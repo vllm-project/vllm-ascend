@@ -23,7 +23,7 @@ class _StoreSubmission:
 
 
 class AsynchronousStoreTimeline:
-    """Preserve FIFO whole-step Store submission and next-step fencing."""
+    """Preserve FIFO whole-step Store submission and explicit completion fences."""
 
     def __init__(self, thread_initializer: Callable[[], None], operation: StoreOperation) -> None:
         self._operation = operation
@@ -35,7 +35,10 @@ class AsynchronousStoreTimeline:
 
     def submit(self, commands: tuple[StoreCommand, ...], source_ready_event: Any) -> StoreBatch:
         self._raise_if_not_running()
-        batch = StoreBatch()
+        batch = StoreBatch(
+            request_ids=frozenset(command.request_id for command in commands),
+            store_job_ids=frozenset(command.store_job_id for command in commands if command.store_job_id is not None),
+        )
         self._executor.submit(_StoreSubmission(batch, commands, source_ready_event))
         return batch
 
@@ -46,6 +49,13 @@ class AsynchronousStoreTimeline:
                 break
         self._raise_if_failed()
         return tuple(batch.completions)
+
+    def collect(self, batch: StoreBatch | None) -> tuple[StoreCompletion, ...] | None:
+        """Observe readiness without waiting, including fatal executor failures before any completion."""
+        self._raise_if_failed()
+        if batch is None or not batch.completed.is_set():
+            return None
+        return self.wait(batch)
 
     @property
     def stopped(self) -> bool:

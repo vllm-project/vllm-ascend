@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import wraps
@@ -65,7 +66,9 @@ class KVPoolWorker(ABC):
         self._groups = {group.group_id: group for group in topology.transfer_groups}
         self._active_step: KVPoolStepContext | None = None
         self._pending_load_request_ids: set[str] = set()
+        self._pending_store_batches: deque[StoreBatch] = deque()
         self._pending_store_batch: StoreBatch | None = None
+        self._latest_store_batch_by_request: dict[str, StoreBatch] = {}
         self._released_store_job_ids: set[int] = set()
         # Only source-safety and execution faults block later steps. Completed
         # cache write failures are logged at the Store fence.
@@ -225,23 +228,64 @@ class KVPoolWorker(ABC):
 
         del completion
 
-    def fence_previous_store(self) -> tuple[StoreCompletion, ...]:
+    def _track_store_batch(self, batch: StoreBatch) -> None:
+        if self._pending_store_batch is None:
+            self._pending_store_batch = batch
+        self._pending_store_batches.append(batch)
+        for request_id in batch.request_ids:
+            self._latest_store_batch_by_request[request_id] = batch
+
+    def fence_previous_store(self, released_request_ids: frozenset[str] | None = None) -> tuple[StoreCompletion, ...]:
+        """Poll completed Stores, fence released requests, or explicitly drain all with no selection.
+
+        FIFO means waiting for a request's latest batch also completes its earlier
+        batches. Like production, a normal step need not wait for sources owned
+        by requests whose blocks are not being released.
+        """
         self._raise_store_fatal_error()
-        pending = self._pending_store_batch
-        if pending is None:
+        if self._pending_store_batch is None:
             return ()
+        if self._store_timeline is None:
+            raise RuntimeError("Store completion exists without a Store timeline")
+        required_batch_ids = (
+            set()
+            if released_request_ids is None
+            else {
+                id(self._latest_store_batch_by_request[request_id])
+                for request_id in released_request_ids
+                if request_id in self._latest_store_batch_by_request
+            }
+        )
+        collected: list[StoreCompletion] = []
         try:
-            if self._store_timeline is None:
-                raise RuntimeError("Store completion exists without a Store timeline")
-            completions = self._store_timeline.wait(pending)
+            # An executor failure can leave later queued batch events unset.
+            self._store_timeline.collect(None)
+            while self._pending_store_batches:
+                pending = self._pending_store_batches[0]
+                completions = (
+                    self._store_timeline.wait(pending)
+                    if released_request_ids is None or required_batch_ids
+                    else self._store_timeline.collect(pending)
+                )
+                if completions is None:
+                    break
+                self._accept_store_completions(pending, completions)
+                collected.extend(completions)
+                self._pending_store_batches.popleft()
+                self._pending_store_batch = self._pending_store_batches[0] if self._pending_store_batches else None
+                required_batch_ids.discard(id(pending))
+                for request_id in pending.request_ids:
+                    if self._latest_store_batch_by_request.get(request_id) is pending:
+                        del self._latest_store_batch_by_request[request_id]
         except Exception as error:
             self._store_fatal_error = error
             raise
+        return tuple(collected)
+
+    def _accept_store_completions(self, batch: StoreBatch, completions: tuple[StoreCompletion, ...]) -> None:
         for completion in completions:
             if completion.evidence.source_release_confirmed and completion.store_job_id is not None:
                 self._released_store_job_ids.add(completion.store_job_id)
-        if all(completion.evidence.source_release_confirmed for completion in completions):
-            self._pending_store_batch = None
         for completion in completions:
             evidence = completion.evidence
             if evidence.error is not None or not evidence.succeeded:
@@ -253,11 +297,13 @@ class KVPoolWorker(ABC):
                     evidence.error,
                 )
             if not evidence.source_release_confirmed:
-                self._store_fatal_error = RuntimeError(
+                raise RuntimeError(
                     f"Store source release is unknown for request {completion.request_id}"
-                )
-                raise self._store_fatal_error from evidence.error
-        return completions
+                ) from evidence.error
+        observed_job_ids = {completion.store_job_id for completion in completions}
+        missing_job_ids = batch.store_job_ids.difference(observed_job_ids)
+        if missing_job_ids:
+            raise RuntimeError(f"Store source release is missing for jobs {sorted(missing_job_ids)}")
 
     def take_released_store_job_ids(self) -> set[int]:
         released = self._released_store_job_ids
@@ -271,8 +317,10 @@ class KVPoolWorker(ABC):
             store_handoff_complete = True
         else:
             try:
-                if self._pending_store_batch is None:
-                    self._pending_store_batch = self._prepare_store_close()
+                if not self._pending_store_batches:
+                    closing_batch = self._prepare_store_close()
+                    if closing_batch is not None:
+                        self._track_store_batch(closing_batch)
                 store_handoff_complete = True
                 self.fence_previous_store()
             except BaseException as error:

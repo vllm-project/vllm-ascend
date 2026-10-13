@@ -729,7 +729,10 @@ def test_completed_store_failure_logs_releases_sources_and_allows_next_step(
     assert resources.closed
 
 
-@pytest.mark.parametrize("native_result", ([], [True], RuntimeError("put failed after address handoff")))
+@pytest.mark.parametrize(
+    "native_result",
+    ([], [True], RuntimeError("put failed after address handoff"), TimeoutError("put timed out after address handoff")),
+)
 def test_bulk_store_unknown_evidence_keeps_registered_resources(native_result) -> None:
     backend = FakeBackend()
     backend.put_result = native_result

@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+from vllm.v1.core.block_pool import BlockPool
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
@@ -34,6 +35,27 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler impor
     LayerwiseScheduler,
     SynchronousBulkScheduler,
 )
+
+
+class _RefCountBlockPool(FakeBlockPool):
+    """Keep the fixture's observations while mirroring upstream physical references."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        for block in self.blocks:
+            block.ref_cnt = 0
+
+    def touch(self, blocks) -> None:
+        blocks = tuple(blocks)
+        super().touch(blocks)
+        for block in blocks:
+            block.ref_cnt += 1
+
+    def free_blocks(self, blocks) -> None:
+        blocks = tuple(blocks)
+        super().free_blocks(blocks)
+        for block in blocks:
+            block.ref_cnt -= 1
 
 
 def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
@@ -317,6 +339,146 @@ def test_finished_and_preempted_cancel_unpublished_load() -> None:
             termination = {terminated_field: ("request",)}
             assert scheduler.build_step(make_output(**termination)).load.commands == (), (stage, terminated_field)
             assert scheduler.build_step(make_output()).load.commands == (), (stage, terminated_field)
+
+
+@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+def test_step_reports_finished_and_preempted_request_union(scheduler_type) -> None:
+    scheduler = scheduler_type(make_config(), FakeRemoteLookup())
+    step = scheduler.build_step(make_output(finished=("finished", "both"), preempted=("preempted", "both")))
+
+    assert step.released_request_ids == frozenset(("finished", "preempted", "both"))
+    assert scheduler.build_step(make_output()).released_request_ids == frozenset()
+
+
+@pytest.mark.parametrize("terminated_field", ("finished", "preempted"))
+def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_field: str) -> None:
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    blocks = [pool.blocks[1], pool.blocks[2]]
+    pool.touch(blocks)
+    request = make_request()
+    scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
+    step = scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 8})
+    )
+    command = step.store.commands[0]
+    assert [block.ref_cnt for block in blocks] == [2, 2]
+    assert scheduler.has_pending_push_work()
+    assert not scheduler.has_pending_block_frees(), "Active request references cannot be reclaimed by Store"
+
+    # The upstream Scheduler frees its own references before publishing the release metadata.
+    pool.free_blocks(blocks)
+    released = scheduler.build_step(make_output(**{terminated_field: ("request",)}))
+    assert released.released_request_ids == frozenset(("request",))
+    assert released.store.commands == ()
+    assert scheduler.has_pending_push_work()
+    assert scheduler.has_pending_block_frees()
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+    assert scheduler.has_pending_push_work()
+    assert scheduler.has_pending_block_frees()
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+    assert not scheduler.has_pending_push_work()
+    assert not scheduler.has_pending_block_frees()
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+
+
+def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgements() -> None:
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    block = pool.blocks[1]
+    # Two requests may share a completed prefix; each Store job takes just one extra reference.
+    pool.touch([block, block])
+    for request_id in ("first", "second"):
+        scheduler.confirm_allocation(make_request(request_id, prompt_tokens=4), FakeBlocks([1]), 0)
+    step = scheduler.build_step(
+        make_output(
+            new=(new_request_data("first", ([1],), 0), new_request_data("second", ([1],), 0)),
+            scheduled_tokens={"first": 4, "second": 4},
+        )
+    )
+    first, second = step.store.commands
+    assert block.ref_cnt == 4
+    assert not scheduler.has_pending_block_frees()
+
+    pool.free_blocks([block, block])
+    scheduler.build_step(make_output(finished=("first", "second")))
+    assert block.ref_cnt == 2
+    assert scheduler.has_pending_block_frees(), "Both job references must be counted for the shared source"
+
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({first.store_job_id: 1}))
+    assert block.ref_cnt == 2
+    assert scheduler.has_pending_block_frees()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({first.store_job_id: 1}))
+    assert block.ref_cnt == 1
+    assert scheduler.has_pending_block_frees()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({second.store_job_id: 1}))
+    assert block.ref_cnt == 1
+    assert scheduler.has_pending_block_frees()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({second.store_job_id: 1}))
+    assert block.ref_cnt == 0
+    assert not scheduler.has_pending_block_frees()
+    assert not scheduler.has_pending_push_work()
+
+
+def test_pending_block_frees_detects_masked_block_without_freeing_active_blocks() -> None:
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True), FakeRemoteLookup())
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    active, masked = pool.blocks[1], pool.blocks[2]
+    pool.touch([active, masked])
+    scheduler.confirm_allocation(make_request(), FakeBlocks([1, 2]), 0)
+    step = scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 8})
+    )
+    assert not scheduler.has_pending_block_frees()
+
+    pool.free_blocks([masked])
+    assert scheduler.has_pending_block_frees()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({step.store.commands[0].store_job_id: 1}))
+    assert active.ref_cnt == 1
+    assert masked.ref_cnt == 0
+    assert not scheduler.has_pending_block_frees()
+
+
+def test_pending_block_frees_is_false_without_bound_pool_or_store_leases() -> None:
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True), FakeRemoteLookup())
+    assert not scheduler.has_pending_block_frees()
+    scheduler.bind_gpu_block_pool(_RefCountBlockPool())
+    assert not scheduler.has_pending_block_frees()
+
+
+@pytest.mark.skipif(not hasattr(BlockPool, "free_blocks"), reason="Allocator reuse requires the real vLLM BlockPool")
+def test_source_blocks_are_not_allocatable_until_every_worker_acknowledges_release() -> None:
+    pool = BlockPool(num_gpu_blocks=6, enable_caching=False, hash_block_size=4)
+    sources = pool.get_new_blocks(2)
+    source_ids = [block.block_id for block in sources]
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    scheduler.bind_gpu_block_pool(pool)
+    scheduler.confirm_allocation(make_request(), FakeBlocks(source_ids), 0)
+    step = scheduler.build_step(
+        make_output(new=(new_request_data("request", (source_ids,), 0),), scheduled_tokens={"request": 8})
+    )
+    command = step.store.commands[0]
+
+    pool.free_blocks(sources)
+    scheduler.build_step(make_output(finished=("request",)))
+    assert scheduler.has_pending_block_frees()
+    available = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert set(source_ids).isdisjoint(block.block_id for block in available)
+    assert pool.get_num_free_blocks() == 0
+
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+    assert pool.get_num_free_blocks() == 0
+    assert scheduler.has_pending_block_frees()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+    assert pool.get_num_free_blocks() == len(source_ids)
+    assert not scheduler.has_pending_block_frees()
+    assert {block.block_id for block in pool.get_new_blocks(len(source_ids))} == set(source_ids)
 
 
 def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> None:

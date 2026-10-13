@@ -127,10 +127,11 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         super().clear_connector_metadata()
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        del kv_connector_metadata
+        if not isinstance(kv_connector_metadata, KVTransferStep):
+            raise TypeError(f"Expected KVTransferStep, got {type(kv_connector_metadata).__name__}")
         assert self.worker is not None
         try:
-            self.worker.fence_previous_store()
+            self.worker.fence_previous_store(kv_connector_metadata.released_request_ids)
         finally:
             self._released_store_job_ids.update(self.worker.take_released_store_job_ids())
 
@@ -187,6 +188,9 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_push_work(self) -> bool:
         return self.scheduler is not None and self.scheduler.has_pending_push_work()
+
+    def has_pending_block_frees(self) -> bool:
+        return self.scheduler is not None and self.scheduler.has_pending_block_frees()
 
     def shutdown(self) -> None:
         if self.scheduler is not None:

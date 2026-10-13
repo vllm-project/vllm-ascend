@@ -33,8 +33,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup
     LookupRequest,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+    KVTransferStep,
     LoadCommand,
     RangeStoreCommand,
+    StoreCommandBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
@@ -287,6 +289,72 @@ def test_layerwise_load_start_exception_closes_attempted_session_once(monkeypatc
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         worker.close()
     assert [call[0] for call in backend.calls].count("batch_get_end") == 1
+    assert resources.closed
+
+
+def test_layerwise_new_store_waits_for_its_single_session_but_empty_decode_does_not(monkeypatch) -> None:
+    backend = FakeBackend()
+    finalization_started = threading.Event()
+    allow_finalization = threading.Event()
+    original_revoke = backend.batch_revoke
+
+    def blocking_revoke(keys):
+        finalization_started.set()
+        assert allow_finalization.wait(timeout=5)
+        return original_revoke(keys)
+
+    monkeypatch.setattr(backend, "batch_revoke", blocking_revoke)
+    worker, resources, _ = make_worker(backend, layerwise=True)
+    first = RangeStoreCommand("first", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    second = RangeStoreCommand("second", TokenRange(0, 4), ((3,),), (b"b",), 4, 18)
+    prepared = threading.Event()
+    failures = []
+
+    def prepare_second_store():
+        try:
+            begin_step(worker, store=(second,))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            prepared.set()
+
+    caller = threading.Thread(target=prepare_second_store)
+    try:
+        # Already-ready finalization is asynchronous. No layer copy was supplied, so it revokes, not publishes.
+        worker.begin_step(KVTransferStep(store=StoreCommandBatch(source_ready_commands=(first,))))
+        worker.finish_step()
+        worker.end_step()
+        assert finalization_started.wait(timeout=2)
+        assert worker.fence_previous_store(frozenset()) == ()
+        begin_step(worker)
+        worker.finish_step()
+        worker.end_step()
+        assert worker.take_released_store_job_ids() == set()
+
+        caller.start()
+        assert not prepared.wait(timeout=0.05), "A new Store must not reuse the old session before finalization"
+        assert worker.take_released_store_job_ids() == set()
+        assert not resources.closed
+        allow_finalization.set()
+        assert prepared.wait(timeout=2)
+        assert not failures
+        assert worker.take_released_store_job_ids() == {17}
+        assert worker.take_released_store_job_ids() == set()
+
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+        worker.finish_step()
+        assert worker.take_released_store_job_ids() == {18}
+        assert worker.take_released_store_job_ids() == set()
+        worker.end_step()
+        assert [call[0] for call in backend.calls].count("batch_revoke") == 1
+        assert [call[0] for call in backend.calls].count("batch_commit") == 1
+    finally:
+        allow_finalization.set()
+        if caller.ident is not None:
+            caller.join(timeout=5)
+            assert not caller.is_alive()
+        worker.close()
     assert resources.closed
 
 

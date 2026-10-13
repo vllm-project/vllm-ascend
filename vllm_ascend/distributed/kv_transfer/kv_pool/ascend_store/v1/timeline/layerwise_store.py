@@ -313,7 +313,12 @@ class LayerwiseStoreTimeline:
         session = self._session
         if session is None:
             raise RuntimeError("Layerwise Store session has not been prepared")
-        batch = StoreBatch()
+        batch = StoreBatch(
+            request_ids=frozenset(command.request_id for command in session.commands),
+            store_job_ids=frozenset(
+                command.store_job_id for command in session.commands if command.store_job_id is not None
+            ),
+        )
         self._session = None
         self._pending_batch = batch
         self._executor.submit(_FinalizeStoreSession(session, batch))
@@ -329,6 +334,12 @@ class LayerwiseStoreTimeline:
             if self._pending_batch is batch:
                 self._pending_batch = None
         return tuple(batch.completions)
+
+    def collect(self, batch: StoreBatch | None) -> tuple[StoreCompletion, ...] | None:
+        self._raise_if_failed()
+        if batch is None or not batch.completed.is_set():
+            return None
+        return self.wait(batch)
 
     def prepare_close(self) -> StoreBatch | None:
         with self._lifecycle_lock:
