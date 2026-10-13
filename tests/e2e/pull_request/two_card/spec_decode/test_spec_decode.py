@@ -266,8 +266,8 @@ def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    # DFlash2 graph defaults to Model Runner V2. test_dflash2_v2_acceptance
-    # covers V2 eager. The main-lane V1 skip does not apply on this path.
+    # DFlash2 graph is on the V2 blacklist, so this case stays on V1 without
+    # an explicit runner env pin. test_dflash2_v2_acceptance covers V2 eager.
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

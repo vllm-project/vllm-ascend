@@ -31,9 +31,8 @@ else:
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
+_DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 _TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
-# First matching prefix wins, so keep Hy3 ahead of Gemma4.
-_ARCH_PREFIXES = (("HYV3", "Hy3-preview"), ("Gemma4", "Gemma4"))
 
 
 def _is_configured(value: object) -> bool:
@@ -72,12 +71,12 @@ def _architectures(model_config: object) -> list[str]:
     return [name for name in names if isinstance(name, str)]
 
 
-def _blacklisted_architecture(model_config: object) -> str | None:
-    names = _architectures(model_config)
-    for prefix, label in _ARCH_PREFIXES:
-        if any(name.startswith(prefix) for name in names):
-            return label
-    return None
+def _is_dflash2_graph(speculative_config: object) -> bool:
+    """DFlash2 graph capture still fails on NPU; eager drafts stay on V2."""
+    if getattr(speculative_config, "enforce_eager", False) is True:
+        return False
+    draft = getattr(speculative_config, "draft_model_config", None)
+    return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
 
 
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
@@ -90,8 +89,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("310P")
 
     if _is_configured(model_config):
-        if architecture := _blacklisted_architecture(model_config):
-            reasons.append(architecture)
         if (
             getattr(model_config, "runner_type", None) == "pooling"
             or getattr(model_config, "is_pooling_model", False) is True
@@ -129,6 +126,8 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         # a separate draft model still runs on the V1 proposer.
         if method == "draft_model":
             reasons.append("draft_model speculative decoding")
+        if _is_dflash2_graph(spec_config):
+            reasons.append("dflash2 graph")
         # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
         # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
         if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
@@ -144,8 +143,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     except for these models and features, which fall back to V1:
 
     * 310P
-    * Hy3-preview (``HYV3*``)
-    * Gemma4 (``Gemma4*``)
     * pooling KV (``runner_type="pooling"``)
     * encoder-decoder (Whisper)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
@@ -156,6 +153,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding
+    * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
     * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.
