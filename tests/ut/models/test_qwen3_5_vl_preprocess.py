@@ -147,54 +147,6 @@ def test_float32_input_keeps_stock_pipeline():
 
 
 # ---------------------------------------------------------------------------
-# Per-engine switch (additional_config["enable_npu_mm_preprocess"])
-# ---------------------------------------------------------------------------
-
-
-class _BaseProcessingInfo:
-    """Minimal stand-in for the ProcessingInfo base that provides the stock
-    processor which _AscendProcessorMixin wraps."""
-
-    def get_hf_processor(self, **kwargs):
-        return SimpleNamespace(image_processor=_make_image_processor())
-
-
-class _ToggleInfo(_AscendVLPreprocessMixin, _BaseProcessingInfo):
-    pass
-
-
-def _ascend_config_with(enable_npu_mm_preprocess):
-    return lambda: SimpleNamespace(enable_npu_mm_preprocess=enable_npu_mm_preprocess)
-
-
-def test_processor_follows_per_engine_ascend_config(monkeypatch):
-    import vllm_ascend.models.qwen3_5_vl as mod
-
-    # Enabled (default): the raw-pixel image processor is installed.
-    monkeypatch.setattr(mod, "get_ascend_config", _ascend_config_with(True))
-    swapped = _ToggleInfo().get_hf_processor()
-    assert swapped.image_processor.__class__ is mod.AscendQwen2VLImageProcessor
-
-    # Disabled via --additional-config: the stock processor is untouched.
-    monkeypatch.setattr(mod, "get_ascend_config", _ascend_config_with(False))
-    kept = _ToggleInfo().get_hf_processor()
-    assert kept.image_processor.__class__ is not mod.AscendQwen2VLImageProcessor
-
-
-def test_processor_defaults_to_enabled_without_ascend_config(monkeypatch):
-    """Tools/tests using the processor outside an engine (no Ascend config)
-    fall back to the documented default instead of crashing."""
-    import vllm_ascend.models.qwen3_5_vl as mod
-
-    def _raise():
-        raise RuntimeError("Ascend config is not initialized.")
-
-    monkeypatch.setattr(mod, "get_ascend_config", _raise)
-    swapped = _ToggleInfo().get_hf_processor()
-    assert swapped.image_processor.__class__ is mod.AscendQwen2VLImageProcessor
-
-
-# ---------------------------------------------------------------------------
 # Field config gating
 # ---------------------------------------------------------------------------
 

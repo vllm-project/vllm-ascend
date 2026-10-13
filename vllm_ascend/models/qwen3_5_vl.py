@@ -25,14 +25,13 @@ replication).
 The raw-pixel path is only taken when the effective processor settings match
 what the device pipeline implements (resize enabled, bicubic resample,
 uint8-only input, and mm_device_do_normalize enabled so the CPU skips
-rescale/normalize). Any other configuration -- the per-engine switch
-``--additional-config '{"enable_npu_mm_preprocess": false}'``, device
-normalization disabled (e.g. --multimodal-config mm_device_do_normalize=
-false), do_resize=False, a non-bicubic resample filter, or non-uint8
-(floating-point) pixels -- falls back to the complete stock CPU pipeline,
-and the emitted keys (no ``image_hw``) tell the field config and the model
-to keep the stock behaviour as well, so rescale+normalize is applied exactly
-once in every configuration.
+rescale/normalize). Any other configuration -- device normalization disabled
+(e.g. --multimodal-config mm_device_do_normalize=false), do_resize=False, a
+non-bicubic resample filter, or non-uint8 (floating-point) pixels -- falls
+back to the complete stock CPU pipeline, and the emitted keys (no
+``image_hw``) tell the field config and the model to keep the stock
+behaviour as well, so rescale+normalize is applied exactly once in every
+configuration.
 
 Encoder ACL graph path: sub-batch selection slices the raw payloads first and
 preprocesses only the selected items, so resize/patchify/normalize run exactly
@@ -61,8 +60,6 @@ from vllm.model_executor.models.qwen3_vl import (
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
-
-from vllm_ascend.ascend_config import get_ascend_config
 
 # Marker stored in the mm_kwargs dicts produced by select_encoder_cudagraph_items
 # once device-side preprocessing has been applied. The graph manager re-packs
@@ -165,18 +162,14 @@ class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
 
 class _AscendProcessorMixin:
     def get_hf_processor(self, **kwargs):
-        # Per-engine switch shared by the processor and the worker (the model
-        # follows the emitted keys): --additional-config
-        # '{"enable_npu_mm_preprocess": false}' keeps the complete stock CPU
-        # pipeline. Outside an engine (tools, unit tests) the Ascend config
-        # may be uninitialized; fall back to the documented default (enabled).
-        try:
-            enabled = get_ascend_config().enable_npu_mm_preprocess
-        except RuntimeError:
-            enabled = True
+        # Install the raw-pixel image processor unconditionally: its
+        # _preprocess falls back to the stock pipeline per call whenever the
+        # effective settings are not supported (mm_device_do_normalize off,
+        # do_resize=False, non-bicubic resample, non-uint8 pixels), so the
+        # swap is inert there. mm_device_do_normalize=false (per-engine,
+        # shared by processor and worker) restores the complete stock CPU
+        # pipeline; the worker follows the emitted keys.
         processor = super().get_hf_processor(**kwargs)
-        if not enabled:
-            return processor
         if processor.image_processor.__class__ is not AscendQwen2VLImageProcessor:
             processor.image_processor.__class__ = AscendQwen2VLImageProcessor
         return processor

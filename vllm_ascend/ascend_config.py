@@ -422,7 +422,6 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
-            "enable_npu_mm_preprocess": true,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -571,11 +570,6 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
-    # Offload Qwen3.5-VL image preprocessing (resize/patchify/rescale+
-    # normalize) to the NPU worker: the front-end emits flat raw uint8 and
-    # the Ascend model subclass runs the whole pipeline on device. Set to
-    # False to keep the complete stock CPU preprocessing pipeline.
-    enable_npu_mm_preprocess: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
