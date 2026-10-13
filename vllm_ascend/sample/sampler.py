@@ -30,7 +30,16 @@ def random_sample(
     # which is the common case, we first assume that every request does
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
+    # Capture the current (default) stream BEFORE entering the global-stream
+    # context. q is allocated from the global-stream allocator pool and may
+    # reuse the block freed by the previous step's q; without ordering the
+    # write after the default stream, the exponential_ below can overwrite
+    # that block while the previous step's probs.div_(q) is still queued
+    # (async scheduling keeps the default stream 1-2 steps deep), corrupting
+    # the previous step's sampling.
+    cur_stream = torch.npu.current_stream()
     with npu_stream_switch(global_stream()):
+        global_stream().wait_stream(cur_stream)
         q = torch.empty_like(probs)
         if len(generators) != probs.shape[0]:
             q.exponential_()
