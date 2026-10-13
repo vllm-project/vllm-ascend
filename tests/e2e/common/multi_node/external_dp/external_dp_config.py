@@ -63,7 +63,6 @@ class NodeInfo:
     distributed_executor_backend: str = ""
     is_headless: bool = False
 
-
     @property
     def devices_per_rank(self) -> int:
         base = self.tp_size * self.cp_size * self.sp_size
