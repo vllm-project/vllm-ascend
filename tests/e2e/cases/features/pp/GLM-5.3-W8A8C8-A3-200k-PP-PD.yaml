@@ -20,9 +20,11 @@ config:
     dp_rank_start: 0
     tp_size: 16
     pp_size: 2
+    nnodes: 2
     node_rank: 0
     master_addr: "${NODE_0_IP}"
     master_port: 7060
+    is_headleass: false
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -33,9 +35,11 @@ config:
     dp_rank_start: 0
     tp_size: 16
     pp_size: 2
+    nnodes: 2
     node_rank: 1
     master_addr: "${NODE_0_IP}"
     master_port: 7060
+    is_headleass: true
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
