@@ -37,6 +37,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -205,7 +206,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     @classmethod
     def _supports_host_metadata_prefill(cls) -> bool:
         """Whether an available fused prefill path only needs host metadata."""
-        use_fla_gdn_prefill = get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
+        use_fla_gdn_prefill = envs.VLLM_ASCEND_ENABLE_FLA_GDN and get_current_hardware_profile().supports(
+            HardwareCapability.FLA_GDN_PREFILL
+        )
         if use_fla_gdn_prefill and _get_fla_gdn_prefill_op() is not None:
             return True
         return cls._probe_fused_chunk()
@@ -617,8 +620,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            use_fla_gdn_prefill = get_pcp_group().world_size == 1 and get_current_hardware_profile().supports(
-                HardwareCapability.FLA_GDN_PREFILL
+            use_fla_gdn_prefill = (
+                envs.VLLM_ASCEND_ENABLE_FLA_GDN
+                and get_pcp_group().world_size == 1
+                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
             # The built-in fused operator is NPU-only. Keep CPU/unit-test

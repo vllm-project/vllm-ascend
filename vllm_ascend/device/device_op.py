@@ -26,6 +26,7 @@ import torch_npu
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend import envs
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -45,6 +46,25 @@ if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
+
+
+@lru_cache(maxsize=32)
+def _fla_gdn_chunk_indices(cu_seqlens: tuple[int, ...], chunk_size: int) -> tuple[int, ...]:
+    """Build compact sequence/chunk pairs using host metadata only."""
+    return tuple(
+        index
+        for seq_idx, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:]))
+        for chunk_idx in range((end - start + chunk_size - 1) // chunk_size)
+        for index in (seq_idx, chunk_idx)
+    )
+
+
+def _fla_gdn_chunk_metadata(prebuilt_meta):
+    chunk_size = envs.VLLM_ASCEND_FLA_CHUNK_SIZE
+    if chunk_size not in (64, 128):
+        raise ValueError("VLLM_ASCEND_FLA_CHUNK_SIZE must be 64 or 128")
+    cu_seqlens = prebuilt_meta.cu_seqlens_host if prebuilt_meta.keep_meta is None else prebuilt_meta.cu_seqlens_kern
+    return chunk_size, cu_seqlens, _fla_gdn_chunk_indices(cu_seqlens, chunk_size)
 
 
 class BaseDeviceAdaptor:
@@ -863,6 +883,9 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
+        chunk_size, cu_seqlens, chunk_indices = _fla_gdn_chunk_metadata(prebuilt_meta)
+        if q.shape[1] == 0:
+            return torch.empty_like(v), initial_state.clone()
         q = l2norm_fwd(q).contiguous()
         k = l2norm_fwd(k).contiguous()
         v = v.contiguous()
@@ -876,8 +899,6 @@ class BaseDeviceAdaptor:
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
 
-        cu_seqlens = prebuilt_meta.cu_seqlens_host
-        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
         keep_meta = prebuilt_meta.keep_meta
         # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
         initial_state_kern = initial_state.transpose(-1, -2).contiguous()
@@ -893,7 +914,7 @@ class BaseDeviceAdaptor:
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
@@ -908,7 +929,7 @@ class BaseDeviceAdaptor:
             # Scatter in the kernel layout so empty segments keep their initial state,
             # then flip back to the caller's [.., Dv, Dk].
             full_final_state = initial_state.transpose(-1, -2).contiguous()
-            full_final_state[keep_meta] = final_state
+            full_final_state[keep_meta] = final_state.to(full_final_state.dtype)
             final_state = full_final_state
         return output, final_state.transpose(-1, -2).contiguous()
 
@@ -1867,6 +1888,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
+        chunk_size, cu_seqlens, chunk_indices = _fla_gdn_chunk_metadata(prebuilt_meta)
+        if q.shape[1] == 0:
+            return torch.empty_like(v), initial_state.clone()
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
@@ -1874,8 +1898,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
 
-        cu_seqlens = prebuilt_meta.cu_seqlens_host
-        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = initial_state
         if keep_meta is not None:
@@ -1890,7 +1912,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
@@ -1903,7 +1925,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         if keep_meta is not None:
             full_final_state = initial_state.clone()
-            full_final_state[keep_meta] = final_state
+            full_final_state[keep_meta] = final_state.to(full_final_state.dtype)
             final_state = full_final_state
         return output, final_state
 

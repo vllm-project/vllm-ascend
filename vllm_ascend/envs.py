@@ -36,6 +36,13 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # GDN prefill backend: 1 prefers FLA NPU (default), 0 uses torch_npu.
+    # Unsupported/unavailable fused backends retain the Triton fallback.
+    # Not sensitive. Set before starting the worker.
+    "VLLM_ASCEND_ENABLE_FLA_GDN": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_FLA_GDN", "1"),
+    # FLA GDN prefill chunk size: 64 or 128 (default). Not sensitive.
+    # Set before starting the worker; does not affect torch_npu or Triton.
+    "VLLM_ASCEND_FLA_CHUNK_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLA_CHUNK_SIZE", "128")),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
