@@ -22,7 +22,10 @@ def tp_worker(monkeypatch):
     def make(implementation, producer):
         extension = AscendStoreTPBenchmarkWorkerExtension()
         role = "kv_producer" if producer else "kv_consumer"
-        extension.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_role=role))
+        # vLLM mixes the extension into a Worker that owns this attribute; supply it only on the test instance.
+        monkeypatch.setattr(
+            extension, "vllm_config", SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_role=role)), raising=False
+        )
         backend = SimpleNamespace(exists=Mock(return_value=[1, 1]))
         operation = "store" if producer else "load"
         method = ("put" if producer else "get") if implementation == "production" else operation
