@@ -187,8 +187,11 @@ def _glm5_next_lightning_indexer_score_kernel(
 def _sort_score_id_pairs(scores, ids, LOG_WIDTH: tl.constexpr):
     """Descending bitonic sort, with pool IDs breaking score ties."""
     lanes = tl.arange(0, 1 << LOG_WIDTH)
-    for stage in tl.static_range(1, LOG_WIDTH + 1):
-        for bit in tl.static_range(stage - 1, -1, -1):
+    # Keep the sorting network in device loops: fully unrolling every gather
+    # produces a costly Ascend compiler graph for the 1024-lane merge.
+    for stage in range(1, LOG_WIDTH + 1):
+        for step in range(stage):
+            bit = stage - 1 - step
             partners = lanes ^ (1 << bit)
             other_scores = tl.gather(scores, partners, axis=0)
             # Ascend gather supports fp32; bitcasts preserve every ID bit.
@@ -235,6 +238,7 @@ def _streaming_pool_topk(
     QUERY_END_SENTINEL: tl.constexpr,
 ):
     lanes = tl.arange(0, TOPK_TILE)
+    merged_lanes = tl.arange(0, 2 * TOPK_TILE)
     dims = tl.arange(0, HEAD_DIM)
     requests = tl.arange(0, REQ_POW2)
     for work in range(tl.program_id(0), rows * PARTITIONS, tl.num_programs(0)):
@@ -284,9 +288,22 @@ def _streaming_pool_topk(
                 # One tile already fits in the candidate buffer, without sorting.
                 best_scores, best_ids = scores, ids
             else:
+                # tl.cat permits reordering on Ascend. Gather each half explicitly
+                # so that score and ID lanes retain the same pairing.
+                merge_indices = merged_lanes % TOPK_TILE
+                merged_scores = tl.where(
+                    merged_lanes < TOPK_TILE,
+                    tl.gather(best_scores, merge_indices, axis=0),
+                    tl.gather(scores, merge_indices, axis=0),
+                )
+                merged_ids = tl.where(
+                    merged_lanes < TOPK_TILE,
+                    tl.gather(best_ids.to(tl.float32, bitcast=True), merge_indices, axis=0),
+                    tl.gather(ids.to(tl.float32, bitcast=True), merge_indices, axis=0),
+                ).to(tl.int32, bitcast=True)
                 merged_scores, merged_ids = _sort_score_id_pairs(
-                    tl.cat(best_scores, scores),
-                    tl.cat(best_ids, ids),
+                    merged_scores,
+                    merged_ids,
                     SORT_LOG_WIDTH,
                 )
                 best_scores = tl.gather(merged_scores, lanes, axis=0)
