@@ -666,6 +666,61 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
 
+    def test_failed_sync_load_fences_save_after_error_is_reported(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock()
+        worker.m_store.get.return_value = [-1]
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            can_save=True,
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+        worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_not_called()
+        worker.kv_send_thread.add_request.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+
+    def test_successful_sync_load_can_save_in_same_step(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock()
+        worker.m_store.get.return_value = [0]
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            can_save=True,
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_called_once_with("r1")
+        worker.kv_send_thread.add_request.assert_called_once_with(req)
+        worker.kv_send_thread.request_queue.join.assert_called_once()
+
     def test_start_load_kv_sync_uses_tail_block_id(self):
         worker = self._make_worker()
         worker.m_store.get = MagicMock()
