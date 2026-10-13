@@ -33,18 +33,20 @@ struct MmadAtlasA5Base {
 using MmadAtlasA2 = MmadAtlasA2Base<false>;
 using MmadAtlasA5 = MmadAtlasA5Base<false>;
 
-template <bool PAGED_CACHE_FLAG_ = false, bool ENABLE_UNIT_FLAG_ = false>
+template <bool PAGED_CACHE_FLAG_ = false, bool ENABLE_UNIT_FLAG_ = false, bool HAS_RESIDUAL_BLOCK_ = false>
 struct MmadAtlasA2SFAIQK : public MmadAtlasA2 {
     static constexpr uint32_t STAGES = 2;
     static constexpr bool PAGED_CACHE_FLAG = PAGED_CACHE_FLAG_;
     static constexpr bool ENABLE_UNIT_FLAG = ENABLE_UNIT_FLAG_;
+    static constexpr bool HAS_RESIDUAL_BLOCK = HAS_RESIDUAL_BLOCK_;
 };
 
-template <bool PAGED_CACHE_FLAG_ = false, bool ENABLE_UNIT_FLAG_ = false>
+template <bool PAGED_CACHE_FLAG_ = false, bool ENABLE_UNIT_FLAG_ = false, bool HAS_RESIDUAL_BLOCK_ = false>
 struct MmadAtlasA2SFAIPV : public MmadAtlasA2 {
     static constexpr uint32_t STAGES = 2;
     static constexpr bool PAGED_CACHE_FLAG = PAGED_CACHE_FLAG_;
     static constexpr bool ENABLE_UNIT_FLAG = ENABLE_UNIT_FLAG_;
+    static constexpr bool HAS_RESIDUAL_BLOCK = HAS_RESIDUAL_BLOCK_;
 };
 
 template <bool PAGED_CACHE_FLAG_ = false, bool HAS_RESIDUAL_BLOCK_ = false, bool PRECOMPUTE_SPARSE_ = false>

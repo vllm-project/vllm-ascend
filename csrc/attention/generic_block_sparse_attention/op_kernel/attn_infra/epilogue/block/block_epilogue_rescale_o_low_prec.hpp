@@ -107,27 +107,29 @@ public:
 
     __aicore__ inline void CopyOToGm(AscendC::GlobalTensor<ElementOutput> gOutput, uint32_t proTokenIdx,
                                      uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
-                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t oHiddenSize)
+                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound,
+                                     uint32_t oHiddenSize)
     {
         uint32_t innerOGmOffset = 0;
         uint32_t innerGOUbOffset = 0;
+        const uint32_t srcGap = (embedRound - embed) * SIZE_OF_16BIT;
         if (proTokenNum != 0U) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset + proTokenIdx * oHiddenSize], goUbTensor[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(proTokenNum, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(proTokenNum, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
             innerOGmOffset += embed;
-            innerGOUbOffset += proTokenNum * embed;
+            innerGOUbOffset += proTokenNum * embedRound;
         }
         for (uint32_t qN_idx = 0; qN_idx < integralHeadNum; qN_idx++) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset], goUbTensor[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(qSThisSubBlock, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(qSThisSubBlock, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
             innerOGmOffset += embed;
-            innerGOUbOffset += qSThisSubBlock * embed;
+            innerGOUbOffset += qSThisSubBlock * embedRound;
         }
         if (epiTokenNum != 0U) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset], goUbTensor[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(epiTokenNum, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(epiTokenNum, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
         }
     }
@@ -232,7 +234,7 @@ public:
 
             // ***move O to GM
             CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
-                      oHiddenSize);
+                      embedRound, oHiddenSize);
             if constexpr (LSE_MODE == LseMode::OUT_ONLY) {
                 if (isLastRowLoop) {
                     AscendC::PipeBarrier<PIPE_V>();
@@ -291,7 +293,8 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
-        uint32_t maxRowNumPerLoop = MAX_UB_O_ELEM_NUM / embed;
+        uint32_t embedRound = (layoutInput.stride(0) == 0U) ? BLOCK_SIZE : layoutInput.stride(0);
+        uint32_t maxRowNumPerLoop = MAX_UB_O_ELEM_NUM / embedRound;
         uint32_t rowNumTile = RoundDown(maxRowNumPerLoop, HALF_BLOCK_SIZE);
 
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
