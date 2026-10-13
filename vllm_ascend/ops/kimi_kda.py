@@ -84,7 +84,7 @@ class AscendKimiRoutedLinear(ReplicatedLinear):
             and can_use_gmm
         ):
             return inner_method.apply_single_group_gmm(layer, x)
-        return quant_method.apply(layer, x, bias)
+        return quant_method.apply(layer, x, bias=bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None

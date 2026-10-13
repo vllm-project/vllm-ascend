@@ -54,7 +54,7 @@ def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
         quant_method.apply.assert_not_called()
     else:
         grouped.assert_not_called()
-        quant_method.apply.assert_called_once_with(layer, x, None)
+        quant_method.apply.assert_called_once_with(layer, x, bias=None)
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():

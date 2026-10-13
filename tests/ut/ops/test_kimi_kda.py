@@ -281,7 +281,7 @@ def test_qkv_matmul_uses_common_dispatch(runtime_mode):
     else:
         grouped.assert_not_called()
         single_group.assert_not_called()
-        quant_method.apply.assert_called_once_with(layer, qkv_input, None)
+        quant_method.apply.assert_called_once_with(layer, qkv_input, bias=None)
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
