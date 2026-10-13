@@ -48,8 +48,8 @@ jobs:
     name: Upload empty extra recommended tests
     runs-on: linux-amd64-cpu-8-hk
     env:
-      OBS_ACCESS_KEY: 'HPUAYLRPR6DJKAA9EUBT'
-      OBS_SECRET_KEY: 'rQJcALjyJqot784hUYfQb20MQOIPJNaMsf9PTfZY'
+      OBS_ACCESS_KEY: 
+      OBS_SECRET_KEY: 
     steps:
       - name: Setup Python
         uses: actions/setup-python@v7
