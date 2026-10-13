@@ -1755,6 +1755,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         return common_attn_metadata, attn_metadata
 
+    def _backup_h2d_fence(self):
+        """Dedicated fence event for the backup_next_token_ids pinned page:
+        synchronize() before the host rewrite, record() after the async
+        copy. The copy itself stays non_blocking; only the source-page
+        reuse is fenced. blocking=True = host sleep-wait instead of
+        busy-polling (upstream synchronize_input_prep idiom, avoids
+        driver-lock spin under TP contention)."""
+        evt = getattr(self, "_backup_h2d_fence_obj", None)
+        if evt is None:
+            mod = getattr(torch, "npu", None)
+            cls = getattr(mod, "Event", None) if mod is not None else None
+            if cls is None:
+                cls = torch.cuda.Event
+            try:
+                evt = cls(blocking=True)
+            except TypeError:
+                evt = cls()
+            self._backup_h2d_fence_obj = evt
+        return evt
+
     def prepare_next_token_ids_padded(
         self,
         sampled_token_ids: torch.Tensor,
@@ -1777,20 +1797,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        # The pinned np page is rewritten every step while the previous
+        # step's non_blocking H2D copy may still be in flight: on torch_npu
+        # the pinned copy rides the SDMA engine and the deep submission ring
+        # lets the host run far ahead, so a late copy delivers the REWRITTEN
+        # value (a -1 sentinel on request-boundary steps) to the torch.where
+        # below. The escaped id scatters into the drafter's input_ids and the
+        # vocab-sized embedding gather faults the vector core (aivec MTE
+        # invalid GM address, EE9999, engine death). Upstream GPU is safe
+        # because a stream-ordered cudaMemcpyAsync lands before later kernels.
+        # Fence the source-page reuse with a dedicated event: synchronize()
+        # before the rewrite, record() after the copy; the copy stays async.
+        self._backup_h2d_fence().synchronize()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
-        # CpuGpuBuffer.copy_to_gpu uses non_blocking=True; on torch_npu the
-        # pinned H2D rides the SDMA engine, whose ordering w.r.t. subsequent
-        # compute kernels on the launch stream is not guaranteed. When the
-        # race is lost, the torch.where below consumes uninitialized memory
-        # (0xa5a5a5a5 marker) and the garbage ids reach the drafter's
-        # vocab-sized embedding gather, faulting the vector core (aivec MTE
-        # invalid GM address, EE9999, engine death). Payload is num_reqs
-        # int32 (<1KB) - a blocking copy is effectively free.
-        self.backup_next_token_ids.gpu[:num_reqs].copy_(
-            self.backup_next_token_ids.cpu[:num_reqs], non_blocking=False
-        )
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        self._backup_h2d_fence().record()
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
