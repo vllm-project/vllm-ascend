@@ -26,6 +26,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
@@ -269,21 +270,36 @@ class TestMtpSharesTheTargetLmHead:
         assert mtp_layer.shared_head.head is target.lm_head
 
 
-def test_load_model_reads_validated_draft_window_size():
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    proposer.vllm_config = SimpleNamespace(additional_config={"draft_window_size": 64})
+@pytest.mark.parametrize(
+    "proposer_class,use_cuda_graph",
+    [
+        (AscendSpecDecodeBaseProposer, False),
+        (AscendDraftModelProposer, True),
+    ],
+)
+def test_load_model_reads_validated_draft_window_size(proposer_class, use_cuda_graph):
+    proposer = proposer_class.__new__(proposer_class)
+    proposer.vllm_config = SimpleNamespace(
+        additional_config={"draft_window_size": 64},
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
+    )
     proposer.maybe_eager_context = nullcontext()
     draft_model = MagicMock()
     proposer._get_model = MagicMock(return_value=draft_model)
-    proposer.method = "eagle3"
+    proposer.method = "draft_model" if proposer_class is AscendDraftModelProposer else "eagle3"
     proposer.num_speculative_tokens = 4
+    proposer.use_cuda_graph = use_cuda_graph
+    proposer.use_eagle = False
+    proposer.enable_enpu = False
+    proposer._runnable = proposer._run_merged_draft
     proposer.runner = SimpleNamespace(max_num_reqs=8)
     proposer.device = "cpu"
     proposer.parallel_drafting = False
     proposer.supports_mm_inputs = False
     proposer._maybe_share_embeddings = MagicMock()
     proposer._maybe_share_topk_indices = MagicMock()
-    proposer._maybe_share_lm_head = MagicMock()
+    if proposer_class is not AscendDraftModelProposer:
+        proposer._maybe_share_lm_head = MagicMock()
 
     draft_layer = MagicMock()
     draft_layer.get_kv_cache_spec.return_value = object()
@@ -298,6 +314,7 @@ def test_load_model_reads_validated_draft_window_size():
         patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
         patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
         patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
+        patch("vllm_ascend.spec_decode.llm_base_proposer.ACLGraphWrapper") as mock_graph_wrapper,
     ):
         mock_pp_group.return_value.is_last_rank = True
         mock_get_ascend_config.return_value.draft_window_size = 4096
@@ -306,6 +323,17 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
+    if use_cuda_graph:
+        mock_graph_wrapper.assert_called_once_with(
+            proposer._run_merged_draft,
+            proposer.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            use_eagle=False,
+            enable_enpu=False,
+        )
+        assert proposer._runnable is mock_graph_wrapper.return_value
+    else:
+        mock_graph_wrapper.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -314,6 +342,7 @@ def test_load_model_reads_validated_draft_window_size():
 )
 def test_load_model_aligns_draft_after_sharing_before_precomputing_hidden_states(method, has_post_process):
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.use_cuda_graph = False
     proposer.vllm_config = SimpleNamespace(quant_config=object())
     proposer.maybe_eager_context = nullcontext()
     proposer.method = method
