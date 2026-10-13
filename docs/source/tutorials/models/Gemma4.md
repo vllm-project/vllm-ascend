@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 quantization is supported on Ascend 950.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. MXFP4 quantization is supported on Ascend 950.
 
 ## 3 Prerequisites
 
@@ -25,18 +25,13 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 | Weight version | Description | Recommended hardware | Download |
 | -------------- | ----------- | -------------------- | -------- |
 | `google/gemma-4-31B-it` | BF16 dense model. | Atlas A2, Atlas A3, or 950PR&950DT Products. Adjust the number of visible NPUs according to the available memory. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-31B-it) |
-| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 dense model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
+| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | MXFP4 quantized dense model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
 | `google/gemma-4-26B-A4B-it` | BF16 MoE model with approximately 26 billion total and 4 billion active parameters. | Atlas A2, Atlas A3, or 950PR&950DT Products. Use tensor parallelism or expert parallelism according to the deployment plan. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-26B-A4B-it) |
-| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 MoE model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
+| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | MXFP4 quantized MoE model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
 
-The two ModelSlim checkpoints use mixed precision rather than quantizing every layer to W4A4 MXFP4:
+Both MXFP4 checkpoints contain a `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing quantized weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
 
-- The 31B dense checkpoint uses W8A8 MXFP8 for attention and vision layers, and W4A4 MXFP4 for most MLP layers. Precision-sensitive MLP layers remain at higher precision.
-- The 26B A4B checkpoint uses W8A8 MXFP8 for attention, non-expert MLP, and vision layers, and W4A4 MXFP4 for the MoE expert layers. The router and vision embedding layers are excluded from W4A4 quantization.
-
-Both checkpoints contain a ModelSlim `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing ModelSlim weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
-
-The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the Ascend 950 quantized commands use all 8 NPUs. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
+The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the Ascend 950 quantized commands use TP4DP2 across all 8 NPUs. Adjust the parallel configuration according to the model size and available devices.
 
 ## 4 Installation
 
@@ -117,9 +112,9 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-#### Ascend 950 ModelSlim Quantized Models
+#### Ascend 950 MXFP4 Quantized Models
 
-The following commands use all 8 NPUs on one 950DT Products node. The quantized checkpoints require `--quantization ascend`.
+The following commands use TP4DP2 across all 8 NPUs on one 950DT Products node. The quantized checkpoints require `--quantization ascend`.
 
 === "31B Dense"
 
@@ -130,7 +125,8 @@ The following commands use all 8 NPUs on one 950DT Products node. The quantized 
     vllm serve ${MODEL_PATH} \
       --served-model-name gemma4 \
       --trust-remote-code \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 2 \
       --quantization ascend \
       --max-model-len 32768 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
@@ -145,7 +141,8 @@ The following commands use all 8 NPUs on one 950DT Products node. The quantized 
     vllm serve ${MODEL_PATH} \
       --served-model-name gemma4 \
       --trust-remote-code \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 2 \
       --enable-expert-parallel \
       --quantization ascend \
       --max-model-len 32768 \
@@ -157,8 +154,9 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 #### Key Parameters
 
 - `--tensor-parallel-size`: sets the tensor parallel size. Adjust it according to model size and available NPU devices.
+- `--data-parallel-size`: sets the number of data parallel ranks. The MXFP4 examples use DP2 together with TP4 to use all 8 NPUs.
 - `--enable-expert-parallel`: enables expert parallelism for MoE variants when the deployment plan uses EP.
-- `--quantization ascend`: enables the Ascend ModelSlim quantization path. It is required for the two quantized checkpoints listed in Section 3.1 and must be omitted for BF16 weights.
+- `--quantization ascend`: enables Ascend quantization. It is required for the two MXFP4 checkpoints listed in Section 3.1 and must be omitted for BF16 weights.
 - `--max-model-len`: sets the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
 - `--enforce-eager`: enables eager execution for baseline verification.
 - `--compilation-config`: configures graph execution. `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, and `PIECEWISE` is also supported.
@@ -283,7 +281,7 @@ The following configurations are for reference only. The optimal configuration d
 | Generation serving | Single-node online serving | 4 | Dense or MoE | Use ACLGraph with `FULL_DECODE_ONLY` to reduce decode dispatch overhead. |
 | Long context | Single-node online serving | 4 | Dense or MoE | Increase `--max-model-len` only when enough KV cache is available; lower concurrency if OOM occurs. |
 | MoE serving | Single-node online serving | 4 | MoE | Use tensor parallelism or expert parallelism according to model size and deployment plan. |
-| Quantized serving on Ascend 950 | Single-node online serving | 8 | Dense or MoE | Use the ModelSlim checkpoint for the selected architecture and add `--quantization ascend`. |
+| Quantized serving on Ascend 950 | Single-node online serving | 8 | Dense or MoE | Use TP4DP2 with the MXFP4 checkpoint and add `--quantization ascend`. |
 
 ### 9.2 Tuning Guidelines
 
@@ -309,7 +307,7 @@ Recommended tuning order:
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
-| ModelSlim quantization | `--quantization ascend` | Reduces weight and activation memory and uses Ascend MXFP operators. | Required for the ModelSlim mixed-precision checkpoints; omit it for BF16 weights. |
+| MXFP4 quantization | `--quantization ascend` | Reduces weight and activation memory and uses Ascend MXFP4 operators. | Required for the MXFP4 checkpoints; omit it for BF16 weights. |
 
 ## 10 FAQ
 
