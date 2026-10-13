@@ -1034,7 +1034,8 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
-def test_draft_metadata_uses_per_request_cpu_upper_bounds():
+def test_draft_metadata_uses_per_request_cpu_upper_bounds(monkeypatch):
+    _patch_optimistic_bound(monkeypatch, enabled=False)
     _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
     req_ids = torch.tensor([17, 23], dtype=torch.int64)
@@ -2052,6 +2053,121 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
+class _RecordingStateBuilder(_PrefillStateBuilder):
+    """Keeps the metadata object so a test can inspect what was published."""
+
+    def __init__(self):
+        super().__init__()
+        self.common_attn_metadata = None
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        self.common_attn_metadata = common_attn_metadata
+        return super().build(common_prefix_len, common_attn_metadata, **kwargs)
+
+
+def _patch_optimistic_bound(monkeypatch, *, enabled):
+    """Point ``build_attn_metadata`` at an AscendConfig carrying the switch."""
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_dspark_draft_kv_optimistic_bound=enabled),
+    )
+
+
+def _build_draft_metadata(monkeypatch, *, approx_enabled):
+    """Run ``build_attn_metadata`` for a *draft* build (no ``seq_lens_np``)."""
+    _patch_optimistic_bound(monkeypatch, enabled=approx_enabled)
+    builder = _RecordingStateBuilder()
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0"],
+        get_metadata_builder=lambda _: builder,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    # The draft's true KV length is 5; the optimistic bound overstates it as 7
+    # because it assumes the previous step's draft was accepted in full.
+    attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+        max_seq_len=64,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        is_prefilling=torch.tensor([False]),
+        seq_lens_np=None,
+        seq_lens_cpu_upper_bound=torch.tensor([7], dtype=torch.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+    )
+    return builder.common_attn_metadata
+
+
+def test_draft_build_keeps_mainline_bound_untrusted_when_approximation_is_off(monkeypatch):
+    """OFF preserves mainline's per-request CPU bound without marking it exact.
+
+    Consumers still follow the mainline model-specific length selection.
+    """
+    cad = _build_draft_metadata(monkeypatch, approx_enabled=False)
+
+    assert cad.seq_lens_cpu_is_exact is False
+    assert cad.seq_lens_cpu_is_approximate is False
+    assert cad.seq_lens_cpu.tolist() == [7]  # mainline uses the supplied per-request bound
+
+
+def test_draft_build_publishes_the_optimistic_bound_when_opted_in(monkeypatch):
+    """The switch authorizes consumers to use the existing optimistic bound.
+
+    It is still not exact -- 7 rather than the true 5 -- so ``is_exact`` must
+    stay False; only the separate approximation flag is raised.
+    """
+    cad = _build_draft_metadata(monkeypatch, approx_enabled=True)
+
+    assert cad.seq_lens_cpu_is_exact is False
+    assert cad.seq_lens_cpu_is_approximate is True
+    assert cad.seq_lens_cpu.tolist() == [7]
+
+
+def test_target_build_is_unaffected_by_the_approximation_flag(monkeypatch):
+    """A target build has ``seq_lens_np`` and must stay exact either way."""
+    for approx_enabled in (False, True):
+        _patch_optimistic_bound(monkeypatch, enabled=approx_enabled)
+        builder = _RecordingStateBuilder()
+        attn_utils.build_attn_metadata(
+            attn_groups=[
+                [
+                    SimpleNamespace(
+                        layer_names=["layer.0"],
+                        get_metadata_builder=lambda _, recording=builder: recording,
+                    )
+                ]
+            ],
+            num_reqs=1,
+            num_tokens=1,
+            query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+            max_query_len=1,
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            max_seq_len=64,
+            block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+            slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+            is_prefilling=torch.tensor([False]),
+            seq_lens_np=np.array([5], dtype=np.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([7], dtype=torch.int32),
+            positions=torch.tensor([0], dtype=torch.int64),
+        )
+        cad = builder.common_attn_metadata
+        assert cad is not None
+        assert cad.seq_lens_cpu_is_exact is True
+        assert cad.seq_lens_cpu_is_approximate is False
+        assert cad.seq_lens_cpu.tolist() == [5]
 
 
 def test_mrv2_binding_wraps_only_v41_slots():

@@ -33,6 +33,46 @@ class PreprocessType(enum.Enum):
     MLAPO = "mlapo"
 
 
+def fia_physical_kv_views(key: torch.Tensor, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Expose padded NHD pages as dense physical blocks without copying KV.
+
+    FIA implementations that materialize non-contiguous inputs otherwise copy
+    the entire cache. The dense views include the gaps, but multiplying each
+    logical block ID by the returned stride addresses only its original page.
+    Both views end at their original last element, preserving storage bounds
+    and each tensor's independent storage offset.
+    """
+    if key.ndim != 3 or value.shape != key.shape or key.shape[0] == 0:
+        return key, value, 1
+    row_size = key.shape[1] * key.shape[2]
+    if row_size == 0:
+        return key, value, 1
+    if any(tensor.stride()[1:] != (key.shape[2], 1) for tensor in (key, value)):
+        return key, value, 1
+    if key.stride(0) != value.stride(0) or key.stride(0) % row_size:
+        return key, value, 1
+    block_stride = key.stride(0) // row_size
+    if block_stride <= 1:
+        return key, value, 1
+    shape = ((key.shape[0] - 1) * block_stride + 1, *key.shape[1:])
+    strides = (row_size, key.shape[2], 1)
+    return key.as_strided(shape, strides), value.as_strided(shape, strides), block_stride
+
+
+def fia_physical_block_table(metadata: Any, block_stride: int) -> torch.Tensor:
+    """Cache a device-only block-address conversion within one metadata step."""
+    if block_stride == 1:
+        return metadata.block_tables
+    cache = getattr(metadata, "fia_block_tables", None)
+    if cache is None:
+        cache = metadata.fia_block_tables = {}
+    if block_stride not in cache:
+        table = metadata.block_tables
+        # Preserve invalid negative sentinels; valid page IDs stay on device.
+        cache[block_stride] = torch.where(table >= 0, table * block_stride, table)
+    return cache[block_stride]
+
+
 def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
     """Refresh NZ management after changing preprocessing policy, before loading weights."""
     resolve_type = getattr(impl, "_fused_preprocess_type", None)
@@ -263,7 +303,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
-    # Host mirror of this cache group's block table, including padded rows.
+    # Producer-audited exact CPU mirror of the device KV lengths. Placeholder
+    # values and optimistic per-request bounds must leave this False.
+    seq_lens_cpu_is_exact: bool = False
+
+    # An explicitly enabled conservative bound, not an exact length. Consumers
+    # may use it only with device-side tail protection; otherwise retain their
+    # precise length path. Defaults keep unaudited producers on the mainline path.
+    seq_lens_cpu_is_approximate: bool = False
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
@@ -333,6 +380,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
+            seq_lens_cpu_is_exact=self.seq_lens_cpu_is_exact,
+            seq_lens_cpu_is_approximate=self.seq_lens_cpu_is_approximate,
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
