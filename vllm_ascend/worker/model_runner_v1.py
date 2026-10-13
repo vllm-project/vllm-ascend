@@ -282,7 +282,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
-    pd_uses_component_major_mla_wire_layout,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -5840,7 +5839,9 @@ class NPUModelRunner(GPUModelRunner):
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                             and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                             and get_flashmla_ops() is not None
-                            and not pd_uses_component_major_mla_wire_layout(self.vllm_config)
+                            # The outer eligibility check admits only supported
+                            # PD, which requires component-major pages.
+                            and self.vllm_config.kv_transfer_config is None
                         ):
                             # A5 interleaves [NoPE | RoPE] per token in every
                             # kernel slot: token0[NoPE|RoPE], token1[...], ...

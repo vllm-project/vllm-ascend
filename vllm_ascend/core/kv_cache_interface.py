@@ -181,6 +181,10 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     that page as one raw block when the published base address, block length,
     and block stride describe the complete slot.  Other connectors still use
     the legacy separate NoPE/RoPE protocol.
+
+    Without PD, local layout selection is unrestricted. With supported PD,
+    both endpoints must use component-major pages because raw transfers carry
+    no metadata distinguishing them from token-fused FlashMLA pages.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
@@ -195,17 +199,6 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
         "MooncakeConnectorV2",
         "MooncakePullConnector",
     }
-
-
-def pd_uses_component_major_mla_wire_layout(vllm_config: VllmConfig) -> bool:
-    """Whether raw PD transfer must use the component-major MLA wire layout.
-
-    MooncakeV2/Pull move raw physical slots and carry no metadata describing
-    whether an MLA page is token-fused or component-major.  Since either
-    endpoint can otherwise make a local hardware/query-head-dependent choice,
-    all such transfers use the universally consumable component-major layout.
-    """
-    return vllm_config.kv_transfer_config is not None and supports_component_major_mla_pd(vllm_config)
 
 
 @dataclass(frozen=True, kw_only=True)

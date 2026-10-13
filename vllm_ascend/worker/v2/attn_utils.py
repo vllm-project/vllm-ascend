@@ -79,7 +79,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
-    pd_uses_component_major_mla_wire_layout,
     supports_component_major_mla_pd,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -1706,7 +1705,9 @@ def _reshape_kv_cache_v2(
                     get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                     and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                     and get_flashmla_ops() is not None
-                    and not pd_uses_component_major_mla_wire_layout(vllm_config)
+                    # The outer eligibility check admits only supported PD,
+                    # which requires component-major pages at both endpoints.
+                    and vllm_config.kv_transfer_config is None
                 ):
                     # Preserve the V1 A5 protocol: one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
@@ -1721,22 +1722,14 @@ def _reshape_kv_cache_v2(
 
                 # A3/FIA keeps each component internally contiguous and puts
                 # the hybrid-page padding only in the leading block stride.
-                nope_cache = make_page_strided_cache_view(
+                kv_caches[layer_name] = _reshape_combined_mla_kv_cache(
                     single_raw_mla_cache,
                     (*component_shape, nope_dim),
-                    kv_cache_spec.dtype,
-                    slot_bytes,
-                )
-                rope_cache = make_page_strided_cache_view(
-                    single_raw_mla_cache,
                     (*component_shape, rope_dim),
                     kv_cache_spec.dtype,
-                    slot_bytes,
-                    offset_bytes=(
-                        kernel_block_size * kv_cache_spec.num_kv_heads * nope_dim * get_dtype_size(kv_cache_spec.dtype)
-                    ),
+                    kv_cache_spec.page_size_bytes,
+                    kernel_blocks_per_manager,
                 )
-                kv_caches[layer_name] = (nope_cache, rope_cache)
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):

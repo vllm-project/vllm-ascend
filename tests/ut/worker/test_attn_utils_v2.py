@@ -495,7 +495,8 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
     assert torch.count_nonzero(raw_typed[2 * physical_page_elements :]) == 8
 
 
-def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch):
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
+def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch, connector):
     layer_name = "model.layers.0.self_attn.attn"
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
@@ -604,7 +605,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     # would otherwise select token-fused.
     monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: (MagicMock(), MagicMock()))
     vllm_config.kv_transfer_config = SimpleNamespace(
-        kv_connector="MooncakeConnectorV2",
+        kv_connector=connector,
         kv_connector_module_path=None,
         kv_connector_extra_config={
             "prefill": {"tp_size": 2},
