@@ -19,15 +19,50 @@
 
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
-from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
+
+
+@triton.jit
+def _pad_v2_replayed_slots_kernel(
+    slot_mappings_ptr,
+    group_stride,
+    cacheable_groups_ptr,
+    query_start_loc_ptr,
+    positions_ptr,
+    replay_start_ptr,
+    replay_window,
+    pad_slot_id,
+    NUM_GROUPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    req = tl.program_id(0)
+    start = tl.load(replay_start_ptr + req)
+    if start <= 0:
+        return
+    begin = tl.load(query_start_loc_ptr + req)
+    end = tl.load(query_start_loc_ptr + req + 1)
+    for tok in range(begin, end, BLOCK):
+        offsets = tok + tl.arange(0, BLOCK)
+        pos = tl.load(positions_ptr + offsets, mask=offsets < end, other=0)
+        replayed = (offsets < end) & (pos >= start) & (pos < start + replay_window)
+        for i in tl.static_range(NUM_GROUPS):
+            group = tl.load(cacheable_groups_ptr + i)
+            tl.store(
+                slot_mappings_ptr + group * group_stride + offsets,
+                pad_slot_id,
+                mask=replayed,
+            )
 
 
 class EngramModelState(AscendModelState):
@@ -47,6 +82,9 @@ class EngramModelState(AscendModelState):
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
+        self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self._replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        self._replay_groups: tuple[int, torch.Tensor] | None = None
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
@@ -61,6 +99,10 @@ class EngramModelState(AscendModelState):
                     "engram_query_start_loc": torch.zeros(self.max_num_reqs + 1, dtype=torch.int32, device=device),
                     "engram_valid_token_count": torch.zeros(1, dtype=torch.int32, device=device),
                 }
+
+    def add_request(self, req_index: int, new_req_data) -> None:
+        super().add_request(req_index, new_req_data)
+        self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement
@@ -81,10 +123,49 @@ class EngramModelState(AscendModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
+        model_specific_attn_metadata=None,
     ) -> dict[str, Any]:
         # prepare_inputs runs before any forward context, so the graph mode of
         # this step is only known here; engram overlap dispatch keys off it.
         self._cg_mode = cudagraph_mode
+        if self._replay_groups is None:
+            from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+
+            specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
+            windows = [int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs]
+            self._replay_groups = (
+                max(windows, default=0),
+                torch.tensor(
+                    [i for i, spec in enumerate(specs) if is_prefix_cacheable(spec)],
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+            )
+        replay_window, cacheable_groups = self._replay_groups
+        num_reqs = input_batch.num_reqs
+        replay_np = np.where(
+            input_batch.is_prefilling_np[:num_reqs],
+            self._replay_start_np[input_batch.idx_mapping_np[:num_reqs]],
+            0,
+        ).astype(np.int32)
+        self._replay_start.np[:num_reqs] = replay_np
+        self._replay_start.copy_to_gpu(num_reqs)
+        replay_start = self._replay_start.gpu[:num_reqs]
+        if replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
+            _pad_v2_replayed_slots_kernel[(num_reqs,)](
+                slot_mappings,
+                slot_mappings.stride(0),
+                cacheable_groups,
+                input_batch.query_start_loc,
+                input_batch.positions,
+                replay_start,
+                replay_window,
+                PAD_SLOT_ID,
+                NUM_GROUPS=cacheable_groups.numel(),
+                BLOCK=1024,
+            )
+        if model_specific_attn_metadata is None:
+            model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
         return super().prepare_attn(
             input_batch,
             cudagraph_mode,
@@ -94,6 +175,7 @@ class EngramModelState(AscendModelState):
             kv_cache_config,
             for_capture=for_capture,
             ubatch_idx=ubatch_idx,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
 
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:

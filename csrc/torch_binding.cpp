@@ -48,7 +48,6 @@
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
-#include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
@@ -58,8 +57,6 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
-#include "attention/store_kv_block/store_kv_block_torch_adpt.h"
-#include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
@@ -158,6 +155,18 @@ std::mutex& get_device_print_mutex()
 {
     static std::mutex device_print_mutex;
     return device_print_mutex;
+}
+
+std::mutex& get_pinned_host_mmap_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<void*, uint64_t>& get_pinned_host_mmaps()
+{
+    static std::unordered_map<void*, uint64_t> regions;
+    return regions;
 }
 
 void device_print_callback(void* args)
@@ -263,7 +272,10 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         // aclrtMemcpyBatchAttr uses srcLoc/dstLoc (aclrtMemLocation)
         // to specify memory locations, not aclrtMemcpyKind.
         int32_t device_id = 0;
-        aclrtGetDevice(&device_id);
+        const aclError get_device_result = aclrtGetDevice(&device_id);
+        TORCH_CHECK(get_device_result == ACL_SUCCESS,
+                    "aclrtGetDevice failed with error code ",
+                    get_device_result);
 
         aclrtMemLocation host_loc = {};
         host_loc.type = ACL_MEM_LOCATION_TYPE_HOST;
@@ -321,6 +333,85 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                     ", dst=", dst_data[i],
                     ", size=", size_data[i]);
     }
+}
+
+bool supports_eccpu_offload()
+{
+#if defined(CANN_MEMCPY_BATCH_ASYNC) && defined(CANN_HOST_REGISTER_V2_PINNED)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void register_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    // mmap is pageable by default; request page locking explicitly.
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "register_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "register_pinned_host_mmap expects a contiguous tensor");
+
+    void* ptr = host_tensor.data_ptr();
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(size > 0, "register_pinned_host_mmap expects a non-empty tensor");
+    TORCH_CHECK(reinterpret_cast<std::uintptr_t>(ptr) % 4096 == 0,
+                "register_pinned_host_mmap requires a 4 KiB-aligned mmap address, got ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    // Track the address and size to reject duplicate or mismatched operations.
+    TORCH_CHECK(regions.find(ptr) == regions.end(),
+                "Host mmap address is already registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+    const aclError ret = aclrtHostRegisterV2(ptr, size, ACL_HOST_REG_PINNED);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostRegisterV2(ACL_HOST_REG_PINNED) failed with error code ",
+                ret, ", address=", reinterpret_cast<std::uintptr_t>(ptr),
+                ", size=", size);
+    regions.emplace(ptr, size);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap requires aclrtHostRegisterV2 with "
+                "ACL_HOST_REG_PINNED in the CANN headers/runtime");
+#endif
+}
+
+void unregister_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "unregister_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "unregister_pinned_host_mmap expects a contiguous tensor");
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    void* ptr = host_tensor.data_ptr();
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    const auto it = regions.find(ptr);
+    TORCH_CHECK(it != regions.end(),
+                "Host mmap address is not registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(it->second == size,
+                "Pinned host mmap size changed before unregister: registered=",
+                it->second, ", current=", size);
+
+    const aclError ret = aclrtHostUnregister(ptr);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostUnregister failed with error code ", ret,
+                ", address=", reinterpret_cast<std::uintptr_t>(ptr));
+    regions.erase(it);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap unregister is unavailable because this "
+                "extension was built without aclrtHostRegisterV2 support");
+#endif
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -2495,21 +2586,6 @@ HOT_FUNCTION void lru_resident_compact_impl(
   }
 }
 
-HOT_FUNCTION void lru_resident_compact(int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr,
-                                       int64_t stable_prefix_lens_ptr, int64_t slot_to_token_ptr,
-                                       int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
-                                       int64_t miss_tokens_ptr, int64_t miss_slots_ptr,
-                                       int64_t token_mark_workspace_ptr, int64_t token_pos_workspace_ptr,
-                                       int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
-                                       int64_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity,
-                                       int64_t max_token, int64_t workspace_threads, int64_t requested_threads) {
-  lru_resident_compact_impl(req_ids_ptr, last_req_ids_ptr, topk_indices_ptr, stable_prefix_lens_ptr, slot_to_token_ptr,
-                            lru_slots_ptr, current_slots_ptr, miss_count_ptr, miss_tokens_ptr, miss_slots_ptr,
-                            token_mark_workspace_ptr, token_pos_workspace_ptr, slot_workspace_ptr,
-                            miss_position_workspace_ptr, epochs_ptr, num_reqs, topk, capacity, max_token,
-                            workspace_threads, requested_threads, 0, 0, 0, num_reqs, 0);
-}
-
 HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
     int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr, int64_t stable_prefix_lens_ptr,
     int64_t slot_to_token_ptr, int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
@@ -2532,96 +2608,6 @@ HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
                             miss_position_workspace_ptr, epochs_ptr, num_reqs, topk, capacity, max_token,
                             workspace_threads, requested_threads, encoded_plan_ptr, encoded_plan_stride,
                             physical_row_workspace_ptr, physical_row_capacity, visible_seq_lens_ptr);
-}
-
-int64_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tensor& miss_tokens,
-                                   const at::Tensor& miss_slots, const at::Tensor& block_table,
-                                   const int64_t block_size, const int64_t token_size_bytes_k,
-                                   const int64_t token_size_bytes_v, const int64_t gvas_k_base,
-                                   const int64_t gvas_v_base, const int64_t addr_k_base, const int64_t addr_v_base,
-                                   const int64_t resident_capacity, const int64_t max_num_threads,
-                                   at::Tensor& gvas_buffer, at::Tensor& addr_buffer, at::Tensor& size_buffer,
-                                   at::Tensor& num_tokens_buffer) {
-  const int32_t num_reqs = miss_tokens.size(0);
-  const int32_t topk = miss_tokens.size(1);
-  const int32_t max_num_tokens_to_load = num_reqs * topk;
-  const int32_t max_num_blocks = block_table.size(1);
-  const int64_t block_size_bytes_k = block_size * token_size_bytes_k;
-  const int64_t block_size_bytes_v = block_size * token_size_bytes_v;
-  TORCH_CHECK(miss_count.size(0) >= num_reqs, "miss_count size not enough for loading.");
-  TORCH_CHECK(miss_slots.size(0) == num_reqs && miss_slots.size(1) == topk,
-              "miss_slots shape should match miss_tokens.");
-  TORCH_CHECK(gvas_buffer.size(0) >= max_num_tokens_to_load * 2, "gvas_buffer size not enough for loading.");
-  TORCH_CHECK(addr_buffer.size(0) >= max_num_tokens_to_load * 2, "addr_buffer size not enough for loading.");
-  TORCH_CHECK(size_buffer.size(0) >= max_num_tokens_to_load * 2, "size_buffer size not enough for loading.");
-  TORCH_CHECK(miss_count.scalar_type() == at::kInt, "miss_count wrong dtype, should be int32.");
-  TORCH_CHECK(miss_tokens.scalar_type() == at::kInt, "miss_tokens wrong dtype, should be int32.");
-  TORCH_CHECK(miss_slots.scalar_type() == at::kInt, "miss_slots wrong dtype, should be int32.");
-  TORCH_CHECK(block_table.scalar_type() == at::kInt, "block_table wrong dtype, should be int32.");
-  TORCH_CHECK(gvas_buffer.scalar_type() == at::kLong, "gvas_buffer wrong dtype, should be int64.");
-  TORCH_CHECK(addr_buffer.scalar_type() == at::kLong, "addr_buffer wrong dtype, should be int64.");
-  TORCH_CHECK(size_buffer.scalar_type() == at::kInt, "size_buffer wrong dtype, should be int32.");
-
-  const int32_t* miss_count_ptr = static_cast<int32_t*>(miss_count.data_ptr());
-  const int32_t* miss_tokens_ptr = static_cast<int32_t*>(miss_tokens.data_ptr());
-  const int32_t* miss_slots_ptr = static_cast<int32_t*>(miss_slots.data_ptr());
-  const int32_t* block_table_ptr = static_cast<int32_t*>(block_table.data_ptr());
-  int64_t* gvas_buffer_ptr = static_cast<int64_t*>(gvas_buffer.data_ptr());
-  int64_t* addr_buffer_ptr = static_cast<int64_t*>(addr_buffer.data_ptr());
-  int32_t* size_buffer_ptr = static_cast<int32_t*>(size_buffer.data_ptr());
-  int32_t* num_tokens_buffer_ptr = static_cast<int32_t*>(num_tokens_buffer.data_ptr());
-
-  int n_threads = static_cast<int>(std::min(static_cast<int64_t>(num_reqs), max_num_threads));
-  n_threads = std::max(n_threads, 1);
-
-  std::vector<int32_t> num_tokens_to_load_req(num_reqs);
-#pragma omp parallel for num_threads(n_threads)
-  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    int32_t count = miss_count_ptr[req_idx];
-    count = std::max(count, 0);
-    count = std::min(count, topk);
-    num_tokens_to_load_req[req_idx] = count;
-  }
-  int32_t num_tokens_to_load_sum = std::accumulate(num_tokens_to_load_req.begin(), num_tokens_to_load_req.end(), 0);
-  std::vector<int32_t> req_start_locs(num_reqs);
-  int32_t cumsum = 0;
-  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    req_start_locs[req_idx] = cumsum;
-    cumsum += num_tokens_to_load_req[req_idx];
-  }
-
-#pragma omp parallel for num_threads(n_threads)
-  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    int32_t req_start_loc_k = req_start_locs[req_idx];
-    int32_t req_start_loc_v = num_tokens_to_load_sum + req_start_loc_k;
-    for (int32_t idx = 0; idx < num_tokens_to_load_req[req_idx]; ++idx) {
-      const int32_t token = miss_tokens_ptr[req_idx * topk + idx];
-      const int32_t slot = miss_slots_ptr[req_idx * topk + idx];
-      if (token < 0 || slot < 0 || slot >= resident_capacity) {
-        continue;
-      }
-      const int32_t block_id = token / static_cast<int32_t>(block_size);
-      if (block_id < 0 || block_id >= max_num_blocks) {
-        continue;
-      }
-      const int32_t offset_in_block = token % static_cast<int32_t>(block_size);
-      const int32_t block_indice = block_table_ptr[req_idx * max_num_blocks + block_id];
-      const int64_t gvas_k = gvas_k_base + block_indice * block_size_bytes_k + offset_in_block * token_size_bytes_k;
-      const int64_t gvas_v = gvas_v_base + block_indice * block_size_bytes_v + offset_in_block * token_size_bytes_v;
-      const int64_t addr_k = addr_k_base + (req_idx * resident_capacity + slot) * token_size_bytes_k;
-      const int64_t addr_v = addr_v_base + (req_idx * resident_capacity + slot) * token_size_bytes_v;
-      gvas_buffer_ptr[req_start_loc_k + idx] = gvas_k;
-      gvas_buffer_ptr[req_start_loc_v + idx] = gvas_v;
-      addr_buffer_ptr[req_start_loc_k + idx] = addr_k;
-      addr_buffer_ptr[req_start_loc_v + idx] = addr_v;
-    }
-  }
-
-  std::fill_n(size_buffer_ptr, num_tokens_to_load_sum, token_size_bytes_k);
-  std::fill_n(&(size_buffer_ptr[num_tokens_to_load_sum]), num_tokens_to_load_sum, token_size_bytes_v);
-
-  num_tokens_buffer_ptr[0] = num_tokens_to_load_sum * 2;
-  return num_tokens_to_load_sum;
 }
 
 namespace {
@@ -2997,15 +2983,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("sparse_kv_warmup_lru_resident_threads", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::warmup_lru_resident_threads);
 
-    ops.def("sparse_kv_lru_resident_compact(int req_ids_ptr, int last_req_ids_ptr, int topk_indices_ptr, "
-            "int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, int current_slots_ptr, "
-            "int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, int token_mark_workspace_ptr, "
-            "int token_pos_workspace_ptr, int slot_workspace_ptr, int miss_position_workspace_ptr, "
-            "int epochs_ptr, int num_reqs, int topk, int capacity, int max_token, int workspace_threads, "
-            "int requested_threads) -> ()");
-    ops.impl("sparse_kv_lru_resident_compact", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::lru_resident_compact);
-
     ops.def("sparse_kv_lru_resident_compact_with_plan_stable_rows(int req_ids_ptr, int last_req_ids_ptr, "
             "int topk_indices_ptr, int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, "
             "int current_slots_ptr, int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, "
@@ -3029,14 +3006,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::enqueue_lru_resident_compact_with_plan_stable_rows);
 
-    ops.def("sparse_kv_compute_lru_resident_addrs(Tensor miss_count, Tensor miss_tokens, Tensor miss_slots, "
-            "Tensor block_table, int block_size, int token_size_bytes_k, int token_size_bytes_v, "
-            "int gvas_k_base, int gvas_v_base, int addr_k_base, int addr_v_base, int resident_capacity, "
-            "int max_num_threads, Tensor(a!) gvas_buffer, Tensor(b!) addr_buffer, Tensor(c!) size_buffer, "
-            "Tensor(d!) num_tokens_buffer) -> int");
-    ops.impl("sparse_kv_compute_lru_resident_addrs", torch::kCPU,
-             &vllm_ascend::compute_lru_resident_addrs);
-
     ops.def("sparse_kv_restore_bfloat16_tensor(int ptr_val, int[] shape) -> Tensor");
     ops.impl("sparse_kv_restore_bfloat16_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              [](int64_t ptr_val, const std::vector<int64_t>& shape) {
@@ -3054,6 +3023,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              });
 #endif
 
+    ops.def("supports_eccpu_offload() -> bool");
+    ops.impl("supports_eccpu_offload", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::supports_eccpu_offload);
+    ops.def("register_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("register_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::register_pinned_host_mmap);
+    ops.def("unregister_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("unregister_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::unregister_pinned_host_mmap);
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
@@ -3603,18 +3581,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_scatter_nd_update_sk", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_sk);
 
-    // This operator is planned to be integrated into PTA in the near future.
-    // Once that happens, the implementation in csrc will be removed.
-    ops.def(
-        "npu_lightning_indexer_quant(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
-        "                            Tensor key_dequant_scale, *, Tensor? actual_seq_lengths_query=None, "
-        "                            Tensor? actual_seq_lengths_key=None, Tensor? block_table=None, "
-        "                            int query_quant_mode=0, int key_quant_mode=0, "
-        "                            str layout_query='BSND', str layout_key='BSND',"
-        "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
-    );
-    ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
-
     ops.def(
         "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
     );
@@ -3634,18 +3600,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
     );
     ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
-
-    //store_kv_block
-     ops.def(
-        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
-         "-> ()"
-     );
-    ops.impl("store_kv_block_metadata", torch::kPrivateUse1, &vllm_ascend::store_kv_block_metadata);
-
-    ops.def(
-        "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
-    );
-    ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
 
     ops.def(
         "npu_sparse_attention_score("

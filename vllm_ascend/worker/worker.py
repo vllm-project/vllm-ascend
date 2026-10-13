@@ -32,7 +32,10 @@ from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
-from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.ec_transfer import (
+    ensure_ec_transfer_initialized,
+    ensure_ec_transfer_shutdown,
+)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -84,6 +87,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -95,6 +99,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -363,8 +368,13 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if ensure_ec_transfer_shutdown is not None:
+            ensure_ec_transfer_shutdown()
 
         if self.profiler is not None:
             self.profiler.shutdown()
@@ -701,9 +711,13 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` budget gate below.
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
@@ -1130,7 +1144,7 @@ class NPUWorker(WorkerBase):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.method == "dspark"
+                and speculative_config.use_eagle()
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and
@@ -1261,6 +1275,30 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
+        """Return serializable encoder graph state for diagnostics.
+
+        Utility RPCs use safe serialization by default, so callers must invoke
+        a worker method by name instead of sending a Python callback. Keep the
+        result limited to primitive containers supported by that serializer.
+        """
+        model_state = getattr(self.model_runner, "model_state", None)
+        encoder_runner = getattr(model_state, "encoder_runner", None)
+        manager = getattr(encoder_runner, "cudagraph_manager", None)
+        if manager is None:
+            # Model Runner V1 owns the manager directly.
+            manager = getattr(self.model_runner, "encoder_cudagraph_manager", None)
+        if manager is None:
+            return None
+        return {
+            "manager": type(manager).__name__,
+            "captured": manager.is_captured(),
+            **manager.get_cumulative_stats(),
+        }
+
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

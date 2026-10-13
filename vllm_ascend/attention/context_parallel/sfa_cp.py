@@ -4,6 +4,7 @@ from functools import partial
 from typing import Any, NamedTuple, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
@@ -106,6 +107,35 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self.o_proj_weight_switch_config,
             self.o_proj_weight_load_partition,
         )
+        if self.is_pcp_decode_sharded:
+            compilation_config = self.vllm_config.compilation_config
+            decode_query_len = 1 + self.vllm_config.num_speculative_tokens
+            max_decode_tokens = self.vllm_config.scheduler_config.max_num_seqs * decode_query_len
+            self._pcp_o_proj_token_capacity = max(
+                max_decode_tokens,
+                compilation_config.max_cudagraph_capture_size or 0,
+                max(compilation_config.cudagraph_capture_sizes or [0]),
+            )
+            capacity = self._pcp_o_proj_token_capacity
+            input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+            output_size = self.o_proj.output_size_per_partition
+            dtype = self.vllm_config.model_config.dtype
+            device = self.o_proj.weight.device
+            # Layers execute O-proj collectives sequentially, so compatible
+            # layers can reuse these graph-stable buffers from the weight pool.
+            buffer_shapes = {
+                "_pcp_o_proj_ag_in_buf": (capacity, input_size),
+                "_pcp_o_proj_ag_out_buf": (pcp_size * capacity, input_size),
+                "_pcp_o_proj_rs_in_buf": (pcp_size * capacity, output_size),
+                "_pcp_o_proj_rs_out_buf": (capacity, output_size),
+            }
+            for name, shape in buffer_shapes.items():
+                pool_key = (self.o_proj_weight_switch_pool_key, "decode", name, device, dtype, shape)
+                buffer = self.o_proj_full_pools.get(pool_key)
+                if buffer is None:
+                    buffer = torch.empty(shape, dtype=dtype, device=device)
+                    self.o_proj_full_pools[pool_key] = buffer
+                setattr(self, name, buffer)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
@@ -138,6 +168,18 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self._all_gather_o_proj_full_weight()
         return context
 
+    def _gather_o_proj_decode_tokens(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Exchange rank-local decode rows using graph-stable buffers."""
+        group = self.o_proj_weight_switch_config.group
+        num_tokens = attn_output.shape[0]
+        if num_tokens > self._pcp_o_proj_token_capacity:
+            raise ValueError("PCP O-proj decode rows exceed the configured token/graph capacity.")
+        local_rows = self._pcp_o_proj_ag_in_buf[:num_tokens]
+        local_rows.copy_(attn_output)
+        global_rows = self._pcp_o_proj_ag_out_buf[: group.world_size * num_tokens]
+        dist.all_gather_into_tensor(global_rows, local_rows, group=group.device_group)
+        return global_rows
+
     def _finalize_o_proj(
         self,
         attn_output: torch.Tensor,
@@ -150,10 +192,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             with self._use_full_o_proj_weights():
                 return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
 
-        # Decode tokens are replicated on PCP ranks. Each rank projects only
-        # its PCP input slice; PCP all-reduce reconstructs the pre-existing
-        # TP-local result, then the normal row-parallel TP reduction completes
-        # the output when TP is enabled.
+        # Feature-sharded weights must project the same token rows on every
+        # PCP rank. Sharded decode exchanges rows first and scatters the summed
+        # projection back to each owner; replicated decode only needs a sum.
         linear_method = self._get_o_proj_weight_switch_method()
         weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
         if weight_part is None:
@@ -167,6 +208,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
                 f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
             )
+        num_local_tokens = attn_output.shape[0]
+        if self.is_pcp_decode_sharded:
+            attn_output = self._gather_o_proj_decode_tokens(attn_output)
         local_input = WeightSwitchMixin.split_tensor_for_parallel(
             attn_output,
             self.o_proj_weight_switch_config.world_size,
@@ -180,7 +224,15 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None, tp_rank=bias_rank)
         else:
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
-        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
+        group = self.o_proj_weight_switch_config.group
+        if self.is_pcp_decode_sharded:
+            scatter_input = self._pcp_o_proj_rs_in_buf[: group.world_size * num_local_tokens]
+            scatter_input.copy_(partial_output)
+            local_output = self._pcp_o_proj_rs_out_buf[:num_local_tokens]
+            dist.reduce_scatter_tensor(local_output, scatter_input, group=group.device_group)
+            partial_output = local_output
+        else:
+            partial_output = group.all_reduce(partial_output)
 
         if self.o_proj.reduce_results and get_tp_group().world_size > 1:
             if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
@@ -522,7 +574,6 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
                 self.kv_cache_spec,
                 self.vllm_config,
                 self.device,
-                self.nope_indexer,
                 self.kernel_block_size,
                 num_heads=self.model_config.hf_text_config.num_attention_heads,
             )

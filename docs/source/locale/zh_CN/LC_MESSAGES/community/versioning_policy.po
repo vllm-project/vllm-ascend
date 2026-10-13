@@ -775,3 +775,18 @@ msgid ""
 msgstr ""
 "main、其他分支、detached checkout 和源码分发包继续使用 setuptools-scm 的默认行为。多个分支共享同一提交时，detached checkout 无法确定目标版本系列；"
 "因此请使用具名分支构建发布版 nightly 软件包。获取完整历史和标签以保留准确的提交距离。从较旧发布提交构建时，需要回移此打包修改。"
+
+msgid ""
+"| v0.30.0rc1  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 /"
+" 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |"
+msgstr ""
+"| v0.30.0rc1  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 /"
+" 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |"
+
+msgid "| 2026.10.11 | Release candidates, v0.30.0rc1            |"
+msgstr "| 2026.10.11 | 候选发布版本，v0.30.0rc1            |"
+
+msgid ""
+"| releases/v0.30.0 | Maintained | CI commitment for vLLM 0.30.0 version"
+"                |"
+msgstr "| releases/v0.30.0 | 维护中 | 针对 vLLM 0.30.0 版本的 CI 承诺                |"

@@ -25,6 +25,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import RemoteOpenAIServer, RemotePDServer, VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 NUM_LAYERS = 2
 NUM_EXPERTS = 16
@@ -543,7 +544,17 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
         assert transfer["do_remote_prefill"]
         assert any(transfer["remote_block_ids"])
         decoded = _completion(decode_url, prompt, kv_transfer_params=transfer)
-        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+        if vllm_version_is("0.30.0"):
+            assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+        else:
+            # vLLM #54222: the D worker now reports the P worker's prefix-cache
+            # hits via kv_transfer_params instead of its own ~100% hit rate from
+            # the transferred KV. A fresh prompt has no P-side hit, so the value
+            # is 0; assert it is propagated rather than positive.
+            assert transfer.get("remote_prefill_cached_tokens") is not None
+            assert (
+                decoded["usage"]["prompt_tokens_details"]["cached_tokens"] == transfer["remote_prefill_cached_tokens"]
+            )
         # A D worker can also receive a request without remote KV. Its MLA
         # prefill weights must remain usable (the previous P/D fallback bug).
         _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])

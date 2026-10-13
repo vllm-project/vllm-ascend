@@ -57,13 +57,16 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 250
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 220
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
+  tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
+  tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 530
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 690
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
   tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 440
+  tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py: 600
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 360
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 1050
@@ -98,6 +101,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 270
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 290
+  tests/e2e/pull_request/two_card/test_hixl_eplb_registration.py: 300
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 650
   tests/e2e/pull_request/two_card/test_pipeline_parallel.py: 280
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 470
