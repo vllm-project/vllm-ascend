@@ -428,11 +428,11 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of MiniMax-M3 on a multi-node environment with 1P1D for better performance.
+This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P2D), or two 950DT nodes (1P1D).
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses `DP=1`, `TP=4`, and pipeline parallel (`PP=4`) with a `16,15,15,14` split of the 60 transformer layers, while the 950DT products MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
+The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, while the 950DT products MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
 
 **Common Issues Tip:** For PD disaggregation issues such as KV transfer timeouts or Mooncake connection errors, refer to the [Public FAQs](../../faqs.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -559,28 +559,32 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "A3 series(W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
-    Explicitly declaring this limit (--limit-mm-per-prompt '{"image":1,"video":0}') improves scheduler-side memory planning and end-to-end throughput. Adjust it to your actual request shape (e.g., `{"image":2,"video":0}` for two-image requests, `{"image":0,"video":1}` for one-video requests); for text-only deployment, this parameter can be omitted.
+    This text-only configuration uses one Prefill rank (`DP1 × TP8 × PP2`) and eight Decode ranks (`DP8 × TP4 × PP1`) across two Decode nodes, with four ranks per node. Each node uses all 16 NPU chips. Set `node_p_ip`, `node_d0_ip`, and `node_d1_ip` to the three nodes' communication IP addresses before running the launch and proxy commands.
+
+    Both roles use Model Runner V1, `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. For multimodal requests, replace `--language-model-only` with the appropriate `--limit-mm-per-prompt` setting as described in [Section 5.5](#55-multimodal-and-vit-dp-optional).
 
     1. Prefill node
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
-    export VLLM_USE_V2_MODEL_RUNNER=1
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    export VLLM_USE_V2_MODEL_RUNNER=0
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_PP_LAYER_PARTITION="16,15,15,14"
+    export VLLM_PP_LAYER_PARTITION="30,30"
     export HCCL_BUFFSIZE=1024
+    export VLLM_HOST_IP=$local_ip
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -588,8 +592,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
-    # For better prefill performance, keep max_num_batched_tokens at 8192 for input
-    # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -605,27 +607,29 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --enable-expert-parallel \
         --seed 1024 \
         --max-model-len 263000 \
-        --max-num-seqs 32 \
-        --max-num-batched-tokens 8192 \
+        --max-num-seqs 128 \
+        --max-num-batched-tokens 2048 \
+        --long-prefill-token-threshold 2048 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.92 \
-        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --language-model-only \
         --reasoning-parser minimax_m3 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_fused_mc2":0,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
+            "kv_buffer_device":"npu",
             "kv_role":"kv_producer",
             "kv_port":"36000",
-            "engine_id":"0",
+            "engine_id":"minimax-m3-prefill-dp0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
-                "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                "prefill":{"dp_size":1,"tp_size":8,"pp_size":2,"pp_layer_partition":"30,30"},
+                "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
     ```
@@ -633,8 +637,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     2. Decode node
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
-    export VLLM_USE_V2_MODEL_RUNNER=1
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    export VLLM_USE_V2_MODEL_RUNNER=0
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
@@ -642,11 +646,13 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
+    export VLLM_HOST_IP=$local_ip
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -664,30 +670,33 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --tensor-parallel-size $7 \
         --pipeline-parallel-size $8 \
         --enable-expert-parallel \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
         --max-model-len 263000 \
-        --max-num-batched-tokens 32768 \
+        --max-num-batched-tokens 2048 \
         --trust-remote-code \
         --quantization ascend \
         --max-num-seqs 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
-        --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --language-model-only \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
+            "kv_buffer_device":"npu",
             "kv_role":"kv_consumer",
             "kv_port":"36100",
-            "engine_id":"1",
+            "engine_id":"minimax-m3-decode-dp'"$4"'",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
-                "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                "prefill":{"dp_size":1,"tp_size":8,"pp_size":2,"pp_layer_partition":"30,30"},
+                "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
     ```
@@ -698,7 +707,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     python launch_online_dp.py \
-        --dp-size 1 --tp-size 4 --pp-size 4 \
+        --dp-size 1 --tp-size 8 --pp-size 2 \
         --dp-size-local 1 --dp-rank-start 0 \
         --dp-address $node_p_ip --dp-rpc-port 6884 \
         --vllm-start-port 31050
@@ -706,24 +715,34 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This starts one Prefill API server on port `31050`. Wait until it prints `Application startup complete`.
 
-    2. Decode node
+    2. First Decode node (`node_d0_ip`, global ranks 0–3)
 
     ```bash
     python launch_online_dp.py \
-        --dp-size 4 --tp-size 4 --pp-size 1 \
+        --dp-size 8 --tp-size 4 --pp-size 1 \
         --dp-size-local 4 --dp-rank-start 0 \
-        --dp-address $node_d_ip --dp-rpc-port 5964 \
-        --vllm-start-port 31060
+        --dp-address $node_d0_ip --dp-rpc-port 31422 \
+        --vllm-start-port 31260
     ```
 
-    This starts four Decode API servers on ports `31060` through `31063`.
+    Wait for rank 0 to print `Started DP Coordinator process`, then launch the second Decode node from another shell; the first node needs the second node to complete initialization.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to 1 Prefill rank and 4 Decode ranks.
+    3. Second Decode node (`node_d1_ip`, global ranks 4–7)
 
     ```bash
-    unset http_proxy
-    unset https_proxy
-    unset ftp_proxy
+    python launch_online_dp.py \
+        --dp-size 8 --tp-size 4 --pp-size 1 \
+        --dp-size-local 4 --dp-rank-start 4 \
+        --dp-address $node_d0_ip --dp-rpc-port 31422 \
+        --vllm-start-port 31260
+    ```
+
+    Set `local_ip` and `nic_name` in the Decode template for each node separately. Both Decode nodes use `node_d0_ip` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight Decode ranks to print `Application startup complete`.
+
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P2D, the proxy forwards requests to one Prefill rank and eight Decode ranks across three nodes.
+
+    ```bash
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
@@ -733,12 +752,15 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --prefiller-ports \
         31050 \
     --decoder-hosts \
-        $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
+        $node_d0_ip $node_d0_ip $node_d0_ip $node_d0_ip \
+        $node_d1_ip $node_d1_ip $node_d1_ip $node_d1_ip \
     --decoder-ports \
-        31060 31061 31062 31063
+        31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+
+    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM-Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
 === "950DT products"
 
@@ -933,15 +955,14 @@ Key Parameter Descriptions:
 
 **Prefill node-specific configurations:**
 
-- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing. Follow the FLASHCOMM1 compatibility guidance in [Section 5.5](#55-multimodal-and-vit-dp-optional) when enabling this flag.
-- `--pipeline-parallel-size` (A3 Prefill: `4`): Splits the 60 MiniMax-M3 layers across four pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=16,15,15,14` and also writes `pp_layer_partition` into the Mooncake extra config. With `TP=4`, use `DP=1` to fit all four stages on one 16-NPU node. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
-- `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.4.
+- `--language-model-only` (optional): Enabled in the A3 text-only example to avoid reserving memory for multimodal processing. Remove it for multimodal requests; see [Section 5.5](#55-multimodal-and-vit-dp-optional).
+- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
 
-- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
+- `--language-model-only` (optional): Enabled in the A3 text-only example to avoid reserving memory for multimodal processing. Remove it for multimodal requests.
 - `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
@@ -952,13 +973,13 @@ Key Parameter Descriptions:
 - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT products `30000`/`26900`.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
 - `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT products only): Required for UBOE / Ascend direct communication on 950DT products.
-- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp1 tp4 pp4` and `decode: dp4 tp4 pp1`. 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on every node. A3 uses `prefill: dp1 tp8 pp2` on one node and `decode: dp8 tp4 pp1` across two nodes (four local DP ranks per Decode node). 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
 
 **Request forwarding (proxy):**
 
 - Wait until every Prefill and Decode rank prints `Application startup complete` before starting the proxy.
 - The proxy maps every prefill engine endpoint and every decode engine endpoint to a single entry point on port `8009`.
-- If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that both nodes still have free NPU memory after the previous run.
+- If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that all nodes still have free NPU memory after the previous run.
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
@@ -1448,11 +1469,42 @@ Proxy (:8009)
     --client_ttl=120
     ```
 
-2. Start Decode with the Section 5.3 `launch_online_dp.py` command for your platform. Wait until every Decode rank prints `Application startup complete`.
+2. Start Decode. The A3 KV pool example above retains its two-node layout (`P: DP1/TP4/PP4`, `D: DP4/TP4/PP1`), so use the Section 5.3 launcher with these arguments on the Decode node:
 
-3. Start Prefill the same way. Wait until every Prefill rank prints `Application startup complete`.
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 4 --tp-size 4 --pp-size 1 \
+        --dp-size-local 4 --dp-rank-start 0 \
+        --dp-address $node_d_ip --dp-rpc-port 5964 \
+        --vllm-start-port 31060
+    ```
 
-4. Start the Section 5.3 proxy. The service is then accessible at `<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
+    On 950DT, use the Section 5.3 950DT Decode command. Wait until every Decode rank prints `Application startup complete`.
+
+3. Start Prefill. On A3, use:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 1 --tp-size 4 --pp-size 4 \
+        --dp-size-local 1 --dp-rank-start 0 \
+        --dp-address $node_p_ip --dp-rpc-port 6884 \
+        --vllm-start-port 31050
+    ```
+
+    On 950DT, use the Section 5.3 950DT Prefill command. Wait until every Prefill rank prints `Application startup complete`.
+
+4. Start the proxy. On A3, register the one Prefill and four Decode endpoints:
+
+    ```bash
+    python load_balance_proxy_server_example.py \
+        --port 8009 --host $node_p_ip \
+        --prefiller-hosts $node_p_ip \
+        --prefiller-ports 31050 \
+        --decoder-hosts $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
+        --decoder-ports 31060 31061 31062 31063
+    ```
+
+    On 950DT, use the Section 5.3 950DT proxy command. The service is then accessible at `<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
 
 #### 5.4.5 Verification
 
@@ -1494,7 +1546,7 @@ When using local media paths in requests, such as `file:///path/to/video.mp4`, a
 
 If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
 
-FLASHCOMM1 and language-model-only mode should not be enabled at the same time for MiniMax-M3 serving. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`.
+The A3 W8A8 text-only PD example in [Section 5.3](#53-prefill-decode-disaggregation) enables both FLASHCOMM1 and language-model-only mode. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while `--language-model-only` disables multimodal inputs and memory reservation. Omit `--language-model-only` when serving images or videos.
 
 ```bash
 # Enable FLASHCOMM1.
