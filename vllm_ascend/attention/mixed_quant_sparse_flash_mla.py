@@ -144,9 +144,6 @@ def mq_meta_adapter(kw):
     # ``*_ori_kv``/``*_cmp_kv`` names instead.
     kw.pop("seqused_kv", None)
     kw.pop("max_seqlen_kv", None)
-    # ``total_q_tokens`` is a caller-side host scalar for the sparse-window
-    # right edge; it is not part of the operator schema.
-    kw.pop("total_q_tokens", None)
     # Explicit per-branch topk lengths are unused in this mode.
     kw.update(ori_topk_length=None, cmp_topk_length=None)
     # Keep the op-facing optionals explicit (None), matching the operator's
@@ -197,7 +194,7 @@ def mq_attn_adapter(q, kw):
         if not torch.npu.is_current_stream_capturing():
             max_kv = kw.get("max_seqlen_kv")
             if max_kv is not None and _fullcov_sparse_indices(osi, int(max_kv)):
-                win_r = int(kw["total_q_tokens"]) - 1
+                win_r = int(q.shape[0]) - 1
         # Original indices are never passed: the new op derives attention
         # from the window (ori_mask_mode) instead.
         kw.pop("ori_sparse_indices", None)
@@ -222,9 +219,6 @@ def mq_attn_adapter(q, kw):
     # ``*_ori_kv``/``*_cmp_kv`` names instead.
     kw.pop("seqused_kv", None)
     kw.pop("max_seqlen_kv", None)
-    # ``total_q_tokens`` is a caller-side host scalar for the sparse-window
-    # right edge; it is not part of the operator schema.
-    kw.pop("total_q_tokens", None)
     # Keep the op-facing optionals explicit (None), matching the operator's
     # schema defaults and the prior full-dict contract.
     kw.update(

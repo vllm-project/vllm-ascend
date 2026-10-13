@@ -2348,7 +2348,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             ori_kv=swa_kv_cache,
             ori_block_table=swa_req_metadata.block_table,
             cu_seqlens_q=actual_seq_lengths_query,
-            total_q_tokens=num_tokens,
             seqused_kv=actual_seq_lengths_key,
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
