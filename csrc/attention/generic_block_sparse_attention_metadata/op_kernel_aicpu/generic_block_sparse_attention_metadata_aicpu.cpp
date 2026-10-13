@@ -79,6 +79,10 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext &ctx)
         seqUsedKv_ = nullptr;
     }
 
+    // Missing mask_type retains the existing causal scheduling contract.
+    if (ctx.GetAttr("mask_type") != nullptr && !GetAttrValue(ctx, "mask_type", maskType_)) {
+        return false;
+    }
     const bool attrsValid =
         GetAttrValue(ctx, "max_q_seq_len", maxQSeqLen_) && GetAttrValue(ctx, "num_q_heads", numQHeads_) &&
         GetAttrValue(ctx, "num_kv_heads", numKvHeads_) && GetAttrValue(ctx, "head_dim", headDim_) &&
@@ -128,7 +132,7 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
         blockShapeX_ != 1 || blockShapeY_ <= 0 || blockShapeY_ > 256 ||
         (isPackedGQA_ != 0 && isPackedGQA_ != 1) || aicCoreNum_ <= 0 ||
         aicCoreNum_ > MAX_AIC_CORE_NUM || (residualBlockMode_ != 0 && residualBlockMode_ != 1) ||
-        (isConsistentTopk_ != 0 && isConsistentTopk_ != 1)) {
+        (isConsistentTopk_ != 0 && isConsistentTopk_ != 1) || (maskType_ != 0 && maskType_ != 1)) {
         KERNEL_LOG_ERROR("Invalid scheduling attrs for GenericBlockSparseAttentionMetadata.");
         return false;
     }
@@ -337,7 +341,7 @@ bool GenericBlockSparseAttentionMetadataAicpu::ParseValidBlockNums(const std::ve
         const int64_t qBlockNum = generic_block_sparse_attention_metadata::CeilDivQSeq(qSeqLen, blockShapeX_);
         for (int64_t qBlock = 0; qBlock < qBlockNum; ++qBlock) {
             const int64_t qToken = qBlock * blockShapeX_;
-            const int64_t visibleKvEnd = kvSeqLen - qSeqLen + qToken + 1;
+            const int64_t visibleKvEnd = maskType_ == 0 ? kvSeqLen : kvSeqLen - qSeqLen + qToken + 1;
             const int64_t residual = residualBlockMode_ == 1 && visibleKvEnd > 0 &&
                 visibleKvEnd % blockShapeY_ != 0 ? 1 : 0;
             for (int64_t sparseHead = 0; sparseHead < sparseHeadNum_; ++sparseHead) {
@@ -373,6 +377,7 @@ bool GenericBlockSparseAttentionMetadataAicpu::GenerateMetadata(const std::vecto
     input.isPackedGQA = isPackedGQA_;
     input.residualBlockMode = residualBlockMode_;
     input.isConsistentTopk = isConsistentTopk_;
+    input.maskType = maskType_;
     input.aicCoreNum = aicCoreNum_;
     input.qSeqLens = qSeqLens;
     input.validBlockNums = validBlockNums;
