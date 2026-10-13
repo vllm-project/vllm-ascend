@@ -100,12 +100,7 @@ class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
         return_tensors,
         **kwargs,
     ):
-        if (
-            not do_resize
-            or do_rescale
-            or do_normalize
-            or resample != Image.Resampling.BICUBIC
-        ):
+        if not do_resize or do_rescale or do_normalize or resample != Image.Resampling.BICUBIC:
             # Unsupported or non-default settings: do_resize disabled (the
             # grid must come from the original resolution), a non-bicubic
             # resample filter (the device path hardcodes bicubic+antialias),
@@ -177,9 +172,7 @@ class AscendQwen3_5VLProcessor(Qwen3VLMultiModalProcessor):
             return config
         channel = self.info.get_hf_config().vision_config.in_channels
         image_hw = hf_inputs["image_hw"]
-        config["pixel_values"] = MultiModalFieldConfig.flat_from_sizes(
-            "image", image_hw.prod(-1) * channel
-        )
+        config["pixel_values"] = MultiModalFieldConfig.flat_from_sizes("image", image_hw.prod(-1) * channel)
         config["image_hw"] = MultiModalFieldConfig.batched("image", keep_on_cpu=True)
         return config
 
@@ -304,9 +297,7 @@ class _AscendVLPreprocessMixin:
                 "image_grid_thw": torch.tensor(selected_grid, dtype=torch.long),
                 "image_hw": torch.tensor(selected_hw, dtype=torch.long),
             }
-            patches = self._resize_and_patchify(
-                image_input, image_input["image_grid_thw"]
-            )
+            patches = self._resize_and_patchify(image_input, image_input["image_grid_thw"])
             pixel_values = self.input_norm(patches, self.visual.dtype)
             return {
                 "pixel_values": pixel_values,
@@ -319,9 +310,7 @@ class _AscendVLPreprocessMixin:
         # with do_rescale/do_normalize disabled).
         modality = self.get_input_modality(mm_kwargs)
         pv_key, grid_key = (
-            ("pixel_values", "image_grid_thw")
-            if modality == "image"
-            else ("pixel_values_videos", "video_grid_thw")
+            ("pixel_values", "image_grid_thw") if modality == "image" else ("pixel_values_videos", "video_grid_thw")
         )
         pixel_values = mm_kwargs[pv_key]
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
@@ -330,18 +319,12 @@ class _AscendVLPreprocessMixin:
         for p in patches_per_item:
             cum_patches.append(cum_patches[-1] + p)
         selected_pv = (
-            torch.cat(
-                [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-            )
+            torch.cat([pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices])
             if indices
             else pixel_values[:0]
         )
         selected_grid = [grid_thw[i] for i in indices]
-        if (
-            indices
-            and not mm_kwargs.get(_DEVICE_PREPROCESS_DONE)
-            and self._device_do_normalize
-        ):
+        if indices and not mm_kwargs.get(_DEVICE_PREPROCESS_DONE) and self._device_do_normalize:
             selected_pv = self.input_norm(selected_pv, self.visual.dtype)
         return {
             pv_key: selected_pv,

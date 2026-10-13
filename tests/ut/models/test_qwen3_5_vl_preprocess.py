@@ -20,10 +20,10 @@ from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
 
 from vllm_ascend import envs as va_envs
 from vllm_ascend.models.qwen3_5_vl import (
-    _AscendVLPreprocessMixin,
+    _DEVICE_PREPROCESS_DONE,
     AscendQwen2VLImageProcessor,
     AscendQwen3_5VLProcessor,
-    _DEVICE_PREPROCESS_DONE,
+    _AscendVLPreprocessMixin,
 )
 
 try:
@@ -117,9 +117,7 @@ def test_raw_preprocess_emits_flat_payload():
 def test_do_resize_false_keeps_stock_grid():
     """do_resize=False must keep the stock grid (review example: 224x224 with
     max_pixels=56*56 keeps [1, 16, 16] instead of shrinking to [1, 4, 4])."""
-    proc = _make_image_processor(
-        size={"shortest_edge": 56 * 56, "longest_edge": 56 * 56}
-    )
+    proc = _make_image_processor(size={"shortest_edge": 56 * 56, "longest_edge": 56 * 56})
     out = proc(
         images=[_pil_image(224, 224)],
         return_tensors="pt",
@@ -176,21 +174,13 @@ def test_field_config_follows_emitted_keys(monkeypatch):
     proc = object.__new__(AscendQwen3_5VLProcessor)
 
     # Stock output (no image_hw): base mapping returned untouched.
-    stock_cfg = proc._get_mm_fields_config(
-        {"pixel_values": torch.zeros(16, PATCH_DIM)}, {}
-    )
+    stock_cfg = proc._get_mm_fields_config({"pixel_values": torch.zeros(16, PATCH_DIM)}, {})
     assert stock_cfg["pixel_values"] is base["pixel_values"]
     assert "image_hw" not in stock_cfg
 
     # Raw output: pixel_values is remapped and image_hw is batched on CPU.
-    proc.info = SimpleNamespace(
-        get_hf_config=lambda: SimpleNamespace(
-            vision_config=SimpleNamespace(in_channels=C)
-        )
-    )
-    raw_cfg = proc._get_mm_fields_config(
-        {"image_hw": torch.tensor([[56, 56], [28, 56]])}, {}
-    )
+    proc.info = SimpleNamespace(get_hf_config=lambda: SimpleNamespace(vision_config=SimpleNamespace(in_channels=C)))
+    raw_cfg = proc._get_mm_fields_config({"image_hw": torch.tensor([[56, 56], [28, 56]])}, {})
     assert raw_cfg["pixel_values"] is not base["pixel_values"]
     assert "image_hw" in raw_cfg
 
@@ -216,9 +206,7 @@ class _StubVLModel(_AscendVLPreprocessMixin):
     def __init__(self, device_do_normalize=True):
         self._c, self._ps, self._tps, self._ms = C, PS, TPS, MS
         self.model_config = SimpleNamespace(
-            multimodal_config=SimpleNamespace(
-                mm_device_do_normalize=device_do_normalize
-            )
+            multimodal_config=SimpleNamespace(mm_device_do_normalize=device_do_normalize)
         )
         self.visual = SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32)
         self.use_data_parallel = False
@@ -252,9 +240,7 @@ def _raw_image_mm_kwargs():
     """Two raw images: 56x56 (grid [1,4,4]) and 28x56 (grid [1,2,4])."""
     torch.manual_seed(0)
     hw = [(56, 56), (28, 56)]
-    flat = torch.randint(
-        0, 256, (sum(C * h * w for h, w in hw),), dtype=torch.uint8
-    )
+    flat = torch.randint(0, 256, (sum(C * h * w for h, w in hw),), dtype=torch.uint8)
     return {
         "pixel_values": flat,
         "image_grid_thw": torch.tensor([[1, 4, 4], [1, 2, 4]]),
@@ -373,9 +359,7 @@ def test_select_videos_normalized_exactly_once():
     # Nested selection (replay buffers / eager fallback / DP re-pack).
     repacked = stub.select_encoder_cudagraph_items(selected, [1])
     assert stub.counting_norm.calls == 1
-    torch.testing.assert_close(
-        repacked["pixel_values_videos"], selected["pixel_values_videos"][16:]
-    )
+    torch.testing.assert_close(repacked["pixel_values_videos"], selected["pixel_values_videos"][16:])
 
 
 def test_select_videos_flag_off_skips_normalization():
