@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 from vllm_ascend.utils import vllm_version_is
@@ -175,6 +176,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
     manager.dp_size = 2
+    manager.vllm_config = SimpleNamespace(num_speculative_tokens=3)
     forward_fn = MagicMock()
     model_state = object()
     input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([10, 20, 30], dtype=torch.int32))
@@ -186,7 +188,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     # descriptor when preparing capture inputs.
     if not vllm_version_is("0.30.0"):
         desc_fields.update(max_query_len=None, uniform_token_count=None)
-    desc = SimpleNamespace(**desc_fields)
+    desc = BatchExecutionDescriptor(**desc_fields)
 
     def capture_side_effect(manager_arg, create_forward_fn, progress_bar_desc=None):
         """Execute the captured forward function for the test descriptor."""
@@ -315,7 +317,7 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
     manager.is_draft_model_prefill = is_prefill
-    desc = MagicMock(num_reqs=2)
+    desc = BatchExecutionDescriptor(num_tokens=4, num_reqs=2, cg_mode=CUDAGraphMode.FULL)
     graph = MagicMock()
     resolved_tasks = object()
     graph.resolve_tasks.return_value = resolved_tasks
