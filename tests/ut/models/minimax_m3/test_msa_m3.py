@@ -390,6 +390,61 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
+@pytest.mark.parametrize("query_len", [1, 2, 4, 8])
+@pytest.mark.parametrize("batch_size", [0, 1, 10, 128, 512])
+def test_sparse_decode_prefix_matches_cumsum(batch_size: int, query_len: int) -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    prefix = builder._get_decode_cu_seqlens_q(batch_size, query_len)
+    expected = torch.cat(
+        [torch.zeros(1, dtype=torch.int64), torch.full((batch_size,), query_len, dtype=torch.int64).cumsum(0)]
+    )
+    assert prefix.dtype == torch.int64
+    torch.testing.assert_close(prefix, expected, rtol=0, atol=0)
+
+
+def test_sparse_decode_prefix_keeps_captured_buffers_alive() -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    captured = builder._get_decode_cu_seqlens_q(10, 4)
+    expected = captured.clone()
+    # Other graph sizes and query lengths must not overwrite captured storage.
+    for batch_size in (1, 128, builder.context_len_buffer.numel()):
+        assert builder._get_decode_cu_seqlens_q(batch_size, 4).data_ptr() == captured.data_ptr()
+        assert builder._get_decode_cu_seqlens_q(batch_size, 1).data_ptr() != captured.data_ptr()
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("batch_size,query_len", [(-1, 4), (8193, 4), (1, 0)])
+def test_sparse_decode_prefix_rejects_invalid_dimensions(batch_size: int, query_len: int) -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    with pytest.raises(ValueError, match="Invalid uniform decode"):
+        builder._get_decode_cu_seqlens_q(batch_size, query_len)
+
+
+@pytest.mark.parametrize("query_len", [0, 1, 4])
+def test_sparse_metadata_builder_forwards_uniform_decode_prefix(
+    monkeypatch: pytest.MonkeyPatch, query_len: int
+) -> None:
+    device = torch.device("cpu")
+    builder = _make_sparse_builder(device)
+    batch_size = 2
+    common = _create_common_attn_metadata(
+        BatchSpec(seq_lens=[65536] * batch_size, query_lens=[query_len] * batch_size), 128, device
+    )
+    monkeypatch.setattr(
+        msa_m3_module, "split_decodes_and_prefills", lambda *args, **kwargs: (batch_size, 0, batch_size * query_len, 0)
+    )
+    metadata = builder.build(0, common)
+    assert metadata.decode is not None
+    if query_len == 0:
+        assert metadata.num_decodes == 0
+        assert metadata.decode.cu_seqlens_q is None
+        assert not builder.decode_cu_seqlens_q_buffers
+    else:
+        expected = common.query_start_loc.to(torch.int64)
+        torch.testing.assert_close(metadata.decode.cu_seqlens_q, expected, rtol=0, atol=0)
+        assert builder.build(0, common).decode.cu_seqlens_q.data_ptr() == metadata.decode.cu_seqlens_q.data_ptr()
+
+
 @pytest.mark.parametrize(
     "batch_spec",
     [
@@ -1287,6 +1342,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
             block_table=torch.tensor([[0, 1]], dtype=torch.int32),
             max_seq_len=5,
             decode_query_len=1,
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int64),
         ),
         prefill=AscendMiniMaxM3SparsePrefillMetadata(
             cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
@@ -1323,6 +1379,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
+    assert mock_sparse_attn_decode.call_args.kwargs["cu_seqlens_q"] is metadata.decode.cu_seqlens_q
     assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
     assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
@@ -1400,8 +1457,11 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert torch.equal(output, torch.ones_like(output))
 
 
+@pytest.mark.parametrize("reuse_prefix", [False, True])
 def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_prefix: bool,
 ) -> None:
     q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16)
@@ -1420,6 +1480,14 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     gbsa_metadata_op.return_value = metadata
     gbsa_attention_op.return_value = (torch.ones_like(output), torch.empty(0))
 
+    prefix = torch.tensor([0, 2, 4], dtype=torch.int64) if reuse_prefix else None
+    if reuse_prefix:
+        monkeypatch.setattr(
+            msa_m3_npu_module,
+            "_build_cu_seqlens_q",
+            MagicMock(side_effect=AssertionError("The per-layer prefix must not be rebuilt")),
+        )
+
     minimax_m3_sparse_attn_decode_npu(
         q,
         kv_cache,
@@ -1431,9 +1499,12 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
         output=output,
         decode_query_len=2,
         block_size=128,
+        cu_seqlens_q=prefix,
     )
 
     gbsa_metadata_op.assert_called_once()
+    if reuse_prefix:
+        assert gbsa_metadata_op.call_args.kwargs["cu_seqlens_q"] is prefix
     metadata_args = gbsa_metadata_op.call_args.args
     metadata_kwargs = gbsa_metadata_op.call_args.kwargs
     assert torch.equal(metadata_args[0], topk_idx)
@@ -1473,6 +1544,24 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     assert kwargs["return_softmax_lse"] is False
     assert "is_packed_gqa" not in kwargs
     assert torch.equal(output, torch.ones_like(output))
+
+
+@pytest.mark.parametrize("shape,dtype", [((2,), torch.int64), ((2, 1), torch.int64), ((3,), torch.int32)])
+def test_sparse_attn_decode_rejects_invalid_reused_prefix(shape: tuple[int, ...], dtype: torch.dtype) -> None:
+    q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="GBSA cu_seqlens_q"):
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16),
+            torch.zeros((2, 4, 2), dtype=torch.int32),
+            torch.zeros((2, 4), dtype=torch.int32),
+            torch.tensor([129, 385], dtype=torch.int32),
+            num_kv_heads=2,
+            sm_scale=0.5,
+            output=torch.empty_like(q),
+            decode_query_len=2,
+            cu_seqlens_q=torch.zeros(shape, dtype=dtype),
+        )
 
 
 def test_m3_impls_provide_update_graph_params_protocol():
