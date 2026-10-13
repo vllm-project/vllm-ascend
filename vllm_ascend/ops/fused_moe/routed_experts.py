@@ -446,11 +446,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
-        if self.quant_type != QuantType.NONE:
-            cache_a5_moe_quant_type(
-                vllm_config,
-                self.quant_type,
-            )
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
         if runner_type is None:
@@ -794,6 +789,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         if self.return_with_event:
             return routed_out, RoutedMoEMilestones(
+                shared_experts_fused=fused_experts_results.shared_experts_fused,
                 routed_dispatch_start=fused_experts_results.before_dispatch_evt,
                 shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
                 routed_combine_start=fused_experts_results.before_combine_evt,

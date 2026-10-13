@@ -215,6 +215,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 layer=layer,
+                shared_weights=shared_experts,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,

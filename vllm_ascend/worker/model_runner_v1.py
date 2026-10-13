@@ -838,6 +838,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        is_dummy_run: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -3503,6 +3504,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                is_dummy_run=is_dummy_run,
             )
 
             # Extract DP padding if there is any

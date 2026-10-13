@@ -20,11 +20,12 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, get_a5_mega_moe_buffer_tokens_per_rank
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
@@ -32,13 +33,13 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.mega_moe import build_mega_moe_shared_kwargs, supports_mega_moe_shared_experts
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp, maybe_record_event
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
-    PrepareAndFinalizeWithMegaMoE,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
@@ -47,7 +48,6 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
@@ -289,14 +289,6 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
-class _MegaMoEBypassTokenDispatcher(MoETokenDispatcher[None]):
-    def token_dispatch(self, token_dispatch_input):
-        raise RuntimeError("A5 MegaMoE bypasses token_dispatch; use MegaMoEBackend.fused_experts instead.")
-
-    def token_combine(self, hidden_states, combine_metadata, bias=None):
-        raise RuntimeError("A5 MegaMoE bypasses token_combine; use MegaMoEBackend.fused_experts instead.")
-
-
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -310,8 +302,9 @@ class FusedMC2CommImpl(MoECommMethod):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
+        self._supports_fused_shared_experts: bool | None = None
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and not self._is_a5_backend and is_mega_moe_supported():
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # Resolve the Python ABI once, before the first collective/capture.
@@ -338,20 +331,18 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def supports_fused_shared_experts(self) -> bool:
-        return (
-            self._is_a5_backend
-            and self._mega_moe_backend is not None
-            and self._mega_moe_backend.supports_shared_experts()
-        )
+        if not (
+            _EXTRA_CTX.use_mega_moe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        ):
+            return False
+        if self._supports_fused_shared_experts is None:
+            self._supports_fused_shared_experts = supports_mega_moe_shared_experts(self.mega_moe)
+        return self._supports_fused_shared_experts
 
     def _get_token_dispatcher(self):
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            return _MegaMoEBypassTokenDispatcher()
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            return PrepareAndFinalizeWithMegaMoE(self.moe_config)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def prepare_hccl_teardown(self) -> bool:
@@ -435,6 +426,8 @@ class FusedMC2CommImpl(MoECommMethod):
             # from scheduler/graph config — rank-invariant.
             rank_invariant_cap = getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
             num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
+        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            num_max_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(get_current_vllm_config())
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
@@ -499,6 +492,8 @@ class FusedMC2CommImpl(MoECommMethod):
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         num_tokens = fused_experts_input.hidden_states.shape[0]
         num_max_tokens = self.token_dispatcher.max_num_tokens_per_rank
+        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            num_max_tokens = get_a5_mega_moe_buffer_tokens_per_rank(get_current_vllm_config())
         if num_tokens > num_max_tokens:
             raise ValueError(
                 f"MegaMoe received {num_tokens} tokens per rank, but its symmetric buffer "
@@ -559,6 +554,13 @@ class FusedMC2CommImpl(MoECommMethod):
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
+        shared_kwargs = {}
+        if fused_experts_input.shared_weights is not None:
+            if not self.supports_fused_shared_experts():
+                raise RuntimeError("The installed MegaMoE operator does not support shared-expert inputs.")
+            shared_kwargs = build_mega_moe_shared_kwargs(
+                fused_experts_input, self.moe_config.intermediate_size_per_partition, weight_type
+            )
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -574,6 +576,7 @@ class FusedMC2CommImpl(MoECommMethod):
             weight1_type=weight_type,
             weight2_type=weight_type,
             **activation_kwargs,
+            **shared_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
@@ -587,6 +590,8 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
+        if fused_experts_input.shared_weights is not None and not _EXTRA_CTX.use_mega_moe:
+            raise ValueError("Shared expert weights require the CANN MegaMoE path.")
         if quant_method is not None:
             weights = quant_method.get_fused_mc2_weights(fused_experts_input.layer)
         else:
@@ -634,4 +639,5 @@ class FusedMC2CommImpl(MoECommMethod):
         return FusedExpertsResult(
             routed_out=out,
             expert_tokens=expert_tokens,
+            shared_experts_fused=fused_experts_input.shared_weights is not None,
         )

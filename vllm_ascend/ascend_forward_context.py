@@ -11,7 +11,11 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    compute_mega_moe_buffer_tokens_per_rank,
+    get_ascend_config,
+    is_mega_moe_supported,
+)
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -375,7 +379,9 @@ def _select_capacity_and_world_size_moe_comm_method(
                 # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
                 # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
                 pass
-            else:
+            elif num_tokens is not None and num_tokens <= get_a5_mega_moe_buffer_tokens_per_rank(
+                vllm_config, mc2_tokens_capacity
+            ):
                 return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -383,29 +389,6 @@ def _select_capacity_and_world_size_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    ascend_config = get_ascend_config()
-    eplb_config = ascend_config.eplb_config
-    kv_role = getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None)
-    buffer_tokens_per_rank = (
-        get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
-        if ascend_config.enable_fused_mc2 == 1
-        else 0
-    )
-    normalized_activation = None if activation is None else activation.lower().removeprefix("moeactivation.")
-    use_mega_moe = (
-        ascend_config.enable_fused_mc2 == 1
-        and world_size > 1
-        and num_tokens <= buffer_tokens_per_rank
-        and quant_type in _A5_MEGA_MOE_QUANT_TYPES
-        and normalized_activation in (None, "silu", "swiglu")
-        and group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
-        and not eplb_config.dynamic_eplb
-        and eplb_config.num_redundant_experts == 0
-        and not ascend_config.mix_placement
-        and kv_role != "kv_consumer"
-    )
-    if use_mega_moe:
-        return MoECommType.FUSED_MC2
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:

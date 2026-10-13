@@ -186,6 +186,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         comm_method=MoECommType.ALLTOALL,
         is_draft=False,
         mega_moe=False,
+        active=(True, True),
     ):
         module = "vllm_ascend.worker.model_runner_v1"
 
@@ -193,6 +194,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
             remote_rank = 1 - runner.dp_rank
             packed_tensor[0, remote_rank] = tokens[remote_rank]
             packed_tensor[1, remote_rank] = modes[remote_rank].value
+            packed_tensor[2, remote_rank] = active[remote_rank]
 
         with (
             patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
@@ -205,7 +207,31 @@ class TestDPPaddingPolicy(unittest.TestCase):
                 num_tokens=tokens[runner.dp_rank],
                 is_draft_model=is_draft,
                 cudagraph_mode=modes[runner.dp_rank],
+                is_dummy_run=not active[runner.dp_rank],
             )
+
+    def test_dummy_rank_cannot_inflate_active_rank_batch_or_disable_graph(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                maximum, across_dp, mode = self._run_sync(
+                    self._make_runner(dp_rank),
+                    tokens=(8, 4096),
+                    modes=(CUDAGraphMode.FULL, CUDAGraphMode.NONE),
+                    active=(True, False),
+                    comm_method=MoECommType.FUSED_MC2,
+                    mega_moe=True,
+                )
+                self.assertEqual(maximum, 8)
+                self.assertEqual(across_dp.tolist(), [8, 8])
+                self.assertEqual(mode, CUDAGraphMode.FULL)
+
+    def test_all_dummy_ranks_still_select_collective_shape(self):
+        maximum, across_dp, mode = self._run_sync(
+            self._make_runner(), active=(False, False), comm_method=MoECommType.MC2
+        )
+        self.assertEqual(maximum, 32)
+        self.assertEqual(across_dp.tolist(), [32, 32])
+        self.assertEqual(mode, CUDAGraphMode.NONE)
 
     def test_skip_dp_sync_keeps_local_token_count(self):
         runner = self._make_runner()

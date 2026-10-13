@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -43,6 +44,15 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config.start()
         self._patch_get_ascend_config_module.start()
         self._patch_get_ascend_config_forward_context.start()
+        self._patch_current_vllm_config = patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config",
+            return_value=SimpleNamespace(
+                kv_transfer_config=None,
+                scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+                parallel_config=SimpleNamespace(world_size_across_dp=8),
+            ),
+        )
+        self._patch_current_vllm_config.start()
         # Mock FusedMoEConfig
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.num_experts = 8
@@ -75,6 +85,7 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
         self._patch_get_ascend_config_forward_context.stop()
+        self._patch_current_vllm_config.stop()
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
@@ -150,6 +161,7 @@ class TestMoECommMethod(TestBase):
         comm_impl.token_dispatcher.global_bs = 0
 
         fused_input = MagicMock()
+        fused_input.shared_weights = None
         fused_input.hidden_states = torch.zeros(2, 8)
         fused_input.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
         fused_input.topk_weights = torch.ones(2, 2)
@@ -230,6 +242,7 @@ class TestMoECommMethod(TestBase):
         comm.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
         comm.token_dispatcher.max_num_tokens_per_rank = 128
         inp = MagicMock()
+        inp.shared_weights = None
         inp.hidden_states = torch.zeros(2, 8)
         inp.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
         inp.topk_weights = torch.ones(2, 2)

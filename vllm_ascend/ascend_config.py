@@ -600,9 +600,9 @@ class AscendConfig:
     # model's quant_type, 0 means disabled (use the model's own quant).
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    # Global token ceiling for dispatch_ffn_combine. A5 MegaMoE derives its
-    # per-rank symmetric-buffer capacity from this ceiling and the current
-    # process's MC2 execution capacity.
+    # Receive-token ceiling for dispatch_ffn_combine and CANN MegaMoE.
+    # A5 also bounds its per-rank input capacity by this ceiling divided
+    # by EP size and the execution capacity for the current PD role.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
