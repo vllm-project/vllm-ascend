@@ -1,15 +1,19 @@
 import unittest
+from itertools import product
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend.attention.context_parallel import common_cp
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
+    use_dcp_q_replicate,
 )
 
 
@@ -237,3 +241,101 @@ def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
     torch.testing.assert_close(out_pe, torch.cat([k_pe] * 4, dim=0))
     impl.tp_group.all_gather.assert_not_called()
     impl.dcp_group.all_gather.assert_called_once()
+
+
+class TestDCPQReplicationConfig(unittest.TestCase):
+    @staticmethod
+    def _make_dcp_q_replicate_config(requested=True, dcp=2, pcp=1):
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                dcp_q_replicate=requested,
+                decode_context_parallel_size=dcp,
+                prefill_context_parallel_size=pcp,
+                tensor_parallel_size=4,
+            ),
+            model_config=SimpleNamespace(enforce_eager=True),
+            cache_config=SimpleNamespace(cache_dtype="auto"),
+            attention_config=SimpleNamespace(indexer_kv_dtype="bf16"),
+            speculative_config=None,
+            lora_config=None,
+        )
+
+    def test_request_precedence(self):
+        for (dcp, pcp), (requested, legacy, expected) in product(
+            [(1, 1), (2, 1), (4, 1), (2, 2)],
+            [(False, None, False), (True, None, True), (False, True, True), (True, False, False)],
+        ):
+            with (
+                self.subTest(dcp=dcp, pcp=pcp, requested=requested, legacy=legacy, expected=expected),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertIs(
+                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested, dcp, pcp), SimpleNamespace()),
+                    expected and dcp > 1 and (pcp == 1),
+                )
+
+    def test_lora_q_replication_is_rejected(self):
+        cfg = self._make_dcp_q_replicate_config()
+        cfg.lora_config = object()
+        with (
+            patch.object(common_cp.envs, "is_set", return_value=False),
+            self.assertRaisesRegex(ValueError, "LoRA adapters"),
+        ):
+            use_dcp_q_replicate(cfg, SimpleNamespace())
+
+    def test_direct_q_graph_and_speculative_requests(self):
+        for speculative, eager, q_rank in product([False, True], [False, True], [None, 4]):
+            with self.subTest(speculative=speculative, eager=eager, q_rank=q_rank):
+                cfg = self._make_dcp_q_replicate_config()
+                cfg.model_config.enforce_eager = eager
+                cfg.speculative_config = (
+                    SimpleNamespace(method="mtp", num_speculative_tokens=3) if speculative else None
+                )
+                with patch.object(common_cp.envs, "is_set", return_value=False):
+                    self.assertTrue(use_dcp_q_replicate(cfg, SimpleNamespace(q_lora_rank=q_rank)))
+
+    def test_sparse_q_replication_scope(self):
+        for dcp, q_rank in [(4, 4), (4, None), (2, 4)]:
+            with self.subTest(dcp=dcp, q_rank=q_rank):
+                cfg, model = (
+                    self._make_dcp_q_replicate_config(dcp=dcp),
+                    SimpleNamespace(index_topk=8, q_lora_rank=q_rank),
+                )
+                with (
+                    patch.object(common_cp.envs, "is_set", return_value=False),
+                    patch.object(common_cp, "enable_dsa_cp", return_value=False),
+                ):
+                    self.assertTrue(use_dcp_q_replicate(cfg, model))
+
+    def test_sparse_q_replication_dsa_cp_conflict(self):
+        for dsa_cp, (requested, dcp, pcp) in product(
+            [False, True], [(False, 2, 1), (True, 1, 1), (True, 2, 2), (True, 2, 1)]
+        ):
+            with self.subTest(dsa_cp=dsa_cp, requested=requested, dcp=dcp, pcp=pcp):
+                cfg = self._make_dcp_q_replicate_config(requested=requested, dcp=dcp, pcp=pcp)
+                model = SimpleNamespace(index_topk=8)
+                active = requested and dcp > 1 and pcp == 1
+                with (
+                    patch.object(common_cp.envs, "is_set", return_value=False),
+                    patch.object(common_cp, "enable_dsa_cp", return_value=dsa_cp) as get_dsa_cp,
+                ):
+                    if active and dsa_cp:
+                        with self.assertRaisesRegex(ValueError, "DSA-CP token sharding"):
+                            use_dcp_q_replicate(cfg, model)
+                    else:
+                        self.assertIs(use_dcp_q_replicate(cfg, model), active)
+                    if not active:
+                        get_dsa_cp.assert_not_called()
+
+    def test_q_replication_leaves_cache_quantization_to_attention(self):
+        for indexer_dtype, cache_dtype in product(["bf16", "fp8", "int8"], ["auto", "fp8", "int8"]):
+            with self.subTest(indexer_dtype=indexer_dtype, cache_dtype=cache_dtype):
+                cfg = self._make_dcp_q_replicate_config()
+                cfg.cache_config.cache_dtype = cache_dtype
+                cfg.attention_config.indexer_kv_dtype = indexer_dtype
+                with (
+                    patch.object(common_cp.envs, "is_set", return_value=False),
+                    patch.object(common_cp, "enable_dsa_cp", return_value=False),
+                ):
+                    self.assertTrue(use_dcp_q_replicate(cfg, SimpleNamespace(index_topk=8)))

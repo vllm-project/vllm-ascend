@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -100,11 +101,18 @@ def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
 class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
+    supports_weight_preprocessing = True
+
     weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
     weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
     supports_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "is_weights_processed", False) is True:
+            return
+        prepare = getattr(layer, "prepare_weights_for_processing", None)
+        if prepare is not None:
+            prepare()
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
@@ -516,6 +524,117 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 self.weight.data.copy_(loaded_weight)
         else:
             super().weight_loader(param, loaded_weight)
+
+
+class _DCPDerivedColumnParallelLinear(AscendColumnParallelLinear):
+    """Local projection prepared by its group parent, once per weight load."""
+
+    _processed_weights: dict[str, torch.Tensor] | None = None
+
+    @property
+    def is_weights_processed(self) -> bool:
+        return self._processed_weights is not None
+
+    def finish_weight_processing(self, previous: "_DCPDerivedColumnParallelLinear | None") -> None:
+        tensors = dict(self.named_parameters(recurse=False)) | dict(self.named_buffers(recurse=False))
+        # Quantization may also create unregistered tensors such as weight_scale_fp32.
+        tensors.update((name, value) for name, value in vars(self).items() if isinstance(value, torch.Tensor))
+        if previous is not None:
+            previous_weights = previous._processed_weights
+            assert previous_weights is not None and previous_weights.keys() == tensors.keys()
+            for name, value in tensors.items():
+                target = previous_weights[name]
+                if (target.shape, target.dtype, target.device) != (value.shape, value.dtype, value.device):
+                    raise ValueError(f"DCP local Q parameter {name} changed layout during weight reload")
+            # Retain graph addresses even if the layerwise loader removed the old parameters.
+            for name, value in tensors.items():
+                target = previous_weights[name]
+                target.data.copy_(value)
+                setattr(self, name, target)
+            tensors = previous_weights
+        self._processed_weights = tensors
+
+
+class AscendDCPGroupColumnParallelLinear(AscendColumnParallelLinear):
+    """Load group Q weights; derive local prefill weights before quantization processing."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        parallel = get_current_vllm_config().parallel_config
+        self.group_size = parallel.decode_context_parallel_size
+        tp_size = parallel.tensor_parallel_size
+        if output_size % tp_size:
+            raise ValueError("DCP Q output size must be divisible by TP size")
+        self.qrep_active = self.group_size > 1  # Upstream MLA interface.
+        self.rank_in_group = get_tensor_model_parallel_rank() % self.group_size
+        super().__init__(input_size, output_size, bias=bias, quant_config=quant_config, prefix=prefix)
+        if not getattr(self.quant_method, "supports_weight_preprocessing", False):
+            raise ValueError(f"DCP Q replication cannot prepare local weights with {type(self.quant_method).__name__}")
+        self.local_proj: _DCPDerivedColumnParallelLinear | None = None
+        self.update_param_tp_status()
+
+    def update_param_tp_status(self) -> None:
+        # The child uses local TP; do not overwrite it with the group TP.
+        for param in self.parameters(recurse=False):
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
+
+    def prepare_weights_for_processing(self) -> None:
+        """Prepare local weights before processing the group weights."""
+        group_params = dict(self.named_parameters(recurse=False))
+        device = next(iter(group_params.values())).device
+        with torch.device(device):
+            local_proj = _DCPDerivedColumnParallelLinear(
+                self.input_size,
+                self.output_size,
+                bias=self.bias is not None,
+                skip_bias_add=self.skip_bias_add,
+                params_dtype=self.params_dtype,
+                quant_config=self.quant_config,
+                prefix=self.prefix,
+                return_bias=self.return_bias,
+            )
+        assert local_proj.tp_size == self.tp_size * self.group_size
+        assert local_proj.tp_rank == self.tp_rank * self.group_size + self.rank_in_group
+        block_size = getattr(self, "weight_block_size", None)
+        if block_size is not None and local_proj.output_size_per_partition % block_size[0]:
+            raise ValueError("DCP Q replication requires local Q heads to align with weight quantization blocks")
+
+        for name, local_param in local_proj.named_parameters(recurse=False):
+            group_param = group_params[name]
+            output_dim = getattr(group_param, "output_dim", None)
+            local_data = group_param.detach()
+            if output_dim is not None:
+                if (
+                    getattr(group_param, "packed_dim", None) == output_dim
+                    and local_proj.output_size_per_partition % group_param.packed_factor
+                ):
+                    raise ValueError(f"DCP Q parameter {name} has a local output boundary inside a packed element")
+                width = local_param.shape[output_dim]
+                if group_param.shape[output_dim] != width * self.group_size:
+                    raise ValueError(f"DCP Q parameter {name} cannot be split into equal local output shards")
+                local_data = local_data.narrow(output_dim, self.rank_in_group * width, width)
+            if local_data.shape != local_param.shape or local_data.dtype != local_param.dtype:
+                raise ValueError(f"DCP Q parameter {name} does not match the local parameter shape or dtype")
+            local_param.data.copy_(local_data)
+        local_proj.quant_method.process_weights_after_loading(local_proj)
+        local_proj.update_param_tp_status()
+        local_proj.finish_weight_processing(self.local_proj)
+        self.local_proj = local_proj
+
+    def forward_local(self, x):
+        """Project only this TP rank's heads using the standard Ascend linear."""
+        if self.local_proj is None:
+            raise RuntimeError("DCP local Q projection must be prepared during weight processing")
+        return self.local_proj(x)
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

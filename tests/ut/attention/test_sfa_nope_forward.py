@@ -112,6 +112,7 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     impl.q_lora_rank = impl.kv_lora_rank = 2
+    impl.dcp_q_replicate_enabled = False
     impl.preprocess_type = PreprocessType.NATIVE
     impl.g_proj = impl.layerwise_kv_cache_hook = None
     impl.has_indexer = True

@@ -26,6 +26,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
@@ -100,6 +101,8 @@ EAGLE3_PCP_GOLDENS = (
 # Five reference PCP1 runs with the shared prompts and the same generation configuration.
 EAGLE3_PCP_MIN_ACCEPTANCE_RATES = [0.54, 0.29, 0.15]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
+DCP_Q_REPLICATE_MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite"
+DCP_Q_REPLICATE_SFA_MODEL = "vllm-ascend/DeepSeek-V3.2-4layers"
 
 
 @dataclass(frozen=True)
@@ -192,6 +195,152 @@ def _run_inference_case(case: InferenceCase) -> None:
     for token_ids, output_text in outputs:
         assert token_ids, "Each request should return at least one generated token"
         assert isinstance(output_text, str) and output_text, "Each request should return non-empty text"
+
+
+class DCPQReplicationWorker:
+    """Read the actual group and attention state in each model worker."""
+
+    model_runner: Any
+
+    def check_dcp_q_replication(self, enabled: bool) -> int:
+        from vllm.distributed import get_dcp_group
+
+        group = get_dcp_group()
+        assert group.world_size == 2
+        assert group.ranks == [0, 1]
+        config = self.model_runner.vllm_config
+        implementations = [
+            layer.impl
+            for layer in config.compilation_config.static_forward_context.values()
+            if hasattr(getattr(layer, "impl", None), "dcp_q_replicate_enabled")
+        ]
+        assert len(implementations) == config.model_config.hf_text_config.num_hidden_layers
+        assert all(impl.dcp_q_replicate_enabled is enabled for impl in implementations)
+        return group.rank_in_group
+
+
+@pytest.mark.parametrize(
+    "model_kind,model,graph_mode,interleave",
+    [
+        pytest.param(
+            "mla",
+            DCP_Q_REPLICATE_MLA_MODEL,
+            graph_mode,
+            1,
+            id=f"mla-{graph_mode or 'eager'}",
+            marks=pytest.mark.e2e_model(DCP_Q_REPLICATE_MLA_MODEL),
+        )
+        for graph_mode in (None, "FULL_DECODE_ONLY", "PIECEWISE")
+    ]
+    + [
+        pytest.param(
+            "sfa",
+            DCP_Q_REPLICATE_SFA_MODEL,
+            graph_mode,
+            interleave,
+            id=f"sfa-{graph_mode or 'eager'}-interleave{interleave}",
+            marks=pytest.mark.e2e_model(DCP_Q_REPLICATE_SFA_MODEL),
+        )
+        for graph_mode in (None, "FULL_DECODE_ONLY")
+        for interleave in (1, 128)
+    ],
+)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="chunked_prefill,prefix_caching",
+    parallel="TP,DCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16,W8A8",
+    graph_mode="eager,full_decode_only,piecewise",
+)
+@patch.dict(
+    os.environ,
+    {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dcp_q_replication(
+    model_kind: str, model: str, graph_mode: str | None, interleave: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compare MRV2 MLA/SFA Q replication OFF/ON with TP2 and DCP2 on two NPUs."""
+    monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
+    sparse = model_kind == "sfa"
+    prompts = (
+        [
+            "Continue the sequence: " + "one two three four " * 30,
+            # Exceed index_topk so this exercises sparse token selection.
+            "Explain how sparse attention selects tokens. " * 350,
+            "The capital of France is",
+        ]
+        if sparse
+        else [
+            "The capital of France is",
+            "Explain how context parallel attention works. " * 40,
+            "A computer scientist studies algorithms. " * 70,
+        ]
+    )
+    max_tokens = 24 if sparse else 16
+    sampling_params = SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=True)
+    results = []
+    for enabled in (False, True):
+        with VllmRunner(
+            model,
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=2,
+            dcp_q_replicate=enabled,
+            quantization="ascend" if sparse else None,
+            worker_extension_cls=f"{__name__}.DCPQReplicationWorker",
+            enforce_eager=graph_mode is None,
+            compilation_config=(
+                {"cudagraph_mode": graph_mode, "cudagraph_capture_sizes": [1, 2, 4]} if graph_mode else {}
+            ),
+            max_model_len=4096 if sparse else 2048,
+            max_num_seqs=MAX_NUM_SEQS,
+            max_num_batched_tokens=128,
+            block_size=128,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            cp_kv_cache_interleave_size=interleave,
+            attention_config={"indexer_kv_dtype": "bf16"} if sparse else {},
+            additional_config={"enable_mlapo": False, "enable_dsa_cp": False},
+            seed=0,
+        ) as runner:
+            ranks = runner.model.collective_rpc("check_dcp_q_replication", args=(enabled,))
+            assert sorted(ranks) == [0, 1]
+            # Teacher forcing keeps both runs on identical input tokens.
+            scored = runner.model.generate(prompts, SamplingParams(temperature=0, max_tokens=1, prompt_logprobs=1))
+            assert len(scored) == len(prompts)
+            if sparse:
+                index_topk = runner.model.llm_engine.vllm_config.model_config.hf_text_config.index_topk
+                assert max(len(output.prompt_token_ids) for output in scored) > index_topk
+            # Keep sparse A/B decode batch sizes identical despite different prompt lengths.
+            prompt_batches = [[prompt] for prompt in prompts] if sparse else [prompts]
+            generations = []
+            for _ in range(2):
+                tokens = [
+                    list(output.outputs[0].token_ids)
+                    for batch in prompt_batches
+                    for output in runner.model.generate(batch, sampling_params)
+                ]
+                assert len(tokens) == len(prompts)
+                assert all(len(token_ids) == max_tokens for token_ids in tokens)
+                generations.append(tokens)
+            results.append((scored, *generations))
+    (baseline, baseline_tokens, baseline_cached), (replicated, replicated_tokens, replicated_cached) = results
+    # Compare Qrep OFF/ON at matching cache states, without assuming cache-state invariance.
+    assert baseline_tokens == replicated_tokens
+    assert baseline_cached == replicated_cached
+    for left, right in zip(baseline, replicated, strict=True):
+        assert left.prompt_token_ids == right.prompt_token_ids
+        assert left.prompt_logprobs is not None and right.prompt_logprobs is not None
+        for token, lp, rp in zip(left.prompt_token_ids, left.prompt_logprobs, right.prompt_logprobs, strict=True):
+            if lp is None:
+                assert rp is None
+            else:
+                assert rp is not None
+                assert lp[token].logprob == pytest.approx(rp[token].logprob, abs=0.05, rel=0)
 
 
 DSV3_2_SFA_PCP_CASE = InferenceCase(

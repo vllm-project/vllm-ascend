@@ -211,6 +211,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 @pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod])
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.dcp_q_replicate_enabled = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
@@ -256,6 +257,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
 )
 def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.dcp_q_replicate_enabled = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = True
@@ -1654,7 +1656,7 @@ class TestAscendMLAImpl(TestBase):
             "v_head_dim": 128,
             "q_lora_rank": 64,
             "q_proj": MagicMock(),
-            "q_b_proj": MagicMock(),
+            "q_b_proj": MagicMock(qrep_active=False),
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
@@ -2939,7 +2941,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_mla_preprocess_prefill_without_rope(self, mock_rope_cache, mock_rope, mock_cache):
         self.impl.use_mla_rope = False
-        self.impl.num_heads = self.impl.num_kv_heads = 1
+        self.impl.num_heads = self.impl.num_kv_heads = self.impl.q_projection_heads = 1
         self.impl.qk_nope_head_dim = self.impl.qk_rope_head_dim = 2
         self.impl.qk_head_dim = 4
         self.impl.kv_lora_rank = self.impl.v_head_dim = 2
