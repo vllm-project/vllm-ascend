@@ -437,10 +437,13 @@ class AscendSharedExperts:
     def _prepare_linear_input_for_overlap(
         self,
         layer: torch.nn.Module,
-        hidden_states: torch.Tensor,
+        hidden_states: LinearInput,
     ) -> LinearInput:
         """Run scheme-owned Vector/AIV preparation before a stage barrier."""
         if not self.multistream_overlap or has_lora(self.lora_context):
+            return hidden_states
+        if not isinstance(hidden_states, torch.Tensor):
+            # Activation may have already quantized the Down input and scale.
             return hidden_states
 
         linear_method = getattr(layer, "quant_method", None)

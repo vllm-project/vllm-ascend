@@ -389,7 +389,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._global_builder.take_device_metadata_tasks()
 
         if needs_global_metadata:
-            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(self, pcp_context)
+            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
+                self, pcp_context, full_graph_mode=kwargs.get("full_graph_mode", False)
+            )
             global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
                 pcp_context, pcp_cache_group_idx, common_attn_metadata
             )

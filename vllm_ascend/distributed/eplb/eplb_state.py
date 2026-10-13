@@ -4,11 +4,13 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -18,12 +20,16 @@ from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.logger import logger
 
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 from vllm_ascend.utils import vllm_version_is
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
+_EPLB_CLOSE_TIMEOUT_SECONDS = 300
+_EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
 
 
@@ -130,7 +136,14 @@ def refresh_model_routing_tables(
 def _raise_if_async_worker_stopped(state: Any) -> None:
     worker = getattr(state, "async_worker", None)
     if worker is not None and not worker.is_alive():
-        raise RuntimeError("EPLB background worker terminated unexpectedly")
+        error = RuntimeError("EPLB background worker terminated unexpectedly")
+        session = getattr(state, "_hixl_session", None)
+        if session is not None:
+            # Device/stream setup can fail before the migration loop is entered.
+            session._error = session._error or error
+            session._usable = False
+            state.raise_if_close_failed()
+        raise error
 
 
 class AscendEplbState(_eplb_state.EplbState):
@@ -138,6 +151,7 @@ class AscendEplbState(_eplb_state.EplbState):
 
     cuda_device_index: int | None
     device_index: int | None
+    async_worker: threading.Thread | None
 
     def __init__(
         self,
@@ -152,6 +166,10 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
+        self._stop_async = threading.Event()
+        self._suspended = False
+        self._close_error: Exception | None = None
+        self._hixl_session: _HixlSession | None = None
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
@@ -168,6 +186,8 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def add_model(self, model, model_config) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
+        if self._hixl_session is not None:
+            raise RuntimeError("Cannot add EPLB models after HIXL initialization")
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
             with _configured_upstream_policy(
@@ -179,6 +199,61 @@ class AscendEplbState(_eplb_state.EplbState):
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+
+    def wait_for_rearrangement(self, stream) -> bool:
+        """Allow an idle worker to stop without recording a fake device event."""
+        while not self.rearrange_event._recorded.wait(_EPLB_EVENT_POLL_SECONDS):
+            if self._stop_async.is_set():
+                return False
+        self.rearrange_event.wait(stream=stream)
+        return True
+
+    def close(self) -> None:
+        """Close EPLB while its CPU groups and NPU mappings are still alive."""
+        self.raise_if_close_failed()
+        try:
+            self._suspended = True
+            worker = self.async_worker
+            if worker is not None:
+                _raise_if_async_worker_stopped(self)
+                # Acknowledge real completed results before stopping the idle loop.
+                # This also handles the worker waiting for consumed_event.
+                self.drain_async()
+                self._stop_async.set()
+                worker.join(timeout=_EPLB_CLOSE_TIMEOUT_SECONDS)
+                if worker.is_alive():
+                    raise TimeoutError("EPLB background worker could not be stopped; worker must terminate")
+                self.async_worker = None
+            if self._hixl_session is not None:
+                self._hixl_session.close()
+        except Exception as error:
+            self._close_error = error
+            self.raise_if_close_failed()
+
+    def raise_if_close_failed(self) -> None:
+        if self._hixl_session is not None and self._hixl_session._error is not None:
+            self._close_error = self._hixl_session._error
+        if self._close_error is not None:
+            logger.error("EPLB cleanup failed; terminating the worker: %s", self._close_error)
+            # Ordinary RPC exceptions are caught by the upstream worker loop.
+            # SystemExit reaches its process-death monitor and engine shutdown.
+            raise SystemExit(
+                "EPLB cleanup failed; worker must terminate before releasing registered memory"
+            ) from self._close_error
+
+    def start_async_loop(self, *args, **kwargs) -> None:
+        if not self._suspended:
+            communicators = {
+                key: model_state.communicator
+                for key, model_state in self.model_states.items()
+                if isinstance(model_state.communicator, AscendHixlEplbCommunicator)
+            }
+            if communicators and self._hixl_session is None:
+                self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
+                self._hixl_session.initialize(communicators)
+            if self._hixl_session is not None:
+                self._hixl_session.check_usable()
+            super().start_async_loop(*args, **kwargs)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(
@@ -277,6 +352,9 @@ class AscendEplbState(_eplb_state.EplbState):
         log_stats: bool = False,
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
+        self.raise_if_close_failed()
+        if self._hixl_session is not None:
+            _raise_if_async_worker_stopped(self)
         is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
         should_collect = getattr(self, "_should_collect_local_load", False)
         self._is_load_sampling_step = False
@@ -402,6 +480,8 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
+        if self._suspended:
+            return None
         use_custom_async_stats = (
             self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats
         )
@@ -435,9 +515,17 @@ class AscendEplbState(_eplb_state.EplbState):
         """Acknowledge changed-layer and no-op results through one lifecycle."""
         if not self.is_async:
             return
+        deadline = time.monotonic() + _EPLB_CLOSE_TIMEOUT_SECONDS
         for model_state in self.model_states.values():
+            work = getattr(model_state, "_eplb_ready_work", None)
+            if work is not None:
+                work.wait(timeout=timedelta(seconds=_EPLB_CLOSE_TIMEOUT_SECONDS))
+                del model_state._eplb_ready_work
+                del model_state._eplb_ready_flag
             while model_state.rebalanced:
                 _raise_if_async_worker_stopped(self)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("EPLB migration could not be drained; worker must terminate")
                 result = model_state.pending_result
                 if result is not None:
                     if getattr(
@@ -453,6 +541,7 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _all_ranks_result_ready(self, model_state: Any) -> bool:
         """Pipeline readiness reduction behind one foreground iteration."""
+        self.raise_if_close_failed()
         _raise_if_async_worker_stopped(self)
         model_state._eplb_migration_span_steps = getattr(model_state, "_eplb_migration_span_steps", 0) + 1
         group = get_ep_group().cpu_group
