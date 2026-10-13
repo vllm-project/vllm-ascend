@@ -161,7 +161,13 @@ jobs:
             BASE_SHA=$(git rev-parse FETCH_HEAD)
           fi
           git cat-file -e "${BASE_SHA}^{commit}"
-          git rebase "$BASE_SHA"
+          # A resolved merge already contains the base. Rebasing it would
+          # discard the merge resolution and replay the conflicting commits.
+          if git merge-base --is-ancestor "$BASE_SHA" HEAD; then
+            echo "Checkout already contains base snapshot $BASE_SHA"
+          else
+            git rebase "$BASE_SHA"
+          fi
           git submodule sync --recursive
           git submodule update --init --recursive
 
