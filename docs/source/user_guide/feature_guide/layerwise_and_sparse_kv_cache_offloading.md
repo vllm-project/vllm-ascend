@@ -158,7 +158,7 @@ Python integration; it does not bundle these native kernels or their bindings.
 An operator-enabled native build is required to run the fused_copy_sfa path.
 
 LIM C8 uses `npu_fused_quant_lightning_indexer_manage`, which is included on
-this branch. Enable it with `--attention_config.indexer_kv_dtype int8`. The
+this branch. Enable it with `--attention_config.indexer_kv_dtype auto`. The
 indexer then Hadamard-rotates and int8-quantizes query and key, and
 `_lim_select` forwards that int8 query and the fp16 dequant scales to the C8
 LIM. The 19-parameter management ABI matches BF16 LIM, so Copy-SFA and miss H2D
@@ -327,7 +327,7 @@ The fused path has these additional requirements:
   the alternative overlap operator instead.
 - Use BF16 for the main KV cache. Sparse SFA C8 is not supported.
   Sparse LI C8 serving is supported for the device-resident indexer:
-  add `--attention_config.indexer_kv_dtype int8` so fused Copy-SFA
+  add `--attention_config.indexer_kv_dtype auto` so fused Copy-SFA
   selects `npu_fused_quant_lightning_indexer_manage`.
 
 | Draft tokens | `Q_max` | Default / minimum `topk_buffer_size` |

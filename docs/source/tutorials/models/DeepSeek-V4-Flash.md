@@ -178,7 +178,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 128 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '
@@ -221,7 +221,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 128 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
@@ -259,7 +259,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 32 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '
@@ -302,7 +302,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 32 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{
@@ -535,7 +535,7 @@ Before you start, please:
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 32 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -600,7 +600,7 @@ Before you start, please:
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
             --block-size 32 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
@@ -686,7 +686,7 @@ Before you start, please:
             --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 32 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -752,7 +752,7 @@ Before you start, please:
             --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
@@ -943,7 +943,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}' \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
             --kv-transfer-config \
@@ -1019,7 +1019,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
