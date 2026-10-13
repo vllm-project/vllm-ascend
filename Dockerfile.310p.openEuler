@@ -16,9 +16,9 @@
 #
 
 # CANN_QUAY_URL (optional): Registry URL of the CANN base image.
-ARG CANN_QUAY_URL="quay.io/ascend/cann"
+ARG CANN_QUAY_URL="swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann"
 # CANN_VERSION (optional): CANN toolkit version used to select the base image tag.
-ARG CANN_VERSION="9.1.0"
+ARG CANN_VERSION="9.2.0_20260930220649"
 
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-openeuler24.03-py3.12
 
@@ -37,12 +37,12 @@ ARG VLLM_COMMIT=""
 ARG SOC_VERSION="ascend310p1"
 # COMPILE_CUSTOM_KERNELS (optional): Whether to compile custom Ascend kernels (1 = yes, 0 = no).
 ARG COMPILE_CUSTOM_KERNELS=1
-# BUILD_TYPE (optional): Build type: 'release' or 'daily' (daily installs extra deps).
+# BUILD_TYPE (optional): Build type: 'release' or 'daily' (both install pinned snapshot deps).
 ARG BUILD_TYPE="release"
-# TORCH_NPU_VERSION (optional, empty if unset): torch_npu version for daily builds.
-ARG TORCH_NPU_VERSION
-# TORCH_NPU_DATE (optional, empty if unset): torch_npu build date for daily builds.
-ARG TORCH_NPU_DATE
+# TORCH_NPU_VERSION (optional): torch_npu version for release and daily builds.
+ARG TORCH_NPU_VERSION="26.2.0"
+# TORCH_NPU_DATE (optional): torch_npu build date for release and daily builds.
+ARG TORCH_NPU_DATE="20260926.5"
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="torch_npu_only"
 
@@ -132,14 +132,13 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
-# ===== Conditional installation based on BUILD_TYPE =====
-
-# Install daily packages via shared script
+# Install the pinned snapshot packages for both release and daily builds.
+# The script keeps its daily-only guard; override BUILD_TYPE only for this call.
 COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
-RUN if [ "$BUILD_TYPE" = "daily" ]; then \
-        bash /tmp/install_daily_deps.sh; \
+RUN if [ "$BUILD_TYPE" = "daily" ] || [ "$BUILD_TYPE" = "release" ]; then \
+        BUILD_TYPE=daily bash /tmp/install_daily_deps.sh; \
     else \
-        echo "Building release version without daily packages"; \
+        echo "Unsupported BUILD_TYPE: $BUILD_TYPE" >&2; exit 1; \
     fi && rm -f /tmp/install_daily_deps.sh
 
 # Set entrypoint and default command
