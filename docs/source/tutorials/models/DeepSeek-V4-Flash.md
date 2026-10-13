@@ -659,8 +659,6 @@ Before you start, please:
         ```shell
         #!/usr/bin/env bash
         set -e
-        unset https_proxy
-        unset http_proxy
         export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
 
         nic_name="xxxx" # change to your own nic name
@@ -738,8 +736,6 @@ Before you start, please:
         ```shell
         #!/usr/bin/env bash
         set -e
-        unset https_proxy
-        unset http_proxy
         export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
 
         nic_name="xxxx" # change to your own nic name
@@ -853,8 +849,6 @@ Before you start, please:
         ```
 
 4. Deploy the P-D disaggregation proxy.
-
-    Wait until all prefill and decode instances are ready before starting the proxy.
 
     Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
