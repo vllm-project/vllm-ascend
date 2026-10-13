@@ -32,6 +32,10 @@ inline at::Tensor GetValidSparseFlashMlaVllmTensor(
                : at::empty({0}, at::TensorOptions().dtype(at::kInt).device(device));
 }
 
+// IMPORTANT: The public Torch name intentionally differs from the CANN name.
+// Keep torch.ops._C_ascend.npu_sparse_flash_mla_metadata unchanged for callers.
+// This adapter calls aclnnSparseFlashMlaMetadataVllm; the Vllm suffix isolates
+// our CANN operator from other implementations. Do not propagate it to the Torch API.
 at::Tensor npu_sparse_flash_mla_metadata_vllm(
     int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDim, const c10::optional<at::Tensor> &cuSeqlensQ,
     const c10::optional<at::Tensor> &cuSeqlensOriKv, const c10::optional<at::Tensor> &cuSeqlensCmpKv,
@@ -145,6 +149,10 @@ std::tuple<at::Tensor, at::Tensor> MakeSparseFlashMlaVllmOutputs(const at::Tenso
     return {attenOut, softmaxLse};
 }
 
+// IMPORTANT: The public Torch name intentionally differs from the CANN name.
+// Keep torch.ops._C_ascend.npu_sparse_flash_mla unchanged for callers.
+// This adapter calls aclnnSparseFlashMlaVllm; the Vllm suffix isolates
+// our CANN operator from other implementations. Do not propagate it to the Torch API.
 std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_vllm(
     const at::Tensor &q, const c10::optional<at::Tensor> &oriKv, const c10::optional<at::Tensor> &cmpKv,
     const c10::optional<at::Tensor> &oriSparseIndices, const c10::optional<at::Tensor> &cmpSparseIndices,

@@ -19,6 +19,10 @@
 
 namespace vllm_ascend {
 
+// IMPORTANT: The public Torch name intentionally differs from the CANN name.
+// Keep torch.ops._C_ascend.dequant_situ_quant unchanged for callers.
+// This adapter calls aclnnDequantSituQuantVllm; the Vllm suffix isolates
+// our CANN operator from other implementations. Do not propagate it to the Torch API.
 std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -33,7 +37,7 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm(
     c10::string_view quant_mode)
 {
     TORCH_CHECK(x.dim() == 2,
-                "dequant_situ_quant_vllm: x must be 2-dimensional [rows, width], but got rank ",
+                "dequant_situ_quant: x must be 2-dimensional [rows, width], but got rank ",
                 x.dim());
     const int64_t input_width = x.size(1);
 

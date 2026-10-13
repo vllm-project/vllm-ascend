@@ -19,6 +19,10 @@
 
 namespace vllm_ascend {
 
+// IMPORTANT: The public Torch name intentionally differs from the CANN name.
+// Keep torch.ops._C_ascend.situ_mx_quant unchanged for callers.
+// This adapter calls aclnnSituMxQuantVllm; the Vllm suffix isolates
+// our CANN operator from other implementations. Do not propagate it to the Torch API.
 std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm(
     const at::Tensor& x,
     double beta,
@@ -32,16 +36,16 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm(
     constexpr int64_t MX_SCALE_ALIGN = 2;
 
     TORCH_CHECK(x.dim() >= 1,
-                "situ_mx_quant_vllm: x must be at least 1-dimensional, but got ",
+                "situ_mx_quant: x must be at least 1-dimensional, but got ",
                 x.dim());
     TORCH_CHECK(x.size(-1) % 2 == 0,
-                "situ_mx_quant_vllm: x last dim must be even, but got ", x.size(-1));
+                "situ_mx_quant: x last dim must be even, but got ", x.size(-1));
     TORCH_CHECK(x.scalar_type() == at::kBFloat16,
-                "situ_mx_quant_vllm: x must be bfloat16, but got ", x.scalar_type());
+                "situ_mx_quant: x must be bfloat16, but got ", x.scalar_type());
     TORCH_CHECK(beta > 0.0,
-                "situ_mx_quant_vllm: beta must be greater than 0, but got ", beta);
+                "situ_mx_quant: beta must be greater than 0, but got ", beta);
     TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
-                "situ_mx_quant_vllm: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
+                "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
                 dst_type);
 
     std::vector<int64_t> y_shape(x.sizes().begin(), x.sizes().end());

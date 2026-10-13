@@ -296,4 +296,4 @@
 | 调用方式  | 样例代码                                                     | 说明                                                         |
 | --------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | aclnn API | [test_aclnn_sparse_flash_mla_metadata_vllm](./examples/test_aclnn_sparse_flash_mla_metadata_vllm.cpp) | 通过[aclnnSparseFlashMlaMetadataVllm](./docs/aclnnSparseFlashMlaMetadataVllm.md)调用SparseFlashMlaMetadataVllm算子 |
-| PyTorch API | [test_torch_sparse_flash_mla_metadata_vllm](./examples/test_torch_sparse_flash_mla_metadata_vllm.py) | 通过`torch.ops._C_ascend.npu_sparse_flash_mla_metadata_vllm`接口生成SparseFlashMlaVllm主算子使用的metadata |
+| PyTorch API | [test_torch_sparse_flash_mla_metadata_vllm](./examples/test_torch_sparse_flash_mla_metadata_vllm.py) | 通过`torch.ops._C_ascend.npu_sparse_flash_mla_metadata`接口生成SparseFlashMlaVllm主算子使用的metadata |
