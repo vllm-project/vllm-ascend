@@ -1,3 +1,4 @@
+import copy
 import queue
 import sys
 import threading
@@ -10,6 +11,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
+
+from tests.ut.kv_offload.mla_fanout_test_utils import registered_page
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -973,3 +976,131 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
+
+
+class TestMLAFanoutTransferDescriptors(unittest.TestCase):
+    def test_scheduler_generates_and_broadcasts_a_fresh_attempt_for_retry(self):
+        params = {
+            "remote_request_id": "prefill-request",
+            "remote_block_ids": [[10]],
+            "remote_engine_id": "prefill",
+            "remote_host": "192.0.2.1",
+            "remote_port": 31000,
+        }
+        metadata = MooncakeConnectorMetadata()
+        metadata.add_new_req("decode-request", [[2]], 1, params)
+        first = metadata.requests["decode-request"].transfer_attempt
+        self.assertTrue(first)
+        self.assertEqual(copy.deepcopy(metadata).requests["decode-request"].transfer_attempt, first)
+        metadata.add_new_req("decode-request", [[3]], 1, params)
+        self.assertNotEqual(metadata.requests["decode-request"].transfer_attempt, first)
+
+    def test_workers_forward_the_scheduler_attempt_to_the_receive_queue(self):
+        params = {
+            "remote_request_id": "prefill-request",
+            "remote_block_ids": [[10]],
+            "remote_engine_id": "prefill",
+            "remote_host": "192.0.2.1",
+            "remote_port": 31000,
+        }
+        metadata = MooncakeConnectorMetadata()
+        metadata.add_new_req("decode-request", [[2]], 1, params)
+        for is_mamba in (False, True):
+            worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+            worker.use_mamba = is_mamba
+            worker._prefill_tp_size = 1
+            worker._prefill_pp_size = 1
+            worker._get_tp_num_need_pulls = MagicMock(return_value=1)
+            worker._get_selected_pcp_rank = MagicMock(return_value=0)
+            worker._get_remote_rank = MagicMock(return_value=[0])
+            worker._get_remote_host_info_by_port = MagicMock(return_value=("192.0.2.1", "prefill"))
+            worker.kv_recv_thread = MagicMock()
+            worker.kv_send_thread = None
+            worker.start_load_kv(copy.deepcopy(metadata))
+            self.assertEqual(
+                worker.kv_recv_thread.add_request.call_args.kwargs["transfer_attempt"],
+                metadata.requests["decode-request"].transfer_attempt,
+            )
+
+    def test_local_peer_uses_leader_block_ids_and_registered_strides(self):
+        thread = object.__new__(KVCacheRecvingThread)
+        thread._prefill_pp_size = 1
+        thread.hma_group_size = 1
+        thread.kv_cache_specs = [MagicMock()]
+        thread.local_engine_id = "decode"
+        thread.local_handshake_port = 32001
+        thread.kv_caches_base_addr = {"decode": {32001: [0x1000]}}
+        thread.block_len_per_addr = [16]
+        thread.block_stride_per_addr = [32]
+        thread.addr_group_idx = [[0]]
+        thread.tp_rank = 1
+        thread.engine = MagicMock()
+        thread.engine.batch_transfer_sync_read.return_value = 0
+        meta = {
+            "remote_request_id": "prefill-request",
+            "remote_block_ids": [[4, 5]],  # Leader's allocation, not P's.
+            "local_block_ids": [[2, 3]],
+            "remote_engine_id": "prefill",
+            "remote_host": "192.0.2.1",
+            "remote_handshake_port": 31001,
+        }
+        peer = {"base_addrs": [0x2000], "host": "192.0.2.2", "rpc_port": 7777}
+        thread._transfer_kv_cache_all_groups_direct(meta, peer)
+        thread.engine.batch_transfer_sync_read.assert_called_once_with("192.0.2.2:7777", [0x1040], [0x2080], [32])
+        self.assertEqual(meta["remote_engine_id"], "prefill")
+
+    def test_diagnostic_reads_registered_page_instead_of_layer_view(self):
+        backing = torch.arange(128, dtype=torch.uint8)
+        layer_view = backing[8:].as_strided((3, 8), (32, 1))
+        self.assertTrue(torch.equal(registered_page(layer_view, backing.data_ptr(), 32, 32, 1), backing[32:64]))
+        self.assertNotEqual(
+            registered_page(layer_view, backing.data_ptr(), 32, 32, 1)[0].item(), layer_view[1, 0].item()
+        )
+        with self.assertRaises(ValueError):
+            registered_page(layer_view, backing.data_ptr(), 32, 32, -1)
+        with self.assertRaises(ValueError):
+            registered_page(layer_view, backing.data_ptr(), 32, 32, 4)
+
+    def test_disabled_fanout_preserves_original_path(self):
+        thread = object.__new__(KVCacheRecvingThread)
+        thread.fanout = None
+        thread._transfer_kv_cache_all_groups_direct = MagicMock()
+        thread._transfer_kv_cache_all_groups({"request_id": "decode-request"})
+        thread._transfer_kv_cache_all_groups_direct.assert_called_once_with({"request_id": "decode-request"})
+
+    def test_dispatch_maps_prefill_blocks_to_leader_allocation(self):
+        thread = object.__new__(KVCacheRecvingThread)
+        thread.fanout = MagicMock()
+        thread.local_engine_id = "decode"
+        thread.local_handshake_port = 32001
+        thread.kv_caches_base_addr = {"decode": {32001: [0x1000]}}
+        thread.block_len_per_addr = [32]
+        thread.block_stride_per_addr = [32]
+        thread.addr_group_idx = [[0]]
+        thread.engine = MagicMock()
+        thread._transfer_kv_cache_all_groups_direct = MagicMock()
+        meta = {
+            "request_id": "decode-request",
+            "remote_block_ids": [[10, 11, 12]],
+            "local_block_ids": [[100, 101]],
+        }
+        publication = {
+            "host": "192.0.2.2",
+            "rpc_port": 7777,
+            "base_addrs": [0x2000],
+            "block_lens": [32],
+            "block_strides": [32],
+            "addr_groups": [[0]],
+            "source_blocks": [[10, 11, 12]],
+            "local_blocks": [[2, 3, 4]],
+        }
+        thread.fanout.transfer.side_effect = lambda req, pull, read, metadata: read(publication)
+        thread._transfer_kv_cache_all_groups(meta)
+        mapped_req = thread._transfer_kv_cache_all_groups_direct.call_args.args[0]
+        self.assertEqual(mapped_req["remote_block_ids"], [[3, 4]])
+        self.assertEqual(meta["remote_block_ids"], [[10, 11, 12]])
+        thread._transfer_kv_cache_all_groups_direct.reset_mock()
+        publication["block_strides"] = [64]
+        with self.assertRaises(ValueError):
+            thread._transfer_kv_cache_all_groups(meta)
+        thread._transfer_kv_cache_all_groups_direct.assert_not_called()

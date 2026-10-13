@@ -8,10 +8,11 @@ import random
 import struct
 import threading
 import time
+import uuid
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import msgspec
@@ -54,6 +55,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mla_fanout import MLAFanout, reader_blocks
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
@@ -184,6 +186,9 @@ class ReqMeta:
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
     remote_pcp_size: int = 1
+    # Generated on the scheduler, then broadcast with connector metadata.
+    # Never generate independently on TP workers.
+    transfer_attempt: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass
@@ -470,10 +475,12 @@ class KVCacheRecvingThread(threading.Thread):
         kv_cache_config: KVCacheConfig,
         kv_caches: dict[str, Any],
         prefill_pp_layer_partition: str | None = None,
+        fanout: MLAFanout | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
+        self.fanout = fanout
         self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
         self.local_handshake_port = local_handshake_port
@@ -561,6 +568,7 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        transfer_attempt: str | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -579,6 +587,7 @@ class KVCacheRecvingThread(threading.Thread):
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
+                "transfer_attempt": transfer_attempt,
             }
         )
 
@@ -721,7 +730,32 @@ class KVCacheRecvingThread(threading.Thread):
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
-        """Handle a KV cache transfer request."""
+        fanout = getattr(self, "fanout", None)
+        if fanout is None:
+            return self._transfer_kv_cache_all_groups_direct(req_meta)
+
+        metadata = {
+            "host": get_ip(),
+            "rpc_port": self.engine.get_rpc_port(),
+            "base_addrs": self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port],
+            "block_lens": self.block_len_per_addr,
+            "block_strides": self.block_stride_per_addr,
+            "addr_groups": self.addr_group_idx,
+        }
+
+        def read(publication: dict[str, Any]) -> None:
+            for layout_field in ("block_lens", "block_strides", "addr_groups"):
+                if publication[layout_field] != metadata[layout_field]:
+                    raise ValueError(f"MLA leader fanout layout mismatch: {layout_field}")
+            if len(publication["base_addrs"]) != len(metadata["base_addrs"]):
+                raise ValueError("MLA leader fanout address count mismatch")
+            local_req = dict(req_meta, remote_block_ids=reader_blocks(req_meta, publication))
+            self._transfer_kv_cache_all_groups_direct(local_req, publication)
+
+        fanout.transfer(req_meta, lambda: self._transfer_kv_cache_all_groups_direct(req_meta), read, metadata)
+
+    def _transfer_kv_cache_all_groups_direct(self, req_meta: dict[str, Any], peer: dict[str, Any] | None = None):
+        """Handle a KV cache transfer using registered base + block stride."""
         remote_request_id = req_meta["remote_request_id"]
         remote_block_ids = req_meta["remote_block_ids"]
         local_block_ids = req_meta["local_block_ids"]
@@ -738,19 +772,26 @@ class KVCacheRecvingThread(threading.Thread):
             return
 
         num_remote_blocks = sum(len(group_block_ids) for group_block_ids in remote_block_ids)  # noqa: F841
-        # Check if we have the remote metadata cached.
-        with self.remote_metadata_lock:
-            has_remote_metadata = (
-                remote_engine_id in self.kv_caches_base_addr
-                and remote_handshake_port in self.kv_caches_base_addr[remote_engine_id]
-            )
-        if not has_remote_metadata:
-            self._get_remote_metadata(remote_host, remote_handshake_port)
-        with self.remote_metadata_lock:
-            remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-            local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
-            remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
-        session_id = f"{remote_host}:{remote_transfer_port}"
+        if peer is None:
+            # Check if we have the remote metadata cached.
+            with self.remote_metadata_lock:
+                has_remote_metadata = (
+                    remote_engine_id in self.kv_caches_base_addr
+                    and remote_handshake_port in self.kv_caches_base_addr[remote_engine_id]
+                )
+            if not has_remote_metadata:
+                self._get_remote_metadata(remote_host, remote_handshake_port)
+            with self.remote_metadata_lock:
+                remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+                remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            session_id = f"{remote_host}:{remote_transfer_port}"
+        else:
+            # Leader metadata is atomically published with the block table.
+            # Engine IDs are shared across D TP ranks, so do not insert this
+            # peer into the P metadata cache or call the P-only handshake.
+            remote_kv_caches_base_addrs = peer["base_addrs"]
+            session_id = f"{peer['host']}:{peer['rpc_port']}"
+        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
 
         # With P-side PP the remote worker only owns its stage's
         # kv_cache_tensors. Offset the local (D) group-major flat addr list to
@@ -1720,6 +1761,24 @@ class MooncakeConnectorWorker:
         self._mamba_ssm_size = mamba_ssm_size
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
 
+        self.fanout: MLAFanout | None = None
+        fanout_config = vllm_config.kv_transfer_config.get_from_extra_config("leader_fanout", None)
+        if fanout_config is not None and self.kv_role == "kv_consumer":
+            if not isinstance(fanout_config, dict):
+                raise ValueError("leader_fanout must be a configuration dictionary")
+            if (
+                not vllm_config.model_config.is_deepseek_mla
+                or not self.use_hybrid
+                or self.use_mamba
+                or self.tp_size <= 1
+                or self._prefill_pp_size != 1
+                or self.pp_size != 1
+                or self.pcp_size != 1
+                or vllm_config.parallel_config.nnodes_within_dp != 1
+            ):
+                raise ValueError("leader_fanout requires replicated hybrid MLA, single-node decode TP, and PP=1")
+            self.fanout = MLAFanout(fanout_config, self.tp_rank, self.tp_size)
+
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
@@ -1914,6 +1973,7 @@ class MooncakeConnectorWorker:
                 self.kv_cache_config,
                 self.kv_caches,
                 self._prefill_pp_layer_partition,
+                fanout=self.fanout,
             )
             self.kv_recv_thread.start()
 
@@ -2001,6 +2061,7 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=pulls_per_stage,
                         all_task_done=(i == num_pulls - 1),
+                        transfer_attempt=meta.transfer_attempt,
                     )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
@@ -2025,6 +2086,7 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                        transfer_attempt=meta.transfer_attempt,
                     )
 
         for req_id in metadata.reqs_in_batch:
