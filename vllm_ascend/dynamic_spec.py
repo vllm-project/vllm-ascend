@@ -98,6 +98,7 @@ class AdaptiveDraftKController:
     max_k: int
     min_k: int = 1
     auto_tune: bool = True
+    require_profile_for_downshift: bool = False
 
     def __post_init__(self) -> None:
         self.max_k = max(int(self.max_k), 0)
@@ -145,11 +146,15 @@ class AdaptiveDraftKController:
         return self._active_bucket
 
     def _desired_k(self, state: _BucketState) -> int:
-        desired = (
-            state.profile_k
-            if self.auto_tune and state.profile_k is not None
-            else state.empirical_k
-        )
+        if self.auto_tune and state.profile_k is not None:
+            desired = state.profile_k
+        elif self.auto_tune and self.require_profile_for_downshift:
+            # AV can price each captured draft width. Keep collecting fresh
+            # full-width confidences until it has made that comparison;
+            # acceptance alone cannot account for an eager narrow graph.
+            desired = self.max_k
+        else:
+            desired = state.empirical_k
         return max(self.min_k, min(desired, self.max_k))
 
     def _advance_state(self, state: _BucketState) -> None:
@@ -296,6 +301,9 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
         max_k=max_k,
         min_k=params["min_k"],
         auto_tune=params["auto_tune"],
+        require_profile_for_downshift=bool(
+            getattr(vllm_config.speculative_config, "enable_adaptive_verification", False)
+        ),
     )
 
 

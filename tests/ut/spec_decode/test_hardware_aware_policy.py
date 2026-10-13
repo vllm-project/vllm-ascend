@@ -102,6 +102,22 @@ def test_missing_profile_uses_acceptance_fallback():
     assert controller.cap(5, 16) == 4
 
 
+def test_adaptive_verification_waits_for_cost_profile_before_downshift():
+    controller = AdaptiveDraftKController(
+        max_k=5, min_k=3, require_profile_for_downshift=True
+    )
+    controller.cap(5, 16)
+    for _ in range(8):
+        controller.observe([5] * 16, [[0]] * 16)
+    assert controller._state(16).empirical_k == 3
+    assert controller.cap(5, 16) == 5
+
+    controller.recommend(16, 3)
+    for _ in range(3):
+        controller.advance_profile(16)
+    assert controller.cap(5, 16) == 3
+
+
 def test_output_recommendation_drives_controller():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     scheduler_output = SimpleNamespace(
@@ -198,9 +214,12 @@ def test_create_controller_and_opt_out():
     config = SimpleNamespace(
         use_v2_model_runner=True,
         additional_config={"dynamic_spec_config": compact(min_k=4)},
-        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=5, enable_adaptive_verification=True
+        ),
     )
     assert _create_controller(config).auto_tune
+    assert _create_controller(config).require_profile_for_downshift
     config.additional_config["dynamic_spec_config"] = compact(min_k=4, auto_tune=False)
     assert not _create_controller(config).auto_tune
 
