@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
 )
 
 
@@ -294,3 +295,103 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
+
+
+class TestMooncakeHybridConnectorWorker(unittest.TestCase):
+    def test_rebuild_stops_listener_and_destroys_old_engine_before_recreate(self):
+        events = []
+        old_engine = MagicMock()
+        old_engine.unregister_memory.side_effect = lambda _ptr: events.append("unregister")
+        old_send = MagicMock()
+        old_send.stop.side_effect = lambda: events.append("stop")
+        old_send.join.side_effect = lambda timeout: events.append(f"join:{timeout}")
+        old_send.is_alive.return_value = False
+        new_send = MagicMock()
+        new_send.start.side_effect = lambda: events.append("start")
+        new_engine = MagicMock()
+        new_engine.get_rpc_port.return_value = 9091
+
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            kv_transfer_config=types.SimpleNamespace(is_kv_producer=True, is_kv_consumer=False)
+        )
+        worker.engine = old_engine
+        worker.kv_send_thread = old_send
+        worker.kv_recv_thread = None
+        worker._registered_regions = ([0x1000], [4096])
+        worker.xfer_handshake_metadata = MagicMock()
+        worker.tp_rank = 0
+        worker._prefill_tp_size = 1
+        worker.engine_id = "engine"
+        worker.side_channel_port = 12345
+        worker.kv_caches = {}
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.reset",
+                side_effect=lambda: events.append("reset"),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.get_transfer_engine",
+                side_effect=lambda *_args, **_kwargs: (events.append("get_engine"), new_engine)[1],
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=lambda *_args: events.append("register"),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.KVCacheSendingThread",
+                return_value=new_send,
+            ),
+            patch("gc.collect", side_effect=lambda: events.append("gc")),
+        ):
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8", "engine-new")
+
+        self.assertEqual(
+            events,
+            ["stop", "join:10", "unregister", "reset", "gc", "get_engine", "register", "start"],
+        )
+        self.assertIs(worker.engine, new_engine)
+        self.assertIs(worker.kv_send_thread, new_send)
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(worker.xfer_handshake_metadata.engine_id, "engine-new")
+
+    def test_sync_engine_id_migrates_consumer_local_metadata(self):
+        local_addrs = [0x1000, 0x2000]
+        thread = types.SimpleNamespace(
+            local_engine_id="engine-old",
+            local_handshake_port=12345,
+            remote_metadata_lock=threading.Lock(),
+            kv_caches_base_addr=defaultdict(
+                dict,
+                {
+                    "engine-old": {12345: local_addrs},
+                    "remote-old": {22345: [0x3000]},
+                },
+            ),
+            remote_te_port=defaultdict(dict, {"remote-old": {22345: 9090}}),
+        )
+        metadata = types.SimpleNamespace(engine_id="consumer-metadata")
+        kv_cfg = types.SimpleNamespace(
+            engine_id="engine-old",
+            is_kv_producer=False,
+            is_kv_consumer=True,
+        )
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.engine_id = "engine-old"
+        worker.vllm_config = types.SimpleNamespace(kv_transfer_config=kv_cfg)
+        worker.xfer_handshake_metadata = metadata
+        worker.kv_recv_thread = thread
+
+        worker._sync_engine_id_after_snapshot("engine-new")
+
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(kv_cfg.engine_id, "engine-new")
+        self.assertEqual(thread.local_engine_id, "engine-new")
+        self.assertEqual(
+            thread.kv_caches_base_addr,
+            {"engine-new": {12345: local_addrs}},
+        )
+        self.assertEqual(thread.remote_te_port, {})
+        # Consumer metadata is not exposed by a send thread.
+        self.assertEqual(metadata.engine_id, "consumer-metadata")

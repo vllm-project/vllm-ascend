@@ -88,8 +88,21 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         keep_nd_weight = _should_keep_nd_for_310p_weight(layer.weight.data)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
-            weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            if keep_nd_weight:
+                weight_fp32 = layer.weight.data.to(torch.float32)
+                layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            else:
+                weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
+                # [snapshot] Register as a persistent buffer (not a plain attribute)
+                # so it is serialized by ``dump_model`` and copied back by
+                # ``restore_model`` after a snapshot resume. It is a derived fp32 copy
+                # of the gate weight (FP32 is never NZ-converted, so it round-trips
+                # cleanly); as a plain attribute its device memory is stale/zero after
+                # resume, which zeroes the router logits and corrupts expert routing.
+                if "weight_fp32" in layer._buffers:
+                    layer.weight_fp32.data = weight_fp32
+                else:
+                    layer.register_buffer("weight_fp32", weight_fp32, persistent=True)
         if "conv1d" not in layer.prefix:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's

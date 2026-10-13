@@ -29,6 +29,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
 
+    def rebuild_kv_transfer_endpoint(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
+        """Rebuild snapshot-sensitive endpoints owned by sub-connectors."""
+        for connector in self._connectors:
+            rebuild = getattr(connector, "rebuild_kv_transfer_endpoint", None)
+            if callable(rebuild):
+                rebuild(local_ip, new_engine_id)
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
