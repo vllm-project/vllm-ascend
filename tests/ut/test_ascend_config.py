@@ -358,6 +358,18 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.rl_config.enabled)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_npu_mm_preprocess(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.enable_npu_mm_preprocess)
+
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_npu_mm_preprocess": False}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.enable_npu_mm_preprocess)
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_warns_unsupported_prefill_backend(self, mock_fix_incompatible_config, mock_logger):
