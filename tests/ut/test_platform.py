@@ -298,11 +298,7 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
         patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
     ):
-        if device_type == AscendDeviceType.A5 and enable_sfa_c8:
-            with pytest.raises(NotImplementedError, match="SFA C8 DCP"):
-                _validate_parallel_config(config)
-        else:
-            _validate_parallel_config(config)
+        _validate_parallel_config(config)
 
 
 @pytest.mark.parametrize(
