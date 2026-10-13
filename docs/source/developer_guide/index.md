@@ -13,6 +13,8 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 ## Design Documents
 
+- **[Sparse HCCL Weight Transfer](sparse_weight_transfer.md)** — Checkpoint patches and trainer lifecycle
+
 Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, and NPUGraph.
 
 ## Evaluation
