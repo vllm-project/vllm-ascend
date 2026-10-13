@@ -1956,6 +1956,8 @@ def main():
     )
 
     args = parser.parse_args()
+    # Probe line so a test_selector.py-only diff exercises the src path filter.
+    print("test_selector gate probe: label required, precise mode")
 
     # Process granularity switches: disable takes precedence over enable
     args.enable_line_match = not args.disable_line_match
