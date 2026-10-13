@@ -49,6 +49,13 @@ CHECKER_CASE = WeightUpdateModelCase(
     hf_overrides=HF_OVERRIDES,
 )
 
+# The server endpoint ships with the paired vLLM (PR #51350); skip the whole
+# module while the CI-pinned vLLM predates it.
+pytest.importorskip(
+    "vllm.model_executor.model_loader.weight_checksum",
+    reason="Weight Checker requires a paired vLLM with PR #51350 (>= v0.31.1rc0).",
+)
+
 pytestmark = pytest.mark.skipif(
     torch.npu.device_count() < 1,
     reason="Weight Checker e2e tests require at least 1 NPU.",
