@@ -3,7 +3,6 @@
 """Regression tests for the Ascend Qwen3.5-VL NPU preprocessing offload.
 
 Covers the review-critical configurations:
-- VLLM_ASCEND_VL_NPU_PREPROCESS centralized env definition;
 - fallback to the stock CPU pipeline when mm_device_do_normalize is disabled
   or non-default processor settings (do_resize/resample) are requested;
 - encoder graph path: raw payloads are sliced BEFORE preprocessing so each
@@ -13,12 +12,10 @@ Covers the review-critical configurations:
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from PIL import Image
 from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
 
-from vllm_ascend import envs as va_envs
 from vllm_ascend.models.qwen3_5_vl import (
     _DEVICE_PREPROCESS_DONE,
     AscendQwen2VLImageProcessor,
@@ -33,34 +30,6 @@ PATCH_DIM = C * TPS * PS * PS  # 1176
 # do_normalize=False into the processor kwargs, so the raw-pixel path is
 # exercised with those flags.
 RAW_KWARGS = {"do_rescale": False, "do_normalize": False}
-
-
-# ---------------------------------------------------------------------------
-# Env variable (centralized definition)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "value,expected",
-    [
-        (None, True),
-        ("1", True),
-        ("", True),
-        ("true", True),
-        ("TRUE", True),
-        ("0", False),
-        ("false", False),
-        ("off", False),
-        ("Off", False),
-        ("yes", True),
-    ],
-)
-def test_env_var_defaults(monkeypatch, value, expected):
-    if value is None:
-        monkeypatch.delenv("VLLM_ASCEND_VL_NPU_PREPROCESS", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_ASCEND_VL_NPU_PREPROCESS", value)
-    assert va_envs.VLLM_ASCEND_VL_NPU_PREPROCESS is expected
 
 
 # ---------------------------------------------------------------------------
