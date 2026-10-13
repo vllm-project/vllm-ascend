@@ -402,8 +402,10 @@ def test_dcp_post_load_allocates_only_consumed_workspaces(
     assert (impl._dcp_current_kv_buffers is not None) is (expected_buffers != "none")
     assert (impl._dcp_prefill_current_kv_buffers is not None) is (expected_buffers == "both")
     if expected_buffers != "none":
+        assert impl._dcp_current_kv_buffers is not None
         assert impl._dcp_current_kv_buffers[2].numel() == 256
     if expected_buffers == "both":
+        assert impl._dcp_prefill_current_kv_buffers is not None
         assert impl._dcp_prefill_current_kv_buffers[2].numel() == 8192
 
 
