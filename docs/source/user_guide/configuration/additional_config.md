@@ -48,7 +48,7 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
-| `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
+| `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
@@ -61,7 +61,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
-| `c8_enable_reshape_optim`           | bool | `True`  | Whether to use the StoreKVBlock operator to accelerate LightningIndexer C8 cache writes. When enabled, the optimization takes effect only when SFA and LightningIndexer C8 are active on a PD prefill (P) node. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
@@ -84,9 +83,6 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
-> [!WARNING]
-> With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict. See [issue #15896](https://github.com/vllm-project/vllm-ascend/issues/15896) for details.
-
 **xlite_graph_config**
 
 | Name | Type | Default | Description |
@@ -98,10 +94,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of lm_head.    |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of embedding. |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of mlp.       |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -318,10 +314,10 @@ An example of additional configuration is as follows:
 ```python
 {
     "finegrained_tp_config": {
-        "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,
-        "embedding_tensor_parallel_size": 8,
         "mlp_tensor_parallel_size": 8,
+        "lmhead_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,

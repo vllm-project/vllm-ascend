@@ -58,8 +58,6 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
-#include "attention/store_kv_block/store_kv_block_torch_adpt.h"
-#include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
@@ -3634,18 +3632,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
     );
     ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
-
-    //store_kv_block
-     ops.def(
-        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
-         "-> ()"
-     );
-    ops.impl("store_kv_block_metadata", torch::kPrivateUse1, &vllm_ascend::store_kv_block_metadata);
-
-    ops.def(
-        "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
-    );
-    ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
 
     ops.def(
         "npu_sparse_attention_score("

@@ -48,7 +48,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -87,7 +87,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -522,11 +522,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
       --host 0.0.0.0 \
@@ -581,11 +576,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
 
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \

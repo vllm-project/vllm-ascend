@@ -1598,6 +1598,41 @@ def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch):
     assert prepared_down_input.output_dtype == torch.bfloat16
 
 
+def test_linear_wrapper_preserves_prequantized_activation_for_down_proj(monkeypatch):
+    quant_scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    down_proj = MagicMock(return_value=(torch.randn(2, 4), None))
+    down_proj.quant_method = SimpleNamespace(quant_method=quant_scheme)
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(down_proj=down_proj)
+    shared_experts.multistream_overlap = True
+    shared_experts.lora_context = None
+    shared_experts._wait_for_routed_stage = MagicMock()
+
+    hidden_states = torch.randn(2, 4)
+    quantized = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 1)
+    prequantized_activation = (quantized, scale)
+    shared_experts.apply_activation = MagicMock(return_value=prequantized_activation)
+    submitted_gate_up = SubmittedSharedExpertGateUp(
+        hidden_states=hidden_states,
+        gate_up=torch.randn(2, 8),
+        gate_up_input_scale=None,
+        local_dp_metadata=None,
+        path=SharedExpertMLPPath.LINEAR_WRAPPER,
+    )
+    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
+
+    with patch.object(
+        quant_scheme, "prepare_input_for_overlap", wraps=quant_scheme.prepare_input_for_overlap
+    ) as prepare:
+        result = shared_experts._finish_linear_wrapped_mlp(submitted_gate_up, RoutedMoEMilestones())
+
+    assert result is down_proj.return_value[0]
+    prepare.assert_not_called()
+    down_proj.assert_called_once_with(prequantized_activation)
+    assert down_proj.call_args.args[0] is prequantized_activation
+
+
 @pytest.mark.parametrize(
     "device_type",
     [

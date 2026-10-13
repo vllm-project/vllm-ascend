@@ -215,7 +215,7 @@ The parameters are explained as follows:
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -262,7 +262,7 @@ The parameters are explained as follows:
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -1272,7 +1272,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1336,7 +1336,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \

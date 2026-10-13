@@ -168,8 +168,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     export TASK_QUEUE_ENABLE=1
 
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
     export HCCL_CONNECT_TIMEOUT=7200
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
@@ -243,8 +241,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     export TASK_QUEUE_ENABLE=1
-
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     export HCCL_CONNECT_TIMEOUT=7200
     export ASCEND_CONNECT_TIMEOUT=10000
@@ -322,7 +318,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -380,7 +375,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -447,7 +441,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
@@ -509,7 +502,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
@@ -752,7 +744,6 @@ Before you start, please:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export ASCEND_RT_VISIBLE_DEVICES=$1
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -809,7 +800,6 @@ Before you start, please:
     nic_name="xxxx" # change to your own nic name
     local_ip=xx.xx.xx.x # use the IP of the current Decode node
 
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_OP_EXPANSION_MODE="AIV"
     export TASK_QUEUE_ENABLE=1
     export VLLM_RPC_TIMEOUT=3600000
@@ -908,7 +898,6 @@ Before you start, please:
     local_ip="xx.xx.xx.x" # use the IP of the current Prefill node
 
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -975,7 +964,6 @@ Before you start, please:
     local_ip="xx.xx.xx.x" # use the IP of the current Decode node
 
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -1178,7 +1166,6 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1/2/3/4 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
 
@@ -1255,7 +1242,6 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.5/6/7/8 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
 

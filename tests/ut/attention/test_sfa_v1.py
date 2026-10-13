@@ -285,20 +285,6 @@ class TestAscendSFACacheComposition(TestBase):
                 for actual_tensor, expected_tensor in zip(composed, expected):
                     self.assertIs(actual_tensor, expected_tensor)
 
-    @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
-        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
-        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
-
-        indexer.enable_sparse_li_c8 = False
-        self.assertFalse(indexer._use_c8_reshape_optim())
-
-        indexer.enable_sparse_li_c8 = True
-        self.assertTrue(indexer._use_c8_reshape_optim())
-
-        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
-        self.assertFalse(indexer._use_c8_reshape_optim())
-
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_fetches_by_k_cache_prefix(self, mock_get_forward_context):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
@@ -808,7 +794,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.start()
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.c8_reshape_optim_enabled = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
         self.ascend_config_patcher = patch(
@@ -1001,90 +986,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         assert isinstance(attn_metadata, AscendSFAMetadata)
         assert attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-
-    @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
-    def test_ascend_sfa_metadata_builder_does_not_build_indexer_c8_metadata(
-        self,
-        store_kv_block_metadata,
-        mock_get_cos_and_sin_mla,
-        mock_get_current_vllm_config,
-    ):
-        cfg = MagicMock()
-        cfg.model_config = MagicMock()
-        cfg.model_config.hf_text_config = MagicMock()
-
-        mock_get_current_vllm_config.return_value = cfg
-        kv_cache_spec = MagicMock()
-        kv_cache_spec.block_size = 128
-        layer_names = ["layer1", "layer2"]
-        vllm_config = MagicMock()
-        vllm_config.cache_config.block_size = 16
-        vllm_config.scheduler_config.max_num_seqs = 16
-        vllm_config.parallel_config.prefill_context_parallel_size = 1
-        vllm_config.model_config.max_model_len = 1024
-        vllm_config.model_config.get_head_size.return_value = 64
-        vllm_config.model_config.dtype = torch.float16
-        vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        vllm_config.kv_transfer_config = SimpleNamespace(
-            kv_role="kv_producer",
-            is_kv_producer=True,
-            is_kv_consumer=False,
-        )
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = 4
-        vllm_config.speculative_config = speculative_config
-        device = torch.device("cpu")
-
-        common_attn_metadata = MagicMock()
-        common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
-        common_attn_metadata.max_query_len = 10
-        common_attn_metadata.num_reqs = 10
-        common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
-        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
-        common_attn_metadata.slot_mapping = torch.randint(0, 10000, (100, 4, 1024), dtype=torch.int64)
-        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
-        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-        common_attn_metadata._seq_lens_cpu = None
-        common_attn_metadata.positions = torch.randn(100)
-        common_attn_metadata.attn_mask = None
-        common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        common_attn_metadata.block_table_tensor = torch.randn(100, 4)
-        common_attn_metadata.cos = None
-        common_attn_metadata.sin = None
-        common_attn_metadata.num_input_tokens = 100
-
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
-
-        with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
-            mock_ascend_config = MagicMock()
-            mock_ascend_config.c8_reshape_optim_enabled = True
-            mock_get_ascend_config.return_value = mock_ascend_config
-
-            builder = AscendSFAMetadataBuilder(
-                kv_cache_spec=kv_cache_spec,
-                layer_names=layer_names,
-                vllm_config=vllm_config,
-                device=device,
-            )
-
-            metadata = builder.build(
-                common_prefix_len=10,
-                common_attn_metadata=common_attn_metadata,
-            )
-
-        assert isinstance(metadata, AscendSFAMetadata)
-        assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
-        assert metadata.slot_mapping.shape == (100, 4, 1024)
-
-        store_kv_block_metadata.assert_not_called()
-        assert metadata.block_size == 128
-        assert metadata.group_len is None
-        assert metadata.group_key_idx is None
-        assert metadata.group_key_cache_idx is None
 
 
 class TestAscendSFAImpl(TestBase):
