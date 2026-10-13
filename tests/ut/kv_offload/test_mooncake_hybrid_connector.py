@@ -80,7 +80,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.side_channel_port = thread.local_handshake_port = 32000
         thread.local_engine_id = "decode"
         thread.remote_metadata_lock = threading.Lock()
-        thread.local_kv_caches_base_addrs = [0x1000]
+        thread.local_kv_caches_base_addrs = [0x1000, 0x2000, 0x3000]
         thread.kv_caches_base_addr = {
             "decode": {32000: [0x1000, 0x2000, 0x3000]},
             "prefill": {31002: [0x4000, 0x5000, 0x6000]},
