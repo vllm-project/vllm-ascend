@@ -42,6 +42,9 @@ __aicore__ inline uint32_t CalculateConfigSignature(
     // Must stay in sync with the metadata scheduler's CalculateConfigSignature.
     hash = HashConfigValue(hash, tilingData->residualBlockMode);
     hash = HashConfigValue(hash, tilingData->isConsistentTopk);
+    if (tilingData->maskType == 0U) {
+        hash = HashConfigValue(hash, 0U);
+    }
     return hash;
 }
 

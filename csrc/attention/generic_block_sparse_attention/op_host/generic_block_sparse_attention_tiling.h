@@ -86,6 +86,8 @@ TILING_DATA_FIELD_DEF_STRUCT(GbsaBaseTiling, baseTileInfo);
 TILING_DATA_FIELD_DEF_STRUCT(GbsaMmPhaseL1Tiling, mmPhaseL1TileInfo);
 TILING_DATA_FIELD_DEF(uint64_t, kvOffsetInfoOffset);
 TILING_DATA_FIELD_DEF(uint32_t, kvOffsetTileWords);
+// Mask mode: 0 = none, 1 = built-in causal. A2/A3 only; A5 kernels always run causal.
+TILING_DATA_FIELD_DEF(uint32_t, maskType);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttention, GenericBlockSparseAttentionTilingData)
 

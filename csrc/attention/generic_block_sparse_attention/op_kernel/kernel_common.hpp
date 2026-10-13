@@ -72,6 +72,8 @@ struct GenericBlockSparseAttentionTilingData {
     GbsaMmPhaseL1Tiling mmPhaseL1TileInfo;
     uint64_t kvOffsetInfoOffset;
     uint32_t kvOffsetTileWords;
+    // Mask mode: 0 = none, 1 = built-in causal. A2/A3 only; A5 kernels always run causal.
+    uint32_t maskType;
 };
 
 } // namespace GenericBlockSparseAttn

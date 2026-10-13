@@ -284,7 +284,8 @@ log_selected_ops
   # Remove all top-level entries under custom_ops_install_dir except .gitkeep, including hidden files and directories.
   find "$custom_ops_install_dir" -mindepth 1 -maxdepth 1 \
     ! -name '.gitkeep' \
-    -exec rm -rf -- {} +
+    -exec rm -rf -- {} + ||
+    log "continuing after cleanup left NFS-held files in ${custom_ops_install_dir}"
 
   shopt -s nullglob
   installer_candidates=(./build/cann-ops-transformer*.run)

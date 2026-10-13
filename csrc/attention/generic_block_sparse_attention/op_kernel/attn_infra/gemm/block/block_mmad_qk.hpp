@@ -19,18 +19,21 @@
 #include "../../../attn_infra/gbsa_gemm_coord.hpp"
 #include "../../../attn_infra/gemm/tile_common/gbsa_gemm_tile_copy.hpp"
 #include "../../../attn_infra/gemm/tile_common/gbsa_tile_mmad.hpp"
+#include "../../../gbsa_sparse_kv_geometry.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
 namespace NpuArch::Gemm::Block {
 ////////////////////////////////////////////////////////////////////
 
-template <bool PAGED_CACHE_FLAG_, bool ENABLE_UNIT_FLAG_, class L1TileShape_, class L0TileShape_, class AType_,
+template <bool PAGED_CACHE_FLAG_, bool ENABLE_UNIT_FLAG_, bool HAS_RESIDUAL_BLOCK_, class L1TileShape_,
+          class L0TileShape_, class AType_,
           class BType_, class CType_, class BiasType_, class TileCopy_, class TileMmad_>
-struct BlockMmad<MmadAtlasA2SFAIQK<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1TileShape_, L0TileShape_, AType_, BType_,
-                 CType_, BiasType_, TileCopy_, TileMmad_> {
+struct BlockMmad<MmadAtlasA2SFAIQK<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_, HAS_RESIDUAL_BLOCK_>, L1TileShape_,
+                 L0TileShape_, AType_, BType_, CType_, BiasType_, TileCopy_, TileMmad_> {
 public:
-    using DispatchPolicy = MmadAtlasA2SFAIQK<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>;
+    using DispatchPolicy = MmadAtlasA2SFAIQK<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_, HAS_RESIDUAL_BLOCK_>;
+    static constexpr bool HAS_RESIDUAL_BLOCK = DispatchPolicy::HAS_RESIDUAL_BLOCK;
     using ArchTag = typename DispatchPolicy::ArchTag;
 
     using L1TileShape = L1TileShape_;
@@ -64,9 +67,6 @@ public:
 
     static constexpr uint32_t STAGES = DispatchPolicy::STAGES;
 
-    static constexpr uint32_t L1A_SIZE = L1TileShape::M * L1TileShape::K * sizeof(ElementA);
-    static constexpr uint32_t L1B_SIZE = L1TileShape::N * L1TileShape::K * sizeof(ElementB);
-
     static constexpr uint32_t L0A_SIZE = ArchTag::L0A_SIZE;
     static constexpr uint32_t L0B_SIZE = ArchTag::L0B_SIZE;
     static constexpr uint32_t L0C_SIZE = ArchTag::L0C_SIZE;
@@ -79,12 +79,16 @@ public:
 
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
 
-    __aicore__ inline BlockMmad(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
+    __aicore__ inline BlockMmad(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0, uint32_t kDyn = 128)
     {
+        uint32_t l1ADynSize = L1TileShape::M * kDyn * sizeof(ElementA);
+        uint32_t l1BDynSize = L1TileShape::N * kDyn * sizeof(ElementB);
+
         l1ATensor = resource.l1Buf.template GetBufferByByte<ElementA>(l1BufAddrStart);
 
         for (uint32_t i = 0; i < STAGES; i++) {
-            l1BTensor[i] = resource.l1Buf.template GetBufferByByte<ElementB>(l1BufAddrStart + L1A_SIZE + L1B_SIZE * i);
+            l1BTensor[i] =
+                resource.l1Buf.template GetBufferByByte<ElementB>(l1BufAddrStart + l1ADynSize + l1BDynSize * i);
 
             l0ATensor[i] = resource.l0ABuf.template GetBufferByByte<ElementA>(L0A_PINGPONG_BUF_SIZE * i);
             l0BTensor[i] = resource.l0BBuf.template GetBufferByByte<ElementB>(L0B_PINGPONG_BUF_SIZE * i);
@@ -127,7 +131,9 @@ public:
                                       AscendC::GlobalTensor<int32_t> gSelectIdx, LayoutA layoutA, LayoutB layoutB,
                                       LayoutC layoutC, GemmCoord actualOriShape, uint32_t nIdx, uint32_t nLoop,
                                       uint32_t &blockSize, uint32_t strideKV, uint32_t &y, uint32_t selectNum,
-                                      uint32_t kvYBlockNum, uint32_t &kvSeqlen)
+                                      uint32_t kvYBlockNum, uint32_t &kvSeqlen, uint32_t pageSize, uint64_t pageStride,
+                                      uint32_t localExplicitBlockCount, uint32_t residualBlockId, bool hasClipped,
+                                      uint32_t fullPrefixSlots)
     {
         uint32_t rowNum = actualOriShape[0];
         uint32_t stackSeqTile = actualOriShape[1];
@@ -141,12 +147,9 @@ public:
 
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
 
-        uint32_t tileNNumPerPaged = blockSize / L1TileShape::N;
         uint32_t nL1Loop = CeilDiv<L1TileShape::N>(stackSeqTile);
 
         for (uint32_t nL1Idx = 0; nL1Idx < nL1Loop; ++nL1Idx) {
-            uint32_t nowNIdx = nIdx + nL1Idx / tileNNumPerPaged;
-
             getBlockShape(actualShape, nL1Idx, nL1Loop, stackSeqTile);
 
             uint32_t mActual = actualShape.m();
@@ -157,21 +160,21 @@ public:
             LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(kActual, nActual);
 
             uint32_t processSize = 0;
-            uint32_t nBlockOffset = nowNIdx * blockSize;
-            uint32_t currentSelectYIdx = nBlockOffset / y;
-            uint32_t currentYoffset = nBlockOffset % y;
-
-            uint32_t currentYIdx = gSelectIdx.GetValue(currentSelectYIdx);
-            uint32_t offsetInKV = currentYIdx * y + currentYoffset;
+            uint32_t nBlockOffset = nIdx * blockSize + nL1Idx * L1TileShape::N;
+            uint32_t currentSelectYIdx = 0;
+            uint32_t currentYoffset = 0;
+            uint32_t currentYIdx = 0;
+            GbsaSparseGeometry::LocateSparseBand<HAS_RESIDUAL_BLOCK>(
+                gSelectIdx, nBlockOffset, selectNum, y, kvSeqlen, localExplicitBlockCount, residualBlockId,
+                hasClipped, fullPrefixSlots, currentSelectYIdx, currentYoffset, currentYIdx);
+            uint64_t offsetInKV = static_cast<uint64_t>(currentYIdx) * y + currentYoffset;
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1KvPingPongFlag);
 
             while (processSize < nActual && currentSelectYIdx < selectNum && currentYIdx < kvYBlockNum &&
                    offsetInKV < kvSeqlen) {
                 uint32_t yAcutal =
-                    (currentSelectYIdx == selectNum - 1 && currentYIdx == kvYBlockNum - 1 && kvSeqlen % y != 0) ?
-                        (kvSeqlen - y * currentYIdx) :
-                        y;
+                    hasClipped ? GbsaSparseGeometry::ClipBlockVisibleLen(currentYIdx, y, kvSeqlen) : y;
                 uint32_t remainingInYBlock = yAcutal - currentYoffset;
                 uint32_t remainingInNBlock = nActual - processSize;
 
@@ -182,8 +185,16 @@ public:
 
                 auto layoutBTile = layoutB.GetTileLayout(MakeCoord(kActual, actualYSize));
 
-                copyGmToL1B(l1BTensor[l1KvPingPongFlag][processSize], gB[offsetInKV * strideKV], layoutBInL1,
-                            layoutBTile);
+                uint64_t sourceOffset = offsetInKV * strideKV;
+                if constexpr (PAGED_CACHE_FLAG_) {
+                    const uint32_t pageIdx = static_cast<uint32_t>(offsetInKV / pageSize);
+                    const uint32_t physicalPage = gBlockTable.GetValue(pageIdx);
+                    sourceOffset = static_cast<uint64_t>(physicalPage) * pageStride +
+                                   (offsetInKV % pageSize) * strideKV;
+                }
+                // Each sparse segment starts at its own nZ column, including past column 16.
+                copyGmToL1B(l1BTensor[l1KvPingPongFlag][layoutBInL1.GetOffset(MatrixCoord{0, processSize})],
+                            gB[sourceOffset], layoutBInL1, layoutBTile);
 
                 processSize += actualYSize;
                 currentYoffset += actualYSize;
@@ -195,8 +206,9 @@ public:
                         break;
                     }
                     currentYoffset = 0;
-                    currentYIdx = gSelectIdx.GetValue(currentSelectYIdx);
-                    offsetInKV = currentYIdx * y;
+                    currentYIdx = GbsaSparseGeometry::GetSparseBlockId<HAS_RESIDUAL_BLOCK>(
+                        gSelectIdx, currentSelectYIdx, localExplicitBlockCount, residualBlockId);
+                    offsetInKV = static_cast<uint64_t>(currentYIdx) * y;
                 }
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1KvPingPongFlag);

@@ -97,7 +97,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionMetadataGetWorkspaceSize(
     const aclTensor *output = l0op::GenericBlockSparseAttentionMetadata(
         idxContiguous, countContiguous, cuQContiguous, cuKvContiguous, seqUsedQContiguous, seqUsedKvContiguous,
         maxQSeqLen, numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, isPackedGqaFlag, layoutQ, aicCoreNum,
-        residualBlockMode, isConsistentTopkFlag, metadataOptional, uniqueExecutor.get());
+        residualBlockMode, isConsistentTopkFlag, metadataOptional, uniqueExecutor.get(), maskType);
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
     *workspaceSize = 0;
     uniqueExecutor.ReleaseTo(executor);

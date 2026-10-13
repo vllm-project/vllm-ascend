@@ -27,7 +27,8 @@ using namespace NpuArch;
 
 using namespace GbsaKernelArch22;
 
-template <class InDtype, class SMDtype, class REDtype = SMDtype, Epilogue::LseMode lseMode = Epilogue::LseMode::NONE>
+template <class InDtype, class SMDtype, class REDtype = SMDtype, Epilogue::LseMode lseMode = Epilogue::LseMode::NONE,
+          bool isPaged = true, bool hasResidualBlock = false>
 __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR sparseBlockIdx,
                                                       GM_ADDR sparseBlockCount, GM_ADDR metaData, GM_ADDR cuSeqLengths,
                                                       GM_ADDR cuSeqLengthsKv, GM_ADDR sequsedQ, GM_ADDR sequsedKv,
@@ -54,7 +55,7 @@ __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_A
     // QK matmul
     using L1TileShapeQK = GemmShape<128, 128, 128>;
     using L0TileShapeQK = GemmShape<128, 128, 128>;
-    using DispatchPolicyQK = Gemm::MmadAtlasA2SFAIQK<false, false>;
+    using DispatchPolicyQK = Gemm::MmadAtlasA2SFAIQK<isPaged, false, hasResidualBlock>;
     using QType = Gemm::GemmType<ElementQ, LayoutQ>;
     using KType = Gemm::GemmType<ElementK, LayoutK>;
     using SType = Gemm::GemmType<ElementS, LayoutS>;
@@ -69,7 +70,7 @@ __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_A
     // PV matmul
     using L1TileShapePV = GemmShape<128, 128, 256>;
     using L0TileShapePV = GemmShape<128, 128, 128>;
-    using DispatchPolicyPV = Gemm::MmadAtlasA2SFAIPV<false, false>;
+    using DispatchPolicyPV = Gemm::MmadAtlasA2SFAIPV<isPaged, false, hasResidualBlock>;
     using VType = Gemm::GemmType<ElementV, LayoutV>;
     using OTmpType = Gemm::GemmType<ElementOTmp, LayoutOTmp>;
     using BlockMmadPV = Gemm::Block::BlockMmad<DispatchPolicyPV, L1TileShapePV, L0TileShapePV, PType, VType, OTmpType>;
@@ -82,7 +83,8 @@ __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_A
     using EpilogueRescaleO =
         Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, OType, OTmpType, OTmpUpdateType, LseType>;
 
-    using GbsaKernel = GbsaRegularKernelArch22<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO>;
+    using GbsaKernel = GbsaRegularKernelArch22<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO,
+                                            isPaged, hasResidualBlock>;
 
     GbsaKernelParamsArch22 params{
         q,         k,          v, sparseBlockIdx, sparseBlockCount, metaData, cuSeqLengths, cuSeqLengthsKv, sequsedQ,

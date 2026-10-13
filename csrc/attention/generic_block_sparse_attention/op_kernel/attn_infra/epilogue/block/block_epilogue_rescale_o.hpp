@@ -105,27 +105,29 @@ public:
 
     __aicore__ inline void CopyOToGm(AscendC::GlobalTensor<ElementOutput> gOutput, uint32_t proTokenIdx,
                                      uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
-                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t oHiddenSize)
+                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound,
+                                     uint32_t oHiddenSize)
     {
         uint32_t innerOGmOffset = 0;
         uint32_t innerGOUbOffset = 0;
+        const uint32_t srcGap = (embedRound - embed) * SIZE_OF_16BIT;
         if (proTokenNum != 0U) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset + proTokenIdx * oHiddenSize], goUbTensor16[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(proTokenNum, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(proTokenNum, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
             innerOGmOffset += embed;
-            innerGOUbOffset += proTokenNum * embed;
+            innerGOUbOffset += proTokenNum * embedRound;
         }
         for (uint32_t qN_idx = 0; qN_idx < integralHeadNum; qN_idx++) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset], goUbTensor16[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(qSThisSubBlock, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(qSThisSubBlock, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
             innerOGmOffset += embed;
-            innerGOUbOffset += qSThisSubBlock * embed;
+            innerGOUbOffset += qSThisSubBlock * embedRound;
         }
         if (epiTokenNum != 0U) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset], goUbTensor16[innerGOUbOffset],
-                                 AscendC::DataCopyExtParams(epiTokenNum, embed * SIZE_OF_16BIT, 0,
+                                 AscendC::DataCopyExtParams(epiTokenNum, embed * SIZE_OF_16BIT, srcGap,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
         }
     }
@@ -268,7 +270,7 @@ public:
 
                 // ***move O to GM
                 CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
-                          oHiddenSize);
+                          embedRound, oHiddenSize);
                 if constexpr (LSE_MODE == LseMode::OUT_ONLY) {
                     if (isLastRowLoop) {
                         AscendC::PipeBarrier<PIPE_V>();
@@ -323,7 +325,8 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
-        uint32_t maxRowNumPerLoop = MAX_UB_O_ELEM_NUM / embed;
+        uint32_t embedRound = (layoutInput.stride(0) == 0U) ? BLOCK_SIZE : layoutInput.stride(0);
+        uint32_t maxRowNumPerLoop = MAX_UB_O_ELEM_NUM / embedRound;
         uint32_t rowNumTile = RoundDown(maxRowNumPerLoop, FLOAT_BLOCK_SIZE);
 
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
@@ -436,17 +439,24 @@ public:
         if (rowNum == 0) {
             return;
         }
+        const uint32_t colStride = RoundUp(colNum, 16U);
         // A previous task may still be copying from the shared output UB.
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
-        AscendC::Duplicate(goUbTensor32, 0.0f, rowNum * colNum);
+        const uint32_t tileElems = AscendC::Std::min(rowNum * colStride, MAX_UB_O_ELEM_NUM);
+        AscendC::Duplicate(goUbTensor32, 0.0f, tileElems);
         AscendC::Duplicate(lse32_ubuf_tensor, std::numeric_limits<float>::lowest(), RoundUp(rowNum, FLOAT_BLOCK_SIZE));
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         const uint64_t oOffset =
-            static_cast<uint64_t>(fdTaskId) * groupSize * colNum + static_cast<uint64_t>(rowOffset) * colNum;
-        AscendC::DataCopy(gPartialO[oOffset], goUbTensor32, rowNum * colNum);
+            static_cast<uint64_t>(fdTaskId) * groupSize * colStride + static_cast<uint64_t>(rowOffset) * colStride;
+        // The FP32 output UB has 8192 elements. Reuse its unchanged zero tile
+        // instead of overwriting adjacent softmax/LSE buffers for large GQA groups.
+        for (uint32_t offset = 0; offset < rowNum * colStride; offset += tileElems) {
+            const uint32_t copyElems = AscendC::Std::min(tileElems, rowNum * colStride - offset);
+            AscendC::DataCopy(gPartialO[oOffset + offset], goUbTensor32, copyElems);
+        }
         const uint64_t lseOffset = static_cast<uint64_t>(fdTaskId) * 2 * fdLseSubStride + subBlockIdx * fdLseSubStride;
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);
@@ -466,18 +476,22 @@ public:
         if (rowNum == 0U) {
             return;
         }
+        const uint32_t colStride = RoundUp(embed, BLOCK_SIZE);
         // A previous task may still be copying from the shared output UB.
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
-        AscendC::Duplicate(goUbTensor16, static_cast<ElementOutput>(0), rowNum * embed);
+        AscendC::Duplicate(goUbTensor16, static_cast<ElementOutput>(0), colStride);
         if constexpr (LSE_MODE == LseMode::OUT_ONLY) {
             AscendC::Duplicate(lse32_ubuf_tensor, -3.402823466e+38F, RoundUp(rowNum, FLOAT_BLOCK_SIZE));
         }
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(gOutput[static_cast<uint64_t>(rowOffset) * embed], goUbTensor16,
-                             AscendC::DataCopyExtParams(rowNum, embed * sizeof(ElementOutput), 0, 0, 0));
+        for (uint32_t r = 0; r < rowNum; ++r) {
+            AscendC::DataCopyPad(
+                gOutput[static_cast<uint64_t>(rowOffset + r) * embed], goUbTensor16,
+                AscendC::DataCopyExtParams(1, embed * sizeof(ElementOutput), 0, 0, 0));
+        }
         if constexpr (LSE_MODE == LseMode::OUT_ONLY) {
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);

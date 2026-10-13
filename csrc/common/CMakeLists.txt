@@ -102,7 +102,7 @@ else()
     )
 endif()
 
-if (NOT BUILD_OPS_RTY_KERNEL)
+if (FALSE)
     if (BUILD_OPEN_PROJECT)
         ExternalProject_Add(tiling_sink_task
             SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/tiling_sink

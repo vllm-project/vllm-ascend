@@ -92,14 +92,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # sparse attention, for diagnosis. Not sensitive.
     "VLLM_ASCEND_FORCE_QSA_REFERENCE": lambda: bool(int(os.getenv("VLLM_ASCEND_FORCE_QSA_REFERENCE", "0"))),
     # Enable fused main-QSA normalization and rotary embedding. Boolean 0/1,
-    # default 0; use only on validated hardware/builds. Not sensitive.
+    # default 1; use only on validated hardware/builds. Not sensitive.
     "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE", "0"))
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE", "1"))
     ),
     # Enable fused normalization/rotary embedding for the QSA indexer. Boolean
-    # 0/1, default 0; use only on validated hardware/builds. Not sensitive.
+    # 0/1, default 1; use only on validated hardware/builds. Not sensitive.
     "VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE", "0"))
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE", "1"))
     ),
     # Enable the native QSA Lightning Indexer. Boolean 0/1, default 0; honored
     # only on SoCs with the QSA_LIGHTNING_INDEXER capability, otherwise falls

@@ -239,5 +239,9 @@ csrc/third_party/
 # local build cache
 .vllm_ascend/
 
+# Local A3 build compatibility files (do not submit)
+/csrc/attention/kda_gate_cumsum/op_kernel/vllm_kda_gate_cumsum.cpp
+/tests/ut/_tools/test_kda_build_registration.py
+
 # local CMake snapshot created before GBSA integration
 /csrc/build.pre_gbsa_integration/

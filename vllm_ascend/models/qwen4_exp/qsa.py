@@ -52,7 +52,6 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_triton,
 )
-from vllm_ascend.utils import is_950
 
 from .lightning_indexer import (
     is_qsa_lightning_cache_compatible,
@@ -387,7 +386,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             and query.ndim == 3
             and query.shape[1] <= 64
             and query.shape[2] == 128
-            and is_qsa_lightning_cache_compatible(cache)
+            and cache.ndim == 4
+            and cache.shape[1] in (192, 384)
+            and cache.shape[2:] == (1, 128)
             and self.compress_ratio == 4
             and self.token_topk == 2048
             and metadata.query_start_loc.ndim == 1
@@ -414,11 +415,26 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 out,
             )
         profile = get_current_hardware_profile()
-        use_lightning = envs.VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER
-        if use_lightning and not profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER):
-            logger.warning_once(
-                "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER is not supported on this SoC; "
-                "falling back to the portable QSA selector."
+        use_lightning = profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER)
+        use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V and profile.supports(HardwareCapability.QSA_E3_EXPAND)
+        lightning_eligible = use_lightning and (
+            profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES)
+            or self._lightning_indexer_eligible(query, metadata)
+        )
+        if lightning_eligible:
+            logger.info_once("QSA LI-v2 is using the Lightning paged-token selector.")
+            return qsa_select_paged_tokens_lightning(
+                query,
+                self.compressed_key_cache.kv_cache,
+                metadata.block_table,
+                metadata.token_to_req,
+                metadata.logical_positions,
+                metadata.seq_lens,
+                metadata.query_start_loc,
+                self.token_topk,
+                self.compress_ratio,
+                out,
+                use_e3=use_e3,
             )
             use_lightning = False
         use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V
@@ -533,7 +549,19 @@ class AscendQSAImpl:
                 query[:num_tokens],
                 key_cache,
                 value_cache,
-                logical_indices,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                output[:num_tokens],
+            )
+        profile = get_current_hardware_profile()
+        if profile.supports(HardwareCapability.QSA_GBSA_ATTENTION):
+            logger.info_once("QSA attention is using the CANN GBSA backend.")
+            return qsa_gbsa_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                compact_indices,
                 attn_metadata.block_table,
                 token_to_req[:num_tokens],
                 output[:num_tokens],

@@ -316,9 +316,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
             OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "PA_BBND requires blockTable; it must not be nullptr.");
             return ACLNN_ERR_PARAM_NULLPTR;
         }
-        if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 || quantType != 0 ||
+        if (quantType != 0 ||
             (query->GetDataType() != DataType::DT_FLOAT16 && query->GetDataType() != DataType::DT_BF16)) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "TND non-paged KV requires A5, FP16/BF16 and quantType=0.");
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "TND non-paged KV requires FP16/BF16 and quantType=0.");
             return ACLNN_ERR_PARAM_INVALID;
         }
         if (cuSeqLengthsQOptional == nullptr || cuSeqLengthsKvOptional == nullptr) {
