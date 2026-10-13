@@ -56,16 +56,10 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
             return None
         raise
 
-    # Resolve a complete API pair from the same package generation. Prefer the
-    # renamed APIs, while retaining support for the earlier operator package.
-    for attention_name, metadata_name in (
-        ("flash_mla", "flash_mla_metadata"),
-        ("flash_mla_with_kvcache", "flash_mla_with_kvcache_metadata"),
-    ):
-        attention_op = getattr(ops, attention_name, None)
-        metadata_op = getattr(ops, metadata_name, None)
-        if callable(attention_op) and callable(metadata_op):
-            return attention_op, metadata_op
+    attention_op = getattr(ops, "flash_mla", None)
+    metadata_op = getattr(ops, "flash_mla_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
     return None
 
 
