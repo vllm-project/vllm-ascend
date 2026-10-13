@@ -344,6 +344,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, *, vllm_config, prefix="") -> None:

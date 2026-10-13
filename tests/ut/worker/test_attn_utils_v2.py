@@ -53,6 +53,7 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -975,6 +976,7 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
             "pcp_context": kwargs.get("pcp_context"),
             "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
             "formatted_slot_mapping": kwargs.get("formatted_slot_mapping"),
+            "full_graph_mode": kwargs.get("full_graph_mode"),
         }
         assert "block_size" not in kwargs
         self.calls.append(call)
@@ -1117,7 +1119,12 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
-    state.max_model_len = 4096
+    # vLLM main (#58149) made max_model_len a read-only property backed by
+    # model_config; v0.30.0 keeps the plain instance attribute.
+    if vllm_version_is("0.30.0"):
+        state.max_model_len = 4096
+    else:
+        state.model_config = SimpleNamespace(max_model_len=4096)
     state.pcp_manager = None
     state._offload_live_req_ids = {"request-1": 0}
     state._offload_draft_attn_groups = []
@@ -1430,7 +1437,12 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
-        model_state.max_model_len = 8
+        # vLLM main (#58149) made max_model_len a read-only property backed by
+        # model_config; v0.30.0 keeps the plain instance attribute.
+        if vllm_version_is("0.30.0"):
+            model_state.max_model_len = 8
+        else:
+            model_state.model_config = SimpleNamespace(max_model_len=8)
         model_state.vllm_config = SimpleNamespace(
             parallel_config=parallel_config,
         )
@@ -1605,6 +1617,30 @@ def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, ful
     )
     assert builder.extra_kwargs is not None
     assert builder.extra_kwargs["full_graph_mode"] is (capture or full_graph)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),) * 2,
+        kv_cache_config=kv_cache_config,
+        for_cudagraph_capture=capture,
+        full_graph_mode=full_graph,
+    )
+    assert len(calls) == 2
+    for call in calls:
+        assert call["full_graph_mode"] is (capture or full_graph)
 
 
 @pytest.mark.parametrize("cache_only_backend", [False, True])
