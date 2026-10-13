@@ -53,6 +53,15 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+_ENABLE_FLA_GDN: bool | None = None
+
+
+def _is_fla_gdn_enabled() -> bool:
+    """Read the worker's prefill backend setting once, on first use."""
+    global _ENABLE_FLA_GDN
+    if _ENABLE_FLA_GDN is None:
+        _ENABLE_FLA_GDN = envs.VLLM_ASCEND_ENABLE_FLA_GDN
+    return _ENABLE_FLA_GDN
 
 
 @lru_cache(maxsize=1)
@@ -206,7 +215,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     @classmethod
     def _supports_host_metadata_prefill(cls) -> bool:
         """Whether an available fused prefill path only needs host metadata."""
-        use_fla_gdn_prefill = envs.VLLM_ASCEND_ENABLE_FLA_GDN and get_current_hardware_profile().supports(
+        use_fla_gdn_prefill = _is_fla_gdn_enabled() and get_current_hardware_profile().supports(
             HardwareCapability.FLA_GDN_PREFILL
         )
         if use_fla_gdn_prefill and _get_fla_gdn_prefill_op() is not None:
@@ -621,7 +630,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
             use_fla_gdn_prefill = (
-                envs.VLLM_ASCEND_ENABLE_FLA_GDN
+                _is_fla_gdn_enabled()
                 and get_pcp_group().world_size == 1
                 and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
             )

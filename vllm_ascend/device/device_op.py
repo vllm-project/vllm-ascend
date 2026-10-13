@@ -48,7 +48,9 @@ else:
     triton_q_rms = None  # type: ignore
 
 
-@lru_cache(maxsize=32)
+_FLA_CHUNK_SIZE: int | None = None
+
+
 def _fla_gdn_chunk_indices(cu_seqlens: tuple[int, ...], chunk_size: int) -> tuple[int, ...]:
     """Build compact sequence/chunk pairs using host metadata only."""
     return tuple(
@@ -60,9 +62,14 @@ def _fla_gdn_chunk_indices(cu_seqlens: tuple[int, ...], chunk_size: int) -> tupl
 
 
 def _fla_gdn_chunk_metadata(prebuilt_meta):
-    chunk_size = envs.VLLM_ASCEND_FLA_CHUNK_SIZE
-    if chunk_size not in (64, 128):
-        raise ValueError("VLLM_ASCEND_FLA_CHUNK_SIZE must be 64 or 128")
+    global _FLA_CHUNK_SIZE
+    # Workers configure this before their first prefill. Cache only valid values.
+    if _FLA_CHUNK_SIZE is None:
+        chunk_size = envs.VLLM_ASCEND_FLA_CHUNK_SIZE
+        if chunk_size not in (64, 128):
+            raise ValueError("VLLM_ASCEND_FLA_CHUNK_SIZE must be 64 or 128")
+        _FLA_CHUNK_SIZE = chunk_size
+    chunk_size = _FLA_CHUNK_SIZE
     cu_seqlens = prebuilt_meta.cu_seqlens_host if prebuilt_meta.keep_meta is None else prebuilt_meta.cu_seqlens_kern
     return chunk_size, cu_seqlens, _fla_gdn_chunk_indices(cu_seqlens, chunk_size)
 
