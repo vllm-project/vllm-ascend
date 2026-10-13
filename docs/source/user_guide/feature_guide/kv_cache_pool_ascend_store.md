@@ -352,6 +352,23 @@ KV Cache supports the following three external storage backends, choose the stor
         }
         ```
 
+    4. To publish complete Decode blocks while keeping Prefill writes disabled, set `save_decode_cache: true` on the consumer. The first Decode save checks the aligned, reachable Prefill prefix and fills missing ancestor blocks. Later saves resume from the worker's last successful offset; failed ranges are checked again at the next completed-block boundary. This mode requires non-layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV.
+
+        ```json
+        {
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_consumer",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": {
+                "lookup_rpc_port": "0",
+                "backend": "mooncake",
+                "save_decode_cache": true
+            }
+        }
+        ```
+
+        When Prefill uses PP, configure `prefill_pp_size` or `prefill_pp_layer_partition` as in the preceding example so Decode writes compatible partition keys.
+
 === "PD-Mixed Scenario"
 
     ##### pd_mix.sh
@@ -1534,9 +1551,10 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
+| `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
-| `prefill_pp_size` | int | 1 | Required when PP + `consumer_is_to_put` | Positive integer | Prefill PP size. |
+| `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 

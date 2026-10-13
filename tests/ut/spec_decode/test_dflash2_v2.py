@@ -74,6 +74,7 @@ def test_patch_swaps_upstream_selector_walk_kernel():
 def _spec_config(arch: str) -> SimpleNamespace:
     return SimpleNamespace(
         method="dflash",
+        enforce_eager=None,
         use_dspark=lambda: False,
         use_dflash=lambda: True,
         draft_model_config=SimpleNamespace(architectures=[arch]),

@@ -525,7 +525,7 @@ class AscendConfig:
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
-                "topk_buffer_size": 4096,
+                "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 128,
                 "keep_device_kv_cache": false
             }
@@ -1665,27 +1665,22 @@ class SparseKVOffloadConfig:
     """
 
     enabled: bool = False
-    topk_buffer_size: int = 4096
+    # -1 resolves to (1 + num_speculative_tokens) * 2048.
+    topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
-    # Generalized Q1/MTP LIM + copy-SFA. The C8 operator is built separately
-    # but is not selected by this serving path.
-    fused_op_type: str = "none"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
-        return self.fused_op_type == "fused_copy_sfa"
+        """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
+        return self.enabled and not self.use_fused_overlap
 
     @model_validator(mode="after")
     def _validate_values(self):
-        if self.fused_op_type not in ("none", "fused_copy_sfa"):
-            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
-        if self.use_fused_copy_sfa and self.use_fused_overlap:
-            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
-        if self.topk_buffer_size <= 0:
-            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size != -1 and self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         return self
@@ -1697,6 +1692,10 @@ class SparseKVOffloadConfig:
                 f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
             )
         config = cls(**user_config)  # type: ignore[call-arg]
+        if config.topk_buffer_size == -1:
+            speculative = getattr(vllm_config, "speculative_config", None)
+            num_speculative_tokens = speculative.num_speculative_tokens if speculative is not None else 0
+            config.topk_buffer_size = (1 + num_speculative_tokens) * 2048
         config._validate_preconditions(vllm_config)
         return config
 

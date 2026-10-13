@@ -27,6 +27,7 @@ def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.input_buffers = buffers
+    runner.debugger = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
     runner.decode_query_len = 2
     runner.pcp_manager = None
