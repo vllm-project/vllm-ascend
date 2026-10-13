@@ -19,7 +19,14 @@ GVA_ALIGN = 2 * 1024 * 1024
 
 
 def _bare_worker(**attrs) -> KVPoolWorker:
-    """Construct a KVPoolWorker without running __init__."""
+    """Construct a KVPoolWorker without running __init__.
+
+    ``layout_dcp_size`` is the sharding factor for the shared GVA region. It is
+    resolved from the peer topology in ``_init_kv_transfer_config`` and equals
+    the local ``dcp_size`` for every symmetric topology, so these stubs default
+    it to that and tests only override it for asymmetric (decode-only) cases.
+    """
+    attrs.setdefault("layout_dcp_size", attrs.get("dcp_size", 1))
     worker = object.__new__(KVPoolWorker)
     for key, value in attrs.items():
         setattr(worker, key, value)
@@ -103,6 +110,107 @@ class TestGlobalGroupAllocSize:
         stride = region // 8
         assert stride % GVA_ALIGN == 0, "shard stride must be GVA-aligned"
         assert stride >= total, "aligned stride must still cover the shard"
+
+
+class TestDecodeOnlyDcpLayout:
+    """Decode-only DCP: producer dcp==1, consumer dcp==N, pcp==1 on both sides.
+
+    Both sides share ONE GVA region, so the un-sharded producer must adopt the
+    peer-sharded layout factor instead of allocating a single-shard region that
+    the sharded consumer would read past.
+    """
+
+    def _producer(self, block_len, put_step, layout_dcp_size):
+        return _bare_worker(
+            group_block_len={0: block_len},
+            group_num_layers={0: len(block_len)},
+            num_layers=len(block_len),
+            total_layers=len(block_len),
+            page_size_bytes=4096,
+            put_step=put_step,
+            pcp_size=1,
+            dcp_size=1,  # producer side has no DCP
+            dcp_rank=0,
+            layout_dcp_size=layout_dcp_size,  # resolved from decode_dcp_size
+        )
+
+    @staticmethod
+    def _consumer(block_len, put_step, dcp_size):
+        return _bare_worker(
+            group_block_len={0: block_len},
+            group_num_layers={0: len(block_len)},
+            num_layers=len(block_len),
+            total_layers=len(block_len),
+            page_size_bytes=4096,
+            put_step=put_step,
+            pcp_size=1,
+            dcp_size=dcp_size,
+            dcp_rank=0,
+            layout_dcp_size=dcp_size,
+        )
+
+    def test_producer_region_covers_all_shards(self):
+        # A dcp=1 producer paired with a dcp=8 consumer must size the region
+        # for 8 shards, not 1.
+        prod = self._producer([32768] * 4, put_step=4, layout_dcp_size=8)
+        assert prod._global_group_alloc_size(0) == GVA_ALIGN * 8
+
+    def test_producer_region_equals_sharded_consumer(self):
+        # The whole point: both sides compute the SAME region size.
+        block_len = [32768] * 4
+        prod = self._producer(block_len, put_step=4, layout_dcp_size=2)
+        cons = self._consumer(block_len, put_step=4, dcp_size=2)
+        assert prod._global_group_alloc_size(0) == cons._global_group_alloc_size(0)
+
+    def test_symmetric_layout_factor_unchanged(self):
+        # Symmetric deployments resolve layout_dcp_size == dcp_size, so the
+        # region math is bit-identical to the pre-adaptation behaviour.
+        block_len = [32768] * 4
+        sym = self._consumer(block_len, put_step=4, dcp_size=8)
+        assert sym._global_group_alloc_size(0) == GVA_ALIGN * 8
+
+
+class TestDecodeOnlyDcpMetadata:
+    """Peer-topology helpers that drive the shared layout factor."""
+
+    @staticmethod
+    def _helpers():
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+            infer_decode_only_dcp,
+            infer_peer_cp_sizes,
+            resolve_layout_dcp_size,
+        )
+
+        return infer_peer_cp_sizes, infer_decode_only_dcp, resolve_layout_dcp_size
+
+    def test_producer_side_resolves_peer_sharded_layout(self):
+        peer_fn, only_fn, layout_fn = self._helpers()
+        peer = peer_fn("kv_producer", {"decode_dcp_size": 8, "decode_pcp_size": 1}, 1, 1)
+        assert peer == (8, 1)
+        assert only_fn(1, 1, *peer) is True
+        assert layout_fn(True, 1, peer[0]) == 8
+
+    def test_consumer_side_resolves_same_layout(self):
+        peer_fn, only_fn, layout_fn = self._helpers()
+        peer = peer_fn("kv_consumer", {"prefill_dcp_size": 1, "prefill_pcp_size": 1}, 8, 1)
+        assert peer == (1, 1)
+        assert only_fn(8, 1, *peer) is True
+        assert layout_fn(True, 8, peer[0]) == 8
+
+    def test_symmetric_topology_keeps_local_dcp(self):
+        peer_fn, only_fn, layout_fn = self._helpers()
+        peer = peer_fn("kv_producer", {}, 2, 1)
+        assert peer == (2, 1)
+        assert only_fn(2, 1, *peer) is False
+        assert layout_fn(False, 2, peer[0]) == 2
+
+    def test_other_asymmetric_shapes_are_not_supported(self):
+        _, only_fn, _ = self._helpers()
+        # both sides sharded, unequal sizes -> not decode-only
+        assert only_fn(2, 1, 4, 1) is False
+        # any pcp > 1 -> not decode-only
+        assert only_fn(1, 2, 8, 2) is False
+        assert only_fn(1, 1, 8, 2) is False
 
 
 if __name__ == "__main__":

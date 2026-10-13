@@ -91,11 +91,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_dcp_mismatch_info,
+    infer_decode_only_dcp,
     infer_group_block_sizes,
     infer_group_cache_families,
+    infer_peer_cp_sizes,
     infer_tp_mismatch_info,
     is_kv_save_role,
     masked_block_runs,
+    resolve_layout_dcp_size,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -234,6 +237,19 @@ class KVPoolWorker:
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
+        # Decode-only DCP: the layerwise GVA region is one shared object whose
+        # shard stride/offset must be computed identically on both P and D.
+        # Producer and consumer are separate worker groups, so each side
+        # resolves the peer topology from the flat prefill_*/decode_* keys and
+        # both agree on a single layout_dcp_size (the peer-sharded size).
+        # Every other asymmetric CP shape keeps the explicit rejection below.
+        self.peer_dcp_size, self.peer_pcp_size = infer_peer_cp_sizes(
+            self.kv_role, extra_config, self.dcp_size, self.pcp_size
+        )
+        self.is_decode_only_dcp = infer_decode_only_dcp(
+            self.dcp_size, self.pcp_size, self.peer_dcp_size, self.peer_pcp_size
+        )
+        self.layout_dcp_size = resolve_layout_dcp_size(self.is_decode_only_dcp, self.dcp_size, self.peer_dcp_size)
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
@@ -257,13 +273,13 @@ class KVPoolWorker:
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.layout_dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
+        ) * self.layout_dcp_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
@@ -383,6 +399,12 @@ class KVPoolWorker:
             self.use_layerwise
             and self.kv_role in ("kv_producer", "kv_consumer")
             and infer_dcp_mismatch_info(self.kv_role, self._extra_config, self.dcp_size, self.pcp_size)
+            # Decode-only DCP is only safe on the GVA data plane: its keys are
+            # (model, hash, head_or_tp_rank) with no dcp field, so the sharding
+            # lives purely in the region layout this adaptation aligns. The
+            # block-key/plain paths encode dcp_rank in the key and would still
+            # disagree, so they keep the rejection.
+            and not (self.is_decode_only_dcp and self.use_layerwise_transfer)
         ):
             peer_role = "prefill" if self.kv_role == "kv_consumer" else "decode"
             raise ValueError(
@@ -704,12 +726,14 @@ class KVPoolWorker:
                 per_layer = sum(gbl) // group_num_layers
                 if getattr(self, "pp_size", 1) > 1:
                     layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
-                if self.dcp_size > 1 and self.put_step > 1:
+                if self.layout_dcp_size > 1 and self.put_step > 1:
                     # Use the GLOBAL region size (PP-aware) as the basis for
                     # the per-shard stride; under PP>1 the local sum(gbl) only
                     # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
-                    shard_idx = self.dcp_rank
+                    shard_stride = self._global_group_alloc_size(group_id) // self.layout_dcp_size
+                    # The un-sharded producer writes shard 0 of the peer-sized
+                    # region; the sharded consumer writes/reads its own shard.
+                    shard_idx = self.dcp_rank if self.dcp_size > 1 else 0
                     layer_byte_offset += shard_idx * shard_stride
             builders.append(
                 LayerBatchBuilder(
@@ -987,10 +1011,10 @@ class KVPoolWorker:
         # and an unaligned stride would yield misaligned GVA addresses that
         # SDMA rejects. With put_step == 1 every rank owns a distinct region
         # key and no shard separation is needed.
-        if self.put_step > 1 and self.dcp_size > 1:
+        if self.put_step > 1 and self.layout_dcp_size > 1:
             gva_align = 2 * 1024 * 1024
             shard_stride = (per_layer * n_global + gva_align - 1) // gva_align * gva_align
-            return shard_stride * self.dcp_size
+            return shard_stride * self.layout_dcp_size
         return per_layer * n_global
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
