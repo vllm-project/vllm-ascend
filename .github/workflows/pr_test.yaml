@@ -557,6 +557,7 @@ jobs:
           pip install regex pyyaml -q
           python3 .github/workflows/scripts/select_tests.py \
             --explicit-e2e-tests tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py \
+            --runner-label-override linux-aarch64-a2b3-4 \
             --skip-cpu-ut
 
       - name: Select tests from coverage recommendations
