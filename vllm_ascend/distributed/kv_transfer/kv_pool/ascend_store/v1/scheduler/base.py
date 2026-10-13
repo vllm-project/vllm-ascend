@@ -189,6 +189,7 @@ class KVPoolScheduler:
         return KVTransferStep(
             LoadCommandBatch(tuple(load_commands)),
             StoreCommandBatch(tuple(source_pending_commands), tuple(source_ready_commands)),
+            finished_request_ids | preempted_request_ids,
         )
 
     def _plan_new_request(
@@ -412,6 +413,9 @@ class KVPoolScheduler:
 
     def has_pending_push_work(self) -> bool:
         return self._source_leases.has_pending() or bool(self._finished_checkpoint_stores)
+
+    def has_pending_block_frees(self) -> bool:
+        return self._source_leases.has_pending_block_frees()
 
     # ================================
     # Request and Scheduler Lifecycle

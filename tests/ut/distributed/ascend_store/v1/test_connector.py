@@ -17,8 +17,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connecto
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
     AscendStoreV1Connector,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
+    LoadCommand,
+    LoadCommandBatch,
     StoreSourceReleaseMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.result import (
@@ -50,6 +53,7 @@ def test_connector_scheduler_hooks_are_thin_delegations() -> None:
         register_finished_partial_tail=register_finished_partial_tail,
         bind_gpu_block_pool=lambda pool: calls.append(("pool", pool)),
         has_pending_push_work=lambda: True,
+        has_pending_block_frees=lambda: True,
         close=lambda: calls.append(("close",)),
     )
     connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
@@ -68,6 +72,7 @@ def test_connector_scheduler_hooks_are_thin_delegations() -> None:
     connector.register_finished_partial_tail(request, ([1, 2],), [(0, 2, 8)])
     connector.bind_gpu_block_pool("pool")
     assert connector.has_pending_push_work()
+    assert connector.has_pending_block_frees()
     connector.shutdown()
 
     assert calls == [
@@ -97,7 +102,7 @@ def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
         wait_for_layer_load=lambda layer: calls.append(("wait_layer", layer)),
         save_layer=lambda layer: calls.append(("save_layer", layer)),
         finish_step=lambda: calls.append(("finish",)),
-        fence_previous_store=lambda: calls.append(("fence",)),
+        fence_previous_store=lambda request_ids=None: calls.append(("fence", request_ids)),
         take_released_store_job_ids=take_released_store_job_ids,
         collect_load_result=lambda: load_result,
         close=lambda: calls.append(("close",)),
@@ -129,9 +134,49 @@ def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
         ("wait_layer", "layer.0"),
         ("save_layer", "layer.0"),
         ("finish",),
-        ("fence",),
+        ("fence", frozenset()),
         ("close",),
     ]
+
+
+@pytest.mark.parametrize(
+    "released_ids,has_load",
+    (
+        (frozenset(), False),
+        (frozenset(("finished", "preempted")), False),
+        (frozenset(), True),
+        (frozenset(("finished", "preempted")), True),
+    ),
+)
+def test_store_fence_preserves_released_request_ids_in_both_load_and_decode_steps(released_ids, has_load) -> None:
+    fenced_requests = []
+    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    connector.scheduler = None
+    connector.worker = SimpleNamespace(
+        fence_previous_store=lambda request_ids=None: fenced_requests.append(request_ids),
+        take_released_store_job_ids=lambda: set(),
+    )
+    connector._released_store_job_ids = set()
+    load = LoadCommand("load", TokenRange(0, 4), ((7,),), (b"a",))
+    metadata = KVTransferStep(load=LoadCommandBatch((load,) if has_load else ()), released_request_ids=released_ids)
+
+    connector.handle_preemptions(metadata)
+
+    assert fenced_requests == [released_ids]
+
+
+@pytest.mark.parametrize("pending_push,pending_frees", ((False, False), (True, False), (True, True)))
+def test_pending_block_frees_are_not_inferred_from_background_push_work(pending_push, pending_frees) -> None:
+    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    connector.scheduler = SimpleNamespace(
+        has_pending_push_work=lambda: pending_push,
+        has_pending_block_frees=lambda: pending_frees,
+    )
+    assert connector.has_pending_push_work() is pending_push
+    assert connector.has_pending_block_frees() is pending_frees
+    connector.scheduler = None
+    assert not connector.has_pending_push_work()
+    assert not connector.has_pending_block_frees()
 
 
 def test_worker_connector_rolls_back_metadata_when_worker_rejects_step(monkeypatch) -> None:

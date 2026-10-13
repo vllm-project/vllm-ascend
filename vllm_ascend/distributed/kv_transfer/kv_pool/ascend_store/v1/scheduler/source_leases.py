@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -64,6 +65,15 @@ class StoreSourceLeases:
 
     def has_pending(self) -> bool:
         return bool(self._leases)
+
+    def has_pending_block_frees(self) -> bool:
+        """Report blocks held only by Store, on the allocation-failure slow path."""
+
+        if self._block_pool is None or not self._leases:
+            return False
+        # Each job touches a block once, independently of how many Workers still owe its acknowledgement.
+        source_refs = Counter(block_id for block_ids, _ in self._leases.values() for block_id in block_ids)
+        return any(self._block_pool.blocks[block_id].ref_cnt == count for block_id, count in source_refs.items())
 
     def pending_job_ids(self) -> tuple[int, ...]:
         return tuple(self._leases)

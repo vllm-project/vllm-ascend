@@ -88,6 +88,7 @@ class KVTransferStep(KVConnectorMetadata):
 
     load: LoadCommandBatch = LoadCommandBatch()
     store: StoreCommandBatch = StoreCommandBatch()
+    released_request_ids: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)

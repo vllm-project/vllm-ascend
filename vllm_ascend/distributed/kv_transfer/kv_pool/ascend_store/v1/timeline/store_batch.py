@@ -14,3 +14,5 @@ class StoreBatch:
 
     completed: threading.Event = field(default_factory=threading.Event)
     completions: list[StoreCompletion] = field(default_factory=list)
+    request_ids: frozenset[str] = frozenset()
+    store_job_ids: frozenset[int] = frozenset()

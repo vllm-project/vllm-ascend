@@ -615,15 +615,10 @@ class BulkWorker(KVPoolWorker):
 
     def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
         del fence
-        if self._pending_store_batch is not None:
-            raise RuntimeError("Previous Store invocation has not reached its fence")
         timeline = self._asynchronous_store_timeline
         if timeline is None:
             raise RuntimeError("Bulk Store is disabled")
-        self._pending_store_batch = timeline.submit(
-            context.step.store.commands,
-            self._record_source_ready(),
-        )
+        self._track_store_batch(timeline.submit(context.step.store.commands, self._record_source_ready()))
         context.store_submitted = True
 
 

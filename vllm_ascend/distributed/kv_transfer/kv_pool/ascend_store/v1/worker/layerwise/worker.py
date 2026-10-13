@@ -309,6 +309,10 @@ class LayerwiseWorker(KVPoolWorker):
         timeline = self._layerwise_store_timeline
         if timeline is None:
             raise RuntimeError("Layerwise Store is disabled")
+        # The next Store reuses this route's single session and mutable layer plan.
+        # Decode without a new Store does not need this handoff barrier.
+        if self._pending_store_batch is not None:
+            self.fence_previous_store()
         timeline.prepare(commands)
 
     def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
@@ -322,7 +326,7 @@ class LayerwiseWorker(KVPoolWorker):
         timeline = self._layerwise_store_timeline
         if timeline is None:
             raise RuntimeError("Layerwise Store is disabled")
-        self._pending_store_batch = timeline.finalize()
+        self._track_store_batch(timeline.finalize())
         context.store_submitted = True
 
     def _prepare_store_close(self) -> StoreBatch | None:
