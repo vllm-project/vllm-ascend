@@ -322,6 +322,7 @@ templates:
 
 
 benchmarks:
+
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
