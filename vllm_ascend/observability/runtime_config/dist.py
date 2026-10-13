@@ -225,12 +225,36 @@ def _is_json_writer() -> bool:
 
 
 def _group_rank(group: Any, src: int = 0) -> int:
+    """Resolve this process's rank inside ``group``.
+
+    Prefer vLLM ``GroupCoordinator.rank_in_group``, then common ``rank``
+    attributes/methods, then ``torch.distributed.get_rank`` on the CPU/device
+    gate. If only ``is_first_rank`` is available, treat this process as
+    ``src`` (broadcast source). Otherwise raise.
+    """
+    for attr in ("rank_in_group", "rank"):
+        val = getattr(group, attr, None)
+        if val is None:
+            continue
+        try:
+            return int(val() if callable(val) else val)
+        except Exception:
+            continue
     try:
-        return int(group.rank_in_group)
+        import torch
+
+        gate = _cpu_gate(group)
+        if gate is not None:
+            return int(torch.distributed.get_rank(gate))
     except Exception:
-        if bool(getattr(group, "is_first_rank", False)):
-            return int(src)
-        return int(src) + 1
+        pass
+    if bool(getattr(group, "is_first_rank", False)):
+        return int(src)
+    raise RuntimeError(
+        "[runtime_config] cannot resolve group rank "
+        f"(attrs tried=rank_in_group/rank, is_first_rank="
+        f"{bool(getattr(group, 'is_first_rank', False))}, src={src})"
+    )
 
 
 def _cpu_gate(group: Any) -> Any | None:
