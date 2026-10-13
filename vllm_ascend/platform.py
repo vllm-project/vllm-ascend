@@ -1766,15 +1766,6 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        # C8 DCP requires a kernel that returns per-shard softmax statistics.
-        # Supported hardware profiles advertise that capability.
-        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
-            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
-        ):
-            raise NotImplementedError(
-                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
-                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
-            )
 
 
 def _validate_model_pcp_dcp_config(
