@@ -424,8 +424,11 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         # Replicated drafts consume global requests, unlike sharded targets.
+        # Adaptive verification also negotiates the draft shape independently.
         # Every DP rank must synchronize the draft batch independently.
-        sync_state = None if self.replicated_pcp else dp_sync
+        sync_state = dp_sync
+        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+            sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate

@@ -16,6 +16,23 @@ from tests.ut.distributed.eplb.test_hixl_communicator import _Engine, _Tensor
 from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 
 
+@pytest.mark.parametrize("finalizing", [False, True])
+def test_destructors_do_not_call_hixl_after_interpreter_shutdown(monkeypatch, finalizing):
+    monkeypatch.setattr(sys, "is_finalizing", lambda: finalizing)
+    engine = hixl_compat.Hixl.__new__(hixl_compat.Hixl)
+    engine._close = MagicMock()
+    engine.__del__()
+    assert engine._close.call_count == (0 if finalizing else 1)
+
+
+def test_destructor_ignores_cleared_module_globals(monkeypatch):
+    engine = hixl_compat.Hixl.__new__(hixl_compat.Hixl)
+    engine._close = MagicMock()
+    monkeypatch.setattr(hixl_compat, "sys", None)
+    engine.__del__()
+    engine._close.assert_not_called()
+
+
 def test_compat_layout_matches_probed_cann_abi():
     assert ctypes.sizeof(hixl_compat.MemDesc) == 144
     assert ctypes.sizeof(hixl_compat.TransferOpDesc) == 24
@@ -34,7 +51,8 @@ def test_compat_layout_matches_probed_cann_abi():
     desc = hixl_compat.TransferOpDesc(local_addr=1, remote_addr=2, len=3)
     assert (desc.local_addr, desc.remote_addr, desc.len) == (1, 2, 3)
     mem_desc = hixl_compat.MemDesc(4096, 8192)
-    assert (mem_desc.addr, mem_desc.len, mem_desc.remote_accessible) == (4096, 8192, True)
+    assert (mem_desc.addr, mem_desc.len) == (4096, 8192)
+    assert bytes(mem_desc.reserved) == bytes(128)
 
 
 def test_compat_empty_options_map_self_points_at_header():
@@ -74,6 +92,11 @@ def test_resolve_raises_when_both_hixl_paths_are_unavailable(monkeypatch):
 
 def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     engine = _Engine()
+    monkeypatch.setitem(
+        sys.modules,
+        "acl",
+        SimpleNamespace(rt=SimpleNamespace(get_context=lambda: (1, 0), set_context=lambda _context: 0)),
+    )
     monkeypatch.setitem(sys.modules, "hixl", None)
     monkeypatch.setattr(hixl_compat, "ensure_available", MagicMock())
     monkeypatch.setattr(hixl_compat, "Hixl", lambda: engine)
@@ -99,8 +122,11 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
         gathered[1] = (
             "192.0.2.2:12346",
             {
-                key: (tuple(address + 10_000 for address in addresses), stride)
-                for key, (addresses, stride) in local_state[1].items()
+                model: {
+                    key: (tuple(address + 10_000 for address in addresses), stride)
+                    for key, (addresses, stride) in meta.items()
+                }
+                for model, meta in local_state[1].items()
             },
         )
 
@@ -125,7 +151,9 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     ]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
-    assert communicator._hixl is hixl_compat
+    session = eplb_communicator._HixlSession(group)
+    session.initialize({"main": communicator})
+    assert session._hixl is hixl_compat
     assert engine.options == {}
     assert len(engine.registered) == 1
     assert isinstance(engine.registered[0], hixl_compat.MemDesc)
@@ -143,5 +171,5 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     assert operation == hixl_compat.TransferOp.READ
     assert all(isinstance(desc, hixl_compat.TransferOpDesc) for desc in descriptors)
 
-    communicator._close()
+    session.close()
     assert engine.finalized

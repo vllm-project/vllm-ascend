@@ -154,6 +154,7 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    allocate_shared_indexer_cache,
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
 )
@@ -5078,6 +5079,10 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` overlay gate below.
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         strided_attention_cache_layers: set[str] = set()
         if (
             not self.use_dcp
@@ -5194,7 +5199,8 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
-            and self.hybrid_with_attn_and_mamba
+            and (self.hybrid_with_attn_and_mamba
+                 or is_step_model)
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors
@@ -5229,6 +5235,20 @@ class NPUModelRunner(GPUModelRunner):
             # Only the layerwise planner emits zero-stride alias descriptors
             # here. Ordinary vLLM group descriptors retain private layer buffers.
             reuse_slot = layerwise_reuse and kv_cache_tensor.layer_stride == 0
+            if reuse_slot and all(
+                isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in shared_layers
+            ):
+                indexer_specs = {
+                    name: spec for name in shared_layers
+                    if isinstance((spec := layer_kv_cache_spec[name]), AscendSFAIndexerCacheSpec)
+                }
+                kv_cache_raw_tensors.update(
+                    allocate_shared_indexer_cache(
+                        indexer_specs, kv_cache_config.num_blocks,
+                        lambda size: self._allocate_int8_cache_tensor(size, alignment),
+                    )
+                )
+                continue
             allocation_layers = shared_layers[:1] if reuse_slot else shared_layers
             use_mamba = False
             use_compressed_cache = False
