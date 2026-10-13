@@ -76,6 +76,8 @@ class AscendKimiRoutedLinear(ReplicatedLinear):
             can_use_gmm = x[0].ndim == 2
         else:
             can_use_gmm = x.ndim == 2
+        weight = getattr(layer, "weight", None)
+        can_use_gmm = can_use_gmm and (weight is None or weight.ndim == 2)
         if (
             bias is None
             and isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
