@@ -4,7 +4,7 @@
 # Lean UTs for 310P MRv2 MTP (rejection offset, capture-safe draft step, RoPE flag).
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -23,6 +23,28 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 
 
 class TestMRv2Mtp310(TestBase):
+    def test_decode_replays_only_runtime_width(self):
+        speculator = object.__new__(AscendMTPSpeculator310)
+        speculator.num_speculative_steps = 4
+        speculator.input_buffers = SimpleNamespace(positions=torch.zeros(2), query_start_loc=torch.arange(3))
+        speculator.idx_mapping = torch.arange(2)
+        speculator._set_draft_step = MagicMock()
+        speculator._generate_draft = MagicMock()
+        speculator.decode_cudagraph_manager = MagicMock()
+        for mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
+            for k in (1, 2, 4):
+                speculator._generate_draft.reset_mock()
+                speculator.decode_cudagraph_manager.reset_mock()
+                speculator._multi_step_decode(
+                    2, True, SimpleNamespace(cg_mode=mode, num_tokens=2), None, torch.ones(2), k
+                )
+                calls = (
+                    speculator.decode_cudagraph_manager.run_fullgraph.call_count
+                    if mode == CUDAGraphMode.FULL
+                    else speculator._generate_draft.call_count
+                )
+                self.assertEqual(calls, k - 1)
+
     def test_greedy_rejection_uses_logit_idx_plus_one(self):
         # draft_sampled[logit_idx+1] must match argmax(logits[logit_idx]) to accept.
         target_logits = torch.tensor(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,8 @@ else:
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
+    BatchExecutionDescriptor,
+    DraftBatchDescriptor,
 )
 
 
@@ -80,6 +83,84 @@ def test_init_draft_decode_graph():
     assert manager.is_draft_model_prefill is False
     set_decode.assert_called_once_with([4, 8])
     set_prefill.assert_not_called()
+
+
+def test_runtime_width_selects_matching_merged_graph():
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.is_draft_model_prefill = False
+    manager.speculator = SimpleNamespace(num_speculative_steps=4)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=4, num_reqs=4)
+    manager.graphs = {DraftBatchDescriptor(**vars(desc), num_speculative_tokens=k): object() for k in (2, 4)}
+    for k in (2, 4, 2):
+        selected = manager.specialize_spec_tokens(desc, k)
+        assert selected in manager.graphs
+        assert selected.num_speculative_tokens == k
+    assert manager.specialize_spec_tokens(desc, 3).cg_mode == CUDAGraphMode.NONE
+    eager = replace(desc, cg_mode=CUDAGraphMode.NONE)
+    assert manager.specialize_spec_tokens(eager, 2) == eager
+
+
+def test_legacy_task_handles_are_isolated_by_draft_width():
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager._draft_graph_params_by_desc = {}
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=4, num_reqs=4)
+    widths = [DraftBatchDescriptor(**vars(desc), num_speculative_tokens=k) for k in (2, 4)]
+    pool = SimpleNamespace(events={4: []}, handles={4: []}, attn_params={4: []}, workspaces={4: None})
+    with patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_draft_graph_params", return_value=pool):
+        for width in widths:
+            with manager._draft_graph_params_scope(width):
+                pool.handles[4].extend(range(width.num_speculative_tokens - 1))
+        for width in [*widths, widths[0]]:
+            with manager._draft_graph_params_scope(width):
+                assert pool.handles[4] == list(range(width.num_speculative_tokens - 1))
+        with pytest.raises(RuntimeError), manager._draft_graph_params_scope(widths[0]):
+            raise RuntimeError("graph update failed")
+    assert pool.handles[4] == []
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
+def test_capture_specializes_all_scheduled_widths():
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.is_draft_model_prefill = False
+    manager.max_num_reqs = 4
+    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
+    manager.speculator = SimpleNamespace(
+        num_speculative_steps=4,
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens_per_batch_size=[(1, 1, 4), (2, 2, 2), (3, 3, 1), (4, 4, 0)]
+        ),
+    )
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=4, num_reqs=4)
+    manager._capture_descs = {CUDAGraphMode.FULL: [desc]}
+    recorded = []
+
+    def capture(manager, create_forward_fn, **kwargs):
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+            create_forward_fn(desc, False)(CUDAGraphMode.NONE)
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch", return_value=nullcontext()
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.prepare_inputs_to_capture"),
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_draft_graph_params", return_value=None),
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.vllm_version_is", return_value=False),
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture", capture),
+    ):
+        manager.capture(
+            lambda *args, **kwargs: recorded.append(kwargs["num_speculative_steps"]),
+            object(),
+            SimpleNamespace(seq_lens_cpu=torch.zeros(4)),
+            object(),
+            [],
+            object(),
+            specialize_spec_tokens=True,
+        )
+    assert recorded == [4, 2]
 
 
 def test_run_fullgraph_uses_updatable_graph():
@@ -148,7 +229,7 @@ def test_run_fullgraph_uses_legacy_graph():
 def test_capture_draft_prefill_delegates_to_parent():
     """Verify draft prefill capture delegates to the parent implementation."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = object()
+    manager.speculator = SimpleNamespace(num_speculative_steps=4)
     manager.is_draft_model_prefill = True
     forward_fn = MagicMock()
     model_state = object()
@@ -250,7 +331,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
         assert len(args) == 5
     else:
         # vLLM #60335 passes `num_speculative_steps` on main.
-        assert args[5] == 3
+        assert forward_fn.call_args.kwargs["num_speculative_steps"] == 3
 
 
 def test_graph_replay_updates_full_graph_params():
