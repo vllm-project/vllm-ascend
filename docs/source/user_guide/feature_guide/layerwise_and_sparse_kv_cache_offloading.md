@@ -128,7 +128,7 @@ Requirements and limitations:
 - Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
 - The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
   not supported. INT8 indexer KV is supported separately through
-  `--attention_config.indexer_kv_dtype int8`; it does not enable main-cache C8.
+  `--attention_config.indexer_kv_dtype auto`; it does not enable main-cache C8.
 - Sparse Decode Offload supports DP and TP on Decode; CP are not supported.
 - Sparse Decode Offload and `PreemptOffloadConnector` are mutually exclusive,
   including when the connector is configured inside `MultiConnector`. Use only

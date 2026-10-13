@@ -192,7 +192,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --quantization ascend \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -250,7 +250,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --async-scheduling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -313,7 +313,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling \
@@ -376,7 +376,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
-        --attention_config.indexer_kv_dtype int8 \
+        --attention_config.indexer_kv_dtype auto \
         --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling
@@ -569,7 +569,7 @@ Before you start, please
             --reasoning-parser glm47 \
             --enforce-eager \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "enable_dsa_cp":true,
                 "enable_fused_mc2": 1,
@@ -657,7 +657,7 @@ Before you start, please
             --reasoning-parser glm47 \
             --enforce-eager \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "enable_dsa_cp":true,
                 "enable_fused_mc2": 1,
@@ -739,7 +739,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "recompute_scheduler_enable": true,
                 "enable_fused_mc2": 1
@@ -820,7 +820,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "recompute_scheduler_enable": true,
                 "enable_fused_mc2": 1
@@ -1020,7 +1020,7 @@ Before you start, please
             --reasoning-parser glm47 \
             --enforce-eager \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "enable_dsa_cp":true,
                 "enable_fused_mc2": 1,
@@ -1132,7 +1132,7 @@ Before you start, please
             --reasoning-parser glm47 \
             --enforce-eager \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "enable_dsa_cp":true,
                 "enable_fused_mc2": 1,
@@ -1240,7 +1240,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "recompute_scheduler_enable": true,
                 "enable_fused_mc2": 1
@@ -1347,7 +1347,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --additional-config '{
                 "recompute_scheduler_enable": true,
                 "enable_fused_mc2": 1
@@ -1614,7 +1614,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
@@ -1702,7 +1702,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
@@ -1790,7 +1790,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
@@ -1878,7 +1878,7 @@ Before you start, please
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
             --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --attention_config.indexer_kv_dtype auto \
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
@@ -2075,7 +2075,7 @@ the deployment scripts.
 | DSA CP | A3 Prefill | `"enable_dsa_cp": true` | Distributes long-context attention work; use the layout specified in each scenario. |
 | DCP | 1M PD (A3) | `--decode-context-parallel-size 16` on Prefill, `8` on Decode | Shards KV cache across the TP group. Keep PCP at 1 and KV interleave at 128 on both roles. |
 | Int8 attention KV cache | A3 W8A8C8 | `--kv-cache-dtype int8` | Reduces attention KV cache memory. |
-| Int8 indexer KV cache | A3 W8A8C8 | `--attention_config.indexer_kv_dtype int8` | Quantizes the indexer cache separately from the attention cache. |
+| Int8 indexer KV cache | A3 W8A8C8 | `--attention_config.indexer_kv_dtype auto` | Quantizes the indexer cache separately from the attention cache. |
 | MLAPO | A3 1M Decode | `"enable_mlapo": true` | Fuses MLA preprocessing; account for its memory requirements. |
 | Recompute scheduler | A3 Decode | `"recompute_scheduler_enable": true` | Enables Prefill-side recomputation when Decode KV cache capacity is insufficient. |
 | Decode graph | A3 Decode | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Captures Decode execution; the reference Prefill uses eager mode. |
