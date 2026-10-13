@@ -19,11 +19,28 @@ from PIL import Image
 from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
 
 from vllm_ascend import envs as va_envs
-from vllm_ascend.models.qwen3_5_vl import (
-    _DEVICE_PREPROCESS_DONE,
-    AscendQwen2VLImageProcessor,
-    AscendQwen3_5VLProcessor,
-    _AscendVLPreprocessMixin,
+
+try:
+    from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm  # noqa: F401
+
+    from vllm_ascend.models.qwen3_5_vl import (
+        _DEVICE_PREPROCESS_DONE,
+        AscendQwen2VLImageProcessor,
+        AscendQwen3_5VLProcessor,
+        _AscendVLPreprocessMixin,
+    )
+
+    _MM_INPUT_NORM_AVAILABLE = True
+except ImportError:
+    # vllm release wheels do not ship mm_input_norm and the model module
+    # imports it unconditionally; the release line is covered by the
+    # releases/v0.30.0 branch instead.
+    _AscendVLPreprocessMixin = object
+    _MM_INPUT_NORM_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(
+    not _MM_INPUT_NORM_AVAILABLE,
+    reason="requires vllm.model_executor.layers.fusion.mm_input_norm (vllm main)",
 )
 
 C, PS, TPS, MS = 3, 14, 2, 2
