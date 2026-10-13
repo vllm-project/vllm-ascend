@@ -102,11 +102,12 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
-from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    flashmla_metadata_scope,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -118,6 +119,7 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
+    AscendV2KVBlockZeroer,
     communicator_switch,
     prepare_v41_dummy_ring_state,
     prepare_v41_source_rope,
@@ -129,8 +131,8 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
-    # backing allocation. Ascend MRV2 preserves that layout in
-    # allocate_kv_cache_main and exposes contiguous backend-specific views.
+    # backing allocation. Ascend MRV2 preserves that allocation and exposes
+    # backend-specific views; MLA may use a page-strided fused/component view.
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
@@ -191,6 +193,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
+        self.flashmla_executor: DeviceMetadataExecutor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -383,6 +386,18 @@ class NPUModelRunner(GPUModelRunner):
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
 
+    def _init_kv_zero_meta(self) -> None:
+        """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+
+        self.kv_block_zeroer = AscendV2KVBlockZeroer(
+            self.device,
+            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            kernel_block_sizes=self.kernel_block_sizes,
+            static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
+            cache_dtype=self.cache_config.cache_dtype,
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -421,6 +436,12 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            if any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            ):
+                self.flashmla_executor = DeviceMetadataExecutor()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -571,11 +592,18 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
+        # Initial memory profiling skips attention before KV cache initialization
+        # creates the groups. Other runs still require initialized builders.
+        attn_groups = getattr(self, "attn_groups", None)
+        if attn_groups is None:
+            if self.flashmla_executor is not None and not (dummy_run and is_profile and skip_attn_for_dummy_run):
+                raise RuntimeError("MRv2 attention groups are unavailable outside initial memory profiling")
+            attn_groups = ()
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
         forward_failed = True
-        with dp_coordination_context:
+        with dp_coordination_context, flashmla_metadata_scope(attn_groups, self.flashmla_executor):
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -725,6 +753,18 @@ class NPUModelRunner(GPUModelRunner):
                     int(batch_state.num_scheduled_tokens.max()),
                     batch_state.has_prefill,
                 )
+        if self.flashmla_executor is not None and batch_state is not None:
+            # Reorder every per-request field before positions, slots, tables
+            # and sampling indices are constructed. A short prompt is prefill.
+            order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+            batch_state = batch_state._replace(
+                req_ids=[batch_state.req_ids[index] for index in order],
+                num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
+                idx_mapping_np=batch_state.idx_mapping_np[order],
+                prefill_len_np=batch_state.prefill_len_np[order],
+                num_computed_prefill_tokens_np=batch_state.num_computed_prefill_tokens_np[order],
+                is_prefilling_np=batch_state.is_prefilling_np[order],
+            )
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
