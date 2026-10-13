@@ -431,10 +431,8 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
-            # PP worker 必须是 headless
             if node.nnodes > 1 and node.node_rank > 0 and not node.is_headless:
                 raise ValueError(f"node {node_index} is PP worker but not headless")
-            # PP master 必须有 master_addr
             if node.nnodes > 1 and not node.master_addr:
                 raise ValueError(f"node {node_index} uses multi-node PP but master_addr is empty")
 
