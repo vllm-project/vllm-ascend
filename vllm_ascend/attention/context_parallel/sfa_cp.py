@@ -378,11 +378,16 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
 def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     # FP8 block movement must preserve bytes, including NaN bit patterns.
-    if cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        return torch.index_select(cache.view(torch.uint8), 0, indices).view(cache.dtype)
-    return torch.index_select(cache, 0, indices)
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
 
 
 @dataclass
@@ -1460,7 +1465,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         split_sizes: tuple[int, ...],
     ) -> DCPGatherContext:
         # HCCL does not transport FP8 directly; gather the packed cache as bytes.
-        transport = x.view(torch.uint8) if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) else x
+        transport = as_byte_view(x)
         gathered, handle, restore_perm = self._all_gather_dim_async(transport, dim)
         if transport.dtype != x.dtype:
             gathered = gathered.view(x.dtype)
