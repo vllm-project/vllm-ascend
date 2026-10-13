@@ -53,6 +53,7 @@ def test_dspark_normalizes_token_fused_views_before_selecting_writer(enabled):
     write = load(DSPARK, "precompute_and_store_context_kv", scope, "AscendK3DSparkModel")
     impl = SimpleNamespace(
         kv_lora_rank=512,
+        dtype=torch.bfloat16,
         num_kv_heads=1,
         qk_rope_head_dim=64,
         use_mla_rope=enabled,
@@ -66,7 +67,12 @@ def test_dspark_normalizes_token_fused_views_before_selecting_writer(enabled):
         exec_context_kv_prolog_v3=Mock(),
         exec_kv_prefill=Mock(),
     )
-    for name in ("supports_prolog_v3_writer", "_validate_prolog_v3_cache", "_cache_requires_prolog_v3_writer"):
+    for name in (
+        "supports_prolog_v3_dtype",
+        "supports_prolog_v3_writer",
+        "_validate_prolog_v3_cache",
+        "_cache_requires_prolog_v3_writer",
+    ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
     choose = Mock(wraps=impl._cache_requires_prolog_v3_writer)
     impl._cache_requires_prolog_v3_writer = choose
@@ -119,6 +125,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, heads):
         slot_mapping=torch.tensor([1, 129, 255, 256]),
         external_flashmla=flash,
         decode=SimpleNamespace(cos=None, sin=None),
+        prefill=None,
     )
     notify = Mock()
     scope = {
@@ -134,6 +141,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, heads):
     }
     impl = SimpleNamespace(
         layer_name="mla",
+        dtype=torch.bfloat16,
         layerwise_kv_cache_hook=None,
         num_heads=heads,
         mlapo_num_heads=16,
@@ -160,16 +168,18 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, heads):
         o_proj=lambda tensor, **kw: (tensor,),
     )
     for name in (
+        "supports_prolog_v3_dtype",
         "supports_prolog_v3_writer",
         "_validate_prolog_v3_cache",
         "_cache_requires_prolog_v3_writer",
         "mla_preprocess_prolog_v3",
+        "_get_dcp_current_kv_workspace",
         "forward",
     ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
     cp_path = "vllm_ascend/attention/context_parallel/mla_cp.py"
     owner = "AscendMlaDCPImpl" if dcp else "AscendMLAImpl"
-    for name in ("reorg_decode_q", "_decode_requires_current_kv"):
+    for name in ("reorg_decode_q", "_decode_requires_current_kv", "_prefill_requires_current_kv"):
         setattr(impl, name, MethodType(load(cp_path if dcp else MLA, name, scope, owner), impl))
 
     def gather(q, pe, *, dim):
@@ -345,3 +355,115 @@ def test_external_selection_reaches_single_raw_allocation(mode, runner):
         single_raw = allocate(worker, "mla", Spec(), layer)
     assert select(impl) is (mode != "pcp")
     assert single_raw is (mode != "pcp")
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("context_write", [False, True])
+def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved, context_write):
+    history, raw = fused_cache()
+    if not interleaved:
+        page_stride = history.stride(0)
+        offset = history.storage_offset()
+        history = (
+            raw.as_strided((3, 128, 1, 512), (page_stride, 512, 512, 1), offset),
+            raw.as_strided((3, 128, 1, 64), (page_stride, 64, 64, 1), offset + 128 * 512),
+        )
+    else:
+        history = (history[..., :512], history[..., 512:])
+    before = raw.clone()
+    slots = torch.tensor([0, -1, 128, -1])
+    buffers = (torch.empty(1, 128, 1, 512), torch.empty(1, 128, 1, 64), torch.arange(4))
+    outputs = (object(), object(), object())
+
+    def strict_prolog(**kwargs):
+        nope, rope = kwargs["kv_cache"], kwargs["kr_cache"]
+        # Match the device failure contract: only the outer page may be strided.
+        for cache in (nope, rope):
+            assert cache.stride(1) == cache.shape[2] * cache.shape[3]
+            assert cache.stride(2) == cache.shape[3]
+        keys = torch.arange(4).float()[:, None, None].expand(4, 1, 512) + 2
+        scatter(
+            key=keys,
+            value=keys[..., :64] + 10,
+            key_cache=nope,
+            value_cache=rope,
+            slot_mapping=kwargs["cache_index"],
+        )
+        return outputs
+
+    write = Mock(side_effect=strict_prolog)
+    scope = {
+        "torch": torch,
+        "torch_npu": SimpleNamespace(npu_mla_prolog_v3=write),
+        "cdiv": lambda x, y: (x + y - 1) // y,
+        "DeviceOperator": SimpleNamespace(reshape_and_cache=scatter),
+    }
+    weights = {name: object() for name in ("weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr")}
+    norm = SimpleNamespace(weight=SimpleNamespace(data=object()), variance_epsilon=1e-6)
+    impl = SimpleNamespace(
+        use_flashmla=True,
+        use_mla_rope=True,
+        fa_quant_layer=False,
+        q_a_layernorm=norm,
+        kv_a_layernorm=norm,
+        _flashmla_writer_buffers=buffers,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        _prepare_prolog_v3_token=lambda x: (x, {}, weights),
+        _flatten_prolog_rope_table=lambda x, _: x,
+    )
+    for name in (
+        "_prolog_v3_writer_workspace",
+        "_run_prolog_v3",
+        "_validate_context_prolog_v3_cache",
+        "_validate_prolog_v3_cache",
+        "exec_context_kv_prolog_v3",
+    ):
+        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
+    args = (torch.zeros(4, 16), object(), object(), history, slots)
+    if context_write:
+        impl.exec_context_kv_prolog_v3(*args)
+    else:
+        assert impl._run_prolog_v3(*args, quantize_query=True) is outputs
+    passed_slots = write.call_args.kwargs["cache_index"]
+    torch.testing.assert_close(passed_slots, torch.arange(4) if interleaved else slots)
+    torch.testing.assert_close(history[0][:2, 0, 0, 0], torch.tensor([2.0, 4.0]))
+    torch.testing.assert_close(history[1][:2, 0, 0, 0], torch.tensor([12.0, 14.0]))
+    assert impl._flashmla_writer_buffers is buffers
+    if interleaved:
+        changed = torch.zeros_like(raw, dtype=torch.bool)
+        for block in (0, 1):
+            start = history[0].storage_offset() + block * history[0].stride(0)
+            changed[start : start + 576] = True
+        torch.testing.assert_close(raw[~changed], before[~changed])
+
+
+def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
+    scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y}
+    impl = SimpleNamespace(
+        use_flashmla=True,
+        _flashmla_writer_buffers=None,
+        W_UV=torch.empty(1),
+        dtype=torch.bfloat16,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=160),
+            cache_config=SimpleNamespace(block_size=128),
+        ),
+    )
+    for name in ("_prepare_flashmla_writer_buffers", "_prolog_v3_writer_workspace"):
+        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
+    impl._prepare_flashmla_writer_buffers()
+    buffers = impl._flashmla_writer_buffers
+    impl._prepare_flashmla_writer_buffers()
+    assert impl._flashmla_writer_buffers is buffers
+    cache, _ = fused_cache()
+    views = (cache[..., :512], cache[..., 512:])
+    writer, slots, staged = impl._prolog_v3_writer_workspace(160, views, torch.arange(160))
+    assert staged and slots.numel() == 160
+    assert writer[0].data_ptr() == buffers[0].data_ptr()
+    with pytest.raises(RuntimeError, match="scheduled token rows"):
+        impl._prolog_v3_writer_workspace(161, views, torch.arange(161))

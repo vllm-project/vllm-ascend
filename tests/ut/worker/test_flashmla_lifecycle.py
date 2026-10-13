@@ -123,6 +123,7 @@ def wrapper(binding):
         "ModelWithContext": lambda model, **kwargs: model,
         "communicator_switch": nullcontext,
         "Any": Any,
+        "IntermediateTensors": type("IntermediateTensors", (), {}),
         "cast": cast,
         "AttentionLayerBase": object,
         "set_current_vllm_config": lambda _: nullcontext(),
@@ -169,6 +170,8 @@ def wrapper(binding):
         obj.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
         obj.kvpp = SimpleNamespace(complete_forward=Mock())
         obj._maybe_send_draft_kv = Mock()
+        obj._start_dump_data = Mock()
+        obj._finalize_dump_data = Mock()
         obj.use_dcp = False
         obj.replicated_pcp = False
         obj.enable_adaptive_verification = False
@@ -179,7 +182,7 @@ def wrapper(binding):
 
     def call(obj, kind, **flags):
         if kind == "Runner":
-            return obj.execute_model(SimpleNamespace(), **flags)
+            return obj.execute_model(SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={}), **flags)
         batch = SimpleNamespace(is_prefilling_np=[False])
         return obj.propose(batch, *([None] * 10), dp_sync="target-dp", **flags)
 
