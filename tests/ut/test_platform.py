@@ -17,6 +17,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
@@ -29,6 +30,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -352,7 +354,11 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
+        # vLLM main exposes aux_output_config; the release has no such field.
+        mock_vllm_config.aux_output_config = None if vllm_version_is("0.30.0") else MagicMock(enabled=False)
         mock_vllm_config.parallel_config.enable_eplb = False
+        mock_vllm_config.offload_config.uva.cpu_offload_gb = 0
+        mock_vllm_config.offload_config.prefetch.offload_group_size = 0
         mock_vllm_config.parallel_config.enable_elastic_ep = False
         mock_vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
@@ -435,6 +441,26 @@ class TestNPUPlatform(TestBase):
             "Override cp_kv_cache_interleave_size to 128",
             mock_warning.call_args.args[0],
         )
+
+    def test_validate_eplb_config_rejects_weight_offload(self):
+        for cpu_gb, group_size in ((1, 0), (0, 2)):
+            with self.subTest(cpu_gb=cpu_gb, group_size=group_size):
+                config = self.mock_vllm_config()
+                config.use_v2_model_runner = True
+                config.parallel_config.enable_eplb = True
+                config.offload_config.uva.cpu_offload_gb = cpu_gb
+                config.offload_config.prefetch.offload_group_size = group_size
+                with self.assertRaisesRegex(ValueError, "incompatible with weight offload/prefetch"):
+                    _validate_eplb_config(config)
+
+    def test_weight_offload_allowed_without_eplb(self):
+        config = self.mock_vllm_config()
+        config.use_v2_model_runner = True
+        config.parallel_config.enable_eplb = False
+        config.offload_config.uva.cpu_offload_gb = 1
+        config.offload_config.prefetch.offload_group_size = 2
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(config)
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
@@ -532,10 +558,7 @@ class TestNPUPlatform(TestBase):
             communicator=None,
         )
 
-        with (
-            patch.dict("os.environ", {}, clear=True),
-            self.assertRaisesRegex(ValueError, "elastic EP"),
-        ):
+        with patch.dict("os.environ", {}, clear=True), self.assertRaisesRegex(ValueError, "elastic EP"):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_rejects_nccl_communicator(self):
@@ -785,6 +808,28 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
+
+    def test_apply_config_platform_defaults_sets_sp_threshold(self):
+        for enabled_option in ("enable_sp", "fuse_gemm_comms"):
+            with self.subTest(enabled_option=enabled_option):
+                pass_config = SimpleNamespace(
+                    enable_sp=False,
+                    fuse_gemm_comms=False,
+                    sp_min_token_num=None,
+                )
+                setattr(pass_config, enabled_option, True)
+                vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(pass_config=pass_config))
+
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
+
+                self.assertEqual(pass_config.sp_min_token_num, 1)
+
+                pass_config.sp_min_token_num = 512
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
+
+                self.assertEqual(pass_config.sp_min_token_num, 512)
 
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
@@ -2138,6 +2183,145 @@ class TestNPUPlatform(TestBase):
         from vllm_ascend import platform
 
         platform._validate_parallel_config(vllm_config)
+
+    def test_validate_deepseek_v4_tp_config_rejects_tp_above_device_limit(self):
+        cases = (
+            ("deepseek_v4", 256, "V4 Flash", 8),
+            ("deepseek_v4", 384, "V4 Pro", 16),
+            ("deepseek_v4.1", 384, "V4.1", 8),
+            ("deepseek_v41", 384, "V4.1", 8),
+        )
+        for model_type, num_experts, variant, max_tp_size in cases:
+            for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
+                with self.subTest(model_type=model_type, device_type=device_type):
+                    vllm_config = self.mock_vllm_config()
+                    vllm_config.use_v2_model_runner = True
+                    vllm_config.model_config.hf_config = SimpleNamespace(
+                        model_type=model_type,
+                        n_routed_experts=num_experts,
+                    )
+                    vllm_config.model_config.hf_text_config = None
+                    vllm_config.parallel_config.tensor_parallel_size = max_tp_size + 1
+
+                    with (
+                        patch(
+                            "vllm_ascend.platform.get_current_hardware_profile",
+                            return_value=get_hardware_profile(device_type),
+                        ),
+                        pytest.raises(ValueError, match=rf"{variant} supports at most TP{max_tp_size}"),
+                    ):
+                        _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+
+    def test_validate_deepseek_v4_tp_config_accepts_tp_at_device_limit(self):
+        cases = (
+            ("deepseek_v4", 256, 8),
+            ("deepseek_v4", 384, 16),
+            ("deepseek_v4.1", 384, 8),
+        )
+        for model_type, num_experts, tp_size in cases:
+            with self.subTest(model_type=model_type, tp_size=tp_size):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = True
+                vllm_config.model_config.hf_config = SimpleNamespace(
+                    model_type=model_type,
+                    n_routed_experts=num_experts,
+                )
+                vllm_config.model_config.hf_text_config = None
+                vllm_config.parallel_config.tensor_parallel_size = tp_size
+
+                with patch(
+                    "vllm_ascend.platform.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ):
+                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+
+    def test_validate_deepseek_v41_tp_config_reads_text_config(self):
+        cases = (
+            ("deepseek_v4.1", "deepseek_v4.1_text"),
+            ("deepseek_v41", "deepseek_v41_text"),
+        )
+        for root_model_type, text_model_type in cases:
+            with self.subTest(root_model_type=root_model_type):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = True
+                vllm_config.model_config.hf_config = SimpleNamespace(model_type=root_model_type)
+                vllm_config.model_config.hf_text_config = SimpleNamespace(
+                    model_type=text_model_type,
+                    n_routed_experts=384,
+                )
+                vllm_config.parallel_config.tensor_parallel_size = 9
+
+                with (
+                    patch(
+                        "vllm_ascend.platform.get_current_hardware_profile",
+                        return_value=get_hardware_profile(AscendDeviceType.A3),
+                    ),
+                    pytest.raises(ValueError, match=r"V4\.1 supports at most TP8"),
+                ):
+                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+
+    def test_validate_deepseek_v4_tp_config_rejects_tp_on_a5(self):
+        for use_v2_model_runner in (False, True):
+            with self.subTest(use_v2_model_runner=use_v2_model_runner):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = use_v2_model_runner
+                vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=256)
+                vllm_config.model_config.hf_text_config = None
+                vllm_config.parallel_config.tensor_parallel_size = 2
+
+                with (
+                    patch(
+                        "vllm_ascend.platform.get_current_hardware_profile",
+                        return_value=get_hardware_profile(AscendDeviceType.A5),
+                    ),
+                    pytest.raises(ValueError, match="does not support tensor parallelism on A5"),
+                ):
+                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+
+    def test_validate_deepseek_v4_tp_config_allows_v1_dsa_cp(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=256)
+        vllm_config.model_config.hf_text_config = None
+        vllm_config.parallel_config.tensor_parallel_size = 32
+
+        with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_get_hardware_profile:
+            _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=True))
+
+        mock_get_hardware_profile.assert_not_called()
+
+    def test_validate_deepseek_v4_tp_config_does_not_exempt_v2_dsa_cp(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=384)
+        vllm_config.model_config.hf_text_config = None
+        vllm_config.parallel_config.tensor_parallel_size = 17
+
+        with (
+            patch(
+                "vllm_ascend.platform.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A2),
+            ),
+            pytest.raises(ValueError, match="V4 Pro supports at most TP16"),
+        ):
+            _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=True))
+
+    def test_validate_deepseek_v4_tp_config_ignores_unrelated_models(self):
+        for model_type, num_experts in (("deepseek_v4", 128), ("deepseek_v3", 256)):
+            with self.subTest(model_type=model_type, num_experts=num_experts):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = True
+                vllm_config.model_config.hf_config = SimpleNamespace(
+                    model_type=model_type,
+                    n_routed_experts=num_experts,
+                )
+                vllm_config.model_config.hf_text_config = None
+                vllm_config.parallel_config.tensor_parallel_size = 32
+
+                with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_get_hardware_profile:
+                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+
+                mock_get_hardware_profile.assert_not_called()
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(

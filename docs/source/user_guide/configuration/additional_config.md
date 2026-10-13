@@ -48,12 +48,17 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
-| `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
+| `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
+| `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
+| `runtime_config_hot_reload`         | bool | `false` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
+| `runtime_config`                    | dict | `None`  | Startup overlay merged into runtime config defaults (detectors, dump quota, report flags). |
+| `runtime_report_dir`                | str  | `None`  | Override report root directory. Default: `<cwd>/runtime/report`. |
+| `runtime_dump_dir`                 | str  | `None`  | Seed KV dump root (`dump.dump_dir`). Default derived from report root. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
@@ -83,6 +88,35 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+<span id="runtime_guard"></span>**runtime_guard**
+
+Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM-Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
+| `runtime_config_hot_reload` | bool | `false` | Enable hot-reload (startup-only; not a JSON field). `false` = static config after startup. |
+| `runtime_config` | dict | `None` | Startup overlay: `defaults ← runtime_config`. Bootstrap overwrites the JSON file with this effective config. Hot-reload re-reads the JSON file only. |
+| `runtime_report_dir` | str | `None` | Report and KV dump root. Default `<cwd>/runtime/report`. |
+| `runtime_dump_dir` | str | `None` | Seed `dump.dump_dir` at startup; JSON hot-reload of `dump.dump_dir` wins afterwards. |
+
+Example (online):
+
+```bash
+vllm serve Qwen/Qwen3-8B --additional-config '{
+  "runtime_config_path": "/data/runtime/config/runtime_config.json",
+  "runtime_config_hot_reload": true,
+  "runtime_config": {
+    "detector": {
+      "token_repeat": { "enabled": true, "on_trigger": ["report", "dump_kv"] }
+    },
+    "dump": { "auto_max_times": 3 }
+  }
+}'
+```
+
+Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`.
+
 **xlite_graph_config**
 
 | Name | Type | Default | Description |
@@ -94,10 +128,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of lm_head.    |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of embedding. |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of mlp.       |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -314,10 +348,10 @@ An example of additional configuration is as follows:
 ```python
 {
     "finegrained_tp_config": {
-        "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,
-        "embedding_tensor_parallel_size": 8,
         "mlp_tensor_parallel_size": 8,
+        "lmhead_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
