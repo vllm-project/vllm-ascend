@@ -374,7 +374,6 @@ class ServerCommandBuilder:
             "VISIBLE_DEVICES": rank.visible_devices,
             "NODE_INDEX": str(rank.node_index),
             "CONFIG_INDEX": str(rank.node_index),
-            #修改
             "PP_LAYER_PARTITION": rank.pp_layer_partition,
             "NNODES": str(rank.nnodes),
             "NODE_RANK": str(rank.node_rank),
@@ -475,15 +474,6 @@ class ExternalDPServerManager:
 
     def start_current_node(self) -> None:
         local_ranks = [rank for rank in self.ranks if rank.node_index == self.current_node_index]
-        # PP worker 等 master 就绪
-        # pp_workers = [r for r in local_ranks if r.is_headless and r.nnodes > 1]
-        # if pp_workers:
-        #     master_rank = next(
-        #         r for r in self.ranks
-        #         if r.role == "prefiller" and not r.is_headless and r.nnodes > 1
-        #     )
-        #     logger.info("PP worker waiting for master %s", rank_health_url(master_rank))
-        #     wait_http_ready(rank_health_url(master_rank), timeout=SERVER_READY_TIMEOUT_SECONDS)
         logger.info("Starting %d external DP ranks on node %d", len(local_ranks), self.current_node_index)
         try:
             for rank in local_ranks:
@@ -597,7 +587,6 @@ def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> l
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        #修改
         prefiller_ranks = [r for r in ranks if r.role == "prefiller" and not r.is_headless]
         decoder_ranks = [r for r in ranks if r.role == "decoder"]
         if not prefiller_ranks or not decoder_ranks:

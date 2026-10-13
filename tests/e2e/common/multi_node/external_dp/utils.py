@@ -153,7 +153,7 @@ def _extract_dtype(config: ExternalDPConfig, commands: list["ServerCommand"]) ->
     has_quant_ascend = any("--quantization ascend" in command.display_cmd for command in commands)
     return "w8a8" if has_w8a8 and has_quant_ascend else "bf16"
 
-#修改
+
 def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     if not commands:
         return []
@@ -204,11 +204,15 @@ def _build_serve_cmd(
     entries: dict[str, str] = {}
     for rank, command in zip(ranks, commands):
         prefix = rank.role
-        #修改点
         if config.routing.type == ROUTING_DISAGGREGATED_PREFILL:
             if rank.role == "prefiller":
-                prefix = "prefill_pp_master" if rank.nnodes > 1 and not rank.is_headless else \
-                    "prefill_pp_worker" if rank.is_headless else "prefill"
+                prefix = (
+                    "prefill_pp_master"
+                    if rank.nnodes > 1 and not rank.is_headless
+                    else "prefill_pp_worker"
+                    if rank.is_headless
+                    else "prefill"
+                )
             else:
                 prefix = "decode"
         entries[f"{prefix}-node{rank.node_index}-rank{rank.local_rank}"] = command.display_cmd
