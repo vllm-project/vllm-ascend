@@ -68,11 +68,6 @@ msgstr ""
 "本文档重点介绍在昇腾 NPU "
 "上的文本服务。它描述了该模型的主要验证步骤，包括支持的特性、前提条件、安装、多节点部署、功能验证、精度和性能评估、性能调优以及常见问题解答。"
 
-msgid ""
-"This document is validated and written based on **vLLM-Ascend 0.23.0**. The "
-"current model (Qwen3.8-27B) is first supported in this version."
-msgstr "本文档基于 **vLLM-Ascend 0.23.0** 进行验证和编写。当前模型（Qwen3.8-27B）在该版本中首次得到支持。"
-
 msgid "## 2 Supported Features"
 msgstr "## 2 支持的特性"
 
@@ -226,33 +221,6 @@ msgstr ""
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
 
-msgid ""
-"1. Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
-msgstr ""
-"1. 有关详细信息，请参阅 "
-"[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
-
-msgid ""
-"2. After execution, you can get the result. Here are the results of "
-"`Qwen3.8-27B`, `Qwen3.8-27B-w8a8` and `Qwen3.8-27B-w8a8-mxfp8` in `vllm-"
-"ascend:v0.23.0rc1` for reference only."
-msgstr ""
-"2. 执行后，您可以获得结果。以下是 `vllm-ascend:v0.23.0rc1` 中 "
-"`Qwen3.8-27B`、`Qwen3.8-27B-w8a8` 和 `Qwen3.8-27B-w8a8-mxfp8` 的结果，仅供参考。"
-
-msgid "| dataset | model | metric | mode | vllm-api-general-chat |"
-msgstr "| dataset | model | metric | mode | vllm-api-general-chat |"
-
-msgid "| GPQA Diamond | Qwen3.8-27B | accuracy | gen | 90.40 |"
-msgstr "| GPQA Diamond | Qwen3.8-27B | accuracy | gen | 90.40 |"
-
-msgid "| GPQA Diamond | Qwen3.8-27B-w8a8 | accuracy | gen | 89.90 |"
-msgstr "| GPQA Diamond | Qwen3.8-27B-w8a8 | accuracy | gen | 89.90 |"
-
-msgid "| GPQA Diamond | Qwen3.8-27B-w8a8-mxfp8 | accuracy | gen | 89.39 |"
-msgstr "| GPQA Diamond | Qwen3.8-27B-w8a8-mxfp8 | accuracy | gen | 89.39 |"
-
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
@@ -278,9 +246,6 @@ msgstr "=== \"Atlas 800 A3 / Atlas 800 A2\""
 
 msgid "The following example is for Atlas 800 A3 / Atlas 800 A2."
 msgstr "以下示例适用于Atlas 800 A3 / Atlas 800 A2。"
-
-msgid "Here is an accuracy evaluation method."
-msgstr "以下是一种精度评估方法。"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -608,11 +573,27 @@ msgid ""
 "successful startup includes output similar to the following:"
 msgstr "等待引擎完成权重加载和图捕获。成功启动会包含类似以下的输出："
 
-msgid "### 7.1 Using AISBench"
-msgstr "### 7.1 使用 AISBench"
-
 msgid "### 8.1 Using AISBench"
 msgstr "### 8.1 使用 AISBench"
 
 msgid "### 8.2 Using vLLM Benchmark"
 msgstr "### 8.2 使用 vLLM Benchmark"
+
+msgid ""
+"It is **recommended to use the latest release candidate (rc) version or the "
+"latest official version** of the `vllm-ascend` image to ensure the best "
+"compatibility and access to the latest features."
+msgstr "**建议使用最新候选发布（rc）版本或最新正式版本**的 `vllm-ascend` 镜像，以确保最佳兼容性并获取最新特性。"
+
+msgid ""
+"Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)\n"
+"to evaluate the deployed service. Accuracy results will be documented in the\n"
+"[release notes](../../user_guide/release_notes.md). When reporting results, record the\n"
+"checkpoint, prompt encoder, reasoning effort, sampling parameters and dataset\n"
+"version."
+msgstr ""
+"请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)\n"
+"对已部署的服务进行评估。精度结果将记录在\n"
+"[发布说明](../../user_guide/release_notes.md)中。报告结果时，请记录\n"
+"checkpoint、prompt encoder、reasoning effort、采样参数和数据集\n"
+"版本。"
