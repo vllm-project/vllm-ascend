@@ -250,33 +250,61 @@ def test_offloading_connector_config_name_resolves_to_ascend_class(
 
 
 def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The no-alias decision for the two stats-silent connectors is
+    """The no-alias decision for the stats-silent PreemptOffloadConnector is
     comment-only in the source; pin the negative case so a class-name key
     cannot appear in the registry without someone updating the comments.
+    (AscendSimpleCPUOffloadConnector now carries a class-name alias: upstream
+    vLLM exposes SimpleCPU offload metrics, vllm-project/vllm#41790.)
     """
     from vllm_ascend.distributed.kv_transfer import register_connector
 
     monkeypatch.setattr(KVConnectorFactory, "_registry", {})
     register_connector()
 
-    assert "AscendSimpleCPUOffloadConnector" not in KVConnectorFactory._registry
     assert "PreemptOffloadConnectorV1" not in KVConnectorFactory._registry
 
 
-def test_no_alias_connectors_inherit_base_stats_default() -> None:
-    """The no-alias decision rests on these connectors never emitting stats;
-    pin the premise so a future get_kv_connector_stats override (upstream
-    vllm-project/vllm#41790 would add one to SimpleCPUOffload) is caught here
-    instead of reviving the #16932 crash.
+def test_simple_cpu_offload_connector_carries_class_name_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream vLLM now exposes SimpleCPU offload metrics
+    (vllm-project/vllm#41790), so AscendSimpleCPUOffloadConnector emits stats
+    and must carry a class-name alias or the #16932 crash returns. Pin the
+    positive case: both the config name and the class name resolve to the
+    Ascend class.
     """
-    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (
-        PreemptOffloadConnectorV1,
-    )
+    from vllm_ascend.distributed.kv_transfer import register_connector
     from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
         AscendSimpleCPUOffloadConnector,
     )
 
-    for cls in (AscendSimpleCPUOffloadConnector, PreemptOffloadConnectorV1):
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+
+    assert (
+        KVConnectorFactory._registry["SimpleCPUOffloadConnector"]()
+        is AscendSimpleCPUOffloadConnector
+    )
+    assert (
+        KVConnectorFactory._registry["AscendSimpleCPUOffloadConnector"]()
+        is AscendSimpleCPUOffloadConnector
+    )
+
+
+def test_no_alias_connectors_inherit_base_stats_default() -> None:
+    """The no-alias decision rests on the connector never emitting stats;
+    pin the premise so a future get_kv_connector_stats override is caught here
+    instead of reviving the #16932 crash.
+
+    AscendSimpleCPUOffloadConnector is no longer checked: upstream vLLM now
+    exposes SimpleCPU offload metrics (vllm-project/vllm#41790), so it emits
+    stats and carries a class-name alias (see register_connector).
+    """
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (
+        PreemptOffloadConnectorV1,
+    )
+
+    for cls in (PreemptOffloadConnectorV1,):
         # The defining class in the MRO must be the vllm base - compare by
         # qualified name, not identity, because the base module can be loaded
         # under a second path in the same process.
