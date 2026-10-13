@@ -2062,8 +2062,9 @@ def main():
                 except urllib.error.HTTPError as e:
                     if e.code != 406:
                         raise
-                    print("  API returned 406 (diff exceeds GitHub diff limits), "
-                          "falling back to github.com diff endpoint")
+                    print(
+                        "  API returned 406 (diff exceeds GitHub diff limits), falling back to github.com diff endpoint"
+                    )
                     fallback_url = f"https://github.com/{repo}/pull/{pr_num}.diff"
                     req = _github_request(fallback_url, "text/plain")
                     with urllib.request.urlopen(req, timeout=120, context=ssl_context) as response:
