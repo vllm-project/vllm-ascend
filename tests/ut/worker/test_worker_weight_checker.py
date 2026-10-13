@@ -9,6 +9,7 @@ access for both runner shapes, and the clear error for an outdated vLLM.
 """
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -69,7 +70,7 @@ def test_dense_dp_replicas_get_distinct_key_prefixes(mock_parallel_groups):
 def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups):
     pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     worker = _make_worker(dp_rank=0)
-    worker.model_runner = SimpleNamespace(get_model=lambda: _TinyModel())
+    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: _TinyModel()))
 
     checksums = worker.compute_weight_checksums()
 
@@ -82,7 +83,7 @@ def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_asce
     pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
-    worker.model_runner = SimpleNamespace(get_model=lambda: model)
+    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
 
     worker.reset_weights()
 
@@ -95,7 +96,7 @@ def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_con
     model = _TinyModel()
     # The v2 model runner only exposes the model attribute, no get_model().
     worker = _make_worker(dp_rank=0)
-    worker.model_runner = SimpleNamespace(model=model)
+    worker.model_runner = cast(Any, SimpleNamespace(model=model))
 
     checksums = worker.compute_weight_checksums()
     assert set(checksums) == {"dp0:pp0:pcp0:tp0:linear.weight"}

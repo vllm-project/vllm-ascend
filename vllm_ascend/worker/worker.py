@@ -71,7 +71,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 try:
-    from vllm.model_executor.model_loader.weight_checksum import (
+    from vllm.model_executor.model_loader.weight_checksum import (  # type: ignore[import-not-found]
         compute_tensor_digests,
         zero_weights,
     )
