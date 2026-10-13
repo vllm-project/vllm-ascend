@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -32,6 +33,8 @@ from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
 )
 from vllm_ascend.utils import _round_up, enable_dsa_cp
+
+logger = init_logger(__name__)
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -473,7 +476,19 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
 
         self.indexer_op = SparseAttnIndexerKpool(self.topk_tokens, self.head_dim)
-        self.enable_sparse_li_c8 = False
+        # The model-side cache owns the LI C8 decision; mirror it so the cache
+        # spec and this backend can never disagree.
+        self.enable_sparse_li_c8 = self.k_cache.quant_dtype is not None
+        if self.enable_sparse_li_c8:
+            self.c8_k_cache_dtype = self.k_cache.quant_dtype
+            # The pooled cache packs one fp32 scale at the end of every
+            # quantized pool row, independent of the quantized dtype.
+            self.c8_k_scale_cache_dtype = torch.float32
+            logger.info(
+                "KPool indexer LI C8 enabled for %s: k_cache dtype=%s, scale dtype=fp32",
+                self.k_cache.prefix,
+                self.c8_k_cache_dtype,
+            )
         for name in ("_wk_weight_f32", "_gate_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
             self.register_buffer(name, None, persistent=False)
 

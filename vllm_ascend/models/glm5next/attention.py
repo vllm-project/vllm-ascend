@@ -10,6 +10,7 @@ from vllm.config import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -27,13 +28,17 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     yarn_get_mscale,
 )
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
     get_kpool_tail_ring_capacity,
 )
+
+logger = init_logger(__name__)
 
 
 class Indexer(nn.Module):
@@ -98,7 +103,16 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16 vectors without quantization scales.
+        # Completed pools store BF16 vectors by default. With LI C8
+        # (attention_config.indexer_kv_dtype in {int8, fp8}) each pooled row is
+        # stored as head_dim quantized bytes plus one packed FP32 scale.
+        li_c8_dtype = None
+        if get_ascend_config().is_kpool_li_c8_enabled():
+            li_c8_dtype = kv_cache_dtype_str_to_dtype(
+                vllm_config.attention_config.indexer_kv_dtype,
+                vllm_config.model_config,
+            )
+            logger.info_once("GLM-Next KPool indexer LI C8 enabled: pooled rows store %s + FP32 scale.", li_c8_dtype)
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
             dtype=torch.bfloat16,
@@ -106,6 +120,7 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
+            quant_dtype=li_c8_dtype,
         )
         # Request-owned FP32 K/gate ring retains the incomplete pool.
         self.tail_cache = Glm5NextTailCache(

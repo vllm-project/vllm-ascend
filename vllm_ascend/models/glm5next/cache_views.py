@@ -67,6 +67,59 @@ def _view_compressed_indexer_cache(
     indexer_kernel_block_size = kernel_block_size // compression_ratio
     num_blocks = raw_single.numel() // kv_cache_spec.page_size_bytes
     num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // indexer_kernel_block_size
+    typed_slot = raw_single.view(kv_cache_spec.dtype)
+    if kv_cache_spec.scale_dim > 0:
+        # LI C8 packed row: head_dim quantized bytes followed by the scale.
+        # Two layouts are supported: an unpadded page (exact fill) flattens to
+        # one row-major view over all kernel blocks; a padded page is only
+        # affine when it holds exactly one kernel block, indexed through the
+        # padded-page stride.
+        dtype_size = get_dtype_size(kv_cache_spec.dtype)
+        row_elems = (
+            kv_cache_spec.head_size + kv_cache_spec.scale_dim * get_dtype_size(kv_cache_spec.scale_dtype) // dtype_size
+        )
+        if raw_single.numel() % kv_cache_spec.page_size_bytes:
+            raise ValueError(f"Compressed indexer cache for {layer_name} is not a whole number of padded pages.")
+        page_el = kv_cache_spec.page_size_bytes // dtype_size
+        content_el = get_storage_block_size(kv_cache_spec) * row_elems
+        if content_el > page_el:
+            raise ValueError(
+                f"Compressed indexer cache for {layer_name} does not fit one small page: "
+                f"content={content_el} elements, page={page_el} elements."
+            )
+        if page_el == content_el:
+            # Exact fill: kernel blocks pack contiguously inside every page, so
+            # one flat row-major view serves all of them, however many kernel
+            # blocks a scheduler block holds.
+            shape = (
+                num_blocks * num_blocks_per_kv_block,
+                indexer_kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                row_elems,
+            )
+            strides = _row_major_strides(shape)
+            if strides[0] * shape[0] != typed_slot.numel():
+                raise ValueError(
+                    f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "
+                    f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
+                )
+            return (torch.as_strided(typed_slot, size=shape, stride=tuple(strides)),)
+        if num_blocks_per_kv_block != 1:
+            # A padded page would put a non-affine gap between the kernel
+            # blocks of one scheduler block; the kernels index by kernel block.
+            raise NotImplementedError(
+                f"Compressed indexer cache for {layer_name} with packed scales requires unpadded pages when a "
+                f"scheduler block holds multiple kernel blocks, got {num_blocks_per_kv_block} "
+                f"(block_size={kv_cache_spec.block_size}, tokens_per_state={kv_cache_spec.tokens_per_state}, "
+                f"kernel_block_size={kernel_block_size}, "
+                f"storage_rows={get_storage_block_size(kv_cache_spec)}, "
+                f"page_size_bytes={kv_cache_spec.page_size_bytes})."
+            )
+        # Padded page with one kernel block per scheduler block: index rows
+        # through the padded-page stride.
+        shape = (num_blocks, indexer_kernel_block_size, kv_cache_spec.num_kv_heads, row_elems)
+        strides = (page_el, row_elems, row_elems, 1)
+        return (torch.as_strided(typed_slot, size=shape, stride=strides),)
     shape = tuple(
         attn_backend.get_kv_cache_shape(
             num_blocks * num_blocks_per_kv_block,
@@ -76,7 +129,6 @@ def _view_compressed_indexer_cache(
         )
     )
     strides = _row_major_strides(shape)
-    typed_slot = raw_single.view(kv_cache_spec.dtype)
     if strides[0] * shape[0] != typed_slot.numel():
         raise ValueError(
             f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "
