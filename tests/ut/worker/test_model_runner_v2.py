@@ -329,6 +329,79 @@ def test_execute_model_skips_dp_coordination_when_safe():
     mock_execute_model.assert_called_once()
 
 
+def _external_dp_runner():
+    runner = _make_runner(need_timing=False)
+    runner.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
+    runner.vllm_config.parallel_config.data_parallel_size = 32
+    return runner
+
+
+def test_execute_model_dummy_syncs_empty_external_dp_step():
+    runner = _external_dp_runner()
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True,
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={},
+    )
+    order: list[str] = []
+
+    def super_execute(self, output, **kwargs):
+        del self, output, kwargs
+        order.append("super")
+        return "empty"
+
+    def dummy_run(num_tokens, *args, **kwargs):
+        del args
+        order.append(f"dummy:{num_tokens}:{kwargs.get('skip_gdn_state_update')}")
+
+    runner._dummy_run = dummy_run
+    with (
+        patch.object(GPUModelRunner, "execute_model", super_execute),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
+    ):
+        assert runner.execute_model(scheduler_output) == "empty"
+
+    assert order == ["dummy:1:True", "super"]
+
+
+@pytest.mark.parametrize(
+    ("tokens", "dummy", "profile", "backend", "dp_size", "skip_allreduce"),
+    [
+        (4, False, False, "external_launcher", 32, False),
+        (0, True, False, "external_launcher", 32, False),
+        (0, False, True, "external_launcher", 32, False),
+        (0, False, False, "mp", 32, False),
+        (0, False, False, "external_launcher", 1, False),
+        (0, False, False, "external_launcher", 32, True),
+    ],
+)
+def test_execute_model_skips_empty_dp_dummy_outside_the_stall(
+    tokens, dummy, profile, backend, dp_size, skip_allreduce
+):
+    runner = _external_dp_runner()
+    runner.vllm_config.parallel_config.distributed_executor_backend = backend
+    runner.vllm_config.parallel_config.data_parallel_size = dp_size
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True,
+        total_num_scheduled_tokens=tokens,
+        num_scheduled_tokens={} if tokens == 0 else {0: tokens},
+    )
+    runner._dummy_run = Mock()
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=skip_allreduce,
+        ),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=dummy, is_profile=profile)
+
+    runner._dummy_run.assert_not_called()
+
+
 def test_full_decode_only_keeps_graph_descriptor_request_count():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
