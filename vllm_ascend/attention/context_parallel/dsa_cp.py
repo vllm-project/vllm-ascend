@@ -1962,6 +1962,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         common_attn_kwargs = dict(
             cu_seqlens_q=local_seq_lengths_query,
+            total_q_tokens=common_attn_metadata.num_actual_tokens,
             seqused_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
