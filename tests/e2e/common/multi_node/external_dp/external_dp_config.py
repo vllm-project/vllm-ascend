@@ -77,7 +77,7 @@ class NodeInfo:
 
 
 @dataclass(frozen=True)
-class NodeTemplate:git
+class NodeTemplate:
     """Per-node env and argument template for launching vLLM servers."""
 
     envs: dict[str, Any]
