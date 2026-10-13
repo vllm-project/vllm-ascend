@@ -53,6 +53,37 @@ def test_complete_apis_are_selected(detector):
     assert detector["get_flashmla_ops"]() == (attention, metadata)
 
 
+def test_renamed_api_pair_is_preferred(detector):
+    attention, metadata, legacy_attention, legacy_metadata = Mock(), Mock(), Mock(), Mock()
+    detector["import_module"].return_value = SimpleNamespace(
+        flash_mla=attention,
+        flash_mla_metadata=metadata,
+        flash_mla_with_kvcache=legacy_attention,
+        flash_mla_with_kvcache_metadata=legacy_metadata,
+    )
+    assert detector["get_flashmla_ops"]() == (attention, metadata)
+
+
+def test_renamed_only_package_is_selected(detector):
+    attention, metadata = Mock(), Mock()
+    detector["import_module"].return_value = SimpleNamespace(flash_mla=attention, flash_mla_metadata=metadata)
+    assert detector["get_flashmla_ops"]() == (attention, metadata)
+
+
+@pytest.mark.parametrize(
+    "apis",
+    [
+        {"flash_mla": Mock()},
+        {"flash_mla": 1, "flash_mla_metadata": Mock()},
+        {"flash_mla": Mock(), "flash_mla_with_kvcache_metadata": Mock()},
+        {"flash_mla_with_kvcache": Mock(), "flash_mla_metadata": Mock()},
+    ],
+)
+def test_incomplete_or_mixed_api_pairs_are_rejected(detector, apis):
+    detector["import_module"].return_value = SimpleNamespace(**apis)
+    assert detector["get_flashmla_ops"]() is None
+
+
 @pytest.mark.parametrize("missing", ["cann_ops_transformer", "cann_ops_transformer.ops", "internal_dependency"])
 def test_import_failure_boundary(detector, missing):
     detector["import_module"].side_effect = ModuleNotFoundError(missing, name=missing)
