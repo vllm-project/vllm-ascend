@@ -27,7 +27,7 @@ class DeviceTensor:
 def load_reader(copy, fmt=2):
     # Execute the production function, isolating only device factories and the
     # final copy kernel without duplicating the slot computation.
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/paged_mla_cache_read.py"
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/device/paged_mla_cache_read.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.Assign))]
     cpu_torch = SimpleNamespace(

@@ -28,10 +28,10 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.ops.triton.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
