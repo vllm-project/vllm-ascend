@@ -26,6 +26,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
 def _make_vllm_config(
     *,
     enable_expert_parallel: bool = True,
+    enable_eplb: bool = False,
     world_size: int = 8,
     pipeline_parallel_size: int = 1,
     tensor_parallel_size: int = 1,
@@ -54,6 +55,7 @@ def _make_vllm_config(
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
+        enable_eplb=enable_eplb,
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
@@ -87,6 +89,8 @@ def _patch_select_moe_comm_method_deps(
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
     is_moe: bool = True,
+    dynamic_eplb: bool = False,
+    expert_map_path: str | None = None,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
@@ -95,7 +99,10 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2,
+            eplb_config=SimpleNamespace(dynamic_eplb=dynamic_eplb, expert_map_path=expert_map_path),
+        ),
     )
 
 
@@ -447,26 +454,48 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
 
 
 @pytest.mark.parametrize(
+    ("enable_eplb", "dynamic_eplb", "expert_map_path"),
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (False, False, "expert_map.json"),
+    ],
+    ids=["disabled", "mrv2", "mrv1-dynamic", "mrv1-static"],
+)
+@pytest.mark.parametrize(
     ("num_tokens", "world_size", "top_k_experts", "expected"),
     [
         (128, 4, 2, MoECommType.MC2),
+        (128, 2, 4, MoECommType.MC2),
+        (None, 2, 4, MoECommType.MC2),
         (129, 2, 4, MoECommType.ALLGATHER),
+        (129, 4, 4, MoECommType.ALLGATHER),
         (129, 8, 4, MoECommType.ALLTOALL),
     ],
 )
-def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_experts, expected):
+def test_select_moe_comm_method_a5(
+    monkeypatch, num_tokens, world_size, top_k_experts, expected, enable_eplb, dynamic_eplb, expert_map_path
+):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A5,
         capacity=128,
+        dynamic_eplb=dynamic_eplb,
+        expert_map_path=expert_map_path,
     )
-    vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
+    vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts, enable_eplb=enable_eplb)
 
+    if expected == MoECommType.ALLGATHER and (enable_eplb or dynamic_eplb or expert_map_path is not None):
+        with pytest.raises(ValueError, match="EPLB is not supported with AllGather MoE communication on A5"):
+            afc.select_moe_comm_method(num_tokens, vllm_config)
+        return
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
 @pytest.mark.parametrize("num_tokens", [128, 4096])
-def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_tokens):
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_tokens, enable_eplb):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A5,
@@ -474,7 +503,7 @@ def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_to
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8, enable_eplb=enable_eplb)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == MoECommType.FUSED_MC2
 

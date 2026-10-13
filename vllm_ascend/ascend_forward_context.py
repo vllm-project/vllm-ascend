@@ -359,6 +359,13 @@ def _select_capacity_and_world_size_moe_comm_method(
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
+        eplb_config = get_ascend_config().eplb_config
+        if (
+            vllm_config.parallel_config.enable_eplb
+            or eplb_config.dynamic_eplb
+            or eplb_config.expert_map_path is not None
+        ):
+            raise ValueError("EPLB is not supported with AllGather MoE communication on A5.")
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
