@@ -457,7 +457,7 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
-    def test_consumer_save_decode_cache_rejects_layerwise(self, mock_worker_cls, mock_lookup_cls):
+    def test_consumer_save_decode_cache_enables_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
             extra_config={
@@ -467,12 +467,16 @@ class TestAscendStoreConnector(unittest.TestCase):
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        with self.assertRaisesRegex(ValueError, "does not support use_layerwise"):
-            AscendStoreConnector(
-                vllm_config=config,
-                role=KVConnectorRole.WORKER,
-                kv_cache_config=None,
-            )
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+        connector.save_kv_layer("layer0", MagicMock(), MagicMock())
+        self.assertTrue(connector.can_put)
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once_with(metadata)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")

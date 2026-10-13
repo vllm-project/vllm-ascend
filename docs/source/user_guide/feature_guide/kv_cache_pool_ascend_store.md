@@ -27,7 +27,7 @@ KV Cache supports the following three external storage backends, choose the stor
 | Hardware | Supported hardware A2/A3/950PR&950DT Products. |
 | Software Dependencies | For HDK/CANN requirements of each series, see the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference). |
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
-| Feature Mutex | `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends. |
+| Feature Mutex | `use_layerwise` supports Prefill save/load and Mooncake Decode saving with `save_decode_cache=true`. |
 
 **Backend-specific**
 
@@ -352,7 +352,7 @@ KV Cache supports the following three external storage backends, choose the stor
         }
         ```
 
-    4. To publish complete Decode blocks while keeping Prefill writes disabled, set `save_decode_cache: true` on the consumer. The first Decode save checks the aligned, reachable Prefill prefix and fills missing ancestor blocks. Later saves resume from the worker's last successful offset; failed ranges are checked again at the next completed-block boundary. This mode requires non-layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV.
+    4. To publish complete Decode blocks while keeping Prefill writes disabled, set `save_decode_cache: true` on the consumer. The first Decode save checks the aligned, reachable Prefill prefix and fills missing ancestor blocks. Later saves resume incrementally; failed ranges are checked again at the next completed-block boundary. Layerwise retries retain the earliest failed offset per request, recheck existing blocks, and apply the current reachable-state masks. Mooncake supports this mode with both bulk and layerwise transfer (`use_layerwise: true`). Layerwise PUTs overlap layer computation and finish before the step releases its source blocks. It writes KV to the Store for reuse and does not free the active request's NPU KV.
 
         ```json
         {
@@ -909,7 +909,7 @@ Expected output: MetaService starts successfully with no errors.
     echo "vLLM started. Log file: log_${ROLE}.log"
     ```
 
-    `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
+    `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; Mooncake consumers can also publish complete Decode blocks with `save_decode_cache: true`. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
@@ -1551,9 +1551,9 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
-| `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
+| `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; Mooncake also supports this consumer mode with `use_layerwise=true`. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
-| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
+| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Mooncake consumers can also save complete Decode blocks with `save_decode_cache=true`. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |

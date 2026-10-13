@@ -17,8 +17,9 @@ from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
-def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
-    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+def is_kv_save_role(kv_role: str, consumer_is_to_put: bool, save_decode_cache: bool = False) -> bool:
+    """Whether the worker can write; ReqMeta.can_save gates individual steps."""
+    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put or save_decode_cache
 
 
 @dataclass(frozen=True)

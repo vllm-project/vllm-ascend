@@ -1918,6 +1918,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         put_started_keys: set[str] | None = None,
         put_started_keys_lock: threading.Lock | None = None,
         session_tracker: LayerwiseSessionTracker | None = None,
+        track_failed_saves: bool = False,
     ):
         super().__init__(
             m_store,
@@ -1938,6 +1939,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         self._put_started_keys = put_started_keys if put_started_keys is not None else set()
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
         self._session_tracker = session_tracker
+        self._track_failed_saves = track_failed_saves
+        self._failed_save_keys: set[str] = set()
         self._active_put_keys: set[str] | None = None
         self._group_put_keys: dict[int, set[str] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
@@ -1963,6 +1966,12 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         else:
             builder = self.layer_batch_builder
         return builder.build_shared(task, is_save=True)
+
+    def take_failed_save_keys(self) -> set[str]:
+        """Consume failures after the worker has drained this step's PUTs."""
+        keys = self._failed_save_keys
+        self._failed_save_keys = set()
+        return keys
 
     def add_revoke_request(self, keys: list[str]) -> None:
         deduplicated_keys = tuple(dict.fromkeys(keys))
@@ -2019,6 +2028,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
+                if self._track_failed_saves:
+                    self._failed_save_keys.update(failed_keys)
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
 
@@ -2036,6 +2047,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 raise
             failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
             if failed_keys:
+                if self._track_failed_saves:
+                    self._failed_save_keys.update(failed_keys)
                 self._revoke_range_keys(failed_keys)
             committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
             if self._session_tracker is not None:
