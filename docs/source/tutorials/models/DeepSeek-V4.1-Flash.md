@@ -273,7 +273,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
 
-    #### 5.2.1 Prepare the DP Launcher
+    #### 5.2.1.1 Prepare the DP Launcher
 
     Save the following script as `launch_online_dp.py` on both nodes. It divides
     the node's visible devices among local DP ranks and starts one vLLM process per
@@ -355,7 +355,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
-    #### 5.2.2 Start the Prefill Node
+    #### 5.2.1.2 Start the Prefill Node
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Prefill node's service IP,
@@ -445,7 +445,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.2.3 Start the Decode Node
+    #### 5.2.1.3 Start the Decode Node
 
     On the Decode node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Decode node's service IP,
@@ -538,7 +538,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.2.4 Deploy the PD Proxy
+    #### 5.2.1.4 Deploy the PD Proxy
 
     After all Prefill and Decode engines are ready, deploy the proxy as described
     in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
@@ -546,7 +546,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
     `<DECODE_NODE_IP>:7107`.
 
-    #### 5.2.5 Key Parameter Descriptions
+    #### 5.2.1.5 Key Parameter Descriptions
 
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` gives every Prefill and Decode engine up
       to 36,000 seconds to finish startup. This includes weight loading and Decode
@@ -1117,7 +1117,7 @@ python3 memcache_standalone.py
 For additional parameters and capacity constraints, refer to
 [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-Reuse `launch_online_dp.py` from Section 5.2.1. Set `MEMCACHE_INSTALL_PATH` to
+Reuse `launch_online_dp.py` from Section 5.2.1.1. Set `MEMCACHE_INSTALL_PATH` to
 the `Location` reported by `pip show memcache_hybrid`, and set
 `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
 files above on both nodes.
@@ -1337,7 +1337,7 @@ PD proxy.
 Wait until both standalone Memcache processes report successful initialization
 before starting the Decode engines. Then wait until every Decode engine reports
 `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-same endpoint mapping described in Section 5.2.4.
+same endpoint mapping described in Section 5.2.1.4.
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs
 show Memcache lookup, get, put, and hit activity, and that Decode logs still
@@ -1369,15 +1369,11 @@ CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
 Before starting vLLM, follow the
-[Memcache backend guide](../../user_guide/feature_guide/kv_pool.md)
+[Mooncake backend guide](../../user_guide/feature_guide/kv_pool.md)
 configure `mooncake.json`, and start the
 mooncake_master Service. The Prefill and Decode nodes must export`mooncake.json`.
 
-This example uses separated Memcache deployment so that the pool reserves host
-memory before vLLM loads the model. Prepare one MetaService configuration and
-two LocalService configurations as described below.
-
-#### 5.3.1 Prepare the Mooncake Services
+#### 5.4.1 Prepare the Mooncake Services
 
 Configure `mooncake.json`:
 
@@ -1406,7 +1402,7 @@ eviction_ratio determines the portion of stored objects that would be evicted.
 default_kv_lease_ttl controls the default lease TTL for KV objects (milliseconds).
 configure it via --default_kv_lease_ttl and keep it larger than ASCEND_CONNECT_TIMEOUT and ASCEND_TRANSFER_TIMEOUT.
 
-#### 5.3.2 Start the Prefill Node with Pooling
+#### 5.4.2 Start the Prefill Node with Pooling
 
 On the Prefill node, save the following script as `run_dp_template.sh`. Set
 `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
@@ -1437,7 +1433,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
-# Parameters required by the MoonCake KV Cache Pool.
+# Parameters required by the Mooncake KV Cache Pool.
 export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
 
@@ -1508,7 +1504,7 @@ vllm serve "$MODEL_PATH" \
 Start the four DP4/TP4 Prefill engines with the launcher command from Section
 5.2.2 after all Decode engines are ready.
 
-#### 5.3.3 Start the Decode Node with Pooling
+#### 5.4.3 Start the Decode Node with Pooling
 
 On the Decode node, save the following script as `run_dp_template.sh`. Set
 `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
@@ -1521,7 +1517,7 @@ unset https_proxy
 unset http_proxy
 
 NIC_NAME="<NETWORK_INTERFACE>"
-LOCAL_IP="<PREFILL_NODE_IP>"
+LOCAL_IP="<DECODE_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
 MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
 
@@ -1540,7 +1536,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
-# Parameters required by the MoonCake KV Cache Pool.
+# Parameters required by the Mooncake KV Cache Pool.
 export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
 
@@ -1612,12 +1608,13 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2
+Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2.2.1.
 
-#### 5.3.4 Startup and Verification
+#### 5.4.4 Startup and Verification
 
 Start the components in this order: Mooncake Master Service, standalone Mooncake Store on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the PD proxy.
-Wait until Mooncake master process report successful initialization before starting the Decode engines. Then wait until every Decode engine reports `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the same endpoint mapping described in Section 5.2.
+Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in Section 5.2.2.4.
+
 Send the same request twice with a reusable prefix. Confirm that Prefill logs show Mooncake lookup, get, put, and hit activity, and that Decode logs still show normal Prefill-to-Decode KV transfer.
 
 Key pooling parameters:
@@ -1694,7 +1691,7 @@ Key pooling parameters:
     Nodes 1 through 3. Only Node 0 exposes the API endpoint. Each server contributes
     one TP8 rank to the global DP4 topology.
 
-### 5.5 Service Verification
+### 5.6 Service Verification
 
 Set the endpoint for the selected deployment, then verify the health endpoint.
 Use `<A3_IP>` with port `8900` for A3 single-node colocated deployment,
