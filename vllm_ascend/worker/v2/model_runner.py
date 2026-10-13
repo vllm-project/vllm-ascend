@@ -1174,7 +1174,7 @@ class NPUModelRunner(GPUModelRunner):
     @contextmanager
     def _cpp_profile_dummy(self, enabled: bool):
         """Scope the target-only prefill semantics used by CPP profiling."""
-        previous_profile_cpp = self.input_buffers.profile_cpp
+        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
         previous_speculator = self.speculator
         if enabled:
             self.input_buffers.profile_cpp = True
@@ -1184,7 +1184,8 @@ class NPUModelRunner(GPUModelRunner):
         try:
             yield
         finally:
-            self.input_buffers.profile_cpp = previous_profile_cpp
+            if enabled:
+                self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
 
     @step_eplb_after(is_dummy=True)
