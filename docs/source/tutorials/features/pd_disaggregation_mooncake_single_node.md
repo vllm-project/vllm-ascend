@@ -279,7 +279,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
     }'
 ```
 
-## MooncakeConnectorV2
+## MooncakeConnectorV2 (experimental)
 
 !!! note "Experimental feature"
 
