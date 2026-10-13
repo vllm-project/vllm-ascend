@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -501,7 +502,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
         block_size=384,
-        num_heads=64,
+        num_heads=1,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -581,7 +582,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
     monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: (MagicMock(), MagicMock()))
     for q_heads in (8, 12, 64, 96):
-        spec = replace(spec, num_heads=q_heads)
+        attn_module.num_heads = q_heads
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
         assert fused.shape == (6, 128, 1, 576)
@@ -589,14 +590,14 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
 
     # Even on A5, FlashMLA-incompatible query-head counts use the
     # FIA-compatible component-major layout.
-    spec = replace(spec, num_heads=48)
+    attn_module.num_heads = 48
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
 
     # Missing FlashMLA APIs in the active CANN package also select the
     # FIA-compatible component-major layout.
     monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: None)
-    spec = replace(spec, num_heads=64)
+    attn_module.num_heads = 64
     missing_flashmla_ops = reshape()
     assert isinstance(missing_flashmla_ops, tuple)
 
@@ -1051,13 +1052,11 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
     assert specs["model.layers.0.self_attn.attn"].num_kv_heads == 1
 
 
-@pytest.mark.parametrize(
-    ("model_type", "expected_num_heads"),
-    [("kimi_linear", 1), ("deepseek_v3", 12)],
-)
-def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads):
+@pytest.mark.parametrize("model_type", ["kimi_linear", "deepseek_v3", "bailing_moe_v25"])
+@pytest.mark.parametrize("query_heads", [4, 12])
+def test_mla_cache_spec_preserves_physical_heads(monkeypatch, model_type, query_heads):
     source_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=384,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -1068,7 +1067,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
         enable_sparse_sfa_c8=False,
         enable_sparse_sfa_turboquant=False,
     )
-    layer.num_heads = 12
+    layer.num_heads = query_heads
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
     layer.get_kv_cache_spec = lambda _config: source_spec
@@ -1082,7 +1081,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
             prefill_context_parallel_size=1,
         ),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
-        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        cache_config=SimpleNamespace(block_size=384, cache_dtype="auto"),
     )
     monkeypatch.setattr(
         attn_utils,
@@ -1095,8 +1094,14 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
     spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
 
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.num_heads == expected_num_heads
+    assert spec.num_heads == source_spec.num_heads == 1
     assert spec.page_size_bytes == source_spec.page_size_bytes
+    # Exercise the generic planner contract without padding that could hide
+    # query heads inflating the logical shape beyond the allocated pages.
+    merged = AscendMLAAttentionSpec.merge([spec, spec])
+    shape_bytes = compute_layer_kv_cache_shape_bytes(merged, num_blocks=2)
+    assert shape_bytes == (2, 1, 384, 576 * 2)
+    assert torch.empty(2 * merged.page_size_bytes, dtype=torch.uint8).view(shape_bytes).numel() == 884736
 
 
 @pytest.mark.parametrize(
@@ -2435,8 +2440,8 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
-    assert specs["fa"].num_heads == 64
-    assert specs["sfa"].num_heads == 64
+    assert specs["fa"].num_heads == 1
+    assert specs["sfa"].num_heads == 1
     assert specs["sfa"].cache_sparse_sfa_c8 is True
 
     mla_spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)

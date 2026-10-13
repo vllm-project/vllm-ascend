@@ -320,10 +320,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        # Keep the pre-existing no-rope MLAPO DCP path working, but allocate the
-        # same private buffers for the strided-cache PROLOG_V3 decode path.
+        # PCP cannot consume the RoPE PROLOG_V3 workspaces. The legacy no-rope
+        # MLAPO decode buffer still has a consumer with PCP enabled.
         if self.dcp_enabled and (
-            self.supports_prolog_v3_writer()
+            (self.supports_prolog_v3_writer() and not self.pcp_enabled and not self.is_pcp_decode_sharded)
             or (self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz)
         ):
             self._prepare_dcp_current_kv_buffers()

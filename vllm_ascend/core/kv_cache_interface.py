@@ -210,8 +210,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
-    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
-    # caches without query heads use the one-latent-head cache contract.
+    # Physical cache heads used by the generic KV planner. Query heads belong
+    # to the attention layer and must not change the cache page geometry.
     num_heads: int = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8

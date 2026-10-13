@@ -359,6 +359,54 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
     assert impl._required_dcp_prefill_current_kv_capacity() == 4096
 
 
+@pytest.mark.parametrize(
+    ("dcp_enabled", "pcp_enabled", "decode_sharded", "use_rope", "expected_buffers"),
+    [
+        (False, False, False, True, "none"),
+        (True, False, False, True, "both"),
+        (True, True, False, True, "none"),
+        (True, False, True, True, "none"),
+        (False, False, False, False, "none"),
+        (True, False, False, False, "decode"),
+        (True, True, False, False, "decode"),
+    ],
+)
+def test_dcp_post_load_allocates_only_consumed_workspaces(
+    dcp_enabled, pcp_enabled, decode_sharded, use_rope, expected_buffers
+):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192, max_num_seqs=32),
+        cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
+    )
+    impl.speculative_config = SimpleNamespace(num_speculative_tokens=7)
+    impl.dcp_enabled = dcp_enabled
+    impl.pcp_enabled = pcp_enabled
+    impl.is_pcp_decode_sharded = decode_sharded
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.use_mla_rope = use_rope
+    impl.enable_kv_nz = False
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = NOPE_DIM
+    impl.qk_rope_head_dim = ROPE_DIM
+    impl.dtype = torch.bfloat16
+    impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.empty(1))
+    impl._dcp_current_kv_buffers = None
+    impl._dcp_prefill_current_kv_buffers = None
+    impl.supports_prolog_v3_writer = lambda: use_rope
+
+    with patch.object(AscendMLAImpl, "process_weights_after_loading"):
+        impl.process_weights_after_loading(torch.bfloat16)
+
+    assert (impl._dcp_current_kv_buffers is not None) is (expected_buffers != "none")
+    assert (impl._dcp_prefill_current_kv_buffers is not None) is (expected_buffers == "both")
+    if expected_buffers != "none":
+        assert impl._dcp_current_kv_buffers[2].numel() == 256
+    if expected_buffers == "both":
+        assert impl._dcp_prefill_current_kv_buffers[2].numel() == 8192
+
+
 def test_dcp_current_kv_buffers_survive_reloads():
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
