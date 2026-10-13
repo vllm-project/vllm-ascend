@@ -108,7 +108,7 @@ class EplbUpdator:
         if self.get_update_info_flag():
             self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
-            with record_function_or_nullcontext("EPLB generate p2p task"):
+            with record_function_or_nullcontext("EPLB_generate_p2p_task"):
                 (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
                     self.update_info_all.pop(0)
                 )
@@ -128,7 +128,7 @@ class EplbUpdator:
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
-            with record_function_or_nullcontext("EPLB gather moe load"):
+            with record_function_or_nullcontext("EPLB_gather_moe_load"):
                 self.compute_and_set_moe_load()
                 self.wakeup_eplb_worker()
 
