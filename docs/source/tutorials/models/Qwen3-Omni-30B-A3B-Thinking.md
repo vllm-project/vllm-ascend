@@ -22,24 +22,26 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B)          |
+| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking) |
 | Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               |  N/A|
 
 The W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-:::{note}
-Qwen3-Omni-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
+!!! note
 
-- **Embedding layer**: BF16 (no quantization)
-- **Q/K normalization** (q_norm, k_norm): BF16
-- **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
-- **MoE routing gate** (mlp.gate): BF16
-- **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
-:::
+    Qwen3-Omni-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
+
+    - **Embedding layer**: BF16 (no quantization)
+    - **Q/K normalization** (q_norm, k_norm): BF16
+    - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
+    - **MoE routing gate** (mlp.gate): BF16
+    - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -50,100 +52,87 @@ You can use the official all-in-one Docker image for Qwen3-Omni MoE models.
 **Docker Pull:**
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 ```
 
 **Docker Run:**
 
-:::::{tab-set}
-:sync-group: hardware
+=== "Atlas 800I A3"
 
-::::{tab-item} Atlas 800I A3
-:sync: a3
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run \
+        --name vllm-ascend-env \
+        --shm-size=128g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -it -d $IMAGE bash
+    ```
 
-docker run \
-    --name vllm-ascend-env \
-    --shm-size=128g \
-    --net=host \
-    --privileged=true \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it -d $IMAGE bash
-```
+    !!! note
 
-:::{note}
-A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
-:::
+        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-::::
+=== "Atlas 800I A2"
 
-::::{tab-item} Atlas 800I A2
-:sync: a2
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run \
-    --name vllm-ascend-env \
-    --shm-size=128g \
-    --net=host \
-    --privileged=true \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it -d $IMAGE bash
-```
-
-::::
-
-:::::
+    docker run \
+        --name vllm-ascend-env \
+        --shm-size=128g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -it -d $IMAGE bash
+    ```
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -191,9 +180,9 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-:::{note}
-If deploying a multi-node environment, set up the environment on each node.
-:::
+!!! note
+
+    If deploying a multi-node environment, set up the environment on each node.
 
 Please install system dependencies.
 
@@ -211,9 +200,9 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
-PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
+Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -224,13 +213,12 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Atlas 800I A2/A3:**
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
     --trust-remote-code \
@@ -242,29 +230,26 @@ vllm serve your_model_path \
     --quantization ascend \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
-    --port 8000 
+    --additional-config '{"weight_nz_mode": 2}' \
+    --port 8000
 ```
 
-:::{note}
+!!! note
 
-- `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
-- `--port`: adjust to avoid conflicts with other services running on the same machine.
-- `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
-- `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
+    - `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
+    - `--port`: adjust to avoid conflicts with other services running on the same machine.
+    - `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
+    - `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
 
-:::
+!!! tip
 
-:::{tip}
-For parameter details, refer to:
+    For parameter details, refer to:
 
-- [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
-- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
-- [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
-:::
+    - [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
+    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
+    - [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
 
 **Service Verification:**
 
@@ -356,11 +341,11 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using EvalScope
+### 7.1 Using EvalScope
 
-As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
+As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope`installation.
+1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope` installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
@@ -383,7 +368,7 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
     | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
     +=============================+============+==========+==========+=======+=========+=========+
     | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
     +-----------------------------+-----------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
@@ -392,10 +377,9 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark  
+### 8.1 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
-Refer to vllm benchmark for more details.
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
@@ -407,8 +391,8 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-export VLLM_USE_MODELSCOPE=True
 export MODEL=Qwen/Qwen3-Omni-30B-A3B-Thinking
+export VLLM_USE_MODELSCOPE=True
 python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-size 2 --swap-space 16 --disable-log-stats --disable-log-request --load-format dummy
 
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
@@ -476,11 +460,9 @@ P99 ITL (ms):                            176.02
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -493,31 +475,28 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
-:::{tip}
-Example AISBench settings for this configuration:
+!!! tip
 
-- `request_rate`: 0
-- `batch_size`: 32
-- Input/Output length: 2048/2048 or 3500/1500
-:::
+    Example AISBench settings for this configuration:
+
+    - `request_rate`: 0
+    - `batch_size`: 32
+    - Input/Output length: 2048/2048 or 3500/1500
 
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -529,7 +508,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -538,22 +516,20 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
-:::{tip}
-Example AISBench settings for this configuration:
+!!! tip
 
-- `request_rate`: 0
-- `batch_size`: 32
-- Input/Output length: 2048/2048 or 3500/1500
-:::
+    Example AISBench settings for this configuration:
+
+    - `request_rate`: 0
+    - `batch_size`: 32
+    - Input/Output length: 2048/2048 or 3500/1500
 
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -566,30 +542,29 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
 ```
 
-:::{tip}
-Example AISBench settings for this configuration:
+!!! tip
 
-- `request_rate`: 0
-- `batch_size`: 32
-- Input/Output length: 65536/1024 or 131072/1024
-:::
+    Example AISBench settings for this configuration:
+
+    - `request_rate`: 0
+    - `batch_size`: 32
+    - Input/Output length: 65536/1024 or 131072/1024
 
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

@@ -57,8 +57,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.multi_node.internal_dp.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
+from tests.e2e.coverage_taxonomy import (
+    validate_coverage_marker,
+)
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -88,6 +91,20 @@ logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
+        choices=("all", "triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: all, triton reference, or msa_m3_npu (torch_npu)."
+        ),
+    )
+
 
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
@@ -493,7 +510,9 @@ def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
         "--data-parallel-size-local" if "--data-parallel-size-local" in vllm_serve_args else "--data-parallel-size"
     )
     data_parallel_size = get_size(data_parallel_arg)
-    return tensor_parallel_size * data_parallel_size
+    pipeline_parallel_size = get_size("--pipeline-parallel-size")
+    prefill_context_parallel_size = get_size("--prefill-context-parallel-size")
+    return tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size
 
 
 class RemotePDServer(RemoteOpenAIServer):
@@ -530,6 +549,11 @@ class RemotePDServer(RemoteOpenAIServer):
             raise RuntimeError("vllm_serves_args must be a list")
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
+        visible_devices = self.env_dict.get(
+            "ASCEND_RT_VISIBLE_DEVICES",
+            os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+        )
+        available_device_ids = visible_devices.split(",") if visible_devices else None
 
         for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
             if "--port" not in vllm_serve_arg:
@@ -539,9 +563,17 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
-            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-                str(device_id) for device_id in range(start_device_id, start_device_id + required_devices)
-            )
+            end_device_id = start_device_id + required_devices
+            if available_device_ids is None:
+                assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
+            else:
+                assigned_device_ids = available_device_ids[start_device_id:end_device_id]
+                if len(assigned_device_ids) != required_devices:
+                    raise ValueError(
+                        f"PD servers require at least {end_device_id} visible devices, "
+                        f"but ASCEND_RT_VISIBLE_DEVICES={visible_devices!r}."
+                    )
+            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(assigned_device_ids)
             start_device_id += required_devices
 
             vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
@@ -878,23 +910,20 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        from vllm_ascend.utils import vllm_version_is
+        import torch
 
-        if not vllm_version_is("0.23.0"):
-            import torch
+        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        full_device_ids: list[str] = [d for d in visible.split(",") if d]
+        if not full_device_ids:
+            full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
-            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-            full_device_ids: list[str] = [d for d in visible.split(",") if d]
-            if not full_device_ids:
-                full_device_ids = [str(i) for i in range(torch.npu.device_count())]
-
-            if llm_kwargs.get("distributed_executor_backend") == "ray":
-                devs = full_device_ids
-                chunk = max(len(devs) // dp_size, 1)
-                start = dp_rank * chunk
-                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-            else:
-                llm_kwargs["device_ids"] = full_device_ids
+        if llm_kwargs.get("distributed_executor_backend") == "ray":
+            devs = full_device_ids
+            chunk = max(len(devs) // dp_size, 1)
+            start = dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+        else:
+            llm_kwargs["device_ids"] = full_device_ids
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -962,7 +991,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         **kwargs,
@@ -979,7 +1007,6 @@ class VllmRunner:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1165,9 +1192,12 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
-        clear_ascend_config()
-        cleanup_dist_env_and_memory()
+        try:
+            self.model.llm_engine.engine_core.shutdown()
+        finally:
+            del self.model
+            clear_ascend_config()
+            cleanup_dist_env_and_memory()
 
 
 class ModelCache:
@@ -1393,7 +1423,6 @@ class DPVllmRunner(VllmRunner):
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         data_parallel_size: int = 2,
@@ -1416,7 +1445,6 @@ class DPVllmRunner(VllmRunner):
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1911,6 +1939,41 @@ def olmoe_lora_files():
     return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def qwen2vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen25-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2.5-3b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_language_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-language")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_connector_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
@@ -1924,7 +1987,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    image_token = "<｜hy_place▁holder▁no▁102｜>"
+    # vLLM PR #49691 matches the complete image placeholder.
+    placeholder = f"<｜hy_place▁holder▁no▁100｜>{image_token}<｜hy_place▁holder▁no▁101｜>"
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
@@ -1939,9 +2004,11 @@ PROMPT_CONFIGS = {
         },
     },
     "hunyuan-vl": {
-        "model": "Tencent-Hunyuan/HunyuanOCR",
+        "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
+        "skip": "HunyuanVL is not supported by the pinned vLLM versions "
+        "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL).",
     },
 }
 
@@ -1952,3 +2019,40 @@ def vl_config(request):
     if "skip" in config:
         pytest.skip(config["skip"])
     return config
+
+
+# ---------------------------------------------------------------------------
+# E2E coverage marker enforcement
+# ---------------------------------------------------------------------------
+# Values used in @pytest.mark.e2e_coverage(...) must come from the shared
+# taxonomy in tests/e2e/coverage_taxonomy.py. This hook enforces that at
+# collection time so a typo / invented value fails loudly and locally
+# (pytest reports an ERROR for that item). Unmarked tests are NOT enforced
+# here — the migration to e2e_coverage is still in progress, so tests
+# without the marker are allowed during the transition.
+#
+# The CI LINT job additionally fails on out-of-taxonomy values via
+# .github/workflows/scripts/coverage.py; this hook is the local, fast
+# feedback path for developers running pytest directly.
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        marker = item.get_closest_marker("e2e_coverage")
+        if marker is None:
+            continue  # migration period: unmarked tests are allowed
+
+        # marker.kwargs: {dim: raw_str}  (e.g. {"arch": "dense",
+        # "feature": "lora,mtp"}). split_multi turns each value into its
+        # constituent tokens; validate_coverage_marker checks every token
+        # against the taxonomy and reports missing required dims.
+        raw_coverage = {dim: str(val) for dim, val in marker.kwargs.items()}
+        problems = validate_coverage_marker(raw_coverage)
+        if not problems:
+            continue
+
+        loc = item.nodeid
+        detail = "; ".join(problems)
+        raise pytest.CollectError(
+            f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
+            "  Values must come from tests/e2e/coverage_taxonomy.py "
+            "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
+        )

@@ -188,22 +188,22 @@ DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE = [
     {
         "token_ids": [185, 40, 608, 245, 207, 17, 15, 1012, 1712, 12608, 11, 285, 304, 463, 803, 14079],
         "logprobs": [
-            -4.621323108673096,
-            -3.077335834503174,
-            -1.3346226215362549,
-            -0.9667544364929199,
-            -2.628643274307251,
-            -1.0353751182556152,
-            -1.9108309745788574,
-            -0.9746326208114624,
-            -0.07258293032646179,
-            -2.375293016433716,
-            -1.7306381464004517,
-            -1.7152436971664429,
-            -0.5231161713600159,
-            -1.2002876996994019,
-            -0.945522665977478,
-            -2.263141393661499,
+            -4.5487470626831055,
+            -2.9279732704162598,
+            -1.1911931037902832,
+            -0.9890881180763245,
+            -2.9628751277923584,
+            -1.0388736724853516,
+            -1.933605432510376,
+            -1.08126699924469,
+            -0.06965763121843338,
+            -2.246259927749634,
+            -1.798103928565979,
+            -1.6769030094146729,
+            -0.45533305406570435,
+            -1.2336065769195557,
+            -1.0255792140960693,
+            -2.1620023250579834,
         ],
     },
     {
@@ -228,45 +228,45 @@ DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE = [
         ],
     },
     {
-        "token_ids": [8913, 13, 185, 549, 19305, 280, 7239, 317, 254, 28071, 13, 185, 549, 13829, 13451, 279],
+        "token_ids": [8913, 13, 185, 549, 19305, 280, 7239, 317, 254, 28071, 334, 89378, 633, 185, 549, 13829],
         "logprobs": [
-            -0.39279282093048096,
-            -0.8086707592010498,
-            -0.7125738859176636,
-            -1.6490240097045898,
-            -1.9644602537155151,
-            -0.4904576539993286,
-            -0.0832064300775528,
-            -0.00726190535351634,
-            -0.38277116417884827,
-            -0.2940319776535034,
-            -0.7399694323539734,
-            -0.07564151287078857,
-            -0.7905924320220947,
-            -1.8350766897201538,
-            -0.4076140522956848,
-            -0.20184002816677094,
+            -0.42458510398864746,
+            -0.7486532926559448,
+            -0.7103590369224548,
+            -1.6236158609390259,
+            -1.9862741231918335,
+            -0.36243343353271484,
+            -0.06133009120821953,
+            -0.007917449809610844,
+            -0.2584840655326843,
+            -0.25238630175590515,
+            -0.7441126108169556,
+            -0.3538426160812378,
+            -0.4181166887283325,
+            -0.04938803240656853,
+            -0.7127790451049805,
+            -0.6716606616973877,
         ],
     },
     {
         "token_ids": [6464, 11, 285, 359, 487, 82, 889, 1872, 276, 752, 34993, 13, 1733, 20838, 11106, 276],
         "logprobs": [
-            -2.4984869956970215,
-            -0.7851194739341736,
-            -0.6003906726837158,
-            -1.4917504787445068,
-            -0.9962607026100159,
-            -0.004179196432232857,
-            -1.5068310499191284,
-            -0.4656505584716797,
-            -0.0027805021964013577,
-            -0.11925199627876282,
-            -0.35579147934913635,
-            -0.35492807626724243,
-            -1.605405330657959,
-            -1.38535737991333,
-            -0.930091142654419,
-            -0.004122450482100248,
+            -2.4362411499023438,
+            -0.8057730197906494,
+            -0.5821954607963562,
+            -1.4138766527175903,
+            -0.7910411953926086,
+            -0.003709698561578989,
+            -1.4790434837341309,
+            -0.42385733127593994,
+            -0.0027132148388773203,
+            -0.10606584697961807,
+            -0.39314907789230347,
+            -0.40517333149909973,
+            -1.7308335304260254,
+            -1.4578124284744263,
+            -1.0194721221923828,
+            -0.005014462396502495,
         ],
     },
 ]
@@ -297,42 +297,42 @@ DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE = [
         "token_ids": [185, 185, 1679, 26430, 279, 16145, 285, 8204, 185, 185, 13483, 9890, 16982, 457, 17693, 829],
         "logprobs": [
             -0.27419501543045044,
-            -0.08238636702299118,
-            -2.0612075328826904,
-            -1.0054221153259277,
-            -4.947062916471623e-05,
-            -4.768370445162873e-07,
-            -2.1457441107486375e-05,
-            -3.933898824470816e-06,
-            -0.00018630675913300365,
-            -1.1920920996999484e-06,
-            -4.172316494077677e-06,
-            -0.00010048838157672435,
-            -1.0847986231965479e-05,
-            -1.1920928244535389e-07,
-            -1.1920920996999484e-06,
-            -1.4185804502631072e-05,
+            -0.07801530510187149,
+            -1.7970994710922241,
+            -0.8873159885406494,
+            -5.698041422874667e-05,
+            -2.3841855067985307e-07,
+            -4.768257713294588e-05,
+            -2.861018856492592e-06,
+            -0.0001554368354845792,
+            -2.622600959512056e-06,
+            -1.1086402082582936e-05,
+            -8.487341256113723e-05,
+            -2.8013790142722428e-05,
+            -6.794906312279636e-06,
+            -1.0728830375228426e-06,
+            -2.503363612049725e-05,
         ],
     },
     {
         "token_ids": [185, 185, 1679, 26430, 279, 16145, 285, 8204, 185, 185, 13483, 9890, 16982, 457, 17693, 829],
         "logprobs": [
             -0.14973750710487366,
-            -0.09690935909748077,
-            -1.8772021532058716,
-            -1.6962311267852783,
-            -0.0001429217227268964,
-            -8.344646289515367e-07,
-            -7.617183291586116e-05,
-            -3.814689989667386e-06,
-            -0.0010556369088590145,
-            -6.318072337307967e-06,
-            -1.1920920996999484e-06,
-            -0.00035553809721022844,
-            -2.729855441430118e-05,
-            -2.3841855067985307e-07,
-            -1.4305104514278355e-06,
+            -0.09421548247337341,
+            -1.9398789405822754,
+            -1.218022108078003,
+            -0.00014232576359063387,
+            -3.5762778338721546e-07,
+            -9.643566590966657e-05,
+            -6.9141146923357155e-06,
+            -0.001158519764430821,
             -4.410733708937187e-06,
+            -4.6491513785440475e-06,
+            -0.00010263393050990999,
+            -3.731180913746357e-05,
+            -8.344646289515367e-07,
+            -2.2649737729807384e-06,
+            -5.960446742392378e-06,
         ],
     },
 ]
@@ -359,6 +359,10 @@ CASE_DS_ACLGRAPH = {
     "tensor_parallel_size": 2,
     "data_parallel_size": 2,
     "enable_expert_parallel": True,
+    # Keep this ACL graph regression on the non-SP path used to generate its
+    # golden answers. Upstream SP has dedicated DP2/TP2 functional and
+    # precision coverage in test_sequence_parallel_linear.py.
+    "all2all_backend": "flashinfer_all2allv",
     "golden_answers": {
         "short": DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE,
         "long": DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE,
@@ -370,6 +374,13 @@ CASE_DS_ACLGRAPH = {
 CASE_DS_ACLGRAPH_ENPU = {
     **CASE_DS_ACLGRAPH,
     "env_vars": {"ENPU_ENABLE": "true"},
+}
+
+CASE_DS_BREAKABLE_ACLGRAPH = {
+    **CASE_DS_ACLGRAPH,
+    "env_vars": {
+        "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+    },
 }
 
 # inherit from tests/e2e/pull_request/utils.py::compare_logprobs
@@ -502,32 +513,35 @@ def _run_worker_process(
     for key, value in cur_case.get("env_vars", {}).items():
         os.environ[key] = str(value)
 
-    # Apply hooks and run inference
-    with _install_spies(metrics):
-        short_prompts = cur_case["prompts"]["short"]
-        chunk_size = len(short_prompts) // world_size
-        short_start_idx = rank * chunk_size
-        short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
-        local_short_prompts = short_prompts[short_start_idx:short_end_idx]
+    llm = None
+    try:
+        # Apply hooks and run inference
+        with _install_spies(metrics):
+            short_prompts = cur_case["prompts"]["short"]
+            chunk_size = len(short_prompts) // world_size
+            short_start_idx = rank * chunk_size
+            short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
+            local_short_prompts = short_prompts[short_start_idx:short_end_idx]
 
-        long_prompts = cur_case["prompts"]["long"]
-        chunk_size = len(long_prompts) // world_size
-        long_start_idx = rank * chunk_size
-        long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
-        local_long_prompts = long_prompts[long_start_idx:long_end_idx]
+            long_prompts = cur_case["prompts"]["long"]
+            chunk_size = len(long_prompts) // world_size
+            long_start_idx = rank * chunk_size
+            long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
+            local_long_prompts = long_prompts[long_start_idx:long_end_idx]
 
-        llm = LLM(
-            model=cur_case["model"],
-            max_model_len=1024,
-            compilation_config=cur_case["compilation_config"],
-            quantization=cur_case["quantization"],
-            tensor_parallel_size=cur_case["tensor_parallel_size"],
-            enable_expert_parallel=cur_case["enable_expert_parallel"],
-            trust_remote_code=True,
-        )
+            llm = LLM(
+                model=cur_case["model"],
+                max_model_len=1024,
+                compilation_config=cur_case["compilation_config"],
+                quantization=cur_case["quantization"],
+                tensor_parallel_size=cur_case["tensor_parallel_size"],
+                enable_expert_parallel=cur_case["enable_expert_parallel"],
+                all2all_backend=cur_case.get("all2all_backend", "allgather_reducescatter"),
+                trust_remote_code=True,
+            )
 
-        compiled_outputs_short = llm.generate(local_short_prompts, _SAMPLING_PARAMS)
-        compiled_outputs_long = llm.generate(local_long_prompts, _SAMPLING_PARAMS)
+            compiled_outputs_short = llm.generate(local_short_prompts, _SAMPLING_PARAMS)
+            compiled_outputs_long = llm.generate(local_long_prompts, _SAMPLING_PARAMS)
 
         def extract_outputs(outputs):
             extracted = []
@@ -553,6 +567,14 @@ def _run_worker_process(
             "long": {"prompt_idx": long_start_idx, "outputs": extract_outputs(compiled_outputs_long)},
         }
         result_queue.put(result_data)
+    finally:
+        try:
+            if llm is not None:
+                llm.llm_engine.engine_core.shutdown()
+        finally:
+            if llm is not None:
+                del llm
+            _exit()
 
 
 def _exit():
@@ -604,13 +626,18 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 
 
 @wait_until_npu_memory_free(0.7)
-@pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
+@pytest.mark.parametrize(
+    "cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU, CASE_DS_BREAKABLE_ACLGRAPH]
+)
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
     # Counter doesn't work in default "spawn" mode
     metrics = None
     if "DeepSeek-V2-Lite-W8A8" in cur_case["model"]:
         # TODO(shihan-lin168): remove this env after set_device issue is resolved
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        # Keep HCCL reductions deterministic so the graph precision golden is
+        # reproducible across independent TP/DP engine launches.
+        monkeypatch.setenv("HCCL_DETERMINISTIC", "strict")
 
     else:
         monkeypatch.setenv("OMP_NUM_THREADS", "1")

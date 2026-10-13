@@ -18,13 +18,65 @@ import json
 import socket
 import threading
 from contextlib import suppress
+from typing import Any
 
 import regex as re
 import torch
 from vllm.logger import logger
 
-from ..executor.elastic_load import P2PSend
+from ..executor.elastic_load import (
+    P2PSend,
+    build_transfer_shape_manifest,
+    get_cached_processed_layout_transfer_items,
+    register_processed_layout_transfer_items,
+)
 from ..utils import find_free_port
+
+
+def _recv_json_message(sock: socket.socket, max_size: int = 64 * 1024 * 1024) -> dict:
+    """Receive one complete JSON object from a TCP socket."""
+    buffer = bytearray()
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        if len(buffer) > max_size:
+            raise RuntimeError(f"JSON message exceeds max size {max_size} bytes")
+        if buffer.rstrip().endswith((b"}", b"]")):
+            try:
+                payload = json.loads(buffer.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"Expected JSON object, got {type(payload)}")
+            return payload
+
+    if not buffer:
+        raise RuntimeError("Incomplete JSON message received from server")
+    try:
+        payload = json.loads(buffer.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise RuntimeError("Incomplete JSON message received from server") from e
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected JSON object, got {type(payload)}")
+    return payload
+
+
+def _parse_transfer_shape_manifest(raw_manifest: object) -> dict[str, tuple[int, ...]] | None:
+    if raw_manifest is None:
+        return None
+    if not isinstance(raw_manifest, dict):
+        raise RuntimeError(f"Invalid transfer_shapes type: {type(raw_manifest)}")
+
+    manifest: dict[str, tuple[int, ...]] = {}
+    for name, shape in raw_manifest.items():
+        if not isinstance(name, str) or not isinstance(shape, list):
+            raise RuntimeError(f"Invalid transfer shape entry for {name!r}: {shape!r}")
+        if not all(isinstance(dim, int) and dim >= 0 for dim in shape):
+            raise RuntimeError(f"Invalid transfer shape dims for {name}: {shape}")
+        manifest[name] = tuple(shape)
+    return manifest
 
 
 class ElasticClient:
@@ -33,7 +85,14 @@ class ElasticClient:
     """
 
     def __init__(
-        self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int, group_name: str = "netloader"
+        self,
+        sources: list[str],
+        device_id: int,
+        model_path: str,
+        tp: int,
+        pp: int,
+        group_name: str = "netloader",
+        int8_cache: str = "no",
     ):
         """
         Initializes the ElasticClient instance.
@@ -45,6 +104,7 @@ class ElasticClient:
         - tp: Tensor parallel size.
         - pp: Pipeline parallel size.
         - group_name: Name of the HCCL process group.
+        - int8_cache: The type of caching for int8 parameters (HBM, DRAM, or no).
         """
         self.sources = sources
         self.device_id = device_id
@@ -52,9 +112,11 @@ class ElasticClient:
         self.tp = tp
         self.pp = pp
         self.group_name = group_name
+        self.int8_cache = int8_cache
 
         self.s: socket.socket | None = None
         self.ack: tuple[str, int] | None = None
+        self.transfer_shape_manifest: dict[str, tuple[int, ...]] | None = None
         self.server_addr: str | None = None
         self.server_port: int | None = None
 
@@ -142,20 +204,11 @@ class ElasticClient:
             raise RuntimeError("Socket was not created correctly.")
         self.s.send(data_str.encode("utf-8"))
 
-    def recv_str(self, buffer_size: int = 1024) -> str:
-        """
-        Receives a string over the socket connection.
-
-        Parameters:
-        - buffer_size: The size of the buffer for receiving data.
-
-        Returns:
-        - The received string.
-        """
+    def recv_json(self) -> dict:
+        """Receive one JSON object over the socket connection."""
         if self.s is None:
             raise RuntimeError("Socket was not created correctly.")
-        data_str = self.s.recv(buffer_size).decode("utf-8")
-        return data_str
+        return _recv_json_message(self.s)
 
     def register(self, device_id: int, model_path: str, tp: int, pp: int) -> tuple[str, int]:
         """
@@ -180,6 +233,7 @@ class ElasticClient:
                 "pp": pp,
                 "port": free_port,
                 "group_name": self.group_name,
+                "int8_cache": self.int8_cache,
             },
         }
 
@@ -189,16 +243,18 @@ class ElasticClient:
             raise RuntimeError(f"Send data {data} to server fails, detail: {e}")
 
         try:
-            ack_str = self.recv_str()
+            ack = self.recv_json()
         except Exception as e:
             raise RuntimeError(f"Receive data from server fails, detail: {e}")
 
-        try:
-            ack = json.loads(ack_str)
-        except Exception as e:
-            raise RuntimeError(f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}")
-
-        logger.info("Receive ack: %s", ack)
+        content = ack.get("content") if isinstance(ack, dict) else None
+        transfer_shapes = content.get("transfer_shapes") if isinstance(content, dict) else None
+        logger.info(
+            "Receive ack: label=%s name=%s transfer_shape_count=%s",
+            ack.get("label") if isinstance(ack, dict) else None,
+            content.get("name") if isinstance(content, dict) else None,
+            len(transfer_shapes) if isinstance(transfer_shapes, dict) else 0,
+        )
 
         if (
             "label" in ack
@@ -207,7 +263,9 @@ class ElasticClient:
             and ack["content"] is not None
             and "name" in ack["content"]
         ):
-            return (ack["content"]["name"], free_port)
+            content = ack["content"]
+            self.transfer_shape_manifest = _parse_transfer_shape_manifest(content.get("transfer_shapes"))
+            return (content["name"], free_port)
         elif "label" in ack and ack["label"] == "JOIN_NACK" and "content" in ack:
             raise RuntimeError(f"Receive nack from server, reason: {ack['content']}")
         else:
@@ -260,6 +318,9 @@ class ElasticServer:
         self.tp = tp
         self.pp = pp
         self.group_name = group_name
+        self.int8_cache = int8_cache
+        self._registered_transfer_items: list[tuple[str, torch.Tensor]] | None = None
+        self._registered_transfer_shapes: dict[str, tuple[int, ...]] | None = None
 
         self.original_int8 = {}
         int8_pattern = "|".join(map(re.escape, int8_cache_name)) if int8_cache_name is not None else "(?:)"
@@ -297,6 +358,23 @@ class ElasticServer:
             self.pp,
             list(self.original_int8),
             int8_cache,
+        )
+
+    def register_transfer_manifest(self, model) -> None:
+        """Register processed-layout transfer manifest after weights are finalized."""
+        if self.int8_cache != "no":
+            return
+
+        cached_items = get_cached_processed_layout_transfer_items(model)
+        registered_items = register_processed_layout_transfer_items(model)
+        self._registered_transfer_items = registered_items
+        self._registered_transfer_shapes = build_transfer_shape_manifest(registered_items)
+        logger.info(
+            "[netloader_p2p] registered transfer manifest count=%s cache_hit=%s rank=%s group=%s",
+            len(registered_items),
+            cached_items is not None,
+            self.device_id,
+            self.group_name,
         )
 
     def __del__(self):
@@ -364,14 +442,19 @@ class ElasticServer:
             if not all(k in content for k in required_keys):
                 return False
             port = content["port"]
+            int8_cache = content.get("int8_cache")
+            if int8_cache is not None and int8_cache not in ["hbm", "dram", "no"]:
+                return False
             return isinstance(port, int) or (isinstance(port, str) and port.isdigit())
 
         comm_name = None
+        ack: dict[str, Any]
         if is_valid_data(data):
             device_id = int(data["content"]["device_id"])
             model_path = data["content"]["model_path"]
             tp = int(data["content"]["tp"])
             pp = int(data["content"]["pp"])
+            int8_cache = data["content"].get("int8_cache")
 
             if (
                 int(self.device_id) == device_id
@@ -379,8 +462,25 @@ class ElasticServer:
                 and int(self.tp) == tp
                 and int(self.pp) == pp
             ):
-                comm_name = str(addr[0]) + ":" + str(addr[1])
-                ack = {"label": "JOIN_ACK", "content": {"name": comm_name}}
+                if int8_cache is not None and self.int8_cache != int8_cache:
+                    msg = f"Received int8_cache {int8_cache} does not consist with this server {self.int8_cache}"
+                    logger.warning(msg)
+                    ack = {
+                        "label": "JOIN_NACK",
+                        "content": msg,
+                    }
+                else:
+                    comm_name = str(addr[0]) + ":" + str(addr[1])
+                    ack_content: dict[str, Any] = {"name": comm_name}
+                    if (
+                        self.int8_cache == "no"
+                        and self._registered_transfer_items is not None
+                        and self._registered_transfer_shapes is not None
+                    ):
+                        ack_content["transfer_shapes"] = {
+                            name: list(shape) for name, shape in self._registered_transfer_shapes.items()
+                        }
+                    ack = {"label": "JOIN_ACK", "content": ack_content}
             else:
                 server_desc = (int(self.device_id), self.model_path, int(self.tp), int(self.pp))
                 client_desc = (device_id, model_path, tp, pp)
@@ -402,7 +502,7 @@ class ElasticServer:
             return
 
         try:
-            conn.send(ack_str)
+            conn.sendall(ack_str)
         except Exception as e:
             logger.error("Failed to send %s to %s, details: %s", ack, addr, e)
             conn.close()
@@ -415,8 +515,13 @@ class ElasticServer:
                     data["content"]["port"],
                     ack["content"]["name"],
                     data["content"].get("group_name", "netloader"),
+                    send_processed_weights=self.int8_cache == "no",
                 )
-                p2psend.send(self.model, self.original_int8)
+                p2psend.send(
+                    self.model,
+                    self.original_int8,
+                    registered_transfer_items=self._registered_transfer_items,
+                )
             except Exception as e:
                 logger.error("P2PSend Failed to send model to %s, details: %s", self.addr, e)
         conn.close()

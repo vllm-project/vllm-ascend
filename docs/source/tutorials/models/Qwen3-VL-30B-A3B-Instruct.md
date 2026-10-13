@@ -10,7 +10,7 @@ The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-ascend` `v
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
@@ -18,100 +18,147 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-30B-A3B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 1 Atlas 800 A2 (64G x 8) node. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct).
+|  Weight Version                                            | Hardware Requirements                                           | Download Links |
+|------------------------------------------------------------|-----------------------------------------------------------------|----------------|
+| `Qwen3-VL-30B-A3B-Instruct` (BF16 version)                 | 1 Atlas 800 A3 (64GB x 16) node or 1 Atlas 800 A2 (64GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) |
+| `Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node                                   | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-:::::{tab-set}
-:sync-group: install
+=== "950DT Products"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on each node.
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export NAME=vllm-ascend
 
-```{code-block} bash
-   :substitutions:
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+      -v /etc/hixlep/:/etc/hixlep/ \
+      -v /root/.cache:/root/.cache \
+      -v /usr/local/sbin:/usr/local/sbin \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+      -v /usr/lib64:/usr/lib64 \
+      -itd $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
+=== "A3 series"
+
+    Start the docker image on each node.
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "A2 series"
+
+    Start the docker image on each node.
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+After starting the container, run the following command to verify the installation:
+
+```bash
+docker ps | grep vllm-ascend
 ```
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
-Start the docker image on each node.
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
+```bash
+pip show vllm-ascend
 ```
 
-::::
-:::::
-
-After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
@@ -141,55 +188,95 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-:::{note}
-If deploying a multi-node environment, set up the environment on each node.
-:::
+!!! note
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+    If deploying a multi-node environment, set up the environment on each node.
 
-## 5 Online Service Deployment
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
+
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. The following example is suitable for image-only online serving on 1 Atlas 800 A2 (64G x 8) node or 1 Atlas 800 A3 (64G x 16) node.
+Single-node deployment runs both Prefill and Decode on the same node. The following examples are suitable for image-only online serving.
 
-Run the following script to start image-only serving:
+=== "950DT Products"
 
-```shell
-#!/bin/sh
+    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized version (`Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8`) can be deployed on a single 950DT Products node. The W8A8 version needs `--quantization ascend`.
 
-# Load model from ModelScope to speed up download.
-export VLLM_USE_MODELSCOPE=True
+    ```shell
+    #!/bin/sh
 
-# Reduce memory fragmentation and avoid out-of-memory errors.
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=400
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export OMP_NUM_THREADS=1
-export OMP_PROC_BIND=false
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
 
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --served-model-name qwen3-vl-30b \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 2 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --max-num-seqs 32 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.9 \
-  --no-enable-prefix-caching \
-  --mm-processor-cache-gb 0 \
-  --limit-mm-per-prompt.image 1 \
-  --limit-mm-per-prompt.video 0 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
-```
+    # Ensure the model path matches the directory recorded during download
+    vllm serve Eco-Tech/Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --distributed-executor-backend mp \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3-vl-30b \
+      --max-num-seqs 32 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --gpu-memory-utilization 0.9 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    ```
+
+=== "A3 series"
+
+    Run the following script to start image-only serving on 1 Atlas 800 A3 (64G x 16) node.
+
+    ```shell
+    #!/bin/sh
+
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3-vl-30b \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --max-num-seqs 32 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.9 \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2": 1}'
+    ```
+
+=== "A2 series"
+
+    The A3 series script above also works on 1 Atlas 800 A2 (64G x 8) node with `--tensor-parallel-size 2`.
 
 Key Parameter Descriptions:
 
@@ -203,7 +290,7 @@ Key Parameter Descriptions:
 - `--allowed-local-media-path /media` allows requests to use local files such as `file:///media/test.mp4`.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -310,7 +397,7 @@ After several minutes, you can get the performance evaluation result. This rando
 | Video serving | Single-node online serving | 2 or more NPUs | BF16 | Use local media paths, lower concurrency, and reduce video length or frame sampling if OOM occurs. |
 | Functional graph validation | Single-node PP | 2 NPUs | BF16 | Use shorter context and explicit capture sizes to validate full decode ACLGraph behavior. |
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
@@ -328,7 +415,7 @@ After several minutes, you can get the performance evaluation result. This rando
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Recommended tuning order
 
@@ -349,7 +436,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Expert parallelism | `--enable-expert-parallel` | Improves MoE serving throughput. | Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Random prompts or unique media may not benefit. |
-| Asynchronous scheduling | `--async-scheduling` | Can improve high-concurrency throughput. | Disable and compare for latency-sensitive workloads. |
 | Pipeline parallel validation | `--pipeline-parallel-size 2` | Provides another two-card validation layout. | Use shorter context and lower batch tokens for functional tests. |
 
 ## 10 FAQ

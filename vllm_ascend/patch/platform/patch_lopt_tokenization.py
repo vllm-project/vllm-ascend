@@ -16,9 +16,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from typing import Any
@@ -52,13 +51,19 @@ _original_hf_renderer_shutdown = HfRenderer.shutdown
 _original_hf_renderer_render_messages = HfRenderer.render_messages
 _original_hf_renderer_render_messages_async = HfRenderer.render_messages_async
 _original_hf_renderer_tokenize_prompt = HfRenderer._tokenize_prompt
-_original_hf_renderer_tokenize_prompt_async = HfRenderer._tokenize_prompt_async
 _original_deepseek_v4_renderer_init = DeepseekV4Renderer.__init__
 _original_deepseek_v4_renderer_shutdown = DeepseekV4Renderer.shutdown
 _original_deepseek_v4_renderer_render_messages = DeepseekV4Renderer.render_messages
 _original_deepseek_v4_renderer_render_messages_async = DeepseekV4Renderer.render_messages_async
 _original_deepseek_v4_renderer_tokenize_prompt = DeepseekV4Renderer._tokenize_prompt
-_original_deepseek_v4_renderer_tokenize_prompt_async = DeepseekV4Renderer._tokenize_prompt_async
+
+# vLLM v0.30.0 note: ``_tokenize_prompt_async`` is no longer a class method.
+# ``BaseRenderer.__init__`` builds it as an instance attribute via
+# ``make_async(self._tokenize_prompt, executor=self._executor)``, binding the
+# (possibly patched) bound method at instantiation time. Patching the sync
+# ``_tokenize_prompt`` class method below therefore covers BOTH the sync and
+# the async tokenization paths, as long as this patch is applied before any
+# renderer is instantiated (it is: plugin patches run at process start).
 
 _LoptRenderer = HfRenderer | DeepseekV4Renderer
 
@@ -177,24 +182,6 @@ def _tokenize_prompt_with_lopt(
     return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
 
-async def _tokenize_prompt_with_lopt_async(
-    renderer: _LoptRenderer,
-    prompt: TextPrompt,
-    params: TokenizeParams,
-    standard_tokenize: Callable[..., Awaitable[TokensPrompt]],
-) -> TokensPrompt:
-    encode_kwargs = params.get_encode_kwargs()
-    text = prompt["prompt"]
-    lopt = _select_lopt(renderer, text, encode_kwargs)
-    if lopt is None:
-        return await standard_tokenize(renderer, prompt, params)
-
-    encode = partial(lopt.encode, text, **encode_kwargs)
-    executor = getattr(renderer, "_executor", None)
-    prompt_token_ids = await asyncio.get_running_loop().run_in_executor(executor, encode)
-    return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
-
-
 def _patched_hf_renderer_tokenize_prompt(
     self: HfRenderer,
     prompt: TextPrompt,
@@ -208,19 +195,6 @@ def _patched_hf_renderer_tokenize_prompt(
     )
 
 
-async def _patched_hf_renderer_tokenize_prompt_async(
-    self: HfRenderer,
-    prompt: TextPrompt,
-    params: TokenizeParams,
-) -> TokensPrompt:
-    return await _tokenize_prompt_with_lopt_async(
-        self,
-        prompt,
-        params,
-        _original_hf_renderer_tokenize_prompt_async,
-    )
-
-
 def _patched_deepseek_v4_renderer_tokenize_prompt(
     self: DeepseekV4Renderer,
     prompt: TextPrompt,
@@ -231,16 +205,6 @@ def _patched_deepseek_v4_renderer_tokenize_prompt(
         prompt,
         params,
         _original_deepseek_v4_renderer_tokenize_prompt,
-    )
-
-
-async def _patched_deepseek_v4_renderer_tokenize_prompt_async(
-    self: DeepseekV4Renderer,
-    prompt: TextPrompt,
-    params: TokenizeParams,
-) -> TokensPrompt:
-    return await _tokenize_prompt_with_lopt_async(
-        self, prompt, params, _original_deepseek_v4_renderer_tokenize_prompt_async
     )
 
 
@@ -274,14 +238,12 @@ def apply_lopt_patch() -> None:
     HfRenderer.render_messages = _patched_hf_renderer_render_messages
     HfRenderer.render_messages_async = _patched_hf_renderer_render_messages_async
     HfRenderer._tokenize_prompt = _patched_hf_renderer_tokenize_prompt
-    HfRenderer._tokenize_prompt_async = _patched_hf_renderer_tokenize_prompt_async
 
     DeepseekV4Renderer.__init__ = _patched_deepseek_v4_renderer_init
     DeepseekV4Renderer.shutdown = _patched_deepseek_v4_renderer_shutdown
     DeepseekV4Renderer.render_messages = _patched_deepseek_v4_renderer_render_messages
     DeepseekV4Renderer.render_messages_async = _patched_deepseek_v4_renderer_render_messages_async
     DeepseekV4Renderer._tokenize_prompt = _patched_deepseek_v4_renderer_tokenize_prompt
-    DeepseekV4Renderer._tokenize_prompt_async = _patched_deepseek_v4_renderer_tokenize_prompt_async
     _PATCH_APPLIED = True
 
 

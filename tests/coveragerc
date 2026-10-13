@@ -1,0 +1,24 @@
+[run]
+branch = True
+# The file path in the specified overwritten data is an absolute path, which facilitates path matching during subsequent analysis.
+relative_files = False
+# Specifies the base name of the generated coverage data file. The absolute path can be used.
+data_file = /tests/outputs/covdata/coverage
+# Adding identifiers such as the process ID to the coverage data file.
+parallel = True
+concurrency = thread,multiprocessing
+sigterm = False
+# Debugging configuration, which helps locate possible exceptions. Enable it as required.
+# debug=pid,dataio,dataop
+# debug_file=/opt/coveragepy_debug.out
+# Disable coverage.py warning printing.
+disable_warnings=no-data-collected,module-not-python
+# List of source code files whose coverage data can be collected.
+include = 
+    */vllm_ascend/*
+    # Any format of Python code under the directory usr.
+    /vllm_ascend/*
+# Configuring the list of files whose coverage data is not to be collected.
+omit = */.local/*
+    /usr/*
+    utils/tirefire.py

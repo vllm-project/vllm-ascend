@@ -148,6 +148,8 @@ TILING_DATA_FIELD_DEF(int64_t, oriKvStride)
 TILING_DATA_FIELD_DEF(int64_t, oriWinLeft)
 TILING_DATA_FIELD_DEF(int64_t, oriWinRight)
 TILING_DATA_FIELD_DEF(int64_t, sparseBlockSize)
+TILING_DATA_FIELD_DEF(bool, hasOriSparseIndices)
+TILING_DATA_FIELD_DEF(uint32_t, oriSparseIndexWidth)
 
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
 
@@ -247,6 +249,8 @@ public:
     int64_t oriWinRight = 0;
     int64_t sparseBlockSize = 0;
     int64_t sparseBlockCount = 0;
+    bool hasOriSparseIndices = false;
+    uint32_t oriSparseIndexWidth = 0;
     // Mask
     int32_t sparseMode = 0;
     // Others Flag
@@ -266,6 +270,7 @@ public:
     ge::DataType qType = ge::DT_FLOAT16;
     ge::DataType oriKvType = ge::DT_FLOAT16;
     ge::DataType cmpKvType = ge::DT_FLOAT16;
+    ge::DataType oriSparseIndicesType = ge::DT_INT32;
     ge::DataType outputType = ge::DT_FLOAT16;
 
     // Layout
@@ -391,6 +396,8 @@ private:
     int64_t blockSize_ = 0;
     int32_t oriBlockSize_ = 0;
     int32_t cmpBlockSize_ = 0;
+    bool hasOriSparseIndices_ = false;
+    uint32_t oriSparseIndexWidth_ = 0;
 
     uint32_t aicNum_ = 0;
     uint32_t aivNum_ = 0;
@@ -404,6 +411,7 @@ private:
     ge::DataType qType_ = ge::DT_FLOAT16;
     ge::DataType oriKvType_ = ge::DT_FLOAT16;
     ge::DataType cmpKvType_ = ge::DT_FLOAT16;
+    ge::DataType oriSparseIndicesType_ = ge::DT_INT32;
     ge::DataType outputType_ = ge::DT_FLOAT16;
 };
 
@@ -468,6 +476,7 @@ public:
     bool HasAxis(const SASAxis &axis, const SASLayout &layout, const gert::Shape &shape) const;
     size_t GetAxisIdx(const SASAxis &axis, const SASLayout &layout) const;
     uint32_t GetAxisNum(const gert::Shape &shape, const SASAxis &axis,const SASLayout &layout) const;
+    uint32_t GetSparseIndexWidth(const gert::Shape &shape, const SASLayout &layout) const;
     static constexpr int64_t invalidDimValue_ = std::numeric_limits<int64_t>::min();
 
     // BaseParams
@@ -506,6 +515,8 @@ public:
     uint32_t cmpMaxBlockNumPerBatch_ = 0;
     int32_t oriBlockSize_ = 0;
     int32_t cmpBlockSize_ = 0;
+    bool hasOriSparseIndices_ = false;
+    uint32_t oriSparseIndexWidth_ = 0;
 
     // template mode
     SASTemplateMode perfMode_ = SASTemplateMode::SWA_TEMPLATE_MODE;
@@ -514,6 +525,7 @@ public:
     ge::DataType qType_ = ge::DT_FLOAT16;
     ge::DataType oriKvType_ = ge::DT_FLOAT16;
     ge::DataType cmpKvType_ = ge::DT_FLOAT16;
+    ge::DataType oriSparseIndicesType_ = ge::DT_INT32;
     ge::DataType cmpSparseIndicesType_ = ge::DT_INT32;
     ge::DataType oriBlockTableType_ = ge::DT_INT32;
     ge::DataType cmpBlockTableType_ = ge::DT_INT32;

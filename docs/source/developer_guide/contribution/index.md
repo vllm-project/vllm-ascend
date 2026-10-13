@@ -22,7 +22,7 @@ python3 -m venv .venv
 source ./.venv/bin/activate
 
 # Clone vllm-ascend and install
-git clone https://github.com/vllm-project/vllm-ascend.git
+git clone --branch main https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
 # Install lint requirement and enable pre-commit hook
@@ -36,14 +36,15 @@ bash format.sh
 
 After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
-```{code-block} bash
-   :substitutions:
+```bash
 cd ~/vllm-project/
 
-# Run CI needs vLLM installed
-git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
+# Install the vLLM commit verified by the main-branch plugin checkout.
+VLLM_COMMIT=$(tr -d '[:space:]' < vllm-ascend/.github/vllm-main-verified.commit)
+git init vllm
+git -C vllm fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_COMMIT"
+git -C vllm checkout --detach FETCH_HEAD
 cd vllm
-pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
@@ -72,6 +73,20 @@ git commit -sm "your commit info"
 
 You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
 
+### Local native build cache
+
+When a source build compiles native csrc actions, their reusable local entries are
+stored in the ignored `csrc/build_cache` directory. Set
+`VLLM_ASCEND_BUILD_CACHE_DIR` to an absolute path to use a different directory.
+This is local build state, not a remote OBS snapshot; deleting it while no
+build is running only makes the next relevant source build cold. Builds that
+disable custom-kernel compilation do not exercise the custom-operator action
+cache.
+
+If you change a generated operator input, compiler command, or toolchain
+dependency, review the [cache identity and CMake integration contract](../Design_Documents/persistent_csrc_build_cache.md#cmake-integration-contract)
+in the design document.
+
 ## DCO and Signed-off-by
 
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
@@ -95,21 +110,11 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[CI]` for build or continuous integration improvements.
 - `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
 
-:::{note}
-If the PR spans more than one category, please include all relevant prefixes.
-:::
+!!! note
+
+    If the PR spans more than one category, please include all relevant prefixes.
 
 ## Others
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing).
 If you encounter any problems while contributing, feel free to submit a PR to improve the documentation to help other developers.
-
-:::{toctree}
-:caption: Index
-:maxdepth: 1
-testing
-doc_writing
-multi_node_test
-nightly_ci_test
-e2e_ci_test
-:::

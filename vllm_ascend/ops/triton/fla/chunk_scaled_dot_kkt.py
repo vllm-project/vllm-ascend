@@ -23,7 +23,7 @@ from .utils import prepare_chunk_indices, safe_exp
         "USE_G": lambda args: args["g_cumsum"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T", "B"])
+@triton.jit(do_not_specialize=["T", "B", "bh_step", "task_num", "num_core"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
     beta,  # [H, B, T]
@@ -33,6 +33,9 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     chunk_indices,
     T,
     B,
+    bh_step,
+    task_num,
+    num_core,
     H: tl.constexpr,
     Hg: tl.constexpr,
     K: tl.constexpr,
@@ -40,9 +43,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    bh_step: tl.constexpr,
-    task_num: tl.constexpr,
-    num_core: tl.constexpr,
 ):
     bt_stride = B * T
     core_id = tl.program_id(0)

@@ -15,7 +15,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 STEP3P5 = ROOT / "vllm_ascend" / "spec_decode" / "step3p5.py"
 BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
-PATCH_SPEC_CFG = ROOT / "vllm_ascend" / "patch" / "platform" / "patch_speculative_config.py"
 WORKER_PATCH_INIT = ROOT / "vllm_ascend" / "patch" / "worker" / "__init__.py"
 LEGACY_STEP3P7_PATCH = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_step3p5_mtp.py"
 
@@ -60,9 +59,9 @@ def test_step3p5_first_pass_forwards_rejected_token_counts() -> None:
     assert "num_rejected_tokens_gpu" in [arg.arg for arg in set_inputs.args.args]
     assert "num_rejected_tokens_gpu=num_rejected_tokens_gpu" in _src(propose)
 
-    # Guard against the override creeping back: the previous step3p5 simple-path
-    # was byte-equivalent to the base's `not needs_extra_input_slots and
-    # pcp_size <= 1` branch, so a re-override is almost certainly redundant.
+    # Guard against the override creeping back: the previous Step3.5
+    # implementation duplicated the base simple path, so a re-override is
+    # almost certainly redundant.
     step_methods = {n.name for n in _class(STEP3P5, "AscendStep3p5MTPProposer").body if isinstance(n, ast.FunctionDef)}
     assert "set_inputs_first_pass" not in step_methods
 
@@ -92,12 +91,86 @@ def test_step3p5_draft_window_and_config_contracts() -> None:
     assert "sliding_attention" in ensure_layer_types
 
 
-def test_step3p7_uses_step3p5_mtp_override_without_legacy_runtime_patch() -> None:
-    override_src = _src(_func(PATCH_SPEC_CFG, "hf_config_override"))
+def test_pad_query_start_loc_for_fia_first_arg_is_query_start_loc() -> None:
+    """No7: _propose must pass query_start_loc as the first arg.
 
-    assert "step3p7" in override_src
-    assert "Step3p7ForConditionalGeneration" in override_src
-    assert "step3p5_mtp" in override_src
-    assert "Step3p5MTP" in override_src
-    assert "patch_step3p5_mtp" not in WORKER_PATCH_INIT.read_text()
-    assert not LEGACY_STEP3P7_PATCH.exists()
+    _pad_query_start_loc_for_fia signature:
+        (self, query_start_loc, num_tokens_padded, num_reqs_padded,
+         num_reqs, cudagraph_runtime_mode, batch_desc_num_reqs) -> int
+
+    Without query_start_loc, every subsequent argument shifts left by one,
+    causing cudagraph_runtime_mode (a CUDAGraphMode enum) to be treated as
+    num_reqs (int) and eventually triggering:
+        TypeError: unsupported operand type(s) for *: 'CUDAGraphMode' and 'int'
+
+    See model_runner_v1.py:_pad_query_start_loc_for_fia and the correct call
+    pattern at llm_base_proposer.py:730–736.
+    """
+    propose = _method(STEP3P5, "AscendStep3p5MTPProposer", "_propose")
+    propose_src = _src(propose)
+
+    # Verify the call site passes query_start_loc as the first argument.
+    assert "self.runner._pad_query_start_loc_for_fia(" in propose_src
+    assert "self.runner.query_start_loc," in propose_src
+
+    # Walk the AST to confirm the first positional arg is query_start_loc.
+    import ast as _ast
+
+    class _CallFinder(_ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.call: ast.Call | None = None
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "self"
+                and node.func.value.attr == "runner"
+                and node.func.attr == "_pad_query_start_loc_for_fia"
+            ):
+                self.call = node
+
+    finder = _CallFinder()
+    finder.visit(propose)
+    assert finder.call is not None, "_pad_query_start_loc_for_fia call not found"
+
+    args = finder.call.args
+    assert len(args) >= 1
+
+    first_arg = args[0]
+    assert isinstance(first_arg, ast.Attribute)
+    assert isinstance(first_arg.value, ast.Attribute)
+    assert isinstance(first_arg.value.value, ast.Name)
+    assert first_arg.value.value.id == "self"
+    assert first_arg.value.attr == "runner"
+    assert first_arg.attr == "query_start_loc"
+
+    # Verify the Step3.5 call pattern matches the base proposer's pattern
+    # for the first three args (query_start_loc, num_input_tokens,
+    # batch_descriptor-based num_reqs).
+    base_propose_src = _src(_method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "_propose"))
+
+    def _find_call_in_src(src: str) -> str | None:
+        """Extract the _pad_query_start_loc_for_fia(...) call span."""
+        marker = "self.runner._pad_query_start_loc_for_fia("
+        idx = src.find(marker)
+        if idx == -1:
+            return None
+        start = idx
+        depth = 0
+        for i in range(idx + len(marker), len(src)):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                if depth == 0:
+                    return src[start : i + 1]
+                depth -= 1
+        return None
+
+    step_call = _find_call_in_src(propose_src)
+    base_call = _find_call_in_src(base_propose_src)
+    assert step_call is not None
+    assert base_call is not None
+    assert "query_start_loc" in step_call
+    assert "num_input_tokens" in step_call

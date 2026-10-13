@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -39,6 +40,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
@@ -52,6 +54,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 multi_steps_attn_metadata,
                 num_tokens,
                 is_prefill,
+                sampling_metadata,
             )
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
@@ -93,12 +96,9 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
 
             assert self.runner is not None
 
-            # 310P does not support PCP/DCP, so we skip all PCP handling.
+            # 310P does not support DCP, so skip context-parallel handling.
             ori_token_indices_to_sample = None
             query_lens_d = None
-
-            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
-                target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)

@@ -59,9 +59,6 @@ ge::graphStatus KvQuantSASTilingCheck::CheckParaExistence()
 
  ge::graphStatus KvQuantSASTilingCheck::CheckUnrequiredParaExistence() const
 {
-    OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor != nullptr || opParamInfo_.oriSparseIndices.desc != nullptr,
-                OP_LOGE(opName_, "oriSparseIndices is not supported now, it must be nullptr."),
-                return ge::GRAPH_FAILED);
     OP_CHECK_IF(opParamInfo_.cuSeqLensOriKv.tensor != nullptr || opParamInfo_.cuSeqLensOriKv.desc != nullptr,
                 OP_LOGE(opName_, "cuSeqLensOriKv is not supported now, it must be nullptr."),
                 return ge::GRAPH_FAILED);

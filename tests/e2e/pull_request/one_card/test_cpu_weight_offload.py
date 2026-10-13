@@ -6,125 +6,143 @@
 #
 """End-to-end tests for CPU weight offloading on Ascend NPU.
 
-Covers both the prefetch backend (NPUPrefetchOffloader) and the UVA
-backend (functional_call fallback path, since UVA is not available on
-NPU hardware).  Tests verify that offloading produces the same outputs
+Covers both the prefetch backend (AscendPrefetchOffloader).
+Tests verify that offloading produces the same outputs
 as the baseline (no offloading).
 """
 
-import os
-
 import pytest
+from vllm.outputs import RequestOutput
 
-from tests.e2e.conftest import wait_until_npu_memory_free
-from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request import utils as e2e_utils
+from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 MODEL = "Qwen/Qwen3-0.6B"
+
+_NZ_GRAPH_SKIP_REASON = (
+    "NZ static buffers make the prefetch H2D copy a "
+    "cross-format (ND->NZ) conversion that is aclop-only on "
+    "CANN 9.0.0 and rejected during ACL graph capture; "
+    "AscendPrefetchOffloader fails fast with a clear error "
+    "for this combo. Remove this skip and the offloader "
+    "guard once the no-transdata prefetch path lands."
+)
+
+
+def _eager_baseline_kwargs(nz_mode: int) -> dict:
+    return {
+        "model_name": MODEL,
+        "max_model_len": 512,
+        "enforce_eager": True,
+        "additional_config": {"weight_nz_mode": nz_mode},
+    }
+
+
+def _generate_eager_baseline(nz_mode: int) -> list[RequestOutput]:
+    with VllmRunner(**_eager_baseline_kwargs(nz_mode)) as runner:
+        return runner.model.generate(
+            prompts=PROMPTS_SHORT,
+            sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
+        )
+
+
+def _assert_offload_matches_baseline(
+    baseline_outputs: list[RequestOutput],
+    runner_kwargs: dict,
+    atol: float = 0.0689,
+    decode_atol: float | None = None,
+    num_runs: int = 3,
+) -> None:
+    """Generate with offload enabled and compare logprobs to a shared baseline."""
+    if decode_atol is None:
+        decode_atol = 2 * atol
+
+    with VllmRunner(**runner_kwargs) as runner:
+        for run_idx in range(num_runs):
+            offload_outputs = runner.model.generate(
+                prompts=PROMPTS_SHORT,
+                sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
+            )
+
+            for prompt_idx, (base_out, offload_out) in enumerate(zip(baseline_outputs, offload_outputs)):
+                base_seq = base_out.outputs[0]
+                offload_seq = offload_out.outputs[0]
+
+                assert base_seq.logprobs is not None and offload_seq.logprobs is not None, (
+                    f"logprobs not returned for prompt {prompt_idx} (run {run_idx})"
+                )
+                assert len(base_seq.token_ids) == len(offload_seq.token_ids) == 3, (
+                    f"Expected 3 tokens for prompt {prompt_idx} (run {run_idx}), "
+                    f"got baseline={len(base_seq.token_ids)}, "
+                    f"offload={len(offload_seq.token_ids)}"
+                )
+
+                e2e_utils._check_prefill_token(base_seq, offload_seq, prompt_idx, atol)
+                for token_idx in range(1, 3):
+                    e2e_utils._check_decode_token(base_seq, offload_seq, token_idx, prompt_idx, decode_atol)
+
+
+def _prefetch_kwargs(*, enforce_eager: bool, nz_mode: int) -> dict:
+    runner_kwargs: dict = {
+        "model_name": MODEL,
+        "max_model_len": 512,
+        "offload_backend": "prefetch",
+        "offload_group_size": 4,
+        "offload_num_in_group": 1,
+        "additional_config": {"weight_nz_mode": nz_mode},
+    }
+    if enforce_eager:
+        runner_kwargs["enforce_eager"] = True
+    else:
+        runner_kwargs["cudagraph_capture_sizes"] = [1, 2, 4, 8]
+    return runner_kwargs
 
 
 # -------------------- Prefetch backend tests --------------------
 
 
 @wait_until_npu_memory_free()
-def test_prefetch_offload_eager():
-    """Test prefetch CPU offloading in eager mode.
+def test_prefetch_offload_nd_accuracy():
+    """ND prefetch offload vs one eager baseline (eager, graph, selective MLP)."""
+    baseline_outputs = _generate_eager_baseline(nz_mode=0)
 
-    Compares outputs between:
-    1. Baseline (eager, no offloading)
-    2. Prefetch offloading (group_size=4, num_in_group=1)
-       with enforce_eager=True (no ACL graph capture)
-    """
-    runner_kwargs = {
-        "model_name": MODEL,
-        "max_model_len": 512,
-        "enforce_eager": True,
-        "offload_backend": "prefetch",
-        "offload_group_size": 4,
-        "offload_num_in_group": 1,
-    }
-    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
-
-
-@wait_until_npu_memory_free()
-def test_prefetch_offload_aclgraph():
-    """Test prefetch CPU offloading with ACL graph capture.
-
-    Compares outputs between:
-    1. Baseline (eager, no offloading)
-    2. Prefetch offloading (group_size=4, num_in_group=1)
-       with ACL graph capture enabled (default, non-eager)
-    """
-    runner_kwargs = {
-        "model_name": MODEL,
-        "max_model_len": 512,
-        "cudagraph_capture_sizes": [1, 2, 4, 8],
-        "offload_backend": "prefetch",
-        "offload_group_size": 4,
-        "offload_num_in_group": 1,
-    }
-    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
-
-
-@wait_until_npu_memory_free()
-def test_prefetch_offload_selective_params():
-    """Test selective parameter offloading (MLP weights only).
-
-    Only offloads gate_up_proj and down_proj parameters, leaving
-    attention weights on NPU.
-    """
-    runner_kwargs = {
-        "model_name": MODEL,
-        "max_model_len": 512,
-        "enforce_eager": True,
-        "offload_backend": "prefetch",
-        "offload_group_size": 8,
-        "offload_num_in_group": 2,
-        "offload_prefetch_step": 1,
-        "offload_params": {"gate_up_proj", "down_proj"},
-    }
-    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
-
-
-# -------------------- UVA backend tests --------------------
-# UVA (Unified Virtual Addressing) is not available on Ascend NPU, so
-# the UVA offloader falls back to the functional_call path that moves
-# weights to device on-demand.  Tests below mirror the upstream
-# test_cpu_offload.py parametrization but only exercise the non-UVA
-# (functional_call) path with enforce_eager, as NPU does not support
-# UVA zero-copy.
-
-
-@pytest.mark.parametrize("disable_pin_memory", [False, True])
-@wait_until_npu_memory_free()
-def test_uva_offload_functional_call(disable_pin_memory):
-    """Test UVA offloader's functional_call fallback on NPU.
-
-    With UVA disabled (forced by env var), the UVA offloader falls back
-    to moving weights to device inside a functional_call wrapper.
-    enforce_eager is required because this fallback is incompatible
-    with graph capture.
-
-    Parametrized over pin_memory to cover both pinned and unpinned
-    CPU storage paths.
-    """
-    old_uva = os.environ.get("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA")
-    old_pin = os.environ.get("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY")
-    try:
-        os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_UVA"] = "1"
-        os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"] = str(int(disable_pin_memory))
-        runner_kwargs = {
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=True, nz_mode=0),
+    )
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=False, nz_mode=0),
+    )
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        {
             "model_name": MODEL,
             "max_model_len": 512,
             "enforce_eager": True,
-            "cpu_offload_gb": 1,
-        }
-        compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
-    finally:
-        if old_uva is None:
-            os.environ.pop("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", None)
-        else:
-            os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_UVA"] = old_uva
-        if old_pin is None:
-            os.environ.pop("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", None)
-        else:
-            os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"] = old_pin
+            "offload_backend": "prefetch",
+            "offload_group_size": 8,
+            "offload_num_in_group": 2,
+            "offload_prefetch_step": 1,
+            "offload_params": {"gate_up_proj", "down_proj"},
+            "additional_config": {"weight_nz_mode": 0},
+        },
+        num_runs=1,
+    )
+
+
+@wait_until_npu_memory_free()
+def test_prefetch_offload_nz_eager_accuracy():
+    """NZ prefetch offload vs one eager baseline. NZ-graph is skipped (unsupported)."""
+    baseline_outputs = _generate_eager_baseline(nz_mode=2)
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=True, nz_mode=2),
+    )
+
+
+@pytest.mark.skip(reason=_NZ_GRAPH_SKIP_REASON)
+def test_prefetch_offload_nz_graph_accuracy():
+    """Placeholder until NZ+graph prefetch is supported."""
+    raise AssertionError("NZ+graph prefetch should stay skipped")

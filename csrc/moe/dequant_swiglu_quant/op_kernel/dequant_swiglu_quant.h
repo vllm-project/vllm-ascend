@@ -132,6 +132,7 @@ protected:
 
     TBuf<TPosition::VECCALC> tmpBuf1_;
     TBuf<TPosition::VECCALC> tmpBuf2_; // only use in swigluMode == 1
+    TBuf<TPosition::VECCALC> scaleBuf_;
 
     uint32_t blockIdx_ = GetBlockIdx();
     int64_t realDimx_ = 0;
@@ -198,6 +199,8 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::Init(
     pipe_->InitBuffer(outQueue_, 1, UbSingleOutSize_ * sizeof(int8_t) + tl_->UbFactorDimx * sizeof(float) + BLOCK_SIZE);
 
     pipe_->InitBuffer(tmpBuf1_, UbSingleOutSize_ * SWI_FACTOR * sizeof(float));
+    pipe_->InitBuffer(scaleBuf_,
+        ((tl_->UbFactorDimx + BLOCK_ELEM - 1) / BLOCK_ELEM) * BLOCK_ELEM * BLOCK_ELEM * sizeof(float));
     if (tl_->swigluMode == 1) {
         pipe_->InitBuffer(
             tmpBuf2_,
@@ -704,25 +707,27 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::DynamicQuant(
     // Calc quant: proDimsx * 64 -> proDimsx
     // repeatTimes:proDimsx, dstRepStride:1(dtype), srcBlkStride:1, srcRepStride:tl_->UbFactorDimy / 64 * 8
     WholeReduceMax(
-        tmpUbF32Gate, tmpUbF32Gate, MASK_NUM_T32, proDimsx, 1, 1, tl_->UbFactorDimy / MASK_NUM_T32 * MASK_BLK_STRIDE,
-        ReduceOrder::ORDER_ONLY_VALUE);
+        tmpUbF32Gate, tmpUbF32Gate, MASK_NUM_T32, proDimsx, 1, 1, tl_->UbFactorDimy / BLOCK_ELEM,
+         ReduceOrder::ORDER_ONLY_VALUE);
     PipeBarrier<PIPE_V>();
     // Calc quant: scaleOut / 127.0
     Muls(scaleOut, tmpUbF32Gate, DYNAMIC_QUANT_FACTOR, proDimsx);
     PipeBarrier<PIPE_V>();
     // Calc Broadcast: proDimsx -> proDimsx,8
     int64_t blockCount = (proDimsx + BLOCK_ELEM - 1) / BLOCK_ELEM;
-    Brcb(outLocal, scaleOut, blockCount, {1, MASK_BLK_STRIDE});
+    LocalTensor<float> brcbTmp = scaleBuf_.AllocTensor<float>();
+    Brcb(brcbTmp, scaleOut, blockCount, {1, MASK_BLK_STRIDE});
     PipeBarrier<PIPE_V>();
     // Copy scale: [proDimsx,8] -> [proDimsx,H]
     SetMaskCount();
     SetVectorMask<float, MaskMode::COUNTER>(tl_->UbFactorDimy);
     Copy<float, false>(
-        tmpUbF32Gate, outLocal, AscendC::MASK_PLACEHOLDER, proDimsx,
+        tmpUbF32Gate, brcbTmp, AscendC::MASK_PLACEHOLDER, proDimsx,
         {1, 0, static_cast<uint16_t>(tl_->UbFactorDimy / BLOCK_ELEM), 1});
     SetMaskNorm();
     ResetMask();
     PipeBarrier<PIPE_V>();
+    scaleBuf_.FreeTensor(brcbTmp);
     // Calc y: tmpUbF32Act = tmpUbF32Act / scaleOut
     Div(tmpUbF32Act, tmpUbF32Act, tmpUbF32Gate, tl_->UbFactorDimy * proDimsx);
     PipeBarrier<PIPE_V>();

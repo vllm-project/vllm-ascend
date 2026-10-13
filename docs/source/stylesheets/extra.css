@@ -1,0 +1,83 @@
+/* vLLM Ascend docs custom styles */
+
+/* Center the logo on the home page */
+.md-typeset .figure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Theme-aware logo swap. The .md-logo wrapper in main.css forces
+   .md-logo img to display:block, so the two <img> elements would
+   stack vertically and overlap visually if neither were hidden.
+   Material's [src$="#only-dark"]{display:none} only covers one half
+   of the swap, so we add explicit class-based rules here for both
+   halves. The class selectors win on specificity (.class > [attr])
+   and don't depend on URL fragment matching. */
+[data-md-color-scheme="default"] .md-logo__img--dark,
+[data-md-color-scheme="default"] .home-hero img[src$="#only-dark"] {
+  display: none !important;
+}
+[data-md-color-scheme="slate"] .md-logo__img--light,
+[data-md-color-scheme="slate"] .home-hero img[src$="#only-light"] {
+  display: none !important;
+}
+
+/* Centered hero logo on the home page. The previous .md-typeset .figure
+   rule didn't match the <p> wrapper mkdocs emits for markdown images,
+   so the logo rendered left-aligned and visually overlapped the header
+   logo. Use a dedicated class with explicit centering and spacing. */
+.home-hero {
+  text-align: center;
+  margin: 2rem 0 2.5rem;
+}
+.home-hero img {
+  display: block;
+  margin: 0 auto;
+  max-width: 720px;
+  width: 100%;
+  height: auto;
+}
+
+/* Make tables more compact */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.5rem 0.75rem;
+}
+
+/* Custom code admonition, matching the upstream vLLM documentation. */
+:root {
+  --md-admonition-icon--code: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.75.75 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.75.75 0 0 1 .734.215m-6.56 0a.75.75 0 0 1 1.042.018.75.75 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.75.75 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"/></svg>');
+}
+
+.md-typeset .admonition.code,
+.md-typeset details.code {
+  border-color: #64dd17;
+}
+
+.md-typeset .code > .admonition-title,
+.md-typeset .code > summary {
+  background-color: #64dd171a;
+}
+
+.md-typeset .code > .admonition-title::before,
+.md-typeset .code > summary::before {
+  background-color: #64dd17;
+  -webkit-mask-image: var(--md-admonition-icon--code);
+  mask-image: var(--md-admonition-icon--code);
+}
+
+/* Outline for content tabs, matching the upstream vLLM documentation. */
+.md-typeset .tabbed-set {
+  border: 0.075rem solid var(--md-default-fg-color);
+  border-radius: 0.2rem;
+}
+
+.md-typeset .tabbed-content {
+  padding: 0 0.6em;
+}
+
+/* GitHub button styling */
+.github-button {
+  margin: 0 4px;
+}

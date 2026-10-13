@@ -1,8 +1,10 @@
 import math
+from collections.abc import Iterable
 from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
@@ -24,6 +26,49 @@ class RopeDataProxy:
     def __init__(self, data_map, is_cos=True):
         self._data = data_map
         self.idx = 0 if is_cos else 1
+
+    def pad_to(self, target_len: int, dim: int = 0) -> "RopeDataProxy":
+        """
+        Return a new proxy whose underlying tensors are padded to ``target_len`` along ``dim``.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, (cos_t, sin_t) in groups.items():
+                pad_size = target_len - cos_t.shape[dim]
+                if pad_size > 0:
+                    ndim = cos_t.ndim
+                    pad = [0] * (2 * ndim)
+                    # F.pad pads from the last dimension backward:
+                    #   (dim_{N-1}_left, dim_{N-1}_right, ..., dim_0_left, dim_0_right)
+                    pad[-(1 + 2 * dim)] = pad_size  # right side of the target dim
+                    cos_t = F.pad(cos_t, pad)
+                    sin_t = F.pad(sin_t, pad)
+                new_data[config_key][group_name] = (cos_t, sin_t)
+        return RopeDataProxy(new_data, is_cos=(self.idx == 0))
+
+    def copy_to_buffers(
+        self,
+        buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]],
+        capacity: int,
+    ) -> tuple["RopeDataProxy", "RopeDataProxy"]:
+        """Copy cos/sin into caller-owned buffers and return proxies viewing them.
+
+        FULL graphs replay captured addresses, so RoPE data built into fresh
+        tensors must be staged in storage that outlives the step. Missing
+        buffers are allocated with room for ``capacity`` tokens.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, rope in groups.items():
+                key = (config_key, group_name)
+                if key not in buffers:
+                    buffers[key] = tuple(t.new_empty((capacity, *t.shape[1:])) for t in rope)
+                new_data[config_key][group_name] = tuple(
+                    buffer[: t.shape[0]].copy_(t) for buffer, t in zip(buffers[key], rope, strict=True)
+                )
+        return RopeDataProxy(new_data, is_cos=True), RopeDataProxy(new_data, is_cos=False)
 
     def __getitem__(self, index):
         if not isinstance(index, str):
@@ -63,15 +108,30 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    layer_names: str | Iterable[str] | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
         pos_map = positions
 
+    requested_configs: set[str] | None = None
+    if layer_names is not None:
+        names = [layer_names] if isinstance(layer_names, str) else list(layer_names)
+        requested_configs = set()
+        for layer_name in names:
+            info = _ROPE_STATE.layer_info.get(layer_name)
+            if info is None and layer_name.endswith(".swa_cache"):
+                info = _ROPE_STATE.layer_info.get(f"{layer_name.removesuffix('.swa_cache')}.attn")
+            if info is None:
+                raise KeyError(f"Layer {layer_name} not registered.")
+            requested_configs.add(info[0])
+
     batch_result: dict[Any, Any] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
+        if requested_configs is not None and config_key not in requested_configs:
+            continue
         if config_key not in _ROPE_STATE.full_rope_cache:
             continue
         full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
@@ -81,9 +141,6 @@ def get_cos_and_sin_dsa(
         for group_name, pos_tensor in pos_map.items():
             if group_name not in registered_groups:
                 continue
-
-            curr_cos = full_rope_cos[pos_tensor]
-            curr_sin = full_rope_sin[pos_tensor]
 
             if use_cache:
                 group_buffers = (
@@ -98,19 +155,35 @@ def get_cos_and_sin_dsa(
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
+                # This is semantically equivalent to the previous
+                # `full_rope_cos[pos_tensor] / full_rope_sin[pos_tensor]`
+                # indexing followed by `copy_`; the change only combines the
+                # indexing and the write into the preallocated output buffers.
+                #
+                # gather_idx is built so torch.gather picks the same rows: each
+                # row contains the token index repeated along the rotary dim.
+                # pos_tensor -> reshape(-1, 1, 1, 1) gives each token its own
+                # row; expand() broadcasts that row across the rotary dim to
+                # match full_rope_* (which is [max_pos, 1, 1, rotary_dim]),
+                # so torch.gather(..., dim=0) selects row pos_tensor[i].
+                gather_idx = (
+                    pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_rope_cos.size(-1))
+                )
                 if draft_index is None:
-                    buf_cos[:num_tokens].copy_(curr_cos)
-                    buf_sin[:num_tokens].copy_(curr_sin)
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[:num_tokens])
 
                     batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
                 else:
-                    buf_cos[draft_index - 1][:num_tokens].copy_(curr_cos)
-                    buf_sin[draft_index - 1][:num_tokens].copy_(curr_sin)
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens])
                     batch_result[config_key][group_name] = (
                         buf_cos[draft_index - 1][:num_tokens],
                         buf_sin[draft_index - 1][:num_tokens],
                     )
             else:
+                curr_cos = full_rope_cos[pos_tensor]
+                curr_sin = full_rope_sin[pos_tensor]
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
     return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)
@@ -140,6 +213,23 @@ def get_full_cos_and_sin_dsa(group_name: str) -> tuple[torch.Tensor, torch.Tenso
     return _ROPE_STATE.full_rope_cache[config_key]
 
 
+def get_full_cos_and_sin_dsa_for_layer(
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the full RoPE cache selected by one registered layer.
+
+    A group name is not sufficient for V4.1 because pure-SWA and long-context
+    layers both use the ``default`` group while registering different RoPE
+    configurations.  Resolving through ``layer_info`` keeps the compressor
+    metadata path tied to the exact table used by its source attention layer.
+    """
+    info = _ROPE_STATE.layer_info.get(layer_name)
+    if info is None:
+        raise KeyError(f"RoPE layer {layer_name!r} is not registered")
+    config_key, _ = info
+    return _ROPE_STATE.full_rope_cache[config_key]
+
+
 class ComplexExpRotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -160,9 +250,12 @@ class ComplexExpRotaryEmbedding(nn.Module):
         self.rotary_dim = rotary_dim
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
+        original_seq_len = extra_kwargs.get("original_max_position_embeddings", max_position_embeddings)
+        apply_yarn_scaling = extra_kwargs.get("apply_yarn_scaling", True)
         config_key = (
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
-            f"base{base}_scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}"
+            f"original_seq_len{original_seq_len}_apply_yarn{apply_yarn_scaling}_base{base}_scaling_factor{scaling_factor}_"
+            f"beta_fast{beta_fast}_beta_slow{beta_slow}"
         )
         _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
 
@@ -173,7 +266,14 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
         if config_key not in _ROPE_STATE.full_rope_cache:
             inv_freq = self.precompute_freqs_cis(
-                rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
+                rotary_dim,
+                max_position_embeddings,
+                original_seq_len,
+                base,
+                scaling_factor,
+                beta_fast,
+                beta_slow,
+                apply_yarn_scaling=apply_yarn_scaling,
             )
             t = torch.arange(
                 max_position_embeddings * scaling_factor,
@@ -187,6 +287,18 @@ class ComplexExpRotaryEmbedding(nn.Module):
             sin = sin.to(current_platform.device_type)
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+
+        # The DSA RoPE tables are built while the sleep-mode weights mem-pool is
+        # active and every DSA layer reads them through the process-global
+        # ``_ROPE_STATE`` cache. Own them as non-persistent buffers as well, so a
+        # level-2 sleep backs up and restores their contents in place; the cache
+        # keeps the same tensor objects, so the lookup path and the addresses
+        # baked into captured ACL graphs are unchanged. ``named_buffers()``
+        # de-duplicates shared tensors, so the layers that share a config key
+        # cost a single backup entry.
+        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
+        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
+        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
 
         use_eagle = (
             vllm_config is not None
@@ -219,7 +331,9 @@ class ComplexExpRotaryEmbedding(nn.Module):
                     _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
 
     @staticmethod
-    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
+    def precompute_freqs_cis(
+        dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, *, apply_yarn_scaling=True
+    ):
         def yarn_find_correction_dim(
             num_rotations: int,
             dim: int,
@@ -254,6 +368,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
         pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
+        if not apply_yarn_scaling:
+            return inv_freq_extrapolation
         inv_freq_interpolation = 1.0 / (factor * pos_freqs)
 
         low, high = yarn_find_correction_range(

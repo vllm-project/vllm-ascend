@@ -51,11 +51,10 @@ jobs:
         id: auth
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
@@ -75,8 +74,9 @@ jobs:
 
       - name: Parse target branch
         id: parse
+        env:
+          TARGET_BRANCH: ${{ github.event.client_payload.slash_command.args.all }}
         run: |
-          TARGET_BRANCH='${{ github.event.client_payload.slash_command.args.all }}'
           TARGET_BRANCH=$(echo "$TARGET_BRANCH" | xargs)
 
           if [ -z "$TARGET_BRANCH" ]; then
@@ -124,15 +124,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          PR_TITLE: ${{ github.event.client_payload.pull_request.title }}
+          PR_BODY: ${{ github.event.client_payload.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          PR_BASE_SHA: ${{ github.event.client_payload.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
-          PR_TITLE='${{ github.event.client_payload.pull_request.title }}'
-          PR_BODY='${{ github.event.client_payload.pull_request.body }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          PR_BASE_SHA='${{ github.event.client_payload.pull_request.base.sha }}'
-          PR_HEAD_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
-          TARGET_BRANCH='${{ steps.parse.outputs.target_branch }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
           # Get the PAT_TOKEN owner's username
           TOKEN_USER=$(gh api user --jq '.login')

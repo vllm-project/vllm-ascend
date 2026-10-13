@@ -23,7 +23,7 @@ on:
 
 jobs:
   slashCommandDispatch:
-    if: github.event.issue.pull_request != null && github.event.comment.user.type == 'User'
+    if: (github.event.issue.pull_request != null || startsWith(github.event.comment.body, '/wait-feedback')) && github.event.comment.user.type == 'User'
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Slash Command Dispatch
@@ -34,10 +34,12 @@ jobs:
           commands: |
             e2e
             rerun
+            cancel
             nightly
             cherry-pick
             revert
             weekly
+            wait-feedback
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -50,6 +52,11 @@ jobs:
               },
               {
                 "command": "rerun",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "cancel",
                 "permission": "none",
                 "issue_type": "pull-request"
               },
@@ -72,5 +79,10 @@ jobs:
                 "command": "weekly",
                 "permission": "none",
                 "issue_type": "pull-request"
+              },
+              {
+                "command": "wait-feedback",
+                "permission": "none",
+                "issue_type": "issue"
               }
             ]

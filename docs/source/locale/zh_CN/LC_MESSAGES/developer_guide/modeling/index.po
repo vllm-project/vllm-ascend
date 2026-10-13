@@ -19,12 +19,9 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/modeling/index.md:1
-#: ../../developer_guide/modeling/index.md:5
 msgid "Modeling"
 msgstr "新模型"
 
-#: ../../developer_guide/modeling/index.md:3
 msgid ""
 "This section provides tutorials of how to implement and register a new model"
 " into vllm-ascend."

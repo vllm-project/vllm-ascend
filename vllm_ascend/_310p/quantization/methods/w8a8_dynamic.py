@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -23,10 +22,10 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 
-from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
@@ -44,6 +43,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W8A8
+    # Activation quant dtype used by the MLP gmm hooks.
+    act_quant_type: torch.dtype = torch.int8
+    # 310P gmm1+swiglu+quant is fused inside npu_quant_grouped_matmul_dequant
+    # + npu_swiglu, so silu is handled by ``apply_gmm1_act_quant``.
+    fused_activations = frozenset({"silu"})
 
     def __init__(self):
         self.ep_group = get_ep_group()
@@ -80,57 +84,13 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: Any | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: Any | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=num_experts,
-        )
-
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=x,
-            )
-
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
@@ -140,19 +100,79 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                layer=layer,
                 quant_type=self.quant_type,
                 dynamic_eplb=False,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=getattr(layer, "activation", "silu"),
             ),
+            quant_method=self,
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            final_hidden_states += zero_expert_result
         return final_hidden_states
+
+    def _get_group_list(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        """Return the cumulative-sum group_list expected by 310P kernels."""
+        group_list = mlp_compute_input.group_list
+        if mlp_compute_input.group_list_type == 1:
+            # Convert group_list to cumulative sum format if group_list is count format
+            group_list = torch.cumsum(group_list, dim=0)
+        return group_list
+
+    def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
+        """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
+        return (
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+        )
+
+    def get_mlp_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Standard MLP-layout weights (w1/w2 with their scales)."""
+        w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+        return MoEWeights(
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        """Fused gmm1 (quant + dequant) + swiglu via 310P kernels.
+
+        ``npu_quant_grouped_matmul_dequant`` quantizes the hidden states to
+        int8 internally (``quant_mode="pertoken"``) and dequantizes the gmm1
+        output, so the activation scale is not needed by ``apply_gmm2``.
+        """
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
+        hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
+            x=mlp_compute_input.hidden_states,
+            quantized_weight=w1,
+            weight_scale=w1_scale,
+            group_list=self._get_group_list(mlp_compute_input),
+            quant_mode="pertoken",
+        )
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        return hidden_states, None
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        """down projection (gmm2, quant + dequant)."""
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        _, _, w2, w2_scale = self._get_mlp_weights(layer)
+        return torch_npu.npu_quant_grouped_matmul_dequant(
+            x=hidden_states,
+            quantized_weight=w2,
+            weight_scale=w2_scale,
+            group_list=self._get_group_list(mlp_compute_input),
+            quant_mode="pertoken",
+        )
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
@@ -169,6 +189,9 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
     Notes:
       - This scheme is discovered via 310P local registry.
+      - Uses true per-token dynamic act quant (``npu_dynamic_quant``) +
+        ``npu_quant_matmul``. Known accuracy issues on some shapes/Graph paths
+        are deferred; do not fall back to load-time fp16 dequant / ``F.linear``.
     """
 
     def get_perchannel_param(
@@ -188,6 +211,7 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        del tp_rank
         # NOTE(310P):
         # - There is an accuracy issue currently, which is expected to be fixed in the next version.
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)

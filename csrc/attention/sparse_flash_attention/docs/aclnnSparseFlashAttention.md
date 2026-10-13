@@ -6,9 +6,9 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>|     √      |
-|<term>Atlas A2 推理系列产品</term>   | √  |
-|<term>Atlas A3 推理系列产品</term>   | √  |
+|<term>Ascend 950PR&950DT 系列产品</term>|     √      |
+|<term>Atlas A2 系列产品</term>   | √  |
+|<term>Atlas A3 系列产品</term>   | √  |
 
 ## 功能说明
 
@@ -504,9 +504,9 @@ aclnnStatus aclnnSparseFlashAttention(
 - 参数query中的D和key、value的D值相等为512，参数query_rope中的Dr和key_rope的Dr值相等为64。
 - 参数query、key、value的数据类型必须保持一致。
 - 支持sparse_block_size整除block_size。
-    - <term>Ascend 950PR/Ascend 950DT</term>：
+    - <term>Ascend 950PR&950DT 系列产品</term>：
         - 只支持sparse_block_size为1。
-    - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：
+    - <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：
         - 支持[1,128]，且要求是2的幂次方，在PageAttention场景下要求sparse_block_size整除block_size
 
 ## 调用示例

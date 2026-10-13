@@ -35,16 +35,6 @@ void store_kv_block_metadata(
 {
     TORCH_CHECK(slot_mapping_npu.numel() > 0, "Tensor slot_mapping_npu is empty.");
     TORCH_CHECK(block_size > 0, "block_size must be positive, but got ", block_size);
-    const int64_t required_capacity = slot_mapping_npu.numel();
-    TORCH_CHECK(group_len.numel() >= required_capacity,
-                "group_len capacity must be at least slot_mapping_npu.numel(), but got ",
-                group_len.numel(), " and ", required_capacity);
-    TORCH_CHECK(group_key_idx.numel() >= required_capacity,
-                "group_key_idx capacity must be at least slot_mapping_npu.numel(), but got ",
-                group_key_idx.numel(), " and ", required_capacity);
-    TORCH_CHECK(group_key_cache_idx.numel() >= required_capacity,
-                "group_key_cache_idx capacity must be at least slot_mapping_npu.numel(), but got ",
-                group_key_cache_idx.numel(), " and ", required_capacity);
 
     EXEC_NPU_CMD(aclnnStoreKvBlockMetadata,
                  slot_mapping_npu,

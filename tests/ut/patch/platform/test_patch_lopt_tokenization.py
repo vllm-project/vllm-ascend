@@ -92,13 +92,32 @@ def test_deepseek_v4_sync_tokenization_uses_lopt() -> None:
     assert lopt.encoded_texts == ["a sufficiently long prompt"]
 
 
+def _make_instance_async_wrapper(renderer: Any) -> Any:
+    """Replicate vLLM v0.30.0's BaseRenderer.__init__ async binding.
+
+    ``BaseRenderer.__init__`` builds ``self._tokenize_prompt_async`` via
+    ``make_async(self._tokenize_prompt, executor=self._executor)``; the bound
+    method resolves through the class, so the patched sync method is what the
+    async path executes.
+    """
+
+    async def _tokenize_prompt_async(prompt, params):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            renderer._executor,
+            lambda: lopt_patch._patched_deepseek_v4_renderer_tokenize_prompt(renderer, prompt, params),
+        )
+
+    return _tokenize_prompt_async
+
+
 def test_deepseek_v4_async_tokenization_uses_lopt() -> None:
     lopt = _FakeLopt()
     renderer = SimpleNamespace(_ascend_lopt_tokenizer=lopt, _executor=None)
+    tokenize_prompt_async = _make_instance_async_wrapper(renderer)
 
     result = asyncio.run(
-        lopt_patch._patched_deepseek_v4_renderer_tokenize_prompt_async(
-            renderer,
+        tokenize_prompt_async(
             {"prompt": "a sufficiently long prompt"},
             _Params(),
         )
@@ -112,15 +131,15 @@ def test_deepseek_v4_async_tokenization_falls_back(monkeypatch: pytest.MonkeyPat
     lopt = _FakeLopt(usable=False)
     renderer = SimpleNamespace(_ascend_lopt_tokenizer=lopt, _executor=None)
     fallback_result = {"prompt": "short", "prompt_token_ids": [99]}
+    tokenize_prompt_async = _make_instance_async_wrapper(renderer)
 
-    async def fallback(renderer, prompt, params):
+    def fallback(renderer, prompt, params):
         return fallback_result
 
-    monkeypatch.setattr(lopt_patch, "_original_deepseek_v4_renderer_tokenize_prompt_async", fallback)
+    monkeypatch.setattr(lopt_patch, "_original_deepseek_v4_renderer_tokenize_prompt", fallback)
 
     result = asyncio.run(
-        lopt_patch._patched_deepseek_v4_renderer_tokenize_prompt_async(
-            renderer,
+        tokenize_prompt_async(
             {"prompt": "short"},
             _Params(),
         )

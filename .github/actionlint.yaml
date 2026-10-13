@@ -5,13 +5,24 @@ self-hosted-runner:
     - linux-aarch64-310p-1
     - linux-aarch64-310p-2
     - linux-aarch64-310p-4
-    - linux-aarch64-a3-1
     - linux-aarch64-a3-2
     - linux-aarch64-a3-4
     - linux-aarch64-a3-8
-    - linux-aarch64-a3-0
+    - linux-aarch64-a3-800i-2
+    - linux-aarch64-a3-800i-4
+    - linux-aarch64-a3-800i-8
+    - linux-aarch64-a3-800t-2
+    - linux-aarch64-a3-800t-4
+    - linux-aarch64-a3-800t-8
+    - linux-aarch64-a3-800t-0
+    - linux-aarch64-a5-0
+    - linux-aarch64-a5-2
+    - linux-aarch64-a5-4
+    - linux-aarch64-a5-8
     - linux-amd64-cpu-2-hk
+    - linux-amd64-cpu-4
     - linux-amd64-cpu-4-hk
+    - linux-aarch64-cpu-4
     - linux-amd64-cpu-8-hk
     - linux-amd64-cpu-16-hk
     - linux-arm64-cpu-16
@@ -20,3 +31,37 @@ self-hosted-runner:
     - linux-aarch64-a2b3-2
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
+    - linux-aarch64-a2b1-8
+    - linux-aarch64-a3-16-sh-001
+
+paths:
+  .github/workflows/_selected_tests.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/_e2e_nightly_single_node.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/_e2e_nightly_single_node_560t.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/_e2e_nightly_single_node_models.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/_build_csrc_cache.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+      - 'specifying action "\$/.github/actions/csrc-l1-save" in invalid format because ref is missing'
+  .github/workflows/schedule_doc_getting_started_test.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/schedule_main2main.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+  .github/workflows/_schedule_image_build.yaml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+      - 'specifying action "\$/.github/actions/csrc-l1-save" in invalid format because ref is missing'
+  .github/workflows/schedule_release_code_and_wheel.yml:
+    ignore:
+      - 'specifying action "\$/.github/actions/csrc-l1-restore" in invalid format because ref is missing'
+      - 'specifying action "\$/.github/actions/csrc-l1-save" in invalid format because ref is missing'

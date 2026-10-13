@@ -20,10 +20,11 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from logging import Logger
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 import torch
 import torch.nn as nn
+import torch_npu
 from vllm.logger import logger
 from xlite._C import Model, ModelConfig
 
@@ -33,6 +34,114 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 
 _MISSING = object()
 """Unique sentinel for missing attributes in this module."""
+_DUMMY_TENSOR = torch.empty(0)
+"""Placeholder tensor for padding missing attributes in :meth:`get_layer_weights`."""
+
+
+def set_dummy_tensor(tensor: torch.Tensor) -> None:
+    """Rebind the module-level :data:`_DUMMY_TENSOR` placeholder.
+
+    :func:`get_layer_weights` reads :data:`_DUMMY_TENSOR` as a bare name, which resolves against this module's globals
+    at call time. Rebinding must therefore mutate *this* module's namespace: a ``from ... import _DUMMY_TENSOR``
+    followed by a plain reassignment in another module only rebinds that module's local copy and
+    leaves the placeholder here unchanged.
+
+    Args:
+        tensor (torch.Tensor): The new placeholder tensor, typically a zero-element tensor allocated on the target
+            device and in the model dtype.
+    """
+    global _DUMMY_TENSOR
+    _DUMMY_TENSOR = tensor
+
+
+class _TensorRepr:
+    """
+    A simple class to provide a string representation of a tensor or an iterable of tensors.
+    """
+
+    def __init__(self, value: Any, /, *, max_it: int = 3) -> None:
+        self.value = value
+        self.max_it = max(1, max_it)  # ensure max_it is at least 1
+
+    def _prune_list_repr(self, repr_list: list[str], /) -> list[str]:
+        """Prune a list of string representations to a maximum number of items, adding an ellipsis if pruned."""
+        repr_set: set[str] = set()
+        pruned_repr_list: list[str] = []
+        last_item_is_ellipsis = False
+        for i, s in enumerate(repr_list):
+            if i >= self.max_it:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                break
+            if s in repr_set:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                continue
+            last_item_is_ellipsis = False
+            pruned_repr_list.append(s)
+            repr_set.add(s)
+        return pruned_repr_list
+
+    @staticmethod
+    def _single_tensor_repr(tensor: torch.Tensor, /) -> str:
+        tensor_format_str = ""
+        if tensor.device.type == "npu" and (tensor_format := torch_npu.get_npu_format(tensor)) != torch_npu.Format.ND:
+            tensor_format_str = f", format={str(tensor_format)}"
+        return f"Tensor(shape={tuple(tensor.shape)}, dtype={tensor.dtype}{tensor_format_str})"
+
+    def _iterable_tensor_repr(self, iterable: torch.Tensor | Sequence[torch.Tensor], /) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if len(iterable) == 0:
+            return "TensorList(len=0)"
+        tensor_repr_list = self._prune_list_repr([self._single_tensor_repr(t) for t in iterable])
+        return f"TensorList(len={len(iterable)}, items=[{', '.join(tensor_repr_list)}])"
+
+    def _iterable_tensor_2d_repr(
+        self, iterable: torch.Tensor | Sequence[torch.Tensor] | Sequence[Sequence[torch.Tensor]], /
+    ) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if all(isinstance(t, torch.Tensor) for t in iterable):
+            iterable = cast(Sequence[torch.Tensor], iterable)
+            return self._iterable_tensor_repr(iterable)
+        iterable = cast(Sequence[Sequence[torch.Tensor]], iterable)
+        if len(iterable) == 0:
+            return "TensorList2D(len=0)"
+        iterable_repr_list = self._prune_list_repr([self._iterable_tensor_repr(t) for t in iterable])
+        return f"TensorList2D(len={len(iterable)}, items=[{', '.join(iterable_repr_list)}])"
+
+    def __bool__(self) -> bool:
+        """False only when the value is a tensor or iterable of tensors and all tensors are empty (numel() == 0).
+        Otherwise, True. This is used to determine whether to include the attribute in the string representation.
+        """
+        value: Any = self.value
+        if isinstance(value, torch.Tensor):
+            return value.numel() > 0
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return any(t.numel() > 0 for t in cast(Sequence[torch.Tensor], value))
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return any(any(tt.numel() > 0 for tt in t) for t in cast(Sequence[Sequence[torch.Tensor]], value))
+        return True
+
+    def __repr__(self) -> str:
+        value = self.value
+        if isinstance(value, torch.Tensor):
+            return self._single_tensor_repr(value)
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return self._iterable_tensor_repr(value)
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return self._iterable_tensor_2d_repr(value)
+        return repr(value)
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class AttributeSetterMixin:
@@ -46,30 +155,35 @@ class AttributeSetterMixin:
     Good for backwards compatibility. For subclasses, :mod:`AttributeSetterMixin` must be the first parent class in the
     inheritance chain to work properly (i.e., the second object in the method resolution order (MRO)).
 
+    **Notes**: Only works for classes with pure class attributes or `__slots__` defined.
+
     Example usage::
 
         class Model:
-            def __init__(self):
-                self.some_existing_attr = 0
+            __slots__ = ["some_existing_attr"]  # or set as a class attribute explicitly if not using __slots__
 
 
         class MyModel(AttributeSetterMixin, Model):
             _on_missing_attr = "ignore"  # silently ignore missing attributes
 
 
-        model = MyModel(...)
+        model = MyModel()
         model.some_existing_attr = 42  # sets the attribute as usual
         model.some_missing_attr = "hello"  # does nothing, no error raised
 
         with model.condition(lambda v: isinstance(v, int) and v > 0):
-            model.some_existing_attr = -1  # does not set because condition is not met
             model.some_existing_attr = 100  # sets because condition is met
+            model.some_existing_attr = -1  # does not set because condition is not met
+
+        print(model.some_existing_attr)  # prints 100, because the -1 assignment was ignored
     """
 
     _on_missing_attr: Literal["raise", "warn", "ignore"] = "warn"
     """Behavior when attempting to set a missing attribute. If `warn`, a logger must be provided to log a warning."""
-    _logger: Logger | None = None
+    _logger: Logger | None = logger
     """Optional logger for warning about missing attributes. If None, no warnings will be logged."""
+    _repr_item: int = 3
+    """Maximum number of items to show in the string representation of iterable attributes."""
 
     def __init_subclass__(cls) -> None:
         if cls.__mro__[1] is not AttributeSetterMixin:
@@ -96,41 +210,56 @@ class AttributeSetterMixin:
                     "%s has no attribute %s. Your `xlite` version might be incompatible.", type(self).__name__, name
                 )
             return
-        match_condition = getattr(self._get_thread_local(), "match_condition", None)
-        if match_condition is not None and not match_condition(value):
+        match_conditions: list[Callable[..., bool]] = getattr(self._get_thread_local(), "match_conditions", [])
+        if not all(condition(value) for condition in match_conditions):
             return
         super().__setattr__(name, value)
 
     @contextmanager
-    def condition(self, match_condition: Callable[..., bool]) -> Generator["AttributeSetterMixin", None, None]:
-        """Context manager that gates attribute setting on `match_condition`.
+    def condition(self, match_condition: Callable[..., bool], /) -> Generator["AttributeSetterMixin", None, None]:
+        """Context manager that gates attribute setting on `match_condition`. Supports nested conditions, which are
+        combined with logical AND.
+
+        Args:
+            match_condition (Callable[..., bool]): A callable that takes the value to be set and returns a boolean
+                indicating whether the value should be set to the instance attribute.
 
         Usage::
 
             with obj.condition(lambda v: v > 0):
                 obj.some_attr = 42  # only set if 42 > 0
+                obj.some_attr = -1  # will not set because -1 > 0 is False
+
+            print(obj.some_attr)  # prints 42, because the second assignment was ignored
         """
         local = self._get_thread_local()
-        previous = getattr(local, "match_condition", None)  # save for nesting
-        local.match_condition = match_condition
+        previous = getattr(local, "match_conditions", [])
+        local.match_conditions = previous + [match_condition]
         try:
             yield self
         finally:
-            local.match_condition = previous  # always restore, even on exception
+            local.match_conditions = previous  # always restore, even on exception
+
+    def __repr__(self) -> str:
+        repr_list = [
+            f"{attr}={val_repr!r}"
+            for attr in dir(self)
+            if not attr.startswith("_")
+            and not callable(value := getattr(self, attr))
+            and (val_repr := _TensorRepr(value, max_it=self._repr_item))
+        ]
+        return f"{type(self).__name__}({', '.join(repr_list)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class XModel(AttributeSetterMixin, Model):
     """:mod:`xlite._C.Model` subclass with safe attribute setting for better backwards compatibility."""
 
-    if torch.distributed.get_rank() == 0:
-        _logger = logger
-
 
 class XModelConfig(AttributeSetterMixin, ModelConfig):
     """:mod:`xlite._C.ModelConfig` subclass with safe attribute setting for better backwards compatibility."""
-
-    if torch.distributed.get_rank() == 0:
-        _logger = logger
 
 
 @dataclass
@@ -323,21 +452,22 @@ def get_dotted_attr(obj: Any, dotted_attr: str, /, *, default: Any = None, raise
     return get_nested_attr(obj, *dotted_attr.split("."), default=default, raises=raises)
 
 
-class WeightGetterConfig(TypedDict):
-    """Configuration dictionary for layer weight extraction in `get_layer_weights`.
+class WeightGetterConfig(TypedDict, total=False):
+    """Configuration dictionary for layer weight extraction in :meth:`get_layer_weights`.
 
     This class is written as a TypedDict for better type checking with `mypy` in the `xlite` module.
     """
 
+    mask: Sequence[bool] | None
     secondary_flattening: str | slice | None
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None
 
 
 def get_layer_weights(
     layers: Sequence[nn.Module],
-    layer_attr: str,
     /,
-    *,
+    *layer_attrs: str,
+    mask: Sequence[bool] | None = None,
     secondary_flattening: str | slice | None = None,
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
     **kwargs: Any,
@@ -351,15 +481,26 @@ def get_layer_weights(
 
     Args:
         layers (Sequence[nn.Module]): Sequence of layers to retrieve weights from.
-        layer_attr (str): Dotted attribute string specifying the layer attribute to retrieve (`layers.[i].[layer_attr]`)
-            , e.g., "self_attn.q_norm.weight".
+        *layer_attrs (str): Dotted attribute string(s) specifying the layer attribute candidate(s) to check and
+            retrieve (`layers[i].[layer_attr]`), e.g., "self_attn.q_norm.weight".
+
+            For a list of string candidates, the first one returning a non-empty list of weights is used.
+        mask (Sequence[bool] | None, optional): Per layer mask. If specified, a boolean mask indicating which layers to
+            include in the weight retrieval; mask must be a list of booleans with the same length as `layers`.
+
+            When `mask` is specified, the returned list of weights will have the same length as `layers`, with
+            missing weights replaced by a placeholder tensor (:data:`_DUMMY_TENSOR`).
+
+            Cannot be specified at the same time as `secondary_flattening`.
         secondary_flattening (str | slice | None, optional): If specified, indicates that the retrieved layer attribute
             is a list of tensors and we need to further flatten it. The expansion can be specified as:
 
-            - `str`: A dotted attribute string such that `layers.[i].[secondary_flattening]` gives the number of items
+            - `str`: A dotted attribute string such that `layers[i].[secondary_flattening]` gives the number of items
               to flatten for that layer.
-            - `slice`: A slice specifying how to slice `layers.[i].[layer_attr]` and then flatten the sliced part.
-            - `None`: No secondary flattening; `layers.[i].[layer_attr]` is directly collected.
+            - `slice`: A slice specifying how to slice `layers[i].[layer_attr]` and then flatten the sliced part.
+            - `None`: No secondary flattening; `layers[i].[layer_attr]` is directly collected.
+
+            Cannot be specified at the same time as `mask`.
         post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
             each retrieved tensor before returning the final list of weights.
         **kwargs: Additional keyword arguments for future extensions.
@@ -367,29 +508,48 @@ def get_layer_weights(
     Returns:
         list[torch.Tensor]: List of retrieved weights.
     """
-    if not secondary_flattening:
-        weights = [
-            weight for layer in layers if (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
-        ]
-    elif isinstance(secondary_flattening, str):
-        weights = [
-            weight
-            for layer in layers
-            if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
-            for weight in weight_lst[: get_dotted_attr(layer, secondary_flattening, default=0)]
-        ]
-    elif isinstance(secondary_flattening, slice):
-        weights = [
-            weight
-            for layer in layers
-            if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
-            for weight in weight_lst[secondary_flattening]
-        ]
-    else:
-        raise ValueError(
-            f"Invalid type for secondary_flattening: {type(secondary_flattening)}. Expected str, slice, or None."
-        )
+    if mask is not None:
+        if secondary_flattening is not None:
+            raise ValueError("Cannot specify both `mask` and `secondary_flattening` at the same time.")
+        if len(mask) != len(layers) or not all(isinstance(m, bool) for m in mask):
+            raise ValueError("`mask` must be a list of booleans with the same length as `layers`.")
 
-    if not post_processor:
-        return weights
-    return [post_processor(weight) for weight in weights]
+    for layer_attr in layer_attrs:
+        if not isinstance(layer_attr, str):
+            raise TypeError(f"layer_attr must be a string or list of strings, got {type(layer_attr)}.")
+        if not secondary_flattening and mask is not None:
+            weights = [
+                weight
+                if wt_mask and (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
+                else _DUMMY_TENSOR
+                for layer, wt_mask in zip(layers, mask)
+            ]
+        elif not secondary_flattening:  # and mask is None
+            weights = [
+                weight for layer in layers if (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
+            ]
+        elif isinstance(secondary_flattening, str):
+            weights = [
+                weight
+                for layer in layers
+                if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
+                for weight in weight_lst[: get_dotted_attr(layer, secondary_flattening, default=0)]
+            ]
+        elif isinstance(secondary_flattening, slice):
+            weights = [
+                weight
+                for layer in layers
+                if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
+                for weight in weight_lst[secondary_flattening]
+            ]
+        else:
+            raise ValueError(
+                f"Invalid type for secondary_flattening: {type(secondary_flattening)}. Expected str, slice, or None."
+            )
+
+        if post_processor:
+            weights = [post_processor(weight) for weight in weights]
+
+        if weights:
+            return weights
+    return []
