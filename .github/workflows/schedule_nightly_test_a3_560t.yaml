@@ -54,6 +54,11 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
@@ -247,6 +252,7 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -298,6 +304,7 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}

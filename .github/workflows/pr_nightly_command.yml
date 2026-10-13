@@ -54,6 +54,7 @@ jobs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
+      vllm_ref: ${{ steps.resolve.outputs.vllm_ref }}
     steps:
       - name: Install system dependencies
         run: |
@@ -224,6 +225,7 @@ jobs:
           fi
 
           BRANCH="main"
+          VLLM_REF=""
           TEST_CASES=""
           AOP_ENABLED="false"
           PROFILE_OPTIONS_JSON='{}'
@@ -231,6 +233,7 @@ jobs:
           NEXT_IS_BRANCH=0
           NEXT_IS_DOWNLOAD=0
           DOWNLOAD_PATH=""
+          NEXT_IS_VLLM_REF=0
           NEXT_IS_GOOD_COMMIT=0
           NEXT_IS_BAD_COMMIT=0
           NEXT_IS_FAIL_CONFIRM_RETRIES=0
@@ -284,6 +287,9 @@ jobs:
               PENDING_OPTION=""
             elif [ "$PENDING_OPTION" = "--profile-benchmark-names" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c --arg value "$WORD" '.benchmark_names = $value' <<< "$PROFILE_OPTIONS_JSON")
+            elif [ "$NEXT_IS_VLLM_REF" = "1" ]; then
+              VLLM_REF="$WORD"
+              NEXT_IS_VLLM_REF=0
               PENDING_OPTION=""
             elif [ "$NEXT_IS_GOOD_COMMIT" = "1" ]; then
               BISECT_GOOD_COMMIT="$WORD"
@@ -309,6 +315,9 @@ jobs:
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--log-path" ]; then
               NEXT_IS_DOWNLOAD=1
+            elif [ "$WORD" = "--vllm-ref" ]; then
+              NEXT_IS_VLLM_REF=1
+              PENDING_OPTION="$WORD"
             elif [ "$WORD" = "--aop_enabled" ]; then
               if [ -z "$TEST_CASES" ]; then
                 echo "ERROR: --aop_enabled must appear after at least one test case"
@@ -396,6 +405,12 @@ jobs:
             fi
           done
 
+          if [ -n "$VLLM_REF" ] &&
+             ! [[ "$VLLM_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "ERROR: --vllm-ref must be a vllm commit SHA, tag (e.g. v0.29.0), or branch name"
+            exit 1
+          fi
+
           if [ -z "$TEST_CASES" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
               -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
@@ -420,6 +435,7 @@ jobs:
             echo "download_path=$DOWNLOAD_PATH"
             echo "aop_enabled=$AOP_ENABLED"
             echo "profile_options_json=$PROFILE_OPTIONS_JSON"
+            echo "vllm_ref=$VLLM_REF"
             echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
             echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
             echo "bisect_fail_confirm_retries=$BISECT_FAIL_CONFIRM_RETRIES"
@@ -498,6 +514,7 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a2.yaml \
@@ -511,12 +528,13 @@ jobs:
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-a3:
     name: Trigger Nightly-A3
@@ -544,6 +562,7 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a3.yaml \
@@ -557,12 +576,13 @@ jobs:
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-a3-560t:
     name: Trigger Nightly-A3-560T
@@ -590,6 +610,7 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a3_560t.yaml \
@@ -603,12 +624,13 @@ jobs:
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-a5:
     name: Trigger Nightly-A5
@@ -636,6 +658,7 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a5.yaml \
@@ -650,11 +673,12 @@ jobs:
             -f download_path="$DOWNLOAD_PATH" \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
+            -f vllm_ref="$VLLM_REF"
           sleep 8
           A5_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a5.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a5_run_id=$A5_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A5 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Nightly-A5 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-310p:
     name: Trigger Nightly-310P
@@ -681,6 +705,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_310p.yaml \
@@ -694,11 +719,12 @@ jobs:
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f profile_options_json="$PROFILE_OPTIONS_JSON"
+            -f vllm_ref="$VLLM_REF"
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Nightly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-weekly-a2:
     name: Trigger Weekly-A2
@@ -723,6 +749,7 @@ jobs:
         id: dispatch_weekly_a2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_weekly_test_a2.yaml \
@@ -733,12 +760,13 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f vllm_ref="$VLLM_REF"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "weekly_a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Weekly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-weekly-a3:
     name: Trigger Weekly-A3
@@ -764,6 +792,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_weekly_test_a3.yaml \
@@ -775,12 +804,13 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "weekly_a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Weekly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-weekly-a3-560t:
     name: Trigger Weekly-A3-560T
@@ -806,6 +836,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_weekly_test_a3_560t.yaml \
@@ -817,12 +848,13 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "weekly_a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Weekly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   dispatch-weekly-310p:
     name: Trigger Weekly-310P
@@ -848,6 +880,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_weekly_test_310p.yaml \
@@ -859,12 +892,13 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f vllm_ref="$VLLM_REF" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "weekly_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched Weekly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
 
   post-links:
     name: Post workflow links
