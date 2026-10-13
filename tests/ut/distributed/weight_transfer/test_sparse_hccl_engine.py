@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sparse HCCL must preserve the upstream contract without entering CUDA."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -167,3 +167,37 @@ def test_noncontiguous_buffers_rejected_before_receive_rpc(npu_context):
     with pytest.raises(ValueError, match="contiguous"):
         engine.send_weights([patch])
     assert not client.mock_calls
+
+
+def test_update_keeps_device_context_through_parent_synchronization(monkeypatch):
+    engine = object.__new__(sparse.SparseHCCLWeightTransferEngine)
+    engine.model = ShardedModel()
+    engine.device = torch.device("meta")
+    device = torch.device("cpu")
+    payloads = iter([torch.tensor([1], dtype=torch.int32), torch.tensor([99.0])])
+    engine.model_update_group = SimpleNamespace(
+        device=device, broadcast=lambda tensor, **kwargs: tensor.copy_(next(payloads))
+    )
+    active = []
+    synchronized = []
+
+    @contextmanager
+    def device_context(selected):
+        active.append(selected)
+        try:
+            yield
+        finally:
+            active.pop()
+
+    def synchronize():
+        assert active == [device]
+        synchronized.append(device)
+
+    monkeypatch.setattr(torch.npu, "device", device_context)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda device: MagicMock())
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+    engine.update_weights(
+        {"names": ["weight"], "dtype_names": ["float32"], "shapes": [[4, 2]], "num_updates_list": [1]}
+    )
+    assert synchronized == [device] and not active
+    assert engine.model.weight[0, 1] == 99

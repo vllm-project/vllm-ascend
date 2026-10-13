@@ -133,7 +133,22 @@ def run():
                 engine.start_weight_update()
             elif operation == "update":
                 info, expected = payload
-                engine.update_weights(info)
+                # Simulate a fresh RPC thread whose ambient NPU is not this
+                # worker's communicator. The inherited completion sync must
+                # still run on the receiving device and restore the ambient one.
+                torch.npu.set_device(0)
+                native_sync = torch.accelerator.synchronize
+
+                def checked_sync(_native_sync=native_sync):
+                    assert torch.npu.current_device() == device.index
+                    _native_sync()
+
+                torch.accelerator.synchronize = checked_sync
+                try:
+                    engine.update_weights(info)
+                finally:
+                    torch.accelerator.synchronize = native_sync
+                assert torch.npu.current_device() == 0
                 expected = torch.tensor(expected, device=device, dtype=torch.bfloat16)[shard]
                 assert torch.equal(model.weight.view(torch.int16), expected.view(torch.int16))
                 dist.barrier()

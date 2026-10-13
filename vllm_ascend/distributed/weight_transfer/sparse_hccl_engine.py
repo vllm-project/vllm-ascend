@@ -12,7 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from math import prod
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import regex as re
 import torch
@@ -95,6 +95,15 @@ class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
 
     init_info_cls = SparseHCCLWeightTransferInitInfo
     update_info_cls = SparseHCCLWeightTransferUpdateInfo
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        group = self.model_update_group
+        if group is None:
+            raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
+        # The inherited update method synchronizes after receive returns. Keep
+        # that synchronization on the communicator, not an RPC thread's device.
+        with torch.npu.device(group.device):
+            super().update_weights(update_info)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         # Reuse the existing HCCL worker-rank calculation and initialization.
