@@ -552,4 +552,5 @@ tail -F /tmp/external_dp_logs/node-0/rank-0.log \
 # node 1: ranks
 tail -F /tmp/external_dp_logs/node-1/rank-0.log \
         /tmp/external_dp_logs/node-1/rank-1.log
+        
 ```
