@@ -478,10 +478,11 @@ class KVCacheRecvingThread(threading.Thread):
         fanout: MLAFanout | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
+        super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.fanout = fanout
-        self.local_kv_caches_base_addrs = list(local_kv_caches_base_addr)
+        self.local_kv_caches_base_addrs = local_kv_caches_base_addr
         self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
         self.local_handshake_port = local_handshake_port
