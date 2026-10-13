@@ -167,6 +167,7 @@ def test_streaming_topk_length_growth_and_shrink_reuses_output(capacity, use_gra
         output_buffer=buffer,
         pack_tail=True,
         allow_cache_packing=False,
+        use_streaming_topk=True,
     )
     # Exercise global request lookup across multiple token chunks.
     monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", 2 * 4 * 512 * 8)
@@ -251,6 +252,7 @@ def test_streaming_topk_handles_ties_and_nonfinite_scores(special_scores):
         index_kpool=POOL_SIZE,
         max_pool_seq_len=capacity,
         allow_cache_packing=False,
+        use_streaming_topk=True,
     ).cpu()[0, 0]
     pools = result[:INDEX_TOPK].view(-1, POOL_SIZE)
     assert ((pools[:, 0] >= 0) & (pools[:, 0] < capacity * POOL_SIZE)).all()
@@ -260,3 +262,152 @@ def test_streaming_topk_handles_ties_and_nonfinite_scores(special_scores):
     if special_scores:
         expected = torch.cat((torch.tensor([5]), torch.arange(capacity - 511, capacity))) * POOL_SIZE
         torch.testing.assert_close(pools[:, 0].sort().values, expected.sort().values.to(torch.int32), rtol=0, atol=0)
+
+
+def _pool_topk_case(capacity):
+    generator = torch.Generator().manual_seed(47)
+    cache, table = _monotonic_paged_cache(capacity, generator)
+    query = torch.zeros(1, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    query[:, 0, :3] = torch.tensor([128 * 128, 128, 1], dtype=torch.bfloat16, device="npu")
+    weights = torch.zeros(1, NUM_HEADS, dtype=torch.bfloat16, device="npu")
+    weights[:, 0] = 1
+    return (
+        query,
+        cache,
+        weights,
+        torch.tensor([1], dtype=torch.int32, device="npu"),
+        torch.tensor([capacity], dtype=torch.int32, device="npu"),
+        table[:1],
+        torch.tensor([capacity * POOL_SIZE + 2], dtype=torch.int64, device="npu"),
+    )
+
+
+def _run_pool_topk_case(args, selected, capacity, use_graph):
+    kwargs = dict(
+        index_topk=selected * POOL_SIZE,
+        index_kpool=POOL_SIZE,
+        max_pool_seq_len=capacity,
+        allow_cache_packing=False,
+        use_streaming_topk=True,
+    )
+    if use_graph:
+        indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        graph.replay()
+    else:
+        result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+    return result.cpu()[0, 0]
+
+
+def _assert_pool_ids_and_tail(result, expected_ids, selected, position):
+    topk = selected * POOL_SIZE
+    history = torch.full((topk,), -1, dtype=torch.int32)
+    tokens = (expected_ids[:, None] * POOL_SIZE + torch.arange(POOL_SIZE)).flatten()
+    history[: tokens.numel()] = tokens.to(torch.int32)
+    torch.testing.assert_close(result[:topk].sort().values, history.sort().values, rtol=0, atol=0)
+    tail = torch.arange((position + 1) // POOL_SIZE * POOL_SIZE, position + 1, dtype=torch.int32)
+    expected_tail = torch.full((POOL_SIZE - 1,), -1, dtype=torch.int32)
+    expected_tail[: tail.numel()] = tail
+    torch.testing.assert_close(result[topk:], expected_tail, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "selected,capacity,streaming",
+    [
+        (127, 512, False),
+        (127, 513, True),
+        (129, 1024, False),
+        (129, 1025, True),
+        (511, 2048, False),
+        (511, 2049, True),
+        (513, 4097, False),
+    ],
+)
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_pool_topk_non_power_of_two_dispatch_boundary(selected, capacity, streaming, use_graph, monkeypatch):
+    args = _pool_topk_case(capacity)
+    widths = []
+    original_topk = torch.topk
+
+    def record_topk(scores, *args, **kwargs):
+        widths.append(scores.shape[1])
+        return original_topk(scores, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", record_topk)
+    result = _run_pool_topk_case(args, selected, capacity, use_graph)
+    expected_width = indexer.TRITON_TOPK_PARTITIONS * (1 << (selected - 1).bit_length()) if streaming else capacity
+    assert widths and all(width == expected_width for width in widths)
+    _assert_pool_ids_and_tail(result, torch.arange(capacity - selected, capacity), selected, capacity * POOL_SIZE + 2)
+
+
+@pytest.mark.parametrize("kind", ["empty_visible", "nan", "negative_inf", "few_valid"])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_streaming_topk_all_invalid_or_fewer_valid_than_k(kind, use_graph):
+    capacity, selected = 4099, 129
+    args = _pool_topk_case(capacity)
+    cache, lengths, table, positions = args[1], args[4], args[5], args[6]
+    expected_ids = torch.empty(0, dtype=torch.long)
+    position = capacity * POOL_SIZE + 2
+    if kind == "empty_visible":
+        lengths.zero_()
+        position = 2
+        positions.fill_(position)
+    else:
+        data = cache.cpu()
+        data[:, :, 0, 0] = -float("inf") if kind == "negative_inf" else float("nan")
+        if kind == "few_valid":
+            expected_ids = torch.tensor([3, 1091, 4098])
+            physical = table[0].cpu()[expected_ids // CACHE_BLOCK_SIZE].long()
+            data[physical, expected_ids % CACHE_BLOCK_SIZE, 0, 0] = 0
+        cache.copy_(data)
+    result = _run_pool_topk_case(args, selected, capacity, use_graph)
+    _assert_pool_ids_and_tail(result, expected_ids, selected, position)
+
+
+@pytest.mark.parametrize("selected", [129, 511])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_streaming_topk_all_winners_in_one_partition(selected, use_graph):
+    capacity = 8193
+    args = _pool_topk_case(capacity)
+    tile = 1 << (selected - 1).bit_length()
+    split = selected // 2
+    # Both tiles belong to partition zero. Winners in the later tile force a
+    # merge; no other partition may supply any of the selected candidates.
+    later = indexer.TRITON_TOPK_PARTITIONS * tile
+    expected_ids = torch.cat((torch.arange(split), torch.arange(later, later + selected - split)))
+    cache, table = args[1], args[5]
+    data = cache.cpu()
+    physical = table[0].cpu()[expected_ids // CACHE_BLOCK_SIZE].long()
+    data[physical, expected_ids % CACHE_BLOCK_SIZE, 0, 0] = 1
+    cache.copy_(data)
+    result = _run_pool_topk_case(args, selected, capacity, use_graph)
+    _assert_pool_ids_and_tail(result, expected_ids, selected, capacity * POOL_SIZE + 2)
+
+
+@torch.inference_mode()
+def test_streaming_topk_requires_explicit_opt_in(monkeypatch):
+    capacity, selected = 4099, 129
+    args = _pool_topk_case(capacity)
+    widths = []
+    original_topk = torch.topk
+
+    def record_topk(scores, *args, **kwargs):
+        widths.append(scores.shape[1])
+        return original_topk(scores, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", record_topk)
+    result = indexer.glm5_next_lightning_indexer_triton(
+        *args,
+        index_topk=selected * POOL_SIZE,
+        index_kpool=POOL_SIZE,
+        max_pool_seq_len=capacity,
+        allow_cache_packing=False,
+    ).cpu()[0, 0]
+    _assert_pool_ids_and_tail(result, torch.arange(capacity - selected, capacity), selected, capacity * POOL_SIZE + 2)
+    assert widths == [capacity]

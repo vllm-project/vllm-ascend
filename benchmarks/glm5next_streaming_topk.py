@@ -10,11 +10,12 @@ import argparse
 import json
 import statistics
 from functools import partial
+from pathlib import Path
 
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.glm5_next_lightning_indexer import glm5_next_lightning_indexer_triton
+from vllm_ascend.ops.triton import glm5_next_lightning_indexer as indexer
 
 
 def graph_latency_us(fn):
@@ -66,12 +67,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=int, nargs="+", default=[1, 60])
     parser.add_argument("--capacities", type=int, nargs="+", default=[33728, 262208])
-    parser.add_argument("--visible-pools", type=int, nargs="+", default=[1024, 8192, 262144])
+    parser.add_argument("--visible-pools", type=int, nargs="+", default=[1024, 32768, 262144])
+    parser.add_argument("--json-output", type=Path)
     options = parser.parse_args()
     if min(options.tokens) <= 0 or min(options.capacities) <= 2048 or min(options.visible_pools) < 512:
         parser.error("tokens must be positive, capacities > 2048, and visible-pools >= 512")
     torch.npu.set_device(0)
     torch.manual_seed(41)
+    results = []
     for capacity in options.capacities:
         pages = (capacity + 31) // 32
         cache = torch.randn(pages, 32, 1, 128, dtype=torch.bfloat16, device="npu")
@@ -86,7 +89,7 @@ def main():
                 lengths = torch.full((tokens,), visible, dtype=torch.int32, device="npu")
                 positions = torch.full((tokens,), visible * 4 - 1, dtype=torch.int64, device="npu")
                 fn = partial(
-                    glm5_next_lightning_indexer_triton,
+                    indexer.glm5_next_lightning_indexer_triton,
                     query,
                     cache,
                     weights,
@@ -103,21 +106,22 @@ def main():
                 streaming = partial(fn, use_streaming_topk=True)
                 assert_selection(streaming(), dense(), query, cache, weights, visible)
                 dense_us, streaming_us = graph_latency_us(dense), graph_latency_us(streaming)
-                print(
-                    json.dumps(
-                        dict(
-                            tokens=tokens,
-                            capacity_pools=capacity,
-                            visible_pools=visible,
-                            dense_us=dense_us,
-                            streaming_us=streaming_us,
-                            speedup=dense_us / streaming_us,
-                            dense_score_bytes=tokens * capacity * 4,
-                            streaming_score_and_id_bytes=tokens * 2048 * 8,
-                        )
-                    ),
-                    flush=True,
+                record = dict(
+                    tokens=tokens,
+                    capacity_pools=capacity,
+                    visible_pools=visible,
+                    actual_context_tokens=visible * 4,
+                    correctness=True,
+                    dense_us=dense_us,
+                    streaming_us=streaming_us,
+                    speedup=dense_us / streaming_us,
+                    dense_score_bytes=tokens * capacity * 4,
+                    streaming_score_and_id_bytes=tokens * indexer.TRITON_TOPK_PARTITIONS * 512 * 8,
                 )
+                results.append(record)
+                print(json.dumps(record), flush=True)
+                if options.json_output:
+                    options.json_output.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
