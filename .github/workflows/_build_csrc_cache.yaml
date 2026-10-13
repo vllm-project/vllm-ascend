@@ -179,7 +179,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          yum install -y python3-pip net-tools jemalloc numactl patch clang
+          yum install -y python3-pip net-tools numactl patch clang
           pip install uv
 
       - name: Restore incremental build cache

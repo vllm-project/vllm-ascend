@@ -68,7 +68,7 @@ SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
 RUN yum update -y && \
-    yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
+    yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} && \
     rm -rf /var/cache/yum/*
@@ -138,7 +138,6 @@ RUN cd /vllm-workspace/vllm && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
-RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
 # ===== Conditional installation based on BUILD_TYPE =====

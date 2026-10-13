@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import eplb_state
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
@@ -19,7 +21,14 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
+    state.model_states = {}
+    with patch.object(upstream_eplb_state.EplbState, "start_async_loop") as start:
+        state.start_async_loop()
+    start.assert_called_once_with()
 
 
 def test_result_readiness_defers_incomplete_transfer(monkeypatch):
@@ -41,6 +50,8 @@ def test_result_readiness_defers_incomplete_transfer(monkeypatch):
 
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
     state.async_worker = None
     model_state = SimpleNamespace(pending_result=None)
 
@@ -151,6 +162,9 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     )
     monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
     state.is_async = False
     state.model_states = model_states
 
@@ -169,6 +183,9 @@ def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):
     refresh = MagicMock()
     monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
     state.is_async = True
     state.model_states = {"model": object()}
 
@@ -286,3 +303,145 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
         assert state.cuda_device_index == 5
     else:
         assert state.device_index == 5
+
+
+def _shutdown_state():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
+    state._stop_async = threading.Event()
+    state._close_error = None
+    state.is_async = True
+    state.async_worker = None
+    state.model_states = {}
+    return state
+
+
+def test_close_wakes_idle_worker_without_fake_device_event():
+    state = _shutdown_state()
+    recorded = threading.Event()
+    event_wait = MagicMock()
+    state.rearrange_event = SimpleNamespace(_recorded=recorded, wait=event_wait)
+    state.async_worker = threading.Thread(target=state.wait_for_rearrangement, args=(None,))
+    state.async_worker.start()
+    state.close()
+    assert state.async_worker is None
+    assert state._suspended
+    assert not recorded.is_set()
+    event_wait.assert_not_called()
+
+
+def test_close_failure_keeps_communicator_owner():
+    state = _shutdown_state()
+    communicator = MagicMock(spec=AscendHixlEplbCommunicator)
+    session = MagicMock(spec=_HixlSession)
+    session._error = None
+    session.close.side_effect = RuntimeError("still bound")
+    state._hixl_session = session
+    state.model_states = {"model": SimpleNamespace(communicator=communicator)}
+    with pytest.raises(SystemExit, match="worker must terminate"):
+        state.close()
+    assert state.model_states["model"].communicator is communicator
+    assert state._suspended
+
+
+def test_failed_close_is_fatal_without_retrying_cleanup():
+    state = _shutdown_state()
+    error = RuntimeError("still bound")
+    state._close_error = error
+    communicator = MagicMock(spec=AscendHixlEplbCommunicator)
+    state.model_states = {"model": SimpleNamespace(communicator=communicator)}
+    with pytest.raises(SystemExit, match="worker must terminate") as exc:
+        state.close()
+    assert exc.value.__cause__ is error
+    assert state._hixl_session is None
+
+
+def test_hixl_initializes_all_models_before_starting_the_async_worker(monkeypatch):
+    state = _shutdown_state()
+    group = object()
+    draft = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
+    main = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
+    draft._cpu_group = main._cpu_group = group
+    state.model_states = {"draft": SimpleNamespace(communicator=draft), "main": SimpleNamespace(communicator=main)}
+    session = MagicMock(spec=_HixlSession)
+    session._error = None
+    factory = MagicMock(return_value=session)
+    monkeypatch.setattr(eplb_state, "_HixlSession", factory)
+    calls: list[tuple[str, list[str] | None]] = []
+    session.initialize.side_effect = lambda models: calls.append(("initialize", list(models)))
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "start_async_loop", lambda *_args: calls.append(("start", None)))
+    state.start_async_loop()
+    state.start_async_loop()
+    assert calls == [("initialize", ["draft", "main"]), ("start", None), ("start", None)]
+    factory.assert_called_once_with(group)
+    assert state._hixl_session is session
+    with (
+        patch.object(upstream_eplb_state.EplbState, "add_model") as add,
+        pytest.raises(RuntimeError, match="Cannot add"),
+    ):
+        state.add_model(object(), object())
+    add.assert_not_called()
+    state.close()
+    state.close()
+    # Actual sessions perform teardown only once, even on repeated state close.
+    assert session.close.call_count == 2
+
+
+def test_hixl_initialization_failure_never_starts_the_async_worker(monkeypatch):
+    state = _shutdown_state()
+    main = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
+    main._cpu_group = object()
+    state.model_states = {"main": SimpleNamespace(communicator=main)}
+    session = MagicMock(spec=_HixlSession)
+    session.initialize.side_effect = RuntimeError("registration failed")
+    monkeypatch.setattr(eplb_state, "_HixlSession", MagicMock(return_value=session))
+    with (
+        patch.object(upstream_eplb_state.EplbState, "start_async_loop") as start,
+        pytest.raises(RuntimeError, match="registration failed"),
+    ):
+        state.start_async_loop()
+    start.assert_not_called()
+    assert state._hixl_session is session
+
+
+@pytest.mark.parametrize("entry", ["step", "ready", "close"])
+def test_hixl_worker_setup_failure_exits_before_releasing_storage(entry):
+    state = _shutdown_state()
+    session = MagicMock(spec=_HixlSession)
+    session._error = None
+    session._usable = True
+    state._hixl_session = session
+    state.async_worker = SimpleNamespace(is_alive=lambda: False)
+    state.model_states = {"main": SimpleNamespace(rebalanced=False, pending_result=None)}
+    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+        if entry == "step":
+            state.step()
+        elif entry == "ready":
+            state._all_ranks_result_ready(object())
+        else:
+            state.close()
+    assert "background worker terminated" in str(fatal.value.__cause__)
+    assert session._error is fatal.value.__cause__
+    assert not session._usable
+    session.close.assert_not_called()
+
+
+@pytest.mark.parametrize("entry", ["step", "ready", "close"])
+def test_failed_shared_session_exits_from_foreground_before_reusing_resources(entry):
+    state = _shutdown_state()
+    error = RuntimeError("HIXL transfer failed")
+    session = MagicMock(spec=_HixlSession)
+    session._error = error
+    state._hixl_session = session
+    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+        if entry == "step":
+            state.step()
+        elif entry == "ready":
+            state._all_ranks_result_ready(object())
+        else:
+            state.close()
+    assert fatal.value.__cause__ is error
+    assert state._hixl_session is session
+    session.close.assert_not_called()
