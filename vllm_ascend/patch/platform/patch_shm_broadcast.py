@@ -6,6 +6,10 @@ from contextlib import contextmanager
 
 from vllm.distributed.device_communicators import shm_broadcast
 
+from vllm_ascend.common.utils.watch_dog import get_watch_dog
+
+_watchdog = get_watch_dog()
+
 MessageQueue = shm_broadcast.MessageQueue
 
 # Cap on how long an idle reader parks before re-reading the authoritative SHM
@@ -65,6 +69,7 @@ def acquire_read(
                 # if this block is not ready,
                 # we need to wait until it is written
                 self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+                _watchdog.feed()
 
                 if self.shutting_down:
                     raise RuntimeError("cancelled")
