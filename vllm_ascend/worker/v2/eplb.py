@@ -11,7 +11,10 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
-from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
+from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
 
 
 def is_eplb_load_collection_phase_matched(
@@ -38,17 +41,29 @@ class AscendEPLBController(EPLBController):
         self,
         parallel_config: Any,
         device: torch.device,
-        load_collection_phase: str = "all",
+        ascend_eplb_config: EplbConfig | None = None,
     ) -> None:
         super().__init__(parallel_config, device)
-        self.load_collection_phase = load_collection_phase
+        ascend_eplb_config = ascend_eplb_config or EplbConfig()
+        self.load_collection_phase = ascend_eplb_config.load_collection_phase
+        # The communicator choice needs one binding class on every EPLB rank,
+        # so reach a group consensus before the policy or state is built.
+        stair_config = (
+            resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+            if parallel_config.enable_eplb
+            else ascend_eplb_config.stair_config
+        )
+        self.eplb_policy = create_eplb_policy(
+            parallel_config.eplb_config.policy,
+            stair_config,
+        )
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = AscendEplbState(self.parallel_config, self.device)
+            self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -56,48 +71,58 @@ class AscendEPLBController(EPLBController):
             batch_has_prefill,
         )
 
-    def step(
+    def maybe_register_speculator(
         self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
+        speculator: Any | None,
+        speculative_config: Any | None,
+        load_dummy_weights: bool,
+    ) -> bool:
+        # The upstream controller checks target EPLB, which can differ from
+        # the replicated draft's setting.
+        if speculator is not None and not speculator.vllm_config.parallel_config.enable_eplb:
+            return False
+        return super().maybe_register_speculator(speculator, speculative_config, load_dummy_weights)
+
+    def prepare_forward(
+        self,
+        model_config: Any,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
     ) -> None:
         state = self.state
-        if not self.parallel_config.enable_eplb or self.suppressed or state is None or not self._has_registered_models:
+        if state is None or not self.parallel_config.enable_eplb:
             return
-
-        discard_current_load = not is_profile and not self._load_collection_phase_matched
-        if (
-            not is_dummy
-            and not is_profile
-            and not discard_current_load
-            and not state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-        ):
-            # Ascend records local GMM counts after every MoE call. Clear
-            # them once per pass while the upstream window is closed.
-            for model_state in state.model_states.values():
-                model_state.expert_load_pass.zero_()
-
-        # Phase selection may change the load submitted by each rank, but all
-        # ranks must advance the EPLB state machine and enter collectives in
-        # the same order. Treat a non-matching batch as an EPLB dummy step and
-        # let the upstream controller preserve the global logging schedule.
-        super().step(is_dummy=is_dummy or discard_current_load, is_profile=is_profile)
+        if not state.uses_custom_load_stats:
+            state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+            return
+        # Operator-provided counts make the upstream unpadded-token tensor unused.
+        if state.should_record_tensor is not None:
+            is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
+            should_record = is_sampling and self._load_collection_phase_matched
+            state.should_record_tensor.fill_(should_record)
+            state._is_load_sampling_step = is_sampling
+            state._should_collect_local_load = should_record
+            if should_record:
+                state._has_fresh_recorded_load = True
 
     def setup_from_mapping(
         self,
         model: nn.Module,
         model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
+        old_num_physical_experts: int | None = None,
     ) -> None:
         model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
-        self.state = AscendEplbState.from_mapping(
+        from_mapping_kwargs: dict[str, Any] = dict(
             model=model,
             model_config=model_config,
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
+            policy=self.eplb_policy,
         )
+        if old_num_physical_experts is not None:
+            from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts
+        self.state = AscendEplbState.from_mapping(**from_mapping_kwargs)
         self._has_registered_models = True

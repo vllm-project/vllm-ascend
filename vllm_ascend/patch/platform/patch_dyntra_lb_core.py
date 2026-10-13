@@ -21,13 +21,11 @@ from typing import Literal, TypedDict
 import numpy as np
 import torch
 import torch.distributed as dist
-import vllm.v1.engine.core as _engine_core_mod
 import vllm.v1.request as _request_module
 from vllm.logger import logger
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.request import Request
 
-import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
 from vllm_ascend.ascend_config import DyntraLBConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
@@ -68,7 +66,7 @@ def _get_dyntra_lb_config(vllm_config) -> DyntraLBConfig:
     dyntra_lb_config = scheduler_config.get("dyntra_lb_config") or {}
     if not isinstance(dyntra_lb_config, dict):
         return DyntraLBConfig()
-    return DyntraLBConfig(dyntra_lb_config)
+    return DyntraLBConfig(**dyntra_lb_config)
 
 
 def _dyntra_lb_enabled(vllm_config) -> bool:
@@ -520,28 +518,4 @@ class DyntraLBDPEngineCoreProc(DPEngineCoreProc):
         return has_new_long_req
 
 
-_PreviousRunEngineCore = EngineCoreProc.run_engine_core
-_UpstreamRunEngineCore = _balance_patch._OriginalRunEngineCore
-_OriginalDPEngineCoreProc = DPEngineCoreProc
-
-
-def _dyntra_lb_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    vllm_config = kwargs.get("vllm_config")
-    dyntra_lb_config = _get_dyntra_lb_config(vllm_config)
-    if not dyntra_lb_config.enabled:
-        return _PreviousRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-    _print_rank_0(
-        "Enable DyntraLB DP load balancing.",
-        dp_rank,
-        dyntra_lb_config.enable_diagnostics,
-    )
-    _engine_core_mod.DPEngineCoreProc = DyntraLBDPEngineCoreProc
-    try:
-        return _UpstreamRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-    finally:
-        _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
-
-
-# Preserve the upstream staticmethod binding when replacing run_engine_core.
-EngineCoreProc.run_engine_core = staticmethod(_dyntra_lb_run_engine_core)
+# The patch for engine core has been moved to patch_engine_core.py

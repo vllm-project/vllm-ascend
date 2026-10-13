@@ -234,7 +234,6 @@ class cmake_build_ext(build_ext):
     def configure(self, ext: CMakeExtension) -> None:
         build_temp = self.build_temp
         os.makedirs(build_temp, exist_ok=True)
-        source_dir = os.path.abspath(ROOT_DIR)
         python_executable = sys.executable
         cmake_args = ["cmake"]
         # Default use release mode to compile the csrc code
@@ -319,23 +318,12 @@ class cmake_build_ext(build_ext):
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
 
-        build_tool = []
-        # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
-        # if which('ninja') is not None:
-        #     build_tool += ['-G', 'Ninja']
-        # Default build tool to whatever cmake picks.
-
-        cmake_args += [source_dir]
+        cmake_args += [ext.cmake_lists_dir]
         logging.info("cmake config command: %s", cmake_args)
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"CMake configuration failed: {e}")
-
-        subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp,
-        )
 
     def build_extensions(self) -> None:
         if not envs.COMPILE_CUSTOM_KERNELS:
@@ -507,6 +495,9 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    package_data={
+        "vllm_ascend.observability": ["config/*.yaml"],
+    },
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
@@ -519,6 +510,9 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
+        ],
+        "ms_service_metric.providers": [
+            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
         ],
     },
 )

@@ -19,9 +19,9 @@
 
 For each accuracy/performance benchmark entry:
   1. Read a preset JSON template
-  2. Patch nested testcase_info fields (preserve base_info)
+  2. Patch nested testcase_info fields (and base_info.test_version)
   3. Write a new JSON file
-  4. Upload via tools/upload_to_openlibing.py
+  4. Upload via ``python -m tools.upload_to_openlibing``
 
 Missing preset/script files only emit warnings and never fail the test.
 """
@@ -39,7 +39,9 @@ from typing import Any
 PRESET_JSON_PATH = Path("/root/.cache/upload_perf/test.json")
 OUTPUT_DIR = Path("/root/.cache/upload_perf/results")
 UPLOAD_LABEL = "performance"
+UPLOAD_MODULE = "tools.upload_to_openlibing"
 _DATASET_PREFIX = "vllm-ascend/"
+_SUPPORTED_TEST_FREQUENCIES = {"nightly", "weekly"}
 
 
 def _default_upload_script_path() -> Path:
@@ -60,11 +62,13 @@ def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace(" ", "_")
 
 
-def resolve_suite_name(config_base_path: str | None = None) -> str:
-    """Return 'weekly' or 'nightly' from CONFIG_BASE_PATH."""
-    base = config_base_path if config_base_path is not None else os.getenv("CONFIG_BASE_PATH", "")
-    normalized = base.replace("\\", "/")
-    return "weekly" if "weekly" in normalized else "nightly"
+def resolve_suite_name(test_frequency: str | None = None) -> str:
+    """Return the explicitly configured scheduled-test frequency."""
+    frequency = (test_frequency or os.getenv("TEST_FREQUENCY") or "nightly").strip().lower()
+    if frequency not in _SUPPORTED_TEST_FREQUENCIES:
+        supported = ", ".join(sorted(_SUPPORTED_TEST_FREQUENCIES))
+        raise ValueError(f"Unsupported TEST_FREQUENCY={frequency!r}; expected one of: {supported}")
+    return frequency
 
 
 def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "") -> str:
@@ -77,6 +81,11 @@ def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "
         if name.lower().endswith(suffix):
             return name[: -len(suffix)]
     return name
+
+
+def resolve_test_version() -> str:
+    """Return nightly/weekly matrix branch (e.g. main, releases-v0.23.0)."""
+    return os.getenv("VLLM_ASCEND_BRANCH", "").strip()
 
 
 def _extract_dataset_name(case_config: dict[str, Any]) -> str:
@@ -108,23 +117,29 @@ def merge_postprocess_payload(
     result: Any,
     *,
     testcase_name: str,
+    case_key: str,
     suite_name: str | None = None,
 ) -> dict[str, Any]:
     """Deep-copy preset and patch nested fields per the preset JSON schema."""
     payload = copy.deepcopy(preset)
+
+    test_version = resolve_test_version()
+    if test_version:
+        payload["base_info"]["test_version"] = test_version
+
     testcase_info = payload.setdefault("testcase_info", {})
     if not isinstance(testcase_info, dict):
         testcase_info = {}
         payload["testcase_info"] = testcase_info
 
     testcase_info["featureFullName"] = suite_name or resolve_suite_name()
-    testcase_info["Testcase_Name"] = testcase_name
 
     test_env = testcase_info.get("testEnv")
     if not isinstance(test_env, dict):
         test_env = {}
         testcase_info["testEnv"] = test_env
 
+    test_env["case_key"] = case_key
     test_env["yaml_name"] = testcase_name
     test_env["request_rate"] = case_config.get("request_rate", 0)
     if "max_out_len" in case_config:
@@ -146,6 +161,10 @@ def merge_postprocess_payload(
         output_tps = _extract_output_tps(result)
         if output_tps is not None:
             indicator["output_tps"] = output_tps
+    elif case_type == "spec_decode" and isinstance(result, list):
+        indicator.update(
+            {f"acceptance_rate_pos_{position}": round(float(rate), 4) for position, rate in enumerate(result)}
+        )
     testcase_info["testIndicator"] = indicator
 
     return payload
@@ -166,9 +185,11 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     if not script_path.is_file():
         print(f"Warning: Postprocess script not found, skip running: {script_path}")
         return
+    repo_root = script_path.resolve().parent.parent
     cmd = [
         sys.executable,
-        str(script_path),
+        "-m",
+        UPLOAD_MODULE,
         "--label",
         UPLOAD_LABEL,
         "--files",
@@ -182,9 +203,10 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
             capture_output=True,
             text=True,
             env=env,
+            cwd=str(repo_root),
         )
     except OSError as exc:
-        print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
+        print(f"Warning: Failed to run postprocess script {UPLOAD_MODULE}: {exc}")
         return
     # upload_to_openlibing uses logging (stderr); always forward both streams
     if completed.stdout:
@@ -220,6 +242,7 @@ def postprocess_one_benchmark(
         case_config,
         result,
         testcase_name=resolved_name,
+        case_key=case_key,
     )
 
     safe_job = _safe_name(job_name or "benchmark")

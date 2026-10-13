@@ -490,6 +490,8 @@ msgid ""
 "favors latency-sensitive, low-concurrency workloads when the TP interconnect"
 " is fast. |"
 msgstr ""
+"| 单请求延迟 | 所有TP工作进程并发地贡献于同一层。 | 请求按顺序遍历PP阶段。 | "
+"当TP互连速度较快时，TP通常更有利于对延迟敏感、低并发的负载。 |"
 
 msgid ""
 "| Steady-state throughput | A large TP group can lose efficiency to "

@@ -41,6 +41,11 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
                 input_ids=input_ids,
             )
 
+        # Fallback gate paths may still produce FP32 logits.
+        # npu_moe_gating_top_k_softmax requires FP16 ND input. This adjusts
+        # dtype only; the default FP16 gate path needs no dtype conversion.
+        router_logits = router_logits.to(torch.float16)
+
         if router_logits.shape[0] > self.MAX_TOKENS_PER_GATING_CALL:
             topk_results = [
                 torch_npu.npu_moe_gating_top_k_softmax(router_logits_chunk, k=self.top_k)

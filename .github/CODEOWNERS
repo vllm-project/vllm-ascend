@@ -31,9 +31,9 @@
 # /tests
 
 # c++ source code
-/cmake @zzzzwwjj
-/csrc @zzzzwwjj
-/CMakeLists.txt @zzzzwwjj
+/cmake @zzzzwwjj @ZT-AIA
+/csrc @zzzzwwjj @ZT-AIA
+/CMakeLists.txt @zzzzwwjj @ZT-AIA
 
 # python source code
 /vllm_ascend/attention @weijinqian0
@@ -41,14 +41,14 @@
 # /vllm_ascend/core
 /vllm_ascend/device @weijinqian0 @zzzzwwjj
 /vllm_ascend/device_allocator @weijinqian0
-/vllm_ascend/distributed @MengqingCao @LCAIZJ
+/vllm_ascend/distributed @LCAIZJ
 # /vllm_ascend/eplb
-/vllm_ascend/kv_offload @nalinaly
+/vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
 /vllm_ascend/lora @paulyu12
 # /vllm_ascend/model_loader
 /vllm_ascend/ops @zzzzwwjj @realliujiaxu
 # /vllm_ascend/patch
-# /vllm_ascend/quantization
+/vllm_ascend/quantization @kunpengW-code
 /vllm_ascend/sample @realliujiaxu
 # /vllm_ascend/spec_decode
 # /vllm_ascend/worker

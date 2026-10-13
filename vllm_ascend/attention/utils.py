@@ -1,25 +1,82 @@
+import enum
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
-    AscendDeviceType,
+    _is_glm_model,
     get_ascend_config,
-    get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
 SFA_QSFA_TILE_SIZE = 128
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+
+class PreprocessType(enum.Enum):
+    NATIVE = "native"
+    PROLOG_V3 = "prolog_v3"
+    MLAPO = "mlapo"
+
+
+def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
+    """Refresh NZ management after changing preprocessing policy, before loading weights."""
+    resolve_type = getattr(impl, "_fused_preprocess_type", None)
+    if resolve_type is None:
+        return
+    managed = resolve_type() is not None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        if layer is not None:
+            layer._fused_preprocess_managed = managed
+
+
+def get_or_register_attention_buffer(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    name: str,
+    factory: Callable[[], torch.Tensor],
+) -> torch.Tensor:
+    """Return a shared non-persistent buffer owned by attention modules."""
+    # TODO: Revisit this after torch_npu supports traversing mem-pool
+    # allocations during sleep/wake. The buffer could then be allocated from
+    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
+    static_forward_context = vllm_config.compilation_config.static_forward_context
+    modules = []
+    for layer_name in layer_names:
+        module = static_forward_context.get(layer_name)
+        if not isinstance(module, torch.nn.Module):
+            raise ValueError(f"Attention layer {layer_name!r} is not a registered torch.nn.Module")
+        modules.append(module)
+
+    if not modules:
+        raise ValueError("At least one attention layer is required to own the buffer")
+
+    buffer = next((getattr(module, name) for module in modules if hasattr(module, name)), None)
+    if buffer is None:
+        buffer = factory()
+
+    for module in modules:
+        existing = getattr(module, name, None)
+        if existing is None:
+            module.register_buffer(name, buffer, persistent=False)
+        elif existing is not buffer:
+            raise ValueError(f"Attention buffer {name!r} is already registered with a different tensor")
+
+    return buffer
 
 
 def build_valid_topk_mask(
@@ -44,6 +101,20 @@ def get_sfa_qsfa_packed_head_dim(
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
+def get_tq_packed_bytes(kv_lora_rank: int) -> int:
+    """Bytes of the int4-packed nope half of one TurboQuant 4-bit latent slot."""
+    return kv_lora_rank // 2
+
+
+def get_tq_fused_slot_bytes(kv_lora_rank: int, qk_rope_head_dim: int) -> int:
+    """Bytes of one fused TQ4 slot: int4 nope + bf16 rope + fp16 scale."""
+    return (
+        get_tq_packed_bytes(kv_lora_rank)
+        + qk_rope_head_dim * get_dtype_size(torch.bfloat16)
+        + get_dtype_size(torch.float16)
+    )
+
+
 @dataclass
 class PagedAttentionGraphParam:
     """Mark PA params when PA and FIA share one graph replay list."""
@@ -53,53 +124,6 @@ class PagedAttentionGraphParam:
 
     def __iter__(self):
         return iter(self.params)
-
-
-def update_paged_attention_graph_param(
-    update_stream,
-    handle,
-    event,
-    param: PagedAttentionGraphParam,
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    (
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        num_heads,
-        scale,
-        _captured_block_table,
-        _captured_seq_lens,
-        output,
-    ) = param.params
-    workspace = torch_npu._npu_paged_attention_get_workspace(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-    )
-    torch.npu.graph_task_update_begin(update_stream, handle)
-    torch_npu._npu_paged_attention(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-        workspace=workspace,
-    )
-    torch.npu.graph_task_update_end(update_stream)
-    event.record(update_stream)
 
 
 def cache_graph_workspace(
@@ -167,10 +191,11 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    """Check any configured PA shape for KV allocation when runtime_shape is None."""
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
         return False
     # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
     # 512-dim global attention heads. Decode can use PA directly; prefill is
@@ -183,13 +208,34 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
     if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
-    return runtime_shape in get_ascend_config().pa_shape_list
+    pa_shape_list = get_ascend_config().pa_shape_list
+    return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
+
+
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    impl = getattr(layer, "impl", None)
+    return (
+        type(impl) is AscendAttentionBackendImpl
+        and impl.sliding_window is None
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and using_paged_attention(None, vllm_config, spec.head_size)
+    )
 
 
 @lru_cache(maxsize=1)
 def enable_dcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
+
+
+def enable_pcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.prefill_context_parallel_size > 1
 
 
 @dataclass
@@ -216,6 +262,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
+
+    # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
@@ -245,13 +293,33 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Decode Context Parallelism (DCP) operations.
     context_parallel_metadata: AscendDCPMetadata | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+    # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
+    req_topk_buffer_slots: torch.Tensor | None = None
+    req_topk_buffer_active: torch.Tensor | None = None
+    copy_sfa_draft_index: int | None = None
+    copy_sfa_restore_tails: bool = False
+    offload_dummy: bool = False
+
+    # vLLM main (#55353) removed the deprecated
+    # CommonAttentionMetadata._seq_lens_cpu / _num_computed_tokens_cpu
+    # fields and (#56157) renamed dcp_local_seq_lens_cpu to
+    # dcp_local_seq_lens_cpu_upper_bound. Ascend keeps its own copies so
+    # NPU attention backends get CPU seq_lens without a GPU->CPU sync.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
+    # Per-request replay start: 0 for every request that is not replaying, else
+    # where that request's replayed run begins. A backend clamps a replaying
+    # request's sliding-window lower bound to it: below that point the window's
+    # KV is not being rebuilt -- the replayed positions are padded on the
+    # cacheable groups -- and only the shared prefix is there. ``None`` means
+    # the same as all zeros; dummy/profiling/capture batches do not fill it.
+    replay_start: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -304,9 +372,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
+            req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
+            req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
+            copy_sfa_draft_index=self.copy_sfa_draft_index,
+            offload_dummy=self.offload_dummy,
+            replay_start=_slice_reqs(self.replay_start),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
@@ -436,7 +506,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -453,7 +523,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
@@ -513,7 +583,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.UNRESTRICTED_MLAPO):
         return bool(config_val)
 
     is_decode_instance = (
@@ -522,3 +592,40 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
+
+
+def _select_seq_lens(
+    common_attn_metadata: AscendCommonAttentionMetadata,
+    kv_cache_spec: AttentionSpec | None,
+    speculative_config: SpeculativeConfig | None,
+    vllm_config: VllmConfig,
+) -> torch.Tensor:
+    """Choose the seq_lens tensor carried by the built attention metadata.
+
+    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
+    updated during draft iterations, while ``seq_lens_cpu`` is None in async
+    spec decode mode. Cross-attention and generic parallel drafting override
+    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
+    family, whose CPU mirror carries the same post-rejection-sampling lengths
+    across draft iterations, so building from it skips the NPU->CPU sync at
+    ``seq_lens.tolist()`` in the metadata build.
+    """
+    # Prefer _seq_lens_cpu (always available, updated during draft
+    # iterations) over seq_lens_cpu (None in async spec decode mode).
+    model_config = vllm_config.model_config
+    num_reqs = common_attn_metadata.num_reqs
+    if common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+    elif common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+    else:
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        seq_lens = common_attn_metadata.seq_lens
+    if speculative_config is not None and speculative_config.parallel_drafting:
+        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
+        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+            seq_lens = common_attn_metadata.seq_lens
+    return seq_lens

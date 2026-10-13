@@ -18,13 +18,17 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2).
+|  Weight Version  | Download Links |
+| -----------------|----------------|
+| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
 ### 3.2 Verify Multi-node Communication
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -32,7 +36,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A2 series"
 
@@ -123,13 +127,9 @@ Run the following script to execute online inference.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_NZ=0
-export TOKENIZERS_PARALLELISM=false
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export TASK_QUEUE_ENABLE=1
-export TOKENIZERS_PARALLELISM=false
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \
@@ -140,6 +140,7 @@ vllm serve /root/.cache/DeepSeek-OCR-2 \
     --gpu-memory-utilization 0.8 \
     --allowed-local-media-path / \
     --additional-config '{
+      "weight_nz_mode": 0,
       "enable_cpu_binding": true,
       "multistream_overlap_shared_expert": true,
       "ascend_compilation_config": {"fuse_qknorm_rope": false}
@@ -160,7 +161,7 @@ Single-node deployment is recommended.
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We don't need to Prefill-Decode disaggregation
+Prefill-Decode disaggregation is not required.
 
 ## 6 Functional Verification
 
@@ -187,7 +188,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -200,11 +201,11 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The performance result is:  
+The performance result is:
 
 **Hardware**: A2-313T, 1 node
 
@@ -232,11 +233,11 @@ The performance result is:
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

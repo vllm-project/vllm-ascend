@@ -1,15 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
+from torch import nn
 from vllm.config import CompilationMode
-from vllm.forward_context import get_forward_context
+
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
+
+def compact_mtp_topk_indices(
+    draft_model: nn.Module,
+    token_indices_to_sample: torch.Tensor,
+    num_input_tokens: int,
+    tp_group: "GroupCoordinator | None" = None,
+    lim_topk_compactors: Sequence[nn.Module] = (),
+) -> None:
+    """Move step-0 top-k rows to the query layout of subsequent MTP steps."""
+    if tp_group is None:
+        draft_model.compact_topk_indices(token_indices_to_sample)
+        for module in lim_topk_compactors:
+            module.compact_lim_topk_metadata(token_indices_to_sample)
+        return
+    if token_indices_to_sample.numel() == 0:
+        return
+
+    # DSA-CP stores each rank's query rows at the front of its buffer. MTP
+    # keeps the padded input size, but steps 1+ contain one query per request.
+    local_num_tokens = (num_input_tokens + tp_group.world_size - 1) // tp_group.world_size
+    local_start = tp_group.rank_in_group * local_num_tokens
+    local_indices = token_indices_to_sample - local_start
+    owns_row = (local_indices >= 0) & (local_indices < local_num_tokens)
+    gather_indices = local_indices.clamp(0, local_num_tokens - 1).long()
+    local_num_reqs = max(0, min(local_num_tokens, token_indices_to_sample.numel() - local_start))
+
+    seen_buffers: set[int] = set()
+    for module in draft_model.modules():
+        buffer = getattr(module, "topk_indices_buffer", None)
+        if buffer is None or id(buffer) in seen_buffers:
+            continue
+        seen_buffers.add(id(buffer))
+
+        # Exactly one rank owns each sampled row. Summing masked rows moves
+        # only request_count * topk entries, rather than all step-0 tokens.
+        # Keep indices and masks on device; no scalar D2H extraction is needed.
+        rows = buffer.index_select(0, gather_indices)
+        rows.masked_fill_(~owns_row.view(-1, *([1] * (rows.ndim - 1))), 0)
+        rows = tp_group.all_reduce(rows)
+        if local_num_reqs:
+            buffer[:local_num_reqs].copy_(rows[local_start : local_start + local_num_reqs])
 
 
 def update_num_computed_tokens_for_batch_change(
@@ -83,20 +129,20 @@ def correct_optimistic_seq_lens_cpu(
 
 class SlidingWindowAdapter:
     """
-    Sliding-window draft attention for the draft model (EAGLE3 and DFlash).
+    Sliding-window draft attention for the draft model (EAGLE3 / DFlash / DSpark).
     Caps the draft model's attention to the most recent ``window_size`` (W) tokens
     by (a) cropping its block table to the window's blocks and (b) keeping every
     KV-length tensor the FIA kernel can read (notably ``_seq_lens_cpu`` for EAGLE3,
-    GPU ``seq_lens`` for DFlash's ``parallel_drafting``) capped at W. Slot-mapping
-    is untouched and still addresses the full, absolute KV cache via
+    GPU ``seq_lens`` for DFlash/DSpark ``parallel_drafting``) capped at W.
+    Slot-mapping is untouched and still addresses the full, absolute KV cache via
     :attr:`full_block_table`.
 
     ``future_offset`` is the number of tokens beyond ``seq_lens`` (at :meth:`apply`
     time) that the window end must cover:
       * EAGLE3 passes ``num_speculative_tokens`` — its ``seq_lens`` is context-only
         and the K draft positions lie beyond it, so ``final = seq_lens + K``.
-      * DFlash passes ``0`` — its ``set_inputs_first_pass`` already bakes the query
-        stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
+      * DFlash / DSpark pass ``0`` — ``set_inputs_first_pass`` already bakes the
+        query stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
     """
 
     def __init__(
@@ -127,14 +173,13 @@ class SlidingWindowAdapter:
         w = self.window_size
         b = self.block_size
         num_reqs = common_attn_metadata.seq_lens.shape[0]
+        full_cols = self.full_block_table.shape[1]
 
         # Window math on the (NPU) seq_lens. Pure arithmetic -> stays on NPU.
         self.start_tokens_in_window_rounding = ((common_attn_metadata.seq_lens + k_future - w).clamp(min=0) // b) * b
         self._windowed_seq_lens = common_attn_metadata.seq_lens - self.start_tokens_in_window_rounding
         start_block_indices = self.start_tokens_in_window_rounding // b
-        needed_blocks_per_req = (self._windowed_seq_lens + b - 1) // b
 
-        full_cols = self.full_block_table.shape[1]
         # column offset grid [1, max_window_blocks]
         cols = torch.arange(self.max_window_blocks, device=self.full_block_table.device).unsqueeze(0)
         # source column per (row, col): start_block_indices[:, None] + cols
@@ -143,8 +188,8 @@ class SlidingWindowAdapter:
         src_cols_clamped = src_cols.clamp(max=full_cols - 1)
 
         gathered = torch.gather(self.full_block_table, 1, src_cols_clamped)
-        needed = torch.clamp(needed_blocks_per_req, max=self.max_window_blocks).unsqueeze(1)
-        # keep only columns within `needed` and within the full table; zero the rest
+
+        needed = torch.clamp((self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks).unsqueeze(1)
         valid_mask = (cols < needed) & (src_cols < full_cols)
         out[:num_reqs].copy_(gathered * valid_mask.to(gathered.dtype))
 
@@ -164,13 +209,11 @@ class SlidingWindowAdapter:
         # update NPU seq_lens: reuse the value computed in compute().
         common_attn_metadata.seq_lens = self._windowed_seq_lens
 
-        # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
-        # no D2H sync. numerically identical to the NPU
         for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
-                _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b
-                setattr(common_attn_metadata, name, _windowed_cpu)
+                _windowed = src - ((src + k_future - w).clamp(min=0) // b) * b
+                setattr(common_attn_metadata, name, _windowed)
 
 
 @contextmanager
@@ -207,18 +250,6 @@ def _maybe_eager_context(vllm_config):
         yield
     finally:
         vllm_config.compilation_config = target_compilation_config
-
-
-# `sp` should be disabled when running MarkovHead
-@contextmanager
-def _disable_flash_comm_v1_context():
-    forward_context = get_forward_context()
-    _raw_flash_comm_v1 = forward_context.flash_comm_v1_enabled
-    try:
-        forward_context.flash_comm_v1_enabled = False
-        yield
-    finally:
-        forward_context.flash_comm_v1_enabled = _raw_flash_comm_v1
 
 
 class DynamicSpecScheduler:
@@ -415,9 +446,8 @@ class DynamicSpecScheduler:
     ) -> torch.Tensor:
         """Estimate DSpark token acceptance probabilities.
 
-        The DSpark confidence head produces logits for each speculative
-        position. Sigmoid converts them to conditional token acceptance
-        probabilities.
+        ``compute_confidence`` already returns per-position acceptance
+        probabilities (sigmoid of the confidence-head logits).
 
         Output:
             token_probs: [B, D]
@@ -446,7 +476,7 @@ class DynamicSpecScheduler:
             markov_embs.shape[-1],
         ).to(flat_hidden.dtype)
 
-        confidence_logits = model.confidence_logits(
+        confidence = model.compute_confidence(
             flat_hidden,
             flat_markov,
         )
@@ -454,13 +484,12 @@ class DynamicSpecScheduler:
         token_probs = self._token_probs_buffer[:num_reqs]
 
         token_probs.copy_(
-            confidence_logits.reshape(
+            confidence.reshape(
                 num_reqs,
                 num_draft_tokens,
             )
         )
 
-        token_probs.sigmoid_()
         token_probs.clamp_(
             min=1e-6,
             max=1.0,

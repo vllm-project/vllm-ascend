@@ -68,3 +68,8 @@ def test_w8a8_dynamic_moe_apply_310_uses_preselected_experts():
     assert fused_experts_input.topk_ids is topk_ids
     assert fused_experts_input.routing.expert_map is expert_map
     assert fused_experts_input.routing.apply_router_weight_on_input is True
+    # Post-refactor contract: weights are read from the layer by the MLP gmm
+    # hooks, and the method dispatches itself as quant_method.
+    assert fused_experts_input.layer is layer
+    assert fused_experts_input.activation == "silu"
+    assert comm_method.fused_experts.call_args.kwargs["quant_method"] is method

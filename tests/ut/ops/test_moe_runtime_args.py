@@ -15,8 +15,10 @@
 # limitations under the License.
 #
 import unittest
+from types import SimpleNamespace
 
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
@@ -41,6 +43,48 @@ def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
 
 
 class TestMoERuntimeArgs(unittest.TestCase):
+    def test_build_mlp_compute_input_preserves_situ_parameters(self):
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.ones(2, 1),
+            topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+            w1=torch.randn(1, 4, 8),
+            w2=torch.randn(1, 8, 4),
+            quant_type=QuantType.NONE,
+            dynamic_eplb=False,
+            activation=MoEActivation.SITU,
+        )
+        token_dispatch_output = MoETokenDispatchOutput(
+            hidden_states=fused_experts_input.hidden_states,
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            combine_metadata=MoEAllGatherCombineMetadata(
+                topk_weights=fused_experts_input.topk_weights,
+                expanded_row_idx=torch.arange(2, dtype=torch.int32),
+                restore_shape=torch.Size([2, 4]),
+            ),
+        )
+        moe_config = SimpleNamespace(
+            activation=MoEActivation.SITU,
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+            swiglu_limit=None,
+            swiglu_alpha=None,
+            swiglu_beta=None,
+        )
+
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=fused_experts_input,
+            token_dispatch_output=token_dispatch_output,
+            moe_config=moe_config,
+            use_fusion_ops=False,
+        )
+
+        self.assertEqual(mlp_compute_input.activation, MoEActivation.SITU)
+        self.assertEqual(mlp_compute_input.activation_situ_beta, 4.0)
+        self.assertEqual(mlp_compute_input.activation_situ_linear_beta, 25.0)
+
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (
             QuantType.NONE,

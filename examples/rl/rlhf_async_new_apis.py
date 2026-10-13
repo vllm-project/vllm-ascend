@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -39,6 +42,7 @@ Usage:
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from dataclasses import asdict
@@ -62,6 +66,12 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferInitInfo,
     HCCLWeightTransferUpdateInfo,
 )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
@@ -190,9 +200,6 @@ ray_env_vars = {
     "VLLM_BATCH_INVARIANT": "1",
     "HCCL_DETERMINISTIC": "strict",
     "LCCL_DETERMINISTIC": "1",
-    # Disable FRACTAL_NZ mode (also handled by batch invariance override_envs)
-    "VLLM_ASCEND_ENABLE_NZ": "0",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "0",
     # Enable expandable segments for PyTorch NPU allocator
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
@@ -210,6 +217,7 @@ llm_kwargs = dict(
     max_model_len=8192,
     distributed_executor_backend="ray",
     gpu_memory_utilization=0.75,
+    additional_config={"weight_nz_mode": 0},
     weight_transfer_config=WeightTransferConfig(backend="hccl"),
 )
 
@@ -271,11 +279,11 @@ N_NEW_TOKENS = 100
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # -- Phase 1: concurrent requests with weight sync --------------------
-print(f"\n{'=' * 50}")
-print(f"Prompts ({len(PROMPTS)}):")
+logger.info("\n%s", "=" * 50)
+logger.info("Prompts (%d):", len(PROMPTS))
 for p in PROMPTS:
-    print(f"  - {p!r}")
-print(f"{'=' * 50}")
+    logger.info("  - %r", p)
+logger.info("%s", "=" * 50)
 
 sampling_params = SamplingParams(temperature=0, max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS)
 
@@ -309,10 +317,10 @@ for i, (output, pause_idx) in enumerate(results):
     all_token_ids = list(output.outputs[0].token_ids)
     before_text = tokenizer.decode(all_token_ids[:pause_idx])
     after_text = tokenizer.decode(all_token_ids[pause_idx:])
-    print(f"\n  Request {i} ({PROMPTS[i]!r}):")
-    print(f"    Old weights ({pause_idx} tokens): {before_text!r}")
+    logger.info("\n  Request %d (%r):", i, PROMPTS[i])
+    logger.info("    Old weights (%d tokens): %r", pause_idx, before_text)
     n_after = len(all_token_ids) - pause_idx
-    print(f"    New weights ({n_after} tokens): {after_text!r}")
+    logger.info("    New weights (%d tokens): %r", n_after, after_text)
 
 # -- Phase 2: validate with a fresh V2 vLLM instance --------------------
 # This validation relies on batch-invariant (deterministic) generation to
@@ -321,10 +329,10 @@ for i, (output, pause_idx) in enumerate(results):
 # generation should be deterministic. Require 100% exact match.
 MIN_PASS_RATE = 1.0
 
-print(f"\n{'=' * 50}")
-print("VALIDATION: comparing weight-synced vLLM with fresh V2 instance")
-print(f"  (Ascend NPU batch-invariant mode: requiring {MIN_PASS_RATE:.0%} exact match)")
-print(f"{'=' * 50}")
+logger.info("\n%s", "=" * 50)
+logger.info("VALIDATION: comparing weight-synced vLLM with fresh V2 instance")
+logger.info("  (Ascend NPU batch-invariant mode: requiring %.0f%% exact match)", MIN_PASS_RATE * 100)
+logger.info("%s", "=" * 50)
 
 ray.get(llm.shutdown.remote())
 ray.kill(llm)
@@ -363,17 +371,20 @@ for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_resu
 
     if match:
         num_pass += 1
-        print(f"  [PASS] {PROMPTS[i]!r}")
+        logger.info("  [PASS] %r", PROMPTS[i])
     else:
-        print(f"  [FAIL] {PROMPTS[i]!r}")
-        print(f"         weight-synced vLLM: {tokenizer.decode(expected)!r}")
-        print(f"         V2 vLLM:           {tokenizer.decode(actual)!r}")
+        logger.info("  [FAIL] %r", PROMPTS[i])
+        logger.info("         weight-synced vLLM: %r", tokenizer.decode(expected))
+        logger.info("         V2 vLLM:           %r", tokenizer.decode(actual))
         for j, (e, a) in enumerate(zip(expected, actual)):
             if e != a:
-                print(
-                    f"         first divergence at output token {j}: "
-                    f"expected {e} ({tokenizer.decode([e])!r}) vs "
-                    f"actual {a} ({tokenizer.decode([a])!r})"
+                logger.info(
+                    "         first divergence at output token %d: expected %d (%r) vs actual %d (%r)",
+                    j,
+                    e,
+                    tokenizer.decode([e]),
+                    a,
+                    tokenizer.decode([a]),
                 )
                 break
 
@@ -381,12 +392,12 @@ ray.get(llm_v2.shutdown.remote())
 ray.kill(llm_v2)
 
 pass_rate = num_pass / num_total
-print(f"\n  Result: {num_pass}/{num_total} prompts passed ({pass_rate:.0%})")
-print(f"  Required: >= {MIN_PASS_RATE:.0%}")
+logger.info("\n  Result: %d/%d prompts passed (%.0f%%)", num_pass, num_total, pass_rate * 100)
+logger.info("  Required: >= %.0f%%", MIN_PASS_RATE * 100)
 
 assert pass_rate >= MIN_PASS_RATE, (
     f"Validation pass rate {pass_rate:.0%} ({num_pass}/{num_total}) "
     f"is below the required {MIN_PASS_RATE:.0%} threshold. "
     f"See failures above for details."
 )
-print("=" * 50)
+logger.info("%s", "=" * 50)

@@ -95,6 +95,9 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
+    DCP_SIZE: tl.constexpr = 1,
+    DCP_RANK: tl.constexpr = 0,
+    CP_INTERLEAVE_SIZE: tl.constexpr = 1,
 ):
     # Grid-stride kernel: launch grid is capped at the vector-core count by
     # the caller (grid = min(cdiv(total_work, TILE_SIZE), num_vectorcore)),
@@ -140,7 +143,17 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
 
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+        # A discarded speculative step has no accepted tokens, so all context
+        # tokens for the step can be rejected. In that case valid_ctx_end points
+        # at this request's first token and valid_ctx_end - 1 belongs to the
+        # previous request (or is before the tensor for the first request).
+        ctx_start = tl.load(query_start_loc_ptr + req_idx, mask=mask, other=0)
+        has_valid_context = valid_ctx_end > ctx_start
+        last_pos_idx = tl.where(has_valid_context, valid_ctx_end - 1, ctx_start)
+        last_pos = tl.load(target_positions_ptr + last_pos_idx, mask=mask, other=0)
+        # query_pos is derived as last_pos + 1 + q_idx below. When no context
+        # remains, start it at this request's original first position.
+        last_pos = tl.where(has_valid_context, last_pos, last_pos - 1)
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
@@ -155,11 +168,25 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # rather than from query_pos. For text-only inputs the two values are
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
-        block_num_q = query_kv_slot_pos // block_size
+        if DCP_SIZE > 1:
+            # Match BlockTable._compute_dcp_slot_mapping: the paged cache on
+            # each DCP rank is compacted, so global token positions must first
+            # be mapped to an owner rank and then to that rank's local position.
+            virtual_block_size = CP_INTERLEAVE_SIZE * DCP_SIZE
+            virtual_block_offset = query_kv_slot_pos % virtual_block_size
+            owner_rank = virtual_block_offset // CP_INTERLEAVE_SIZE
+            local_kv_slot_pos = (
+                query_kv_slot_pos // virtual_block_size * CP_INTERLEAVE_SIZE + virtual_block_offset % CP_INTERLEAVE_SIZE
+            )
+        else:
+            owner_rank = DCP_RANK
+            local_kv_slot_pos = query_kv_slot_pos
+        block_num_q = local_kv_slot_pos // block_size
         block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
             tl.int64
         )
-        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        slot_q = block_id_q * block_size + (local_kv_slot_pos % block_size)
+        slot_q = tl.where(owner_rank == DCP_RANK, slot_q, -1)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
@@ -175,3 +202,39 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
             tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
 
         block_start += block_start_step
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def dflash2_greedy_selector_walk_kernel(
+    scores_ptr,
+    candidate_ids_ptr,
+    output_ptr,
+    num_reqs,
+    num_steps: tl.constexpr,
+    top_k: tl.constexpr,
+):
+    # The grid is one program per request, capped at the vector-core count by
+    # the caller; each program grid-strides over requests so any count up to
+    # the cap covers the batch. The walk is sequential per request (prev_idx
+    # depends on the previous step), so one request is handled at a time.
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    offsets = tl.arange(0, top_k)
+
+    req = pid
+    while req < num_reqs:
+        # Slot 0 uses the verified anchor as predecessor.
+        prev_idx = 0
+        for step in range(num_steps):
+            score_base = (req * num_steps + step) * top_k * top_k + prev_idx * top_k
+            row = tl.load(scores_ptr + score_base + offsets).to(tl.float32)
+
+            # first/smallest index wins.
+            max_value = tl.max(row, axis=0)
+            next_idx = tl.min(tl.where(row == max_value, offsets, top_k), axis=0)
+
+            candidate_base = (req * num_steps + step) * top_k
+            token = tl.load(candidate_ids_ptr + candidate_base + next_idx)
+            tl.store(output_ptr + req * num_steps + step, token)
+            prev_idx = next_idx
+        req += num_programs

@@ -17,10 +17,11 @@
 #include "kernel_operator_intf.h"
 
 #if defined(__DAV_C310__)
-    #include "hc_pre_m_k_split_core_arch35.h"
-    #include "hc_pre_m_split_core_arch35.h"
-    #include "hc_pre_base_arch35.h"
-    using namespace HcPreNs;
+#include "hc_pre_m_k_split_core_arch35.h"
+#include "hc_pre_m_k_split_core_premix_arch35.h"
+#include "hc_pre_m_split_core_arch35.h"
+#include "hc_pre_m_split_core_premix_arch35.h"
+#include "hc_pre_base_arch35.h"
 #else
     #include "lib/matmul_intf.h"
     #include "hc_pre_m_k_split_core.h"
@@ -31,8 +32,8 @@
 using namespace AscendC;
 
 extern "C" __global__ __aicore__ void hc_pre(GM_ADDR x, GM_ADDR hc_fn, GM_ADDR hc_scale, GM_ADDR hc_base,
-                                             GM_ADDR y, GM_ADDR post, GM_ADDR comb_frag, GM_ADDR workspace,
-                                             GM_ADDR tiling)
+                                             GM_ADDR pre_mix, GM_ADDR y, GM_ADDR post, GM_ADDR comb_frag,
+                                             GM_ADDR pre, GM_ADDR workspace, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     if (workspace == nullptr) {
@@ -46,7 +47,7 @@ extern "C" __global__ __aicore__ void hc_pre(GM_ADDR x, GM_ADDR hc_fn, GM_ADDR h
     TPipe pipe;
 
     // 950PR 950DT
-    #if defined(__DAV_C310__)
+#if defined(__DAV_C310__)
         if (TILING_KEY_IS(1000)) {
             GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
             const HcPreTilingData *__restrict tilingData = &tiling_data_in;
@@ -57,17 +58,36 @@ extern "C" __global__ __aicore__ void hc_pre(GM_ADDR x, GM_ADDR hc_fn, GM_ADDR h
 
             TPipe pipeStage2;
             HcPreNs::HcPreMKSplitCorePart2<DTYPE_X> op2;
-            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, userWs, tilingData, &pipeStage2);
+            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, pre, userWs, tilingData, &pipeStage2);
+            op2.Process();
+            pipeStage2.Destroy();
+        } else if (TILING_KEY_IS(1002)) {
+            GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
+            const HcPreTilingData *__restrict tilingData = &tiling_data_in;
+            HcPreNs::HcPreMKSplitCorePremixPart1<DTYPE_X> op;
+            op.Init(x, hc_fn, pre_mix, y, userWs, tilingData, &pipe);
+            op.Process();
+            pipe.Destroy();
+
+            TPipe pipeStage2;
+            HcPreNs::HcPreMKSplitCorePremixPart2<DTYPE_X> op2;
+            op2.Init(x, hc_scale, hc_base, pre_mix, y, post, comb_frag, pre, userWs, tilingData, &pipeStage2);
             op2.Process();
             pipeStage2.Destroy();
         } else if (TILING_KEY_IS(1001)) {
             GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
             const HcPreTilingData *__restrict tilingData = &tiling_data_in;
-            HcPreNs::HcPreMSplitCorePart1<DTYPE_X> op;
-            op.Init(x, hc_fn, hc_scale, hc_base, y, post, comb_frag, tilingData, &pipe);
+            HcPreNs::HcPreMSplitCoreArch35<DTYPE_X> op;
+            op.Init(x, hc_fn, hc_scale, hc_base, y, post, comb_frag, pre, tilingData, &pipe);
+            op.Process();
+        } else if (TILING_KEY_IS(1003)) {
+            GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
+            const HcPreTilingData *__restrict tilingData = &tiling_data_in;
+            HcPreNs::HcPreMSplitCorePremixArch35<DTYPE_X> op;
+            op.Init(x, hc_fn, hc_scale, hc_base, pre_mix, y, post, comb_frag, pre, tilingData, &pipe);
             op.Process();
         }
-    #else
+#else
       // A3
         if (TILING_KEY_IS(0)) {
             GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
@@ -80,10 +100,10 @@ extern "C" __global__ __aicore__ void hc_pre(GM_ADDR x, GM_ADDR hc_fn, GM_ADDR h
 
             TPipe pipeStage2;
             HcPre::HcPreMembaseKSplitCorePart2<DTYPE_X> op2;
-            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, userWs, tilingData, &pipeStage2);
+            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, pre_mix, pre, userWs, tilingData, &pipeStage2);
             op2.Process();
 
             pipeStage2.Destroy();
         }
-    #endif
+#endif
 }

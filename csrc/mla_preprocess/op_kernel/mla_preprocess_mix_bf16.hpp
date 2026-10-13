@@ -21,7 +21,7 @@
 #include "lib/matmul_intf.h"
 
 #include "mla_preprocess.h"
-#include "../op_host/tiling/mla_preprocess_tiling.h"
+#include "mla_preprocess_tiling_data.h"
 
 namespace MLAPO_BF16 {
 template <typename QkDtype, typename CosDtype, typename QOutDtype, int8_t CacheMode>

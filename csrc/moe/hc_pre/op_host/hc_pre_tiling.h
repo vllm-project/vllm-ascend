@@ -99,6 +99,8 @@ TILING_DATA_FIELD_DEF(int64_t, stage1MFactor);
 TILING_DATA_FIELD_DEF(int64_t, bufferPool0Size);
 TILING_DATA_FIELD_DEF(int64_t, bufferPool1Size);
 TILING_DATA_FIELD_DEF(int64_t, mUbSize);
+TILING_DATA_FIELD_DEF(int64_t, hasPreMix);
+TILING_DATA_FIELD_DEF(int64_t, hasPreOut);
 
 END_TILING_DATA_DEF;
 

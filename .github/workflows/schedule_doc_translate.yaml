@@ -63,7 +63,7 @@ jobs:
           git remote add fork "https://github.com/vllm-ascend-ci/vllm-ascend.git"
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 

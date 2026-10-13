@@ -21,9 +21,12 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tp_group
 from vllm.forward_context import is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
+    Gemma4RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -32,8 +35,9 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -90,13 +94,31 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
 def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_cache
     global _sin_cache
+    global _cos_mla
+    global _sin_mla
+    num_tokens = positions.size(0)
+    # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
+    # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
+    if _cos_mla is not None and _cos_mla.shape[-1] == 0:
+        return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
     cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
     sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
-    global _cos_mla
-    global _sin_mla
-    num_tokens = positions.size(0)
+    if _cos_mla is None or _cos_mla.shape[-1] != cos.shape[-1]:
+        # use_cache=True callers expect a fixed-address slice of the persistent
+        # buffer, because ACL graph replay reuses the captured cos/sin pointers.
+        # This path cannot honour that, so it is only safe on the eager path:
+        # reaching it inside a capture region would leave the replay reading
+        # stale addresses. Upstream crashed here instead, so warn loudly.
+        logger.warning_once(
+            "MLA rope cache is unusable (buffer rope_dim=%s, requested rope_dim=%d);"
+            " returning a temporary cos/sin pair instead of the persistent buffer."
+            " This is unsafe inside ACL graph capture.",
+            "unset" if _cos_mla is None else _cos_mla.shape[-1],
+            cos.shape[-1],
+        )
+        return cos, sin
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
@@ -116,7 +138,27 @@ def _record_cos_and_sin_cache(cos_cache, sin_cache):
     _sin_cache = sin_cache
 
 
-def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
+def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
+    """Publish the interleaved cos/sin pair derived from ``cos_sin_cache``.
+
+    ``cos_sin_cache`` is a non-persistent buffer of ``owner``, but the
+    de-interleaved pair every MLA/SFA rope lookup reads through the module
+    globals is a *derived* tensor pair, allocated while
+    ``NPUWorker.load_model()`` holds the sleep-mode ``weights`` mem-pool.
+    Holding them only in module globals makes them invisible to the level-2
+    wake backup, which walks ``model.named_buffers()``: a level-2 wake then
+    leaves every rope lookup reading discarded (remapped, zeroed) storage and
+    silently changes the model output, while the pointers stay valid so nothing
+    crashes. This is the ownership bug RFC #16558 describes.
+
+    Own the pair as non-persistent buffers of the module that built it, the
+    contract RFC #16558 section "Prefer model buffers or host values for static
+    state" prescribes: the globals keep the very same tensor objects, so the
+    lookup path and the addresses baked into captured ACL graphs are unchanged,
+    ``named_buffers()`` de-duplicates the shared pair, and ``persistent=False``
+    keeps them out of ``state_dict()`` and makes vLLM's layerwise reload keep
+    their bytes instead of re-materialising them from meta storage.
+    """
     global _cos_cache
     global _sin_cache
     if _cos_cache is not None or _sin_cache is not None:
@@ -125,6 +167,8 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
+    owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
+    owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
 
 
 def update_cos_sin(positions):
@@ -160,12 +204,27 @@ def rope_forward_oot(
     rotary_dim: int,
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if out_dtype == torch.float8_e4m3fn and key is None:
+        raise ValueError("float8_e4m3fn RoPE output requires a key tensor")
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
+    if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
+        raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
     if HAS_TRITON:
         num_tokens = query.shape[0]
+        if out_dtype == torch.float8_e4m3fn:
+            query_width = query.numel() // num_tokens
+            key_width = key.numel() // num_tokens
+            if query_width % head_size != 0 or key_width % head_size != 0:
+                head_size = key_width
+                if query_width % head_size != 0:
+                    raise ValueError(
+                        f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
+                    )
+            rotary_dim = min(rotary_dim, head_size)
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
             key.view(num_tokens, -1, head_size),
@@ -173,8 +232,11 @@ def rope_forward_oot(
             positions=positions,
             rope_dim=rotary_dim,
             is_neox_style=is_neox_style,
+            out_dtype=out_dtype,
         )
     else:
+        if out_dtype == torch.float8_e4m3fn:
+            raise RuntimeError("float8_e4m3fn RoPE output requires Triton")
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
@@ -207,26 +269,57 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self, self.cos_sin_cache)
 
     def forward_oot(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
     ):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
-        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
-        if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
-            positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
-        return torch.ops.vllm.npu_rotary_embedding(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
+        if is_draft_model and self.use_mtp and enable_sp():
+            tp_group = get_tp_group()
+            positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
+
+        if key is None:
+            dummy_key = (
+                torch.empty(query.shape[0], 0, self.head_size, dtype=query.dtype, device=query.device)
+                if HAS_TRITON
+                else torch.empty(
+                    (query.shape[0], 1, self.head_size) if query.ndim == 3 else (query.shape[0], self.head_size),
+                    dtype=query.dtype,
+                    device=query.device,
+                )
+            )
+            query, _ = rope_forward_oot(
+                positions,
+                query,
+                dummy_key,
+                self.cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                is_neox_style,
+            )
+            return query, None
+        rope_args = (
+            positions,
+            query,
+            key,
+            self.cos_sin_cache,
+            self.head_size,
+            self.rotary_dim,
+            is_neox_style,
         )
+        if out_dtype is None:
+            return torch.ops.vllm.npu_rotary_embedding(*rope_args)
+        return torch.ops.vllm.npu_rotary_embedding(*rope_args, out_dtype=out_dtype)
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
@@ -245,15 +338,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
+        # vLLM main (#56446) replaced the YaRN mscale parameters with
+        # mscale/mscale_all_dim/attention_factor.
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+            "attention_factor": attention_factor,
             "truncate": truncate,
         }
         super().__init__(
@@ -270,8 +367,61 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         key: torch.Tensor,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
     ):
-        return AscendRotaryEmbedding.forward_oot(self, positions, query, key, offsets, is_neox_style_override)
+        return AscendRotaryEmbedding.forward_oot(
+            self,
+            positions,
+            query,
+            key,
+            offsets,
+            is_neox_style_override,
+            out_dtype,
+        )
+
+
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+    """Gemma4 proportional RoPE on the NPU rotary kernel.
+
+    Subclasses rather than reusing AscendRotaryEmbedding so Gemma4's
+    `_compute_inv_freq`, which zero-pads the non-rotated frequency pairs, keeps
+    building the cos/sin cache. Only the forward is swapped, which lets full
+    attention layers emit `npu_rotary_embedding` like the sliding ones instead
+    of an unfused rotate_half chain.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        _record_cos_sin_cache(self.cos_sin_cache)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        offsets: torch.Tensor | None = None,
+        is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(
+            self,
+            positions,
+            query,
+            key,
+            offsets,
+            is_neox_style_override,
+            out_dtype,
+        )
 
 
 class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
@@ -559,17 +709,33 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
+        if not self.is_neox_style and not get_current_hardware_profile().supports(
+            HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE
+        ):
+            # The legacy ACL backend only supports half pairing.
+            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
+            if rotary_dim < head_dim:
+                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
+            return self._post_process(output, origin_shape, origin_dtype)
+
         # cos, sin: [seq_len, rotary_dim // 2]
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+            rotary_mode = "half"
+        else:
+            # GPT-J/Kimi pairs adjacent dimensions and repeats each coefficient.
+            cos = cos.repeat_interleave(2, dim=-1)
+            sin = sin.repeat_interleave(2, dim=-1)
+            rotary_mode = "interleave"
         # cos, sin: [1, seq_len, 1, rotary_dim]
         cos = cos.reshape(1, -1, 1, rotary_dim)
         sin = sin.reshape(1, -1, 1, rotary_dim)
 
         if rotary_dim == head_dim:
-            output = torch_npu.npu_rotary_mul(x, cos, sin)
+            output = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode=rotary_mode)
         else:
-            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin, rotary_mode=rotary_mode)
             output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)

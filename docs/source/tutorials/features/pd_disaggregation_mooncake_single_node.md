@@ -6,6 +6,8 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides
 
 Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture (one Prefiller and one Decoder on the same node). Assume the IP address is 192.0.0.1.
 
+For P/D transfer priority settings, see [QoS Configuration](pd_disaggregation_mooncake_multi_node.md#qos-configuration).
+
 ## Verify Communication Environment
 
 ### Verification Process
@@ -141,6 +143,18 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 ```
 
 ## Prefiller/Decoder Deployment
+
+!!! note "Timeout for long sequences or high concurrency"
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+
+    ```shell
+    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    ```
+
+    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+
+    Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
 We can run the following scripts to launch a server on the prefiller/decoder NPU, respectively.
 

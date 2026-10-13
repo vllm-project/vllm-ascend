@@ -7,6 +7,19 @@ to get specific plans.
 
 ## Gaps with vLLM (To Be Addressed)
 
+- [ ] `model_runner` sample-token Ascend hooks + runtime_guard decorators
+
+    Why: The wave sync / sample-phase guard orchestration lives in
+    `vllm_ascend/observability/runtime_guard/hooks.py` decorators
+    (`@runtime_guard_step` shared with v1, `@runtime_guard_sample_tokens`
+    v2-only). The runner's `sample_tokens` and `postprocess_sampled` bodies are
+    the original functional logic with no `SamplePhaseResult` / `_rg_*`
+    protocol, hook split, or runner-side stash — deleting the decorator
+    restores the pre-guard methods byte-identically (worker
+    `execute_dummy_batch` pattern; the spec-stats stash lives in the
+    decorator's `wrap_postprocess_sampled`). Track these when the upstream
+    `GPUModelRunner.execute_model` / `sample_tokens` contract changes.
+
 - [ ] `set_cos_and_sin` & `update_cos_sin`
 
     Why: DeepSeek-like models (mla) still need cos/sin setting and updating in model_runner. These should be removed when mla can solve cos/sin internally.
@@ -27,13 +40,26 @@ to get specific plans.
 
 - [ ] `model_runner.graph_manager_wrapper`
 
-    Why: ModelAclGraphManager needs model_runner's input_buffers and model_state.attn_metadata to update_full_graph_params, so model_runner should be passed into __init__ of ModelAclGraphManager.
+    Why: ModelAclGraphManager needs model_runner's input_buffers and model_state.attn_metadata to update_full_graph_params, so model_runner should be passed into `__init__` of ModelAclGraphManager.
 
     Location: `model_runner.NPUModelRunner.initialize_kv_cache`.
 
 - [ ] `speculator.graph_manager_wrapper`
 
-    Why: EagleAclGraphManager needs speculator's input_buffers and model_state.attn_metadata to update_full_graph_params, so speculator should be passed into __init
-    __ of EagleAclGraphManager.
+    Why: AutoRegressiveAclGraphManager needs speculator's input_buffers and model_state.attn_metadata to update_full_graph_params, so speculator should be passed into `__init__` of AutoRegressiveAclGraphManager.
 
     Location: `speculator.AscendEagleSpeculator.init_cudagraph_manager`.
+
+- [x] `extract_hidden_states` (MRV2)
+
+    Why: Upstream vLLM added Model Runner V2 support for
+    `extract_hidden_states`. Ascend reuses upstream
+    `ExtractHiddenStatesSpeculator` via `init_speculator` dispatch and keeps
+    `HiddenStateCacheSpec` on a private single-tensor allocate/reshape path.
+    `use_aux_hidden_state_outputs` is enabled by upstream
+    `GPUModelRunner.__init__`.
+
+    After vLLM #51718 (0828 pin), every KV descriptor is a view into one
+    shared backing with `[B, H, N, C]` pages. Hidden-state dumps stay on
+    per-layer private buffers so they cannot overlay hybrid Attention/Mamba
+    storage, and reshape matches `CacheOnlyAttentionLayer.basic_cache`.

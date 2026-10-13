@@ -10,7 +10,7 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 !!! note
 
-    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for Ascend950DT, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
+    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
 
 ## 2 Supported Features
 
@@ -22,36 +22,29 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 300I DUO:
-
-- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
-
-Requires 1 card on Ascend950DT series (96G × 8) node.
-
-- `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8)
-
-Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
-
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
-
-Requires 1 card on Ascend950DT series (96G × 8) node.
-
-- `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8)
+|  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
+|-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
+| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
+| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
+| `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
+| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -197,7 +190,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -205,16 +198,14 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 Run docker container to start the vLLM server on single-NPU:
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
       --host 0.0.0.0 \
       --port $2 \
@@ -237,12 +228,10 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --host 0.0.0.0 \
     --port $2 \
@@ -258,7 +247,7 @@ Run docker container to start the vLLM server on single-NPU:
     --gpu-memory-utilization 0.91 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
-    --mm-processor-cache-gb 0 
+    --mm-processor-cache-gb 0
 
     ```
 
@@ -266,12 +255,10 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
     --max_model_len 16384 \
@@ -281,7 +268,7 @@ Run docker container to start the vLLM server on single-NPU:
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
-    --tensor-parallel-size $4 \ 
+    --tensor-parallel-size $4 \
     --trust-remote-code \
     --max-num-seqs 128 \
     --max-model-len 32768 \
@@ -290,7 +277,7 @@ Run docker container to start the vLLM server on single-NPU:
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
-    --mm-processor-cache-gb 0 
+    --mm-processor-cache-gb 0
 
     ```
 
@@ -400,7 +387,7 @@ The accuracy of some models is already within our CI monitoring scope, including
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -433,7 +420,7 @@ After several minutes, you can get the performance evaluation result.
 |Long Context<br>(128k, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
 |Multimodal<br>(1080p)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
@@ -459,4 +446,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

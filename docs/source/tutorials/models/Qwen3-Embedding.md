@@ -6,17 +6,21 @@ The Qwen3 Embedding model series is the latest proprietary model of the Qwen fam
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Qwen3-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)
-- `Qwen3-Embedding-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)
-- `Qwen3-Embedding-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)
+|  Weight Version        | Download Links |
+|------------------------|----------------|
+| `Qwen3-Embedding-8B`  | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) |
+| `Qwen3-Embedding-4B`   | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) |
+| `Qwen3-Embedding-0.6B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -24,7 +28,31 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-Embedding` model directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+=== "Ascend 950DT&950PR Products"
+
+    The following command uses the Ubuntu image for Ascend 950DT&950PR Products to start the container.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    docker run --rm \
+        --name vllm-ascend \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -107,18 +135,17 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-=== "A3/A2 series"
+=== "Ascend 950DT&950PR Products/A3/A2"
 
     ```shell
-    #!/bin/sh
-    vllm serve Qwen/Qwen3-Embedding-0.6B  \
-      --served-model-name Qwen/Qwen3-Embedding-0.6B  \
+    vllm serve Qwen/Qwen3-Embedding-0.6B \
+      --served-model-name Qwen/Qwen3-Embedding-0.6B \
       --runner pooling \
       --port 8000 \
       --max-model-len 1024
@@ -128,6 +155,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
       --served-model-name Qwen/Qwen3-Embedding-0.6B  \
       --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
@@ -145,7 +173,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -203,7 +231,7 @@ For more usage examples, please reference the [examples](https://github.com/vllm
 
 Here are two accuracy evaluation methods.
 
-### Using MTEB
+### 7.1 Using MTEB
 
 1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
@@ -239,7 +267,7 @@ Here are two accuracy evaluation methods.
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance of `Qwen3-Embedding-0.6B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
@@ -254,4 +282,4 @@ After about several minutes, you can get the performance evaluation result.
 
 ## 9 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

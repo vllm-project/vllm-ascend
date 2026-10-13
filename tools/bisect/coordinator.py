@@ -22,20 +22,34 @@ sentinel so workers know whether to continue or exit.
 
 Protocol files under ``<coord_dir>/round_<N>/``::
 
-    command.json                {round, commit, rebuild}
+    command.json                {round, commit, rebuild, action, version_targets, version_checks}
     ready_<idx>.json            {node, head}
+    start.json                  {}                                  (master, after the barrier)
     verdict.json                {verdict}            (master, after the trial)
     <coord_dir>/DONE            sentinel -> workers exit
 """
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 3.0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` so readers only ever see the complete file.
+
+    Plain ``write_text`` creates the file before its content lands, so a node
+    polling on a shared PVC can observe a torn (partial) file and die parsing
+    it. Temp file + rename makes publication atomic.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 class Coordinator:
@@ -77,20 +91,37 @@ class Coordinator:
         return self.root / "DONE"
 
     # ------------------------------------------------------- master writes
-    def publish_command(self, rnd: int, commit: str, rebuild: bool, action: str = "RUN") -> None:
+    def publish_command(
+        self,
+        rnd: int,
+        commit: str,
+        rebuild: bool,
+        action: str = "RUN",
+        version_targets: dict[str, str] | None = None,
+        version_checks: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
         """Publish the per-round command. ``action`` is "RUN" (deploy + run the
         distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
         mismatch -- workers consume the command but do not deploy/run, keeping
         leader/worker rounds in lockstep)."""
+        command = {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}
+        if version_targets is not None:
+            command["version_targets"] = version_targets
+        if version_checks is not None:
+            command["version_checks"] = list(version_checks)
         path = self._round_dir(rnd) / "command.json"
-        path.write_text(json.dumps({"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}))
+        _atomic_write(path, json.dumps(command))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
 
     def publish_verdict(self, rnd: int, verdict: str) -> None:
-        (self._round_dir(rnd) / "verdict.json").write_text(json.dumps({"verdict": verdict}))
+        _atomic_write(self._round_dir(rnd) / "verdict.json", json.dumps({"verdict": verdict}))
+
+    def publish_start(self, rnd: int) -> None:
+        _atomic_write(self._round_dir(rnd) / "start.json", "{}")
+        logger.info("[coord] released round %d for test execution", rnd)
 
     def publish_done(self) -> None:
-        self._done_flag.write_text("done")
+        _atomic_write(self._done_flag, "done")
         logger.info("[coord] published DONE")
 
     def is_done(self) -> bool:
@@ -99,7 +130,7 @@ class Coordinator:
     # ------------------------------------------------------- worker writes
     def signal_ready(self, rnd: int, head: str) -> None:
         path = self._round_dir(rnd) / f"ready_{self.node_index}.json"
-        path.write_text(json.dumps({"node": self.node_index, "head": head}))
+        _atomic_write(path, json.dumps({"node": self.node_index, "head": head}))
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
 
     @staticmethod
@@ -166,6 +197,23 @@ class Coordinator:
             "only ran the test (not the bisect agent) will never join this barrier."
         )
 
+    def any_foreign_ready(self) -> bool:
+        """Master: True if any node other than this one signalled ready, in ANY
+        round of this run.
+
+        All ``round_*`` directories are scanned, not just the current round: a
+        worker that joins late still lands its ready marker in the round the
+        master has already left, and that must count as "a worker exists" (the
+        run should SKIP that round, not abort). Note this is a "has ever
+        joined" check, not liveness: a worker that dies mid-run keeps its
+        markers and the run degrades to per-round SKIPs.
+        """
+        return any(
+            ready.stem != f"ready_{self.node_index}"
+            for rdir in self.root.glob("round_*")
+            for ready in rdir.glob("ready_*.json")
+        )
+
     def wait_verdict(self, rnd: int, timeout_s: float) -> str | None:
         """Worker: block until the master publishes this round's verdict / DONE."""
         path = self._round_dir(rnd) / "verdict.json"
@@ -177,6 +225,19 @@ class Coordinator:
                 return None
             time.sleep(_POLL_INTERVAL_S)
         raise TimeoutError(f"Timed out waiting for verdict of round {rnd}")
+
+    def wait_start(self, rnd: int, timeout_s: float) -> bool:
+        """Worker: wait until the master releases the test or aborts the round."""
+        start = self._round_dir(rnd) / "start.json"
+        verdict = self._round_dir(rnd) / "verdict.json"
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if start.exists():
+                return True
+            if verdict.exists() or self.is_done():
+                return False
+            time.sleep(_POLL_INTERVAL_S)
+        raise TimeoutError(f"Timed out waiting for start of round {rnd}")
 
     def _assert_consistent(self, readies: list[Path], expected_commit: str) -> None:
         for r in readies:
