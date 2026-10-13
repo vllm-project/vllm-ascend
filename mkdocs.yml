@@ -280,6 +280,7 @@ nav:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
+        - user_guide/configuration/runtime_config.md
         - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
@@ -288,6 +289,7 @@ nav:
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/runtime_guard.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
