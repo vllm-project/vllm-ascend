@@ -60,12 +60,13 @@ def test_environment_override_wins(monkeypatch, env_value):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
+        SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForConditionalGeneration"])),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4UnifiedForConditionalGeneration"])),
         SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="dflash",
-                enforce_eager=False,
-                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-            )
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
         ),
         SimpleNamespace(
             kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
@@ -93,7 +94,12 @@ def test_environment_override_wins(monkeypatch, env_value):
         "parallel-drafting",
         "eagle3-without-parallel-drafting",
         "dflash2-eager",
-        "dflash2-graph",
+        "hy3-preview",
+        "hy3-preview-architecture",
+        "gemma4-causal",
+        "gemma4-conditional",
+        "gemma4-unified",
+        "gemma4-hf-config",
         "mooncake-pd",
         "kvpp",
         "reduce-sample-disabled",
@@ -115,13 +121,12 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
 @pytest.mark.parametrize(
     "config",
     [
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
-        SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForConditionalGeneration"])),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4UnifiedForConditionalGeneration"])),
         SimpleNamespace(
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
+            speculative_config=SimpleNamespace(
+                method="dflash",
+                enforce_eager=False,
+                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+            )
         ),
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
@@ -146,12 +151,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
     ids=[
-        "hy3-preview",
-        "hy3-preview-architecture",
-        "gemma4-causal",
-        "gemma4-conditional",
-        "gemma4-unified",
-        "gemma4-hf-config",
+        "dflash2-graph",
         "pooling-runner",
         "pooling-model",
         "encoder-decoder",
@@ -238,11 +238,15 @@ def test_blacklist_logs_fallback(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
 
-    assert (
-        use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is False
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+        )
     )
+    assert use_v2_model_runner(config) is False
     assert len(warning_calls) == 1
-    assert "Hy3-preview" in warning_calls[0][1]
+    assert "dflash2 graph" in warning_calls[0][1]
 
 
 def test_validation_is_decoupled_from_upstream():
