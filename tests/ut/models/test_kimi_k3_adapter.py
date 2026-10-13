@@ -4,9 +4,11 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
@@ -20,6 +22,39 @@ from vllm_ascend.models.kimi_k3_dspark import (
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import vllm_version_is
+
+
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
+    layer = kimi_k3.AscendKimiRoutedLinear.__new__(kimi_k3.AscendKimiRoutedLinear)
+    nn.Module.__init__(layer)
+    method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    x = torch.randn(4, 128, dtype=torch.bfloat16)
+    output = torch.randn(4, 192, dtype=torch.bfloat16)
+    quant_method = SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output))
+    layer.quant_method = quant_method
+    layer.bias = None
+    layer.skip_bias_add = False
+    layer.return_bias = True
+
+    with (
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
+        ),
+        patch("vllm_ascend.ops.kimi_kda.is_forward_context_available", return_value=True),
+        patch.object(AscendW8A8MXFP8DynamicLinearMethod, "apply_single_group_gmm", return_value=output) as grouped,
+    ):
+        actual = layer.forward(x)
+
+    assert actual[0] is output
+    assert actual[1] is None
+    if runtime_mode == CUDAGraphMode.NONE:
+        grouped.assert_called_once_with(layer, x)
+        quant_method.apply.assert_not_called()
+    else:
+        grouped.assert_not_called()
+        quant_method.apply.assert_called_once_with(layer, x, None)
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():

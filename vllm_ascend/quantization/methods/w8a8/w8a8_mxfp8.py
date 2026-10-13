@@ -156,6 +156,42 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         return output
 
+    def apply_single_group_gmm(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Run a single MXFP8 projection through grouped matmul in eager mode."""
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            output_dtype = torch.bfloat16
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                x,
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
+            )
+            output_dtype = x.dtype
+
+        group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
+        return torch_npu.npu_grouped_matmul(
+            x=[quantized_x],
+            weight=[layer.weight.unsqueeze(0)],
+            scale=[layer.weight_scale.unsqueeze(0)],
+            per_token_scale=[pertoken_scale],
+            group_list=group_list,
+            split_item=2,
+            group_type=0,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+
     def process_weights_after_loading(self, layer):
         """Process weights after loading for MXFP8 inference.
 

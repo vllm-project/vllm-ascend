@@ -16,6 +16,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
@@ -202,6 +203,68 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(padded_x.shape, (2, 544))
         torch.testing.assert_close(padded_x[:, :16], torch.zeros(2, 16))
         torch.testing.assert_close(padded_x[:, 16:], x)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
+    def test_single_group_gmm_quantizes_routed_input_on_device(self, mock_torch_npu):
+        x = torch.randn(4, 128, dtype=torch.bfloat16)
+        quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
+        pertoken_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
+        mock_torch_npu.npu_dynamic_mx_quant.return_value = (quantized, pertoken_scale)
+        output = torch.empty(4, 192, dtype=torch.bfloat16)
+        mock_torch_npu.npu_grouped_matmul.return_value = [output]
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.empty(128, 192, dtype=torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.empty(2, 192, 2, dtype=torch.uint8), requires_grad=False)
+
+        actual = self.scheme.apply_single_group_gmm(layer, x)
+
+        self.assertIs(actual, output)
+        mock_torch_npu.npu_dynamic_mx_quant.assert_called_once_with(
+            x, dst_type=torch.float8_e4m3fn, scale_alg=self.scheme.dynamic_mx_quant_scale_alg
+        )
+        kwargs = mock_torch_npu.npu_grouped_matmul.call_args.kwargs
+        self.assertIs(kwargs["x"][0], quantized)
+        self.assertEqual(kwargs["weight"][0].shape, (1, 128, 192))
+        self.assertEqual(kwargs["scale"][0].shape, (1, 2, 192, 2))
+        self.assertIs(kwargs["per_token_scale"][0], pertoken_scale)
+        self.assertEqual(kwargs["group_list"].tolist(), [4])
+        self.assertEqual(kwargs["group_list"].device, quantized.device)
+        self.assertEqual(kwargs["output_dtype"], torch.bfloat16)
+        self.assertEqual(kwargs["split_item"], 2)
+        self.assertEqual(kwargs["group_type"], 0)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
+    def test_single_group_gmm_accepts_prequantized_qkv(self, mock_torch_npu):
+        quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
+        pertoken_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
+        output = torch.empty(4, 192, dtype=torch.bfloat16)
+        mock_torch_npu.npu_grouped_matmul.return_value = [output]
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.empty(128, 192, dtype=torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.empty(2, 192, 2, dtype=torch.uint8), requires_grad=False)
+
+        actual = self.scheme.apply_single_group_gmm(layer, (quantized, pertoken_scale))
+
+        self.assertIs(actual, output)
+        mock_torch_npu.npu_dynamic_mx_quant.assert_not_called()
+        self.assertEqual(mock_torch_npu.npu_grouped_matmul.call_args.kwargs["output_dtype"], torch.bfloat16)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
+    def test_single_group_gmm_accepts_prepared_input(self, mock_torch_npu):
+        quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
+        pertoken_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
+        output = torch.empty(4, 192, dtype=torch.float16)
+        mock_torch_npu.npu_grouped_matmul.return_value = [output]
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.empty(128, 192, dtype=torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.empty(2, 192, 2, dtype=torch.uint8), requires_grad=False)
+
+        prepared = PreparedLinearInput(quantized, pertoken_scale, torch.float16)
+        actual = self.scheme.apply_single_group_gmm(layer, prepared)
+
+        self.assertIs(actual, output)
+        mock_torch_npu.npu_dynamic_mx_quant.assert_not_called()
+        self.assertEqual(mock_torch_npu.npu_grouped_matmul.call_args.kwargs["output_dtype"], torch.float16)
 
 
 class TestAscendW8A8MXFP8DSLinearMethod(TestBase):

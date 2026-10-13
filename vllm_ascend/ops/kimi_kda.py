@@ -15,9 +15,11 @@ from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.forward_context import get_forward_context
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    ReplicatedLinear,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
@@ -36,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -54,6 +57,42 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+class AscendKimiRoutedLinear(ReplicatedLinear):
+    """Dispatch eager Kimi K3 MXFP8 projections through single-group GMM."""
+
+    @staticmethod
+    def apply_projection(
+        layer: nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        quant_method = layer.quant_method
+        inner_method = getattr(quant_method, "quant_method", quant_method)
+        if isinstance(x, PreparedLinearInput):
+            can_use_gmm = x.quantized.ndim == 2 and x.scale is not None
+        elif isinstance(x, tuple):
+            can_use_gmm = x[0].ndim == 2
+        else:
+            can_use_gmm = x.ndim == 2
+        if (
+            bias is None
+            and isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
+            and is_forward_context_available()
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and can_use_gmm
+        ):
+            return inner_method.apply_single_group_gmm(layer, x)
+        return quant_method.apply(layer, x, bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        output = self.apply_projection(self, x, bias)
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -368,16 +407,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _matmul_fused_qkv(
         self,
-        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        qkv_input: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
             raise RuntimeError("KDA fused QKV quantization method is not initialized")
-        return quant_method.apply(
-            self.in_proj_qkvgfab,
-            qkv_input,
-            bias=None,
-        )
+        return AscendKimiRoutedLinear.apply_projection(self.in_proj_qkvgfab, qkv_input)
 
     @staticmethod
     def _run_causal_conv1d(
