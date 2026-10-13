@@ -1,28 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend port of test_pard2_anchor_acceptance_length in vLLM PR #49406.
+"""Qwen3-8B PARD-2 acceptance regression on Ascend, following vLLM PR #49406.
 
-Reference: https://github.com/ganeshr10/vllm/blob/
-9a54e5a94f294c2b991a0f606dd25cf16f77c6ea/tests/v1/e2e/spec_decode/acceptance_rates/pard2/test_pard2.py
-
-Use GSM8K's first 50 test questions with its first five training examples,
-plain completion prompts, greedy sampling, K=15 and max_tokens=256. This is
-an acceptance-length regression, not an answer-accuracy or performance test.
-It requires an Ascend NPU and vLLM containing the upstream PARD-2 implementation.
-Models use repository IDs like the neighboring DFlash test. GSM8K is downloaded
-from the upstream CI dataset and reused from pytest's cache on subsequent runs.
+GSM8K downloading, JSONL reading and prompt construction are copied from
+upstream gsm8k_eval.py. Downloads are reused from the upstream temporary cache.
+Calls the prompt builder directly; there is no prompt fixture.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
-from pathlib import Path
+import tempfile
+from collections.abc import Generator
 from unittest.mock import patch
-from urllib.request import urlopen
 
 import pytest
+import regex as re
+import requests
 from vllm import SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.platforms import current_platform
@@ -37,38 +34,88 @@ NUM_QUESTIONS = 50
 NUM_SHOTS = 5
 NUM_SPECULATIVE_TOKENS = 15
 MIN_ACCEPTANCE_LENGTH = 4.0
+INVALID = -9999999
 
 
-def _read_gsm8k_split(path: Path) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8") as stream:
-        rows = [json.loads(line) for line in stream if line.strip() and not line.startswith("#")]
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict) or any(not isinstance(row.get(key), str) for key in ("question", "answer")):
-            raise ValueError(f"{path}: record {index + 1} must contain string question and answer fields")
-    return rows
+# GSM8K helpers copied from:
+# https://github.com/vllm-project/vllm/blob/main/tests/evals/gsm8k/gsm8k_eval.py
+# Source Git blob: 4eec87945b6fc8ce6388bf52f3e3a069400f7b2f (2026-10-12).
+def download_and_cache_file(url: str, filename: str | None = None) -> str:
+    """Download and cache a file from a URL."""
+    if filename is None:
+        filename = os.path.join(tempfile.gettempdir(), url.split("/")[-1])
+
+    if os.path.exists(filename):
+        return filename
+
+    print(f"Downloading from {url} to {filename}")
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+
+    with open(filename, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024):
+            f.write(chunk)
+
+    return filename
 
 
-def _build_gsm8k_prompts(data_dir: Path) -> list[str]:
-    # Do not import upstream tests: this repository has its own `tests` package.
-    # Match _build_gsm8k_prompts(num_questions=50, num_shots=5, gen_prefix="").
-    train = _read_gsm8k_split(data_dir / "train.jsonl")
-    test = _read_gsm8k_split(data_dir / "test.jsonl")
-    assert len(train) >= NUM_SHOTS, f"GSM8K train.jsonl needs at least {NUM_SHOTS} records"
-    assert len(test) >= NUM_QUESTIONS, f"GSM8K test.jsonl needs at least {NUM_QUESTIONS} records"
-    examples = "".join(f"Question: {row['question']}\nAnswer: {row['answer']}\n\n" for row in train[:NUM_SHOTS])
-    return [examples + f"Question: {row['question']}\nAnswer:" for row in test[:NUM_QUESTIONS]]
+def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
+    """Load GSM8K train and test data."""
+    train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
+    test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
+
+    train_file = download_and_cache_file(train_url)
+    test_file = download_and_cache_file(test_url)
+
+    train_data = list(read_jsonl(train_file))
+    test_data = list(read_jsonl(test_file))
+
+    return train_data, test_data
 
 
-@pytest.fixture(scope="module")
-def pard2_gsm8k_prompts(pytestconfig: pytest.Config) -> list[str]:
-    data_dir = pytestconfig.cache.mkdir("pard2_gsm8k")
-    for split in ("train", "test"):
-        path = data_dir / f"{split}.jsonl"
-        if not path.is_file():
-            url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/{split}.jsonl"
-            with urlopen(url, timeout=60) as response:
-                path.write_bytes(response.read())
-    return _build_gsm8k_prompts(data_dir)
+def read_jsonl(filename: str) -> Generator[dict, None, None]:
+    """Read a JSONL file."""
+    with open(filename) as fin:
+        for line in fin:
+            if not line.startswith("#"):
+                yield json.loads(line)
+
+
+def get_answer_value(answer_str: str) -> int:
+    """Extract the numerical answer from the response."""
+    answer_str = answer_str.replace(",", "")
+    numbers = re.findall(r"\d+", answer_str)
+    if len(numbers) < 1:
+        return INVALID
+    try:
+        return ast.literal_eval(numbers[-1])
+    except SyntaxError:
+        return INVALID
+
+
+def _build_gsm8k_prompts(
+    num_questions: int = 1319,
+    num_shots: int = 5,
+    gen_prefix: str = "",
+) -> tuple[list[str], list[int]]:
+    """Build few-shot GSM8K completion prompts and ground-truth labels."""
+    if num_questions == 0:
+        return [], []
+    train_data, test_data = load_gsm8k_data()
+    num_questions = min(num_questions, len(test_data))
+
+    few_shot_examples = ""
+    for i in range(num_shots):
+        few_shot_examples += f"Question: {train_data[i]['question']}\nAnswer:{gen_prefix} {train_data[i]['answer']}\n\n"
+
+    prompts = []
+    labels = []
+    for i in range(num_questions):
+        prompts.append(few_shot_examples + f"Question: {test_data[i]['question']}\nAnswer:{gen_prefix}")
+        labels.append(get_answer_value(test_data[i]["answer"]))
+
+    assert all(label != INVALID for label in labels), "Some labels are invalid"
+    return prompts, labels
 
 
 def _compute_acceptance_length(metrics: list[Metric]) -> float:
@@ -101,10 +148,10 @@ def test_pard2_anchor_acceptance_length(
     max_tokens: int,
     enforce_eager: bool,
     compilation_config: dict,
-    pard2_gsm8k_prompts: list[str],
 ) -> None:
     """Catch loss of token 0 / its zero target feature through acceptance collapse."""
     assert current_platform.device_type == "npu", "This regression must execute on an Ascend NPU"
+    prompts = _build_gsm8k_prompts(num_questions=NUM_QUESTIONS, num_shots=NUM_SHOTS)[0]
     sampling_params = SamplingParams(temperature=0, max_tokens=max_tokens)
     # Follow the shared Ascend runner defaults, including block_size=16,
     # enable_chunked_prefill=True and trust_remote_code=True. Prompt construction,
@@ -138,7 +185,7 @@ def test_pard2_anchor_acceptance_length(
     ) as runner:
         # Submit all 50 completion prompts at once, without a chat template,
         # benchmark warmup, or a concurrency-1 admission loop.
-        outputs = runner.model.generate(pard2_gsm8k_prompts, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
         assert len(outputs) == NUM_QUESTIONS and all(output.finished for output in outputs), (
             "The GSM8K regression did not complete all 50 requests"
         )
