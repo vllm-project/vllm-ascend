@@ -683,17 +683,18 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl.is_pcp_decode_sharded = False
 
     attn_module.impl.dcp_enabled = True
-    attn_module.impl._required_dcp_current_kv_capacity = lambda: 128
+    attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl._dcp_current_kv_buffers = (
         torch.empty(1, 128, 1, 512),
         torch.empty(1, 128, 1, 64),
         torch.arange(128),
     )
+    attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
     assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl._required_dcp_current_kv_capacity = lambda: 129
+    attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl._required_dcp_current_kv_capacity = lambda: 128
+    attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
     attn_module.impl._dcp_current_kv_buffers = None
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.dcp_enabled = False

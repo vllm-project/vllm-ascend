@@ -1372,7 +1372,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl.dcp_enabled = True
         attn_module.impl.supports_prolog_v3_writer = lambda: True
         runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
-        attn_module.impl._required_dcp_current_kv_capacity = lambda: 384
+        attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
@@ -1384,6 +1384,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             torch.empty(1, 384, 1, 64),
             torch.arange(384),
         )
+        attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,

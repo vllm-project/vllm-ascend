@@ -316,6 +316,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._dcp_prefill_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
@@ -328,7 +329,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             self._prepare_dcp_current_kv_buffers()
 
     def _required_dcp_current_kv_capacity(self) -> int:
-        """Upper bound on query rows in a DCP decode/draft-prefill graph."""
+        """Upper bound on query rows in a DCP decode graph."""
         decode_query_len = 1
         if self.speculative_config is not None:
             decode_query_len += self.speculative_config.num_speculative_tokens or 0
@@ -338,25 +339,64 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             scheduler_config.max_num_seqs * decode_query_len,
         )
 
-    def _prepare_dcp_current_kv_buffers(self) -> None:
-        if self._dcp_current_kv_buffers is not None:
-            # Graph capture stores these buffer addresses. A weight reload must
-            # not replace the allocation out from under a captured graph.
-            return
-        # Every graph size uses a view of this layer-owned allocation, so the
-        # current KV and index addresses stay live across capture and replay.
-        max_tokens = min(
-            self._required_dcp_current_kv_capacity(),
-            MLAPO_MAX_SUPPORTED_TOKENS,
-        )
+    def _required_dcp_prefill_current_kv_capacity(self) -> int:
+        """Upper bound on current rows in a DCP prefill graph."""
+        return self.vllm_config.scheduler_config.max_num_batched_tokens
+
+    def _allocate_dcp_current_kv_buffers(
+        self,
+        max_tokens: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         block_size = self.vllm_config.cache_config.block_size
         cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
-        assert self.fused_qkv_a_proj is not None
-        device = self.fused_qkv_a_proj.weight.device
-        self._dcp_current_kv_buffers = (
+        return (
             torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
             torch.empty((*cache_shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
             torch.arange(max_tokens, dtype=torch.int64, device=device),
+        )
+
+    def _prepare_dcp_current_kv_buffers(self) -> None:
+        uses_prolog_v3_writer = self.supports_prolog_v3_writer()
+        if self._dcp_current_kv_buffers is not None and (
+            not uses_prolog_v3_writer or self._dcp_prefill_current_kv_buffers is not None
+        ):
+            # Graph capture stores these buffer addresses. A weight reload must
+            # not replace the allocation out from under a captured graph.
+            return
+        assert self.fused_qkv_a_proj is not None
+        device = self.fused_qkv_a_proj.weight.device
+        if self._dcp_current_kv_buffers is None:
+            decode_capacity = self._required_dcp_current_kv_capacity()
+            if not uses_prolog_v3_writer:
+                # The legacy MLAPO DCP contract retains its operator token cap.
+                decode_capacity = min(decode_capacity, MLAPO_MAX_SUPPORTED_TOKENS)
+            self._dcp_current_kv_buffers = self._allocate_dcp_current_kv_buffers(decode_capacity, device)
+        if uses_prolog_v3_writer and self._dcp_prefill_current_kv_buffers is None:
+            # Mixed batches keep decode and prefill current chunks alive until
+            # their attention kernels run, so the two workspaces are disjoint.
+            prefill_capacity = self._required_dcp_prefill_current_kv_capacity()
+            self._dcp_prefill_current_kv_buffers = self._allocate_dcp_current_kv_buffers(prefill_capacity, device)
+
+    def _dcp_current_kv_buffers_are_sufficient(self) -> bool:
+        """Whether allocation-time buffers cover every admitted DCP graph."""
+        decode_buffers = self._dcp_current_kv_buffers
+        if decode_buffers is None or self._required_dcp_current_kv_capacity() > decode_buffers[2].numel():
+            return False
+        if not self.supports_prolog_v3_writer():
+            return True
+        prefill_buffers = self._dcp_prefill_current_kv_buffers
+        return (
+            prefill_buffers is not None
+            and self._required_dcp_prefill_current_kv_capacity() <= prefill_buffers[2].numel()
+        )
+
+    def _prefill_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        """Whether DCP prefill attention needs the complete current chunk."""
+        return (
+            self.dcp_enabled
+            and attn_metadata.prefill is not None
+            and attn_metadata.num_actual_tokens > attn_metadata.num_decode_tokens
         )
 
     @staticmethod

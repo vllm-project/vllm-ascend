@@ -350,6 +350,15 @@ def test_dcp_current_kv_capacity_uses_decode_query_len():
     assert impl._required_dcp_current_kv_capacity() == 96
 
 
+def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=32, max_num_batched_tokens=4096),
+    )
+
+    assert impl._required_dcp_prefill_current_kv_capacity() == 4096
+
+
 def test_dcp_current_kv_buffers_survive_reloads():
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
@@ -363,6 +372,8 @@ def test_dcp_current_kv_buffers_survive_reloads():
     impl.dtype = torch.float32
     impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.empty(1))
     impl._dcp_current_kv_buffers = None
+    impl._dcp_prefill_current_kv_buffers = None
+    impl.supports_prolog_v3_writer = lambda: False
 
     impl._prepare_dcp_current_kv_buffers()
     first_buffers = impl._dcp_current_kv_buffers
@@ -377,6 +388,37 @@ def test_dcp_current_kv_buffers_survive_reloads():
         first.data_ptr() == second.data_ptr()
         for first, second in zip(first_buffers, impl._dcp_current_kv_buffers, strict=True)
     )
+
+
+def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = NOPE_DIM
+    impl.qk_rope_head_dim = ROPE_DIM
+    impl.dtype = torch.float32
+    impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.empty(1))
+    impl._dcp_current_kv_buffers = None
+    impl._dcp_prefill_current_kv_buffers = None
+    impl.supports_prolog_v3_writer = lambda: True
+
+    impl._prepare_dcp_current_kv_buffers()
+    first_decode_buffers = impl._dcp_current_kv_buffers
+    first_prefill_buffers = impl._dcp_prefill_current_kv_buffers
+    assert first_decode_buffers is not None
+    assert first_prefill_buffers is not None
+    assert first_decode_buffers[0].shape == (1, 128, 1, NOPE_DIM)
+    assert first_prefill_buffers[0].shape == (32, 128, 1, NOPE_DIM)
+    assert first_decode_buffers[0].untyped_storage() is not first_prefill_buffers[0].untyped_storage()
+    assert impl._dcp_current_kv_buffers_are_sufficient()
+
+    impl._prepare_dcp_current_kv_buffers()
+    assert impl._dcp_current_kv_buffers is first_decode_buffers
+    assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
 def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
@@ -557,7 +599,13 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
         torch.empty(1, 1, 1, ROPE_DIM),
         torch.arange(1),
     )
+    impl._dcp_prefill_current_kv_buffers = (
+        torch.empty(1, 1, 1, NOPE_DIM),
+        torch.empty(1, 1, 1, ROPE_DIM),
+        torch.arange(1),
+    )
     impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._prefill_requires_current_kv = MagicMock(return_value=True)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
     impl._mla_preprocess = MagicMock(return_value=(None, None))
@@ -584,12 +632,21 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
 
 def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     impl = _make_impl()
+    dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    dcp_impl.__dict__.update(impl.__dict__)
+    impl = dcp_impl
+    impl.dcp_enabled = True
+    impl.speculative_config = None
     num_prefill_tokens = 4
     current_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
     current_pe_cache = torch.zeros(1, BLOCK_SIZE, 1, ROPE_DIM)
     current_indices = torch.arange(BLOCK_SIZE)
-    impl._dcp_current_kv_buffers = (current_nope_cache, current_pe_cache, current_indices)
-    impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._dcp_current_kv_buffers = (
+        torch.empty(1, BLOCK_SIZE, 1, NOPE_DIM),
+        torch.empty(1, BLOCK_SIZE, 1, ROPE_DIM),
+        torch.arange(BLOCK_SIZE),
+    )
+    impl._dcp_prefill_current_kv_buffers = (current_nope_cache, current_pe_cache, current_indices)
     impl._prepare_prolog_v3_weights = lambda: impl._prolog_v3_weights
 
     qkv_lora = torch.zeros(num_prefill_tokens, impl.q_lora_rank + FUSED_DIM)
@@ -610,6 +667,8 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     # Slots -1 are real current rows owned by another DCP rank, not padding.
     prefill_slots = torch.tensor([-1, BLOCK_SIZE, -1, BLOCK_SIZE + 1])
     metadata = SimpleNamespace(
+        causal=True,
+        decode=None,
         num_decode_tokens=0,
         num_actual_tokens=num_prefill_tokens,
         slot_mapping=prefill_slots,
@@ -634,6 +693,10 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
         )
 
     with (
+        patch(
+            "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+            SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False),
+        ),
         patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
         patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
         patch.object(mla_v1.DeviceOperator, "reshape_and_cache") as mock_scatter,
@@ -659,6 +722,98 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     nope_passed_to_kv_b = impl.kv_b_proj.call_args.args[0]
     assert torch.equal(nope_passed_to_kv_b[:, 0], expected_nope)
     assert torch.equal(prefill.k_pe[:, 0, 0], expected_pe)
+
+
+def test_mla_preprocess_prolog_v3_keeps_mixed_dcp_current_kv_disjoint():
+    impl = _make_impl()
+    dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    dcp_impl.__dict__.update(impl.__dict__)
+    impl = dcp_impl
+    impl.dcp_enabled = True
+    impl.speculative_config = object()
+    num_decode_tokens = 2
+    num_prefill_tokens = 4
+    decode_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
+    decode_pe_cache = torch.zeros(1, BLOCK_SIZE, 1, ROPE_DIM)
+    prefill_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
+    prefill_pe_cache = torch.zeros(1, BLOCK_SIZE, 1, ROPE_DIM)
+    current_indices = torch.arange(BLOCK_SIZE)
+    impl._dcp_current_kv_buffers = (decode_nope_cache, decode_pe_cache, current_indices)
+    impl._dcp_prefill_current_kv_buffers = (prefill_nope_cache, prefill_pe_cache, current_indices)
+    impl._prepare_prolog_v3_weights = lambda: impl._prolog_v3_weights
+    impl.reorg_decode_q = MagicMock(side_effect=lambda q_nope, q_pe: (q_nope, q_pe))
+
+    total_tokens = num_decode_tokens + num_prefill_tokens
+    qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
+    impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
+    impl.q_a_layernorm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.q_proj = MagicMock(
+        side_effect=lambda tensor: (torch.zeros(tensor.shape[0], impl.num_heads * (impl.qk_nope_head_dim + ROPE_DIM)),)
+    )
+    impl.rope_single = MagicMock(side_effect=lambda tensor, _cos, _sin: tensor)
+    impl.kv_b_proj = MagicMock(
+        side_effect=lambda tensor: (
+            torch.zeros(tensor.shape[0], impl.num_heads * (impl.qk_nope_head_dim + impl.v_head_dim)),
+        )
+    )
+
+    nope, rope = _component_major_cache()
+    hidden = torch.randn(total_tokens, 128)
+    metadata = SimpleNamespace(
+        causal=True,
+        decode=SimpleNamespace(
+            cos=torch.randn(num_decode_tokens, ROPE_DIM),
+            sin=torch.randn(num_decode_tokens, ROPE_DIM),
+            actual_seq_lengths_q=[2, 2],
+        ),
+        prefill=SimpleNamespace(
+            cos=torch.randn(num_prefill_tokens, ROPE_DIM),
+            sin=torch.randn(num_prefill_tokens, ROPE_DIM),
+        ),
+        num_decode_tokens=num_decode_tokens,
+        num_actual_tokens=total_tokens,
+        slot_mapping=torch.tensor([10, 11, -1, BLOCK_SIZE, -1, BLOCK_SIZE + 1]),
+    )
+
+    def fake_prolog(**kwargs):
+        is_decode = kwargs["kv_cache"].untyped_storage() is decode_nope_cache.untyped_storage()
+        kwargs["kv_cache"].fill_(3.0 if is_decode else 5.0)
+        kwargs["kr_cache"].fill_(4.0 if is_decode else 6.0)
+        return (
+            torch.zeros(kwargs["token_x"].shape[0], impl.num_heads * NOPE_DIM),
+            torch.zeros(kwargs["token_x"].shape[0], impl.num_heads * ROPE_DIM),
+            None,
+            None,
+            None,
+        )
+
+    with (
+        patch(
+            "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+            SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False),
+        ),
+        patch.object(
+            mla_v1,
+            "_EXTRA_CTX",
+            SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False),
+        ),
+        patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog),
+        patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
+        patch.object(mla_v1.DeviceOperator, "reshape_and_cache") as mock_scatter,
+    ):
+        decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
+
+    mock_legacy.assert_not_called()
+    assert decode is not None
+    assert prefill is not None
+    assert decode.current_k_nope is not None
+    assert decode.current_k_pe is not None
+    assert torch.all(decode.current_k_nope == 3.0)
+    assert torch.all(decode.current_k_pe == 4.0)
+    assert torch.all(prefill.k_pe == 6.0)
+    assert len(mock_scatter.call_args_list) == 2
+    assert mock_scatter.call_args_list[0].kwargs["key"].untyped_storage() is decode_nope_cache.untyped_storage()
+    assert mock_scatter.call_args_list[1].kwargs["key"].untyped_storage() is prefill_nope_cache.untyped_storage()
 
 
 def test_mla_preprocess_prolog_v3_supports_dcp_current_kv_split(monkeypatch):

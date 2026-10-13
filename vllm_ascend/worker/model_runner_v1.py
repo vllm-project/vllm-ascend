@@ -4968,18 +4968,12 @@ class NPUModelRunner(GPUModelRunner):
             # preprocessing contract. Keep their allocation compatible with it.
             return False
         if getattr(impl, "dcp_enabled", False):
-            dcp_current_kv_buffers = getattr(impl, "_dcp_current_kv_buffers", None)
-            required_capacity_getter = getattr(impl, "_required_dcp_current_kv_capacity", None)
-            if required_capacity_getter is None:
+            buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
+            if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
                 return False
-            required_capacity = required_capacity_getter()
-            if (
-                dcp_current_kv_buffers is None
-                or required_capacity > dcp_current_kv_buffers[2].numel()
-            ):
+            if not buffers_are_sufficient():
                 # DCP split attention needs stable private current-KV buffers
-                # for every possible decode/draft-prefill graph. Keep larger
-                # batches on the legacy allocation and preprocessing path.
+                # for every admitted decode, prefill, and mixed graph.
                 return False
         if getattr(impl, "fa_quant_layer", False):
             return False

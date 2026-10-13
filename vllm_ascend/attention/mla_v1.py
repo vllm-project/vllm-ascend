@@ -1553,6 +1553,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
         return False
 
+    def _prefill_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        return False
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -2060,9 +2063,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         num_tokens: int,
         kv_cache: tuple[torch.Tensor, torch.Tensor],
+        *,
+        prefill: bool = False,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return a private full current-KV workspace for one DCP graph phase."""
-        dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
+        attribute = "_dcp_prefill_current_kv_buffers" if prefill else "_dcp_current_kv_buffers"
+        dcp_current_kv_buffers = getattr(self, attribute, None)
         assert dcp_current_kv_buffers is not None
         current_nope_cache, current_pe_cache, current_indices = dcp_current_kv_buffers
         assert num_tokens <= current_indices.numel()
@@ -2088,7 +2094,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         """
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
-        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
         decode_result = None
         prefill_result = None
         assert self.layer_name is not None
@@ -2099,7 +2106,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_decode_tokens > 0:
             history_slots = attn_metadata.slot_mapping[:num_decode_tokens]
             current_k_nope = current_k_pe = None
-            if requires_current_kv:
+            if decode_requires_current_kv:
                 # DCP split attention needs the complete current chunk while the
                 # paged cache keeps only this rank's history rows. Write the
                 # current chunk to stable private buffers first, then scatter the
@@ -2127,7 +2134,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_q_nope = decode_q_nope[:, : self.num_heads]
                 decode_q_pe = decode_q_pe[:, : self.num_heads]
             decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
-            if requires_current_kv:
+            if decode_requires_current_kv:
                 DeviceOperator.reshape_and_cache(
                     key=current_k_nope,
                     value=current_k_pe,
@@ -2173,13 +2180,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_metadata.prefill.sin,
             )
 
-            if requires_current_kv:
+            if prefill_requires_current_kv:
                 # DCP slot mappings use -1 for real current rows owned by
                 # another rank. Keep the complete chunk in the private
                 # workspace, then scatter only this rank's owned rows.
-                prolog_cache, prolog_slots, current_k_nope, current_k_pe = self._get_dcp_current_kv_workspace(
-                    num_prefill_tokens, kv_cache
-                )
+                (
+                    prolog_cache,
+                    prolog_slots,
+                    prefill_current_k_nope,
+                    prefill_current_k_pe,
+                ) = self._get_dcp_current_kv_workspace(num_prefill_tokens, kv_cache, prefill=True)
             else:
                 prolog_cache = kv_cache
                 prolog_slots = prefill_slots
@@ -2193,24 +2203,26 @@ class AscendMLAImpl(MLAAttentionImpl):
                 quantize_query=False,
             )
 
-            if requires_current_kv:
+            if prefill_requires_current_kv:
                 DeviceOperator.reshape_and_cache(
-                    key=current_k_nope,
-                    value=current_k_pe,
+                    key=prefill_current_k_nope,
+                    value=prefill_current_k_pe,
                     key_cache=kv_cache[0],
                     value_cache=kv_cache[1],
                     slot_mapping=prefill_slots,
                 )
             else:
-                current_k_nope, current_k_pe = self._gather_current_kv_from_cache(kv_cache, prefill_slots)
-            if self.fa_quant_layer and self.support_fp8_attention:
-                current_k_nope = torch.mul(current_k_nope.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
-                    current_k_nope.dtype
+                prefill_current_k_nope, prefill_current_k_pe = self._gather_current_kv_from_cache(
+                    kv_cache, prefill_slots
                 )
-            projected = self.kv_b_proj(current_k_nope.reshape(-1, self.kv_lora_rank))[0]
+            if self.fa_quant_layer and self.support_fp8_attention:
+                prefill_current_k_nope = torch.mul(
+                    prefill_current_k_nope.to(self.fak_descale_float.dtype), self.fak_descale_float
+                ).to(prefill_current_k_nope.dtype)
+            projected = self.kv_b_proj(prefill_current_k_nope.reshape(-1, self.kv_lora_rank))[0]
             projected = projected.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             prefill_k_nope, prefill_value = projected.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            prefill_k_pe = current_k_pe.view(-1, self.num_kv_heads, self.qk_rope_head_dim).expand(
+            prefill_k_pe = prefill_current_k_pe.view(-1, self.num_kv_heads, self.qk_rope_head_dim).expand(
                 (*prefill_k_nope.shape[:-1], -1)
             )
             prefill_result = PrefillMLAPreprocessResult(
@@ -2968,19 +2980,29 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
         dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
-        required_current_kv_tokens = num_actual_tokens if requires_current_kv else num_decode_tokens
+        dcp_prefill_current_kv_buffers = getattr(self, "_dcp_prefill_current_kv_buffers", None)
+        num_prefill_tokens = max(num_actual_tokens - num_decode_tokens, 0)
         use_prolog_v3_strided_cache = (
             self._cache_requires_prolog_v3_writer(kv_cache)
             and not self.pcp_enabled
             and not self.is_pcp_decode_sharded
-            and (not requires_current_kv or self.dcp_enabled)
+            and (not decode_requires_current_kv or self.dcp_enabled)
+            and (not prefill_requires_current_kv or self.dcp_enabled)
             and (
                 not self.dcp_enabled
                 or (
                     dcp_current_kv_buffers is not None
-                    and required_current_kv_tokens <= dcp_current_kv_buffers[2].numel()
+                    and num_decode_tokens <= dcp_current_kv_buffers[2].numel()
+                    and (
+                        not prefill_requires_current_kv
+                        or (
+                            dcp_prefill_current_kv_buffers is not None
+                            and num_prefill_tokens <= dcp_prefill_current_kv_buffers[2].numel()
+                        )
+                    )
                 )
             )
         )
@@ -2998,7 +3020,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif (
             (self.fa_quant_layer or self.enable_mlapo)
             and not fused_mla_cache
-            and (not requires_current_kv or can_use_dcp_prolog)
+            and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
