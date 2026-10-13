@@ -145,6 +145,8 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             for dst_tensor, src_tensor in recv_staging:
                 if dst_tensor.device.type == "npu" and torch_npu.get_npu_format(dst_tensor) == ACL_FORMAT_FRACTAL_NZ:
                     # Ascend950 cannot copy CPU tensors directly into NZ storage.
+                    # TODO: Remove this workaround once copy_ supports H2D
+                    # copies into NZ storage on Ascend950.
                     src_tensor = torch_npu.npu_format_cast(
                         src_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
                     )
