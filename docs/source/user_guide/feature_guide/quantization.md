@@ -159,3 +159,41 @@ python -m vllm.entrypoints.api_server \
 - [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
 - [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)
 - [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/features/quantization/)
+
+## Online MXFP8 from float checkpoints
+
+The existing `ascend` method can explicitly quantize original BF16/FP16
+weights to W8A8 MXFP8 on A5. This mode reuses `AscendModelSlimConfig` and
+vLLM v0.23.0's existing `quantization_config_dict_json` configuration hook.
+It requires no changes to vLLM or a separate configuration file.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --dtype bfloat16 \
+    --quantization ascend \
+    --hf-overrides '{"quantization_config_dict_json":{"online_quantization":true,"model_quant_type":"W8A8_MXFP8","group_size":32,"ignore":["lm_head"]}}'
+```
+
+The override must contain a JSON object. `online_quantization` is an explicit
+boolean opt-in; `model_quant_type` must be `W8A8_MXFP8` and `group_size` must
+be 32. Linear and fused MoE weights are quantized after float weight loading.
+Optional `ignore` accepts complete layer names or `re:` expressions. All
+unfused shards of a fused projection must use the same scheme. Layer-name
+mappings supplied by vLLM are applied to ignore entries.
+
+The example retains a float `lm_head`. Embeddings, attention, KV cache, and
+ignored layers remain unquantized. Hardware, float dtype, reduction dimensions
+and returned scale storage are validated before runtime weights are published.
+Online options cannot be combined with offline per-layer `.weight` entries
+or attention/KV-cache quantization.
+
+Use an original float checkpoint without embedded quantization metadata:
+vLLM gives checkpoint quantization metadata precedence over this override.
+Existing `--quantization ascend` deployments without `online_quantization`
+continue to use the offline ModelSlim path.
+
+For training updates, retain BF16/FP16 source weights and the native layerwise
+reload start/finish lifecycle. Computed scales are excluded from checkpoint
+metadata; native reload copies rebuilt weights and scales back to the captured
+runtime storage. The first load still allocates float weights, so this mode
+does not optimize loading peak memory. Validate model accuracy, real kernel
+execution and graph replay on A5 before production use.
