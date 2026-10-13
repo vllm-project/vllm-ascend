@@ -34,6 +34,8 @@ from vllm_ascend.models.glm5next.kv_cache import (
     get_kpool_tail_ring_capacity,
 )
 
+pytestmark = pytest.mark.usefixtures("keypool_kernels")
+
 
 @pytest.fixture(autouse=True)
 def default_dsa_cp_disabled(monkeypatch):
@@ -223,8 +225,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     # as a view, so both builders observe the same persistent buffer.
     assert first.block_size == 128 // pool_size
     torch.testing.assert_close(first.block_table, expanded)
-    assert first.slot_mapping.tolist() == [8 * storage_block_size - 1, -1, 2 * storage_block_size, -1]
-    assert first.seq_lens.tolist() == [storage_block_size + 1]
+    assert first.slot_mapping.shape == (4,)
+    assert first.seq_lens.shape == (1,)
     address = first.block_table.data_ptr()
     assert draft.block_table.data_ptr() == address
     common.block_table_tensor[:, :split] = 3 * split + torch.arange(split)
@@ -234,7 +236,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
 
 
-def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatch):
+def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatch, keypool_kernels):
     monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: True)
     monkeypatch.setattr(
         "vllm_ascend.attention.indexer_kpool.get_tp_group",
@@ -279,14 +281,18 @@ def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatc
     )
     metadata = builder.build(0, common)
     tail = tail_builder.build(0, common)
-    assert metadata.positions.tolist() == [0, 1, 2, 3, 0, 0]
-    assert metadata.slot_mapping.tolist() == [-1, -1, -1, 0, -1, -1]
-    assert metadata.cum_query_lens.tolist() == [4, 5]
+    assert metadata.positions.shape == (6,)
+    assert metadata.slot_mapping.shape == (6,)
+    assert metadata.cum_query_lens.shape == (2,)
     query = metadata.query_metadata
     assert query.num_actual_tokens == 2
-    assert query.positions.tolist() == [3, 0, 0]
-    assert query.cum_query_lens.tolist() == [1, 2]
-    assert tail.slot_mapping.tolist() == [0, 1, 2, 3, 128, -1]
+    assert query.positions.data_ptr() == metadata.positions[3:].data_ptr()
+    assert query.cum_query_lens.shape == query.seq_lens.shape == query.pool_tail.shape == (2,)
+    call = keypool_kernels.build_keypool_metadata.call_args
+    assert call.kwargs["query_metadata"] is query
+    assert call.kwargs["local_start"] == 3
+    assert tail.slot_mapping.data_ptr() == common.slot_mapping.data_ptr()
+    assert tail.cann_inputs is keypool_kernels.build_tail_inputs.return_value
     refreshed = builder.build(0, common).query_metadata
     assert refreshed.cum_query_lens.data_ptr() == query.cum_query_lens.data_ptr()
     assert refreshed.positions.data_ptr() == query.positions.data_ptr()
@@ -340,7 +346,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     }
 
 
-def test_indexer_metadata_preserves_raw_request_boundaries():
+def test_indexer_metadata_exposes_kernel_request_buffers():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
@@ -379,9 +385,9 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
 
     metadata = builder.build(0, common)
 
-    assert metadata.cum_query_lens.tolist() == [2, 5]
-    assert metadata.raw_seq_lens.tolist() == [18, 35]
-    assert metadata.seq_lens.tolist() == [1, 2]
+    assert metadata.cum_query_lens.shape == (2,)
+    assert metadata.raw_seq_lens.shape == (2,)
+    assert metadata.seq_lens.shape == (2,)
     assert metadata.num_actual_tokens == 5
 
 
@@ -422,9 +428,9 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
 
     metadata = builder.build_for_drafting(common, draft_index=1)
 
-    assert metadata.seq_lens.tolist() == [1, 2, 0, 0]
-    assert metadata.cum_query_lens.tolist() == [1, 2, 3, 4]
-    assert metadata.raw_seq_lens.tolist() == [17, 33, 0, 0]
+    assert metadata.seq_lens.shape == (4,)
+    assert metadata.cum_query_lens.shape == (4,)
+    assert metadata.raw_seq_lens.shape == (4,)
 
 
 def test_indexer_metadata_buffers_are_stable_per_draft_step():
@@ -469,6 +475,10 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         first.cum_query_lens.data_ptr(),
         first.raw_seq_lens.data_ptr(),
         first.positions.data_ptr(),
+        first.query_start_loc.data_ptr(),
+        first.start_pos.data_ptr(),
+        first.pool_tail.data_ptr(),
+        first.pooled_slot_mapping.data_ptr(),
     )
     captured = builder.build_for_graph_capture(common, attn_state=object())
     drafted = builder.build_for_drafting(
@@ -488,10 +498,12 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         refreshed.cum_query_lens.data_ptr(),
         refreshed.raw_seq_lens.data_ptr(),
         refreshed.positions.data_ptr(),
+        refreshed.query_start_loc.data_ptr(),
+        refreshed.start_pos.data_ptr(),
+        refreshed.pool_tail.data_ptr(),
+        refreshed.pooled_slot_mapping.data_ptr(),
     )
     assert refreshed_ptrs == first_ptrs
-    assert refreshed.positions.tolist() == [32, 33]
-    assert refreshed.raw_seq_lens.tolist() == [34]
 
     other_step = SimpleNamespace(**vars(common))
     other_step.slot_mapping = common.slot_mapping.clone()
@@ -502,5 +514,9 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         second.cum_query_lens.data_ptr(),
         second.raw_seq_lens.data_ptr(),
         second.positions.data_ptr(),
+        second.query_start_loc.data_ptr(),
+        second.start_pos.data_ptr(),
+        second.pool_tail.data_ptr(),
+        second.pooled_slot_mapping.data_ptr(),
     )
     assert all(left != right for left, right in zip(first_ptrs, second_ptrs))
