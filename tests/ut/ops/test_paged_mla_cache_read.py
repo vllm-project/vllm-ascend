@@ -10,7 +10,7 @@ import torch
 
 
 class DeviceTensor:
-    """保留真实CPU存储，只替换设备边界，避免测试创建NPU上下文。"""
+    """Keep real CPU storage and emulate the device boundary without creating an NPU context."""
 
     device = SimpleNamespace(type="npu")
 
@@ -25,7 +25,8 @@ class DeviceTensor:
 
 
 def load_reader(copy, fmt=2):
-    # 执行实际生产函数；只隔离设备工厂和最终copy内核，不复制slot算法。
+    # Execute the production function, isolating only device factories and the
+    # final copy kernel without duplicating the slot computation.
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/paged_mla_cache_read.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.Assign))]
@@ -84,7 +85,8 @@ def test_strided_token_reads_preserve_request_order_and_source(dtype, component,
 
     def copy(cache, slots):
         calls.append(slots.tolist())
-        # 独立逐行参考，不依赖生产函数的repeat_interleave或前缀累加。
+        # Use an independent row-by-row reference without the production
+        # function's repeat_interleave or cumulative prefix computation.
         return torch.stack(
             [
                 torch.cat([part.tensor[slot // block_size, slot % block_size, 0] for part in cache])
@@ -127,7 +129,7 @@ def test_unaffected_layouts_keep_native_reader(unsupported):
         cache = cache.expand(2, 128, 2, 8)
 
     def forbidden_copy(*args):
-        pytest.fail("未受影响布局不能进入新copy路径")
+        pytest.fail("Unaffected layouts must not enter the new copy path")
 
     fmt = 29 if unsupported == "nz" else 2
     assert not load_reader(forbidden_copy, fmt)(DeviceTensor(cache), DeviceTensor(cache), None, None, None, None, None)

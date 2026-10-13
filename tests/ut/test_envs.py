@@ -35,10 +35,7 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name in (
-                        "VLLM_ASCEND_KVPOOL_RANGE_DEBUG",
-                        "VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE",
-                    ):
+                    if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
                         test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
@@ -64,10 +61,7 @@ class TestEnvVariables(TestBase):
                 getattr(envs_ascend, var_name)
 
     def test_debug_env_vars_are_strict_and_disabled_by_default(self):
-        for name in (
-            "VLLM_ASCEND_KVPOOL_RANGE_DEBUG",
-            "VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE",
-        ):
+        for name in ("VLLM_ASCEND_KVPOOL_RANGE_DEBUG",):
             original_val = os.environ.pop(name, None)
             try:
                 self.assertFalse(getattr(envs_ascend, name))

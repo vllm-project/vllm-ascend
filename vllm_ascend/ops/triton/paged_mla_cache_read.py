@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""按token读取非连续ND MLA缓存，不重新排列或复制整个缓存。"""
+"""Read individual tokens from strided ND MLA caches without repacking the full cache."""
 
 import torch
 import torch_npu
@@ -12,7 +12,7 @@ PCP_COPY_MAX_TILE_ROWS = 8
 
 
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
-    """只处理已验证的4D、单物理头、FP16/BF16非连续ND缓存。"""
+    """Handle validated strided 4D FP16/BF16 ND caches with one physical head."""
     if (
         cache_k.ndim != 4
         or cache_v.ndim != 4
@@ -24,7 +24,7 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
         or (cache_k.is_contiguous() and cache_v.is_contiguous())
     ):
         return False
-    # 0/2是NCHW/ND的物理格式；NZ等布局维持原生reader路径。
+    # Formats 0/2 are NCHW/ND; keep NZ and other layouts on the native reader path.
     if int(torch_npu.get_npu_format(cache_k)) not in (0, 2) or int(torch_npu.get_npu_format(cache_v)) not in (0, 2):
         return False
     num_sequences = seq_lens.numel()
@@ -47,7 +47,8 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
         raise ValueError("Strided MLA cache reader received incompatible metadata or output buffers.")
     if num_tokens == 0:
         return True
-    # GPU长度是base/DCP各自真实local长度；不使用global CPU累计长度。
+    # Device lengths describe local rows for both base and DCP paths.
+    # Do not use global cumulative lengths from the CPU.
     lengths = seq_lens.to(torch.int64)
     requests = torch.repeat_interleave(
         torch.arange(num_sequences, device=seq_lens.device, dtype=torch.int64),
@@ -63,13 +64,15 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
     physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
     slots = physical_blocks * block_size + positions % block_size
 
-    # 既有A3多行copy在不完整末tile上会报MTE；最大row tile为8。
-    # 重复已有合法slot使全部地址有效，最多额外读取7个token，不读取新页。
+    # The existing A3 batched copy can raise MTE errors on a partial final tile.
+    # Pad to the maximum tile size of 8 rows by repeating a valid slot. This reads
+    # at most 7 extra tokens without accessing additional pages.
     padded_tokens = (num_tokens + PCP_COPY_MAX_TILE_ROWS - 1) // PCP_COPY_MAX_TILE_ROWS * PCP_COPY_MAX_TILE_ROWS
     if padded_tokens != num_tokens:
         slots = torch.cat((slots, slots[:1].expand(padded_tokens - num_tokens)))
     packed = copy_pcp_kv_cache((cache_k, cache_v), slots)[:num_tokens]
-    # split视图row stride包含另一组件；复制到原TND输出保持消费者契约。
+    # Split views retain a row stride spanning both components. Copy into the
+    # original TND outputs to preserve the consumer's layout contract.
     key.copy_(packed[:, : cache_k.shape[-1]].unsqueeze(1))
     value.copy_(packed[:, cache_k.shape[-1] :].unsqueeze(1))
     return True

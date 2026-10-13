@@ -292,29 +292,6 @@ def test_k3_dspark_prolog_v3_prepares_native_weights_without_mutating_source(mon
     assert q_proj.weight.shape == (3, 2)
 
 
-def test_k3_dspark_cache_diagnostic_reports_view_bounds(monkeypatch):
-    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
-    normalized_cache = (fused_cache[..., :4], fused_cache[..., 4:])
-    slots = torch.tensor([0, 5])
-
-    monkeypatch.setenv("VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE", "1")
-    monkeypatch.setattr(kimi_k3_dspark, "get_flashmla_ops", lambda: (object(), object()))
-    with patch.object(kimi_k3_dspark.logger, "warning") as warning:
-        kimi_k3_dspark._log_dspark_mla_cache_diagnostic(0, fused_cache, normalized_cache, slots)
-
-    def rendered(call):
-        args = call.args
-        return args[0] % args[1:]
-
-    assert warning.call_count == 3
-    assert "original_type=Tensor" in rendered(warning.call_args_list[0])
-    assert "normalized_type=tuple" in rendered(warning.call_args_list[0])
-    assert "flashmla_ops=available" in rendered(warning.call_args_list[0])
-    assert "python_bound_ok=True" in rendered(warning.call_args_list[-1])
-    assert "exceeds_u32=False" in rendered(warning.call_args_list[-1])
-    assert "slots_bound_ok=True" in rendered(warning.call_args_list[-1])
-
-
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)

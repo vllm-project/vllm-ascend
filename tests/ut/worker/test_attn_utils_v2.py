@@ -2576,7 +2576,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
 def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
     monkeypatch, dtype, manager_block_size, rope_dim, page_padding_bytes, raw_offset_bytes
 ):
-    """MLA 的 manager 页 4 与 Mamba 的 SSM 页 3 必须保持相互隔离。"""
+    """Keep MLA manager page 4 isolated from Mamba SSM page 3."""
     mla_name = "model.layers.0.self_attn.attn"
     mamba_name = "model.layers.1.linear_attn"
     num_blocks = 5
@@ -2631,7 +2631,8 @@ def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
 
-    # 使用真实 allocator 的共享 backing，并保留原始 slice 前后的哨兵区域。
+    # Use the real allocator's shared backing and retain sentinel regions before
+    # and after the original slice.
     raw_caches = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
     mla_raw, mamba_raw = raw_caches[mla_name], raw_caches[mamba_name]
     assert isinstance(mla_raw, torch.Tensor) and isinstance(mamba_raw, torch.Tensor)
@@ -2675,7 +2676,8 @@ def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
     nope_block_bytes = kernel_block_size * nope_dim * dtype_bytes
     rope_block_bytes = kernel_block_size * rope_dim * dtype_bytes
     for block_id in range(first_kernel_block, last_kernel_block):
-        # 通过物理页地址独立核对两个组件和 padding，不用 cache 的 stride 推导预期。
+        # Check both components and padding using physical page addresses,
+        # without deriving expected values from the cache strides.
         block_start = block_id * slot_bytes
         rope_start = block_start + nope_block_bytes
         padding_start = rope_start + rope_block_bytes
@@ -2720,7 +2722,8 @@ def test_combined_mla_cache_requires_positive_kernel_block_ratio(num_blocks_per_
 
 @pytest.mark.parametrize("page_stride_bytes", [0, -32, 31, 30])
 def test_combined_mla_cache_requires_aligned_kernel_slots(page_stride_bytes):
-    # 30 字节虽满足 dtype 对齐，但不能均分成两个 dtype 对齐的 kernel 槽。
+    # 30 bytes satisfy dtype alignment but cannot form two equally sized,
+    # dtype-aligned kernel slots.
     with pytest.raises(ValueError, match="dtype-aligned kernel slots"):
         attn_utils._reshape_combined_mla_kv_cache(
             torch.empty(64, dtype=torch.int8), (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, page_stride_bytes, 2
@@ -2737,7 +2740,8 @@ def test_combined_mla_cache_requires_room_for_both_components():
 def test_combined_mla_cache_bounds_views_to_raw_slice():
     backing = torch.full((128,), 42, dtype=torch.int8)
     raw_cache = backing[16:78]
-    # 底层 storage 仍有余量，但 view 不能借用当前层 raw slice 外的字节。
+    # The backing storage has spare capacity, but the view must stay within
+    # the current layer's raw slice.
     with pytest.raises(ValueError, match="exceed the layer's raw cache slice"):
         attn_utils._reshape_combined_mla_kv_cache(raw_cache, (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, 32, 2)
     assert torch.all(backing == 42)
@@ -2789,7 +2793,8 @@ def test_combined_mla_cache_nonzero_offset_preserves_guards_and_slot_padding(dty
     k_cache.fill_(1.25)
     v_cache.fill_(-0.25)
 
-    # 每槽 20 字节：K 占 12 字节、V 占 4 字节，剩余 4 字节必须保留哨兵。
+    # Each 20-byte slot contains 12 bytes of K and 4 bytes of V; the remaining
+    # 4 bytes must retain their sentinel values.
     slot_bytes = page_stride_bytes // kernel_blocks_per_manager
     k_block_bytes = 12
     v_block_bytes = 4

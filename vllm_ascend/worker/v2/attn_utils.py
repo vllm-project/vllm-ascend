@@ -716,7 +716,7 @@ def _reshape_combined_mla_kv_cache(
     page_stride_bytes: int,
     num_blocks_per_kv_block: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """把两个MLA组件放在同一物理页的kernel槽内，保持共享池的页地址一致。"""
+    """Place both MLA components in each page's kernel slots, preserving shared-pool page addresses."""
     if len(k_shape) != 4 or len(v_shape) != 4 or k_shape[:3] != v_shape[:3]:
         raise ValueError("Combined MLA cache components must have matching block/token/head dimensions.")
     dtype_size = get_dtype_size(dtype)
