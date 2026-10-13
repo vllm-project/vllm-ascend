@@ -86,7 +86,8 @@ def test_connector_scheduler_hooks_are_thin_delegations() -> None:
     ]
 
 
-def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
+@pytest.mark.parametrize("use_layerwise", [False, True])
+def test_worker_connector_hooks_delegate_and_drain_worker_results(use_layerwise: bool) -> None:
     calls: list[tuple[Any, ...]] = []
     released_store_job_ids = {17}
 
@@ -108,6 +109,7 @@ def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
         close=lambda: calls.append(("close",)),
     )
     connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    connector._use_layerwise = use_layerwise
     connector.scheduler = None
     connector.worker = worker
     connector.lookup_server = None
@@ -128,15 +130,11 @@ def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
     assert connector.build_connector_worker_meta() is None
     connector.shutdown()
 
-    assert calls == [
-        ("bind", {"layer": "cache"}),
-        ("start_load",),
-        ("wait_layer", "layer.0"),
-        ("save_layer", "layer.0"),
-        ("finish",),
-        ("fence", frozenset()),
-        ("close",),
-    ]
+    expected_calls: list[tuple[Any, ...]] = [("bind", {"layer": "cache"}), ("start_load",)]
+    if use_layerwise:
+        expected_calls.extend((("wait_layer", "layer.0"), ("save_layer", "layer.0")))
+    expected_calls.extend((("finish",), ("fence", frozenset()), ("close",)))
+    assert calls == expected_calls
 
 
 @pytest.mark.parametrize(
@@ -238,6 +236,10 @@ def test_connector_closes_created_worker_if_lookup_server_cannot_start(monkeypat
         lambda *_args: SimpleNamespace(lookup=lambda *_args: None, close=lambda: calls.append("worker")),
     )
     monkeypatch.setattr(AscendStoreV1Connector, "_resolve_lookup_address", lambda *_args: "unsupported://lookup")
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(rank=0),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
+    )
     with pytest.raises(RuntimeError, match="Failed to start Lookup server"):
-        AscendStoreV1Connector(SimpleNamespace(parallel_config=SimpleNamespace(rank=0)), None, None)
+        AscendStoreV1Connector(config, None, None)
     assert calls == ["worker"]

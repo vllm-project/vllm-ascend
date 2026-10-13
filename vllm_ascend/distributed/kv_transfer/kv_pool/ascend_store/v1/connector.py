@@ -38,6 +38,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
 
+        self._use_layerwise = bool(vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False))
         self.scheduler: KVPoolScheduler | None = None
         self.worker: KVPoolWorker | None = None
         self.lookup_server: LookupServer | None = None
@@ -140,10 +141,14 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self.worker.start_load()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
+        if not self._use_layerwise:
+            return
         assert self.worker is not None
         self.worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: Any, **kwargs: Any) -> None:
+        if not self._use_layerwise:
+            return
         del kv_layer, attn_metadata, kwargs
         assert self.worker is not None
         self.worker.save_layer(layer_name)
