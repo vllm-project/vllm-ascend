@@ -136,6 +136,7 @@ def test_worker_reuses_upstream_lifecycle_with_lazy_ascend_data_plane(is_produce
         buffer_device="cuda",
         pool_size=4096,
         protocol="ascend",
+        cross_encoder_cache=False,
     )
     vllm_config = SimpleNamespace(ec_transfer_config=SimpleNamespace(ec_connector_extra_config={}))
     with (
