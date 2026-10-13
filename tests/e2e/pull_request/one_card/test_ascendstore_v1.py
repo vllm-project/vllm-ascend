@@ -45,6 +45,9 @@ BENCHMARK_TIMEOUT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 0.1
 SUMMARY_METRICS = ("median_ttft_ms", "median_tpot_ms", "median_e2el_ms", "request_throughput")
 WORKER_EXTENSION = "tests.e2e.pull_request.one_card.ascendstore_v1_performance.AscendStoreBenchmarkWorkerExtension"
+TIMING_SCHEDULER = "tests.e2e.pull_request.one_card.ascendstore_v1_scheduler.AscendStoreTimingScheduler"
+DIAGNOSTIC_OUTPUT_TOKENS = 8
+DIAGNOSTIC_CONCURRENCY = 1
 CONNECTORS = (
     (
         "production",
@@ -72,10 +75,35 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
     first_blocks = [tuple(sample.prompt[:BLOCK_SIZE]) for sample in inputs]
     assert len(set(first_blocks + [tuple(warmup.prompt[:BLOCK_SIZE])])) == len(first_blocks) + 1
 
-    observations = {
+    exercises = {
         implementation: _exercise_connector(tmp_path, model_path, tokenizer, inputs, warmup, connector_name, module)
         for implementation, connector_name, module in CONNECTORS
     }
+    observations = {implementation: result["measurements"] for implementation, result in exercises.items()}
+    diagnostics = {implementation: result["diagnostics"] for implementation, result in exercises.items()}
+    diagnostic_comparisons = []
+    for round_index in range(REPEAT_COUNT):
+        production = diagnostics["production"][round_index]["benchmark"]
+        candidate = diagnostics["v1"][round_index]["benchmark"]
+        instrumentation_effect = {}
+        for implementation in diagnostics:
+            profiled = diagnostics[implementation][round_index]["benchmark"]
+            baseline = observations[implementation][str(DIAGNOSTIC_OUTPUT_TOKENS)][str(DIAGNOSTIC_CONCURRENCY)]
+            reference = baseline[round_index]["cold"]
+            instrumentation_effect[implementation] = {
+                "profiled_over_uninstrumented_median_ttft": profiled["median_ttft_ms"] / reference["median_ttft_ms"],
+                "profiled_over_uninstrumented_median_e2el": profiled["median_e2el_ms"] / reference["median_e2el_ms"],
+                "profiled_over_uninstrumented_request_throughput": (
+                    profiled["request_throughput"] / reference["request_throughput"]
+                ),
+                "generated_texts_equal": profiled["generated_texts"] == reference["generated_texts"],
+            }
+        diagnostic_comparisons.append(
+            {
+                "generated_texts_equal": candidate["generated_texts"] == production["generated_texts"],
+                "instrumentation_effect": instrumentation_effect,
+            }
+        )
     comparisons: dict[str, Any] = {}
     summaries: dict[str, Any] = {implementation: {} for implementation, _, _ in CONNECTORS}
     for output_tokens in OUTPUT_TOKEN_COUNTS:
@@ -128,11 +156,24 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
         "measurements": observations,
         "round_summaries": summaries,
         "comparisons": comparisons,
+        "stage_timing_diagnostics": {
+            "scene": {
+                "concurrency": DIAGNOSTIC_CONCURRENCY,
+                "output_tokens": DIAGNOSTIC_OUTPUT_TOKENS,
+                "phase": "cold",
+            },
+            "separate_instrumented_runs": True,
+            "control_stage_recording_enabled": False,
+            "intervals_overlap_and_must_not_be_added": True,
+            "step_ids_are_process_local": True,
+            "cleanup_request_ids_are_context_not_execution": True,
+            "npu_events_read_after_benchmark": True,
+            "measurements": diagnostics,
+            "comparisons": diagnostic_comparisons,
+        },
     }
-    serialized = json.dumps(report, indent=2)
-    (tmp_path / "ascendstore-serve-performance.json").write_text(serialized, encoding="utf-8")
     # The existing selected-test log artifact preserves the complete report without CI changes.
-    print(f"\nASCENDSTORE_SERVE_PERFORMANCE\n{serialized}")
+    _write_report(tmp_path / "ascendstore-serve-performance.json", "ASCENDSTORE_SERVE_PERFORMANCE", report)
     # A wording difference must not discard other scenes or their reset/provenance evidence.
     for output_key, concurrency_comparisons in comparisons.items():
         for concurrency_key, rounds in concurrency_comparisons.items():
@@ -145,6 +186,10 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
                         phase,
                         result["different_request_indices"],
                     )
+    for round_index, comparison in enumerate(diagnostic_comparisons, start=1):
+        assert comparison["generated_texts_equal"], ("diagnostic", round_index, "production/v1 outputs differ")
+        for implementation, effect in comparison["instrumentation_effect"].items():
+            assert effect["generated_texts_equal"], ("diagnostic", round_index, implementation, "hooks changed output")
 
 
 def _summarize_rounds(rounds: list[dict[str, Any]]) -> dict[str, Any]:
@@ -171,6 +216,7 @@ def _exercise_connector(
     connector_name: str,
     connector_module: str,
 ) -> dict[str, Any]:
+    scheduler_timing_path = tmp_path / f"{connector_name}-scheduler-stage-timing.json"
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
     pool_config = MooncakeKVPoolConfig(
         config={
@@ -195,6 +241,7 @@ def _exercise_connector(
             "load_async": False,
             "save_decode_cache": False,
             "discard_partial_chunks": True,
+            "benchmark_stage_timing_path": str(scheduler_timing_path),
         },
     }
     server_args = shlex.split(f"""
@@ -204,7 +251,14 @@ def _exercise_connector(
         --tensor-parallel-size 1 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8
         --enable-prefix-caching --prefix-caching-hash-algo sha256 --no-enable-chunked-prefill
         --enforce-eager --no-async-scheduling --seed 42
-    """) + ["--kv-transfer-config", json.dumps(transfer_config), "--worker-extension-cls", WORKER_EXTENSION]
+    """) + [
+        "--kv-transfer-config",
+        json.dumps(transfer_config),
+        "--worker-extension-cls",
+        WORKER_EXTENSION,
+        "--scheduler-cls",
+        TIMING_SCHEDULER,
+    ]
     # This optional NPU service dependency is needed only when executing our E2E.
     pool_runtime = import_module("tests.e2e.common.single_node.kv_pool_runtime")
     observations: dict[str, Any] = {}
@@ -253,20 +307,7 @@ def _exercise_connector(
                     rounds = []
                     for _ in range(REPEAT_COUNT):
                         # Store must drain before force-removing objects from this test's private Mooncake master.
-                        start = time.perf_counter()
-                        response = requests.post(
-                            server.url_for("collective_rpc"),
-                            json={
-                                "method": "reset_ascendstore_benchmark_pool",
-                                "args": [pool.master_address],
-                                "timeout": CONTROL_TIMEOUT_SECONDS,
-                            },
-                            timeout=CONTROL_TIMEOUT_SECONDS,
-                        )
-                        response.raise_for_status()
-                        results = response.json()["results"]
-                        assert len(results) == 1, "The ordinary benchmark requires exactly one Worker"
-                        pool_reset = {**results[0], "duration_ms": (time.perf_counter() - start) * 1000}
+                        pool_reset = _call_worker_rpc(server, "reset_ascendstore_benchmark_pool", [pool.master_address])
                         assert pool_reset["removed_objects"] > 0, "The preceding requests did not publish external KV"
                         cold_reset = _reset_local_prefix_cache(server)
                         cold = _run_benchmark(server, tokenizer, samples, concurrency)
@@ -291,7 +332,125 @@ def _exercise_connector(
                             }
                         )
                     observations[str(output_tokens)][str(concurrency)] = rounds
+            # Keep completed controls even if the new diagnostic cannot install or collect its hooks.
+            _write_report(
+                tmp_path / f"{connector_name}-uninstrumented.json",
+                "ASCENDSTORE_UNINSTRUMENTED_CHECKPOINT",
+                {"connector": connector_name, "stage_recording_enabled": False, "measurements": observations},
+            )
+            diagnostics = _run_stage_timing_diagnostics(
+                server, tokenizer, inputs, pool.master_address, scheduler_timing_path
+            )
+    return {"measurements": observations, "diagnostics": diagnostics}
+
+
+def _run_stage_timing_diagnostics(
+    server: RemoteOpenAIServer,
+    tokenizer: TokenizerLike,
+    inputs: list[SampleRequest],
+    master_address: str,
+    scheduler_timing_path: Path,
+) -> list[dict[str, Any]]:
+    """Replay only C1/8/cold with temporary hooks; never mix these timings into the uninstrumented matrix."""
+    observations: list[dict[str, Any]] = []
+    checkpoint_path = scheduler_timing_path.with_name(f"{scheduler_timing_path.stem}-diagnostic-progress.json")
+    for round_index in range(REPEAT_COUNT):
+        samples = [
+            replace(
+                sample,
+                expected_output_len=DIAGNOSTIC_OUTPUT_TOKENS,
+                request_id=f"ascendstore-stage-{round_index + 1}-{index}",
+            )
+            for index, sample in enumerate(inputs)
+        ]
+        pool_reset = _call_worker_rpc(server, "reset_ascendstore_benchmark_pool", [master_address])
+        assert pool_reset["removed_objects"] > 0
+        local_reset = _reset_local_prefix_cache(server)
+        observation = {"pool_reset_before": pool_reset, "reset_before": local_reset, "round": round_index + 1}
+        observations.append(observation)
+        try:
+            _call_worker_rpc(server, "start_ascendstore_stage_timing")
+            try:
+                measurements = _run_benchmark(server, tokenizer, samples, DIAGNOSTIC_CONCURRENCY)
+                observation["benchmark"] = measurements
+                assert measurements["prompt_tokens_by_source"] == {
+                    "local_compute": REQUEST_COUNT * PROMPT_TOKEN_COUNT,
+                    "local_cache_hit": 0,
+                    "external_kv_transfer": 0,
+                }, "The stage-timing replay must remain a genuinely cold C1 request batch"
+            finally:
+                # Resolve deferred events and restore hooks outside benchmark timing, even after failed requests.
+                worker_timings = _call_worker_rpc(server, "stop_ascendstore_stage_timing")
+                observation["worker"] = worker_timings
+                _reset_local_prefix_cache(server)
+            scheduler_timings = json.loads(scheduler_timing_path.read_text(encoding="utf-8"))
+            observation["scheduler"] = scheduler_timings
+            for timings in (worker_timings, scheduler_timings):
+                assert timings["records"], "Diagnostic hooks produced no timing evidence"
+                assert any(
+                    f"ascendstore-stage-{round_index + 1}-" in request_id
+                    for record in timings["records"]
+                    for request_id in record["request_ids"]
+                ), "Timing evidence belongs to a different diagnostic round"
+            observation["stage_summary"] = _summarize_stage_timings(
+                worker_timings["records"] + scheduler_timings["records"]
+            )
+        except BaseException as error:
+            # Emit partial traces only on failure; successful traces appear once in the complete final report.
+            observation["error"] = f"{type(error).__name__}: {error}"
+            _write_report(
+                checkpoint_path, "ASCENDSTORE_DIAGNOSTIC_CHECKPOINT", {"status": "failed", "rounds": observations}
+            )
+            raise
     return observations
+
+
+def _summarize_stage_timings(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Group overlapping intervals by stage and token shape, without fabricating an additive latency breakdown."""
+    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for record in records:
+        tokens = record["scheduled_tokens"]
+        phase = "unattributed"
+        if tokens and sum(tokens.values()) > 0:
+            phase = "prefill" if max(tokens.values()) > 1 else "decode"
+        elif record["step_id"] is not None:
+            phase = "cleanup"
+        groups.setdefault(phase, {}).setdefault(record["stage"], []).append(record)
+    summary: dict[str, dict[str, Any]] = {}
+    for phase, stages in groups.items():
+        summary[phase] = {}
+        for stage, intervals in stages.items():
+            host_ms = [interval["host_ms"] for interval in intervals]
+            device_ms = [interval["device_ms"] for interval in intervals if "device_ms" in interval]
+            summary[phase][stage] = {
+                "calls": len(intervals),
+                "total_host_ms": sum(host_ms),
+                "median_host_ms": median(host_ms),
+                "max_host_ms": max(host_ms),
+                "total_device_stream_ms": sum(device_ms) if device_ms else None,
+                "median_device_stream_ms": median(device_ms) if device_ms else None,
+            }
+    return summary
+
+
+def _call_worker_rpc(server: RemoteOpenAIServer, method: str, args: list[str] | None = None) -> dict[str, Any]:
+    start = time.perf_counter()
+    response = requests.post(
+        server.url_for("collective_rpc"),
+        json={"method": method, "args": args or [], "timeout": CONTROL_TIMEOUT_SECONDS},
+        timeout=CONTROL_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    results = response.json()["results"]
+    assert len(results) == 1 and isinstance(results[0], dict), "The ordinary benchmark requires one Worker result"
+    return {**results[0], "duration_ms": (time.perf_counter() - start) * 1000}
+
+
+def _write_report(path: Path, label: str, report: dict[str, Any]) -> None:
+    """Persist evidence locally and in the existing CI log artifact, including partial diagnostic failures."""
+    serialized = json.dumps(report, indent=2)
+    path.write_text(serialized, encoding="utf-8")
+    print(f"\n{label}\n{serialized}")
 
 
 def _make_requests(tokenizer: TokenizerLike, scenario: str, count: int = REQUEST_COUNT) -> list[SampleRequest]:
