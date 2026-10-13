@@ -281,6 +281,10 @@ curl http://192.0.0.1:8080/v1/chat/completions \
 
 ## MooncakeConnectorV2
 
+!!! note "Experimental feature"
+
+    MooncakeConnectorV2 is currently experimental. Its configuration and supported feature combinations may change as development continues.
+
 MooncakeConnectorV2 is a refactored version of MooncakeConnectorV1, with design improvements and support for more features. It uses asynchronous, decoder-initiated KV-cache transfers. Its capabilities and restrictions are summarized below; support for an individual feature does not imply that every model and feature combination has been validated.
 
 | Feature | Support and restrictions |
