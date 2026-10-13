@@ -12,6 +12,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Automatic Prefix Caching      | 🟢 Functional    | Functional, see detailed note: [vllm-ascend#732][apc]                    |
 | LoRA                          | 🔵 Experimental  | Functional, see detailed note: [LoRA][LoRA]                    |
 | Speculative decoding          | 🟢 Functional    | Basic support                                                          |
+| DSpark                        | 🔵 Experimental  | Verified on DeepSeek-V4-Flash; no issues observed.                      |
 | Pooling                       | 🔵 Experimental  | CI needed to adapt to more models; V1 support relies on vLLM support.   |
 | Enc-dec                       | 🟡 Planned       | vLLM should support this feature first.                                |
 | Multi Modality                | 🟢 Functional    | [Multi Modality][multimodal], optimizing and adapting more models            |
@@ -31,6 +32,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Runtime Guard                 | 🔵 Experimental  | Detect / report / dump_kv; see [Runtime Guard][runtime_guard].          |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 | KVPP                          | 🔵 Experimental  | Non-hybrid MLA/SFA models in eager mode; see [KVPP][kvpp] for supported combinations. |
+| Batch Invariance              | 🔵 Experimental  | Deterministic output independent of batch size and request order; see [Batch Invariance][batch_invariance] |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
@@ -52,3 +54,4 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [eplb]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/expert_parallelism_load_balancer.html
 [pipeline_parallel]: ../feature_guide/pipeline_parallel.md
 [kvpp]: ../feature_guide/kvpp.md
+[batch_invariance]: ../feature_guide/batch_invariance.md
