@@ -44,7 +44,19 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
     smart_resize,
 )
-from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+
+try:
+    from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+except ImportError:
+    # vllm release wheels (<= v0.30.0) keep FusedInputNorm in models/vision
+    # instead; both build the same (identity when disabled) normalizer from
+    # the processor config.
+    from vllm.model_executor.models.vision import FusedInputNorm
+
+    def build_mm_input_norm(model_config):
+        return FusedInputNorm.from_model_config(model_config)
+
+
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
