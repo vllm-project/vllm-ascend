@@ -28,8 +28,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 |-----------------------------------|----------------------------|----------------|
 | `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
 | `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
-|`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
-|`GLM-5.1-w4a4`(950DT Products mxfp4 Quantized)| The weights have been verified on 950DT Products and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
+|`GLM-5.1-w8a8c8-MTP`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
+|`GLM-5.1-w4a4c8-mxfp4`(950DT Products mxfp4 Quantized)| The weights have been verified on 950DT Products and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -179,7 +179,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "950DT Products"
 
-    - Quantized model `glm-5.1-w4a4` can be deployed on 1 950DT Product (96GB × 8) .
+    - Quantized model `GLM-5.1-w4a4c8-mxfp4` can be deployed on 1 950DT Product (96GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -207,7 +207,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4c8-mxfp4 \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 1 \
@@ -345,7 +345,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
     **High-Throughput Scenario (DP8 TP4)**
 
-    - `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 8) for high-throughput scenarios.
+    - `GLM-5.1-w8a8c8-MTP`: can be deployed on 2 Atlas 800 A3 (128GB × 8) for high-throughput scenarios.
 
     Run the following scripts on two nodes respectively.
 
@@ -363,7 +363,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 8 \
@@ -408,7 +408,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
     --host 0.0.0.0 \
     --port 8000 \
     --headless \
@@ -691,7 +691,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4c8-mxfp4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -756,7 +756,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4c8-mxfp4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -821,7 +821,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4c8-mxfp4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -889,7 +889,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4c8-mxfp4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1065,7 +1065,7 @@ if __name__ == "__main__":
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
             --host 0.0.0.0 \
             --port 8000 \
             --pipeline-parallel-size 2 \
@@ -1127,7 +1127,7 @@ if __name__ == "__main__":
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
             --host 0.0.0.0 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
@@ -1192,7 +1192,7 @@ if __name__ == "__main__":
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1255,7 +1255,7 @@ if __name__ == "__main__":
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w8a8c8-MTP \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1476,7 +1476,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Tuning Guidelines](#92-tuning-guidelines) for tuning based on actual conditions.
 
-The tables below provide recommended parameter configurations for the `GLM-5.1-w8a8c8` quantized model on Atlas 800 A3, covering three deployment scenarios:
+The tables below provide recommended parameter configurations for the `GLM-5.1-w8a8c8-MTP` quantized model on Atlas 800 A3, covering three deployment scenarios:
 
 - **Dual-Node Co-Located 198K High Throughput**: `DP8 TP4`, see [Multi-node Deployment](#52-multi-node-deployment).
 - **Dual-Node Co-Located 198K Low Latency**: `DP2 TP16`, see [Multi-node Deployment](#52-multi-node-deployment).
@@ -1487,7 +1487,7 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 
 #### 9.1.1 Table 1: Detailed Node Configuration
 
-> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs; a 950DT Product node hosting 8 cards). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All A3 scenarios use the `GLM-5.1-w8a8c8` weights; the 950DT Products scenarios use the `GLM-5.1-w4a4` weights.
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs; a 950DT Product node hosting 8 cards). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All A3 scenarios use the `GLM-5.1-w8a8c8-MTP` weights; the 950DT Products scenarios use the `GLM-5.1-w4a4c8-mxfp4` weights.
 >
 > When testing with a prefix cache hit rate > 0, keep `--enable-prefix-caching` (as in the deployment scripts); when the hit rate is 0, replace it with `--no-enable-prefix-caching`.
 
