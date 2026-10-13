@@ -12,6 +12,7 @@ Covers the review-critical configurations:
 
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 from PIL import Image
 from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
@@ -115,6 +116,17 @@ def test_device_normalize_disabled_keeps_stock_pipeline():
     assert out["pixel_values"].shape == (16, PATCH_DIM)
     # Stock output is rescaled+normalized, i.e. far away from [0, 255].
     assert float(out["pixel_values"].abs().max()) < 10.0
+
+
+def test_float32_input_keeps_stock_pipeline():
+    """Floating-point pixels must not be quantized by the raw device path
+    (review example: a constant 128.4 image must survive, not round to 128)."""
+    proc = _make_image_processor()
+    img = np.full((56, 56, 3), 128.4, dtype=np.float32)
+    out = proc(images=[img], return_tensors="pt", **RAW_KWARGS)
+    assert "image_hw" not in out
+    assert out["pixel_values"].shape == (16, PATCH_DIM)
+    torch.testing.assert_close(out["pixel_values"], torch.full((16, PATCH_DIM), 128.4))
 
 
 # ---------------------------------------------------------------------------

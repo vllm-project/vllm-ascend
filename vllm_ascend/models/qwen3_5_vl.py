@@ -23,12 +23,13 @@ placeholder accounting is unchanged. Payload drops ~8x (uint8, no temporal
 replication).
 
 The raw-pixel path is only taken when the effective processor settings match
-what the device pipeline implements (resize enabled, bicubic resample, and
-mm_device_do_normalize enabled so the CPU skips rescale/normalize). Any other
-configuration -- device normalization disabled (e.g. --multimodal-config
-mm_device_do_normalize=false), do_resize=False, or a non-bicubic resample
-filter -- falls back to the complete stock CPU pipeline, and the emitted keys
-(no ``image_hw``) tell the field config and the model to keep the stock
+what the device pipeline implements (resize enabled, bicubic resample,
+uint8-only input, and mm_device_do_normalize enabled so the CPU skips
+rescale/normalize). Any other configuration -- device normalization disabled
+(e.g. --multimodal-config mm_device_do_normalize=false), do_resize=False, a
+non-bicubic resample filter, or non-uint8 (floating-point) pixels -- falls
+back to the complete stock CPU pipeline, and the emitted keys (no
+``image_hw``) tell the field config and the model to keep the stock
 behaviour as well, so rescale+normalize is applied exactly once in every
 configuration.
 
@@ -69,6 +70,20 @@ from vllm.multimodal.inputs import MultiModalFieldConfig
 _DEVICE_PREPROCESS_DONE = "_ascend_device_preprocess_done"
 
 
+def _all_uint8(images) -> bool:
+    """The device pipeline quantizes pixels with clamp+round, which would
+    alter valid floating-point values (e.g. 128.4 -> 128); only uint8 inputs
+    may take the raw path, everything else keeps the stock CPU pipeline."""
+    for image in images:
+        dtype = image.dtype
+        if torch.is_tensor(image):
+            if dtype != torch.uint8:
+                return False
+        elif str(dtype) != "uint8":  # numpy arrays
+            return False
+    return True
+
+
 class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
     """Emit flat raw uint8 + original (H, W) + target grid; skip everything else.
 
@@ -94,14 +109,22 @@ class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
         return_tensors,
         **kwargs,
     ):
-        if not do_resize or do_rescale or do_normalize or resample != Image.Resampling.BICUBIC:
+        if (
+            not do_resize
+            or do_rescale
+            or do_normalize
+            or resample != Image.Resampling.BICUBIC
+            or not _all_uint8(images)
+        ):
             # Unsupported or non-default settings: do_resize disabled (the
             # grid must come from the original resolution), a non-bicubic
             # resample filter (the device path hardcodes bicubic+antialias),
-            # or device normalization disabled (mm_device_do_normalize off
+            # device normalization disabled (mm_device_do_normalize off
             # leaves do_rescale/do_normalize enabled, so the CPU must run the
-            # full pipeline). Keep the stock behaviour so grids, values and
-            # token counts match upstream exactly.
+            # full pipeline), or non-uint8 (floating-point) pixels that the
+            # device path's clamp+round quantization would alter. Keep the
+            # stock behaviour so grids, values and token counts match
+            # upstream exactly.
             return Qwen2VLImageProcessor._preprocess(
                 self,
                 images,
@@ -144,7 +167,10 @@ class _AscendProcessorMixin:
         # Install the raw-pixel image processor unconditionally: its
         # _preprocess falls back to the stock pipeline per call whenever the
         # effective settings are not supported (mm_device_do_normalize off,
-        # do_resize=False, non-bicubic resample), so the swap is inert there.
+        # do_resize=False, non-bicubic resample, non-uint8 pixels), so the
+        # swap is inert there. mm_device_do_normalize=false (per-engine,
+        # shared by processor and worker) restores the complete stock CPU
+        # pipeline; the worker follows the emitted keys.
         processor = super().get_hf_processor(**kwargs)
         if processor.image_processor.__class__ is not AscendQwen2VLImageProcessor:
             processor.image_processor.__class__ = AscendQwen2VLImageProcessor
