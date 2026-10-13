@@ -203,6 +203,7 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
     monkeypatch, adaptive, dummy, profile, context_len, scheduled_reqs, has_state, expected_reqs
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.expert_offload_manager = None
     runner.debugger = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))

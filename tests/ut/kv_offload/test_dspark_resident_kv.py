@@ -61,6 +61,7 @@ def _prefill_runner(
     connector="SfaRemoteD2HConnector",
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.expert_offload_manager = None
     runner.debugger = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
