@@ -670,7 +670,6 @@ def wait_ranks_ready(
         all_ready = True
         unhealthy_after_ready = []
 
-        # ← 改这里：ranks → http_ranks，只检查非 headless 节点
         for rank in http_ranks:
             is_ready = is_http_ready(rank_health_url(rank), timeout=1.0)
             if is_ready:
