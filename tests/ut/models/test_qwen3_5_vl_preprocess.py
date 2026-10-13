@@ -11,7 +11,6 @@ Covers the review-critical configurations:
   never normalizes twice (images and videos).
 """
 
-import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -26,25 +25,6 @@ from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendVLPreprocessMixin,
 )
-
-
-def _resolve_input_norm_cls():
-    """The fused input normalizer moved between vllm versions:
-    layers/fusion/mm_input_norm on main nightlies, models/vision on release
-    wheels (<= v0.30.0). Resolve it dynamically so mypy (which runs against
-    the pinned release vllm) does not flag the missing optional module."""
-    for module_name, attr in (
-        ("vllm.model_executor.layers.fusion.mm_input_norm", "FusedMMInputNorm"),
-        ("vllm.model_executor.models.vision", "FusedInputNorm"),
-    ):
-        try:
-            return getattr(importlib.import_module(module_name), attr)
-        except ImportError:
-            continue
-    return None  # pragma: no cover - guard for vllm layout changes
-
-
-FusedMMInputNorm = _resolve_input_norm_cls()
 
 C, PS, TPS, MS = 3, 14, 2, 2
 PATCH_DIM = C * TPS * PS * PS  # 1176
@@ -180,7 +160,6 @@ def test_field_config_follows_emitted_keys(monkeypatch):
         Qwen3VLMultiModalProcessor,
         "_get_mm_fields_config",
         lambda self, hf_inputs, hf_processor_mm_kwargs: base,
-        raising=False,
     )
     proc = object.__new__(AscendQwen3_5VLProcessor)
 
@@ -201,9 +180,18 @@ def test_field_config_follows_emitted_keys(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _affine_norm(x, dtype):
+    """Plain-torch stand-in for the fused input norm (same (x / rescale -
+    mean) / std semantics, uniform per channel). The tests verify the model's
+    orchestration (exactly-once slicing/normalization); the real normalizer
+    is upstream code exercised by the e2e tests. Constructing the real
+    CustomOp here would also require a vllm config context."""
+    return ((x / 255.0 - 0.5) / 0.25).to(dtype)
+
+
 class _CountingNorm:
-    def __init__(self, inner):
-        self.inner = inner
+    def __init__(self):
+        self.inner = _affine_norm
         self.calls = 0
 
     def __call__(self, x, dtype):
@@ -221,16 +209,7 @@ class _StubVLModel(_AscendVLPreprocessMixin):
         )
         self.visual = SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32)
         self.use_data_parallel = False
-        if FusedMMInputNorm is not None:
-            inner = FusedMMInputNorm(
-                image_mean=[0.48145466, 0.4578275, 0.40821073],
-                image_std=[0.26862954, 0.26130258, 0.27577711],
-                rescale_factor=1 / 255,
-                channel=C,
-            )
-        else:
-            inner = lambda x, dtype: x  # noqa: E731
-        self.counting_norm = _CountingNorm(inner)
+        self.counting_norm = _CountingNorm()
         self.input_norm = self.counting_norm
 
     def get_input_modality(self, mm_kwargs):
@@ -383,7 +362,7 @@ def test_select_videos_flag_off_skips_normalization():
     }
     selected = stub.select_encoder_cudagraph_items(mm_kwargs, [0])
     assert stub.counting_norm.calls == 0
-    torch.testing.assert_close(selected["pixel_values_videos"], raw)
+    torch.testing.assert_close(selected["pixel_values_videos"], raw[: 2 * 4])
 
 
 # ---------------------------------------------------------------------------
