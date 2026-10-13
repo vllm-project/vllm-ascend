@@ -22,11 +22,15 @@ memory budget, max length, executor backend, sleep-mode allocation pool and
 config overrides. A future edit that touches one builder and not the other would
 silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
+
+Checkpoint-source checks cover learned router state and fused projection
+expansion, which a shared startup/update data source could otherwise omit.
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
@@ -37,8 +41,21 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 )
 
 CASE = MODEL_CASES[0]
+MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMaxAI/MiniMax-M3")
+ORACLE_CASES = (CASE, MINIMAX_M3_CASE)
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+
+
+def _minimax_metadata(model):
+    config = MagicMock()
+    config.text_config.n_routed_experts = 0
+    with (
+        patch.object(utils.AutoConfig, "from_pretrained", return_value=config),
+        patch.object(utils.AutoModelForCausalLM, "from_config", return_value=model),
+    ):
+        source = utils.FixedRandomWeightSource(MINIMAX_M3_CASE, torch.device("cpu"))
+    return [(meta.name, meta.shape, meta.dtype) for meta in source.metadata()]
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:
@@ -57,10 +74,11 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
     return flags
 
 
-def test_reference_and_lane_differ_only_in_the_load_path():
+@pytest.mark.parametrize("case", ORACLE_CASES, ids=lambda case: case.id)
+def test_reference_and_lane_differ_only_in_the_load_path(case):
     lane = _flag_map(
         live_update_serve_args(
-            CASE,
+            case,
             backend="hccl",
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
@@ -68,7 +86,7 @@ def test_reference_and_lane_differ_only_in_the_load_path():
     )
     reference = _flag_map(
         reference_serve_args(
-            CASE,
+            case,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         )
@@ -78,8 +96,8 @@ def test_reference_and_lane_differ_only_in_the_load_path():
     # under the case's own model name and tokenizer.
     assert lane.pop("--load-format") == "dummy"
     assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
-    assert reference.pop("--tokenizer") == CASE.model
-    assert reference.pop("--served-model-name") == CASE.model
+    assert reference.pop("--tokenizer") == case.model
+    assert reference.pop("--served-model-name") == case.model
     assert "--load-format" not in reference
 
     assert lane == reference
@@ -187,3 +205,45 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+def test_minimax_checkpoint_source_includes_router_state():
+    model = MagicMock()
+    model.named_parameters.return_value = [("model.layers.3.mlp.gate.weight", torch.empty((8, 16), device="meta"))]
+    model.named_buffers.return_value = [
+        ("model.layers.3.mlp.gate.e_score_correction_bias", torch.empty(8, device="meta")),
+        ("model.rotary_emb.inv_freq", torch.empty(8, device="meta")),
+    ]
+    model.state_dict.return_value = {
+        "model.layers.3.mlp.gate.weight": MagicMock(),
+        "model.layers.3.mlp.gate.e_score_correction_bias": MagicMock(),
+    }
+    prefix = "language_model.model.layers.3.block_sparse_moe"
+    assert _minimax_metadata(model) == [
+        (f"{prefix}.gate.weight", (8, 16), torch.bfloat16),
+        (f"{prefix}.e_score_correction_bias", (8,), torch.float32),
+    ]
+
+
+def test_minimax_checkpoint_source_splits_fused_projections():
+    model = MagicMock()
+    model.named_parameters.return_value = [
+        ("model.layers.0.mlp.gate_up_proj.weight", torch.empty((12, 16), device="meta")),
+        ("model.layers.3.mlp.shared_experts.gate_up_proj.weight", torch.empty((12, 16), device="meta")),
+        ("model.layers.3.mlp.experts.gate_up_proj", torch.empty((2, 12, 16), device="meta")),
+    ]
+    model.named_buffers.return_value = []
+    model.state_dict.return_value = {}
+    actual = {name: (shape, dtype) for name, shape, dtype in _minimax_metadata(model)}
+    expected_names = {
+        "language_model.model.layers.0.mlp.gate_proj.weight",
+        "language_model.model.layers.0.mlp.up_proj.weight",
+        "language_model.model.layers.3.block_sparse_moe.shared_experts.gate_proj.weight",
+        "language_model.model.layers.3.block_sparse_moe.shared_experts.up_proj.weight",
+        *{
+            f"language_model.model.layers.3.block_sparse_moe.experts.{expert}.{shard}.weight"
+            for expert in range(2)
+            for shard in ("w1", "w3")
+        },
+    }
+    assert actual == {name: ((6, 16), torch.bfloat16) for name in expected_names}
