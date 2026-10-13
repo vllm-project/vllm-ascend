@@ -212,16 +212,24 @@ class AscendLinearMethod(LinearMethodBase):
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # layer.prefix and the tp-group layout are fixed once the model is
+        # constructed, so resolve tp_rank once per layer instead of on every
+        # forward call.
+        tp_rank = layer.__dict__.get("_ascend_tp_rank")
+        if tp_rank is None:
+            tp_rank = self._resolve_tp_rank(layer)
+            layer.__dict__["_ascend_tp_rank"] = tp_rank
+        return self.quant_method.apply(layer, x, bias, tp_rank)
+
+    @staticmethod
+    def _resolve_tp_rank(layer: torch.nn.Module) -> int:
         if isinstance(layer, RowParallelLinear):
             if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
-                tp_rank = get_otp_group().rank_in_group
-            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
-                tp_rank = get_mlp_tp_group().rank_in_group
-            else:
-                tp_rank = get_tensor_model_parallel_rank()
-        else:
-            tp_rank = 0
-        return self.quant_method.apply(layer, x, bias, tp_rank)
+                return get_otp_group().rank_in_group
+            if layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
+                return get_mlp_tp_group().rank_in_group
+            return get_tensor_model_parallel_rank()
+        return 0
 
 
 class AscendKVCacheMethod(BaseKVCacheMethod):
