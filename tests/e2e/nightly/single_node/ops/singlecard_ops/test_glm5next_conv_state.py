@@ -74,3 +74,42 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
     torch.testing.assert_close(result.cpu(), expected_output, atol=tolerance, rtol=tolerance)
     # Check the entire allocation: unrelated slots and gaps must not change.
     torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("requests, dim", [(1, 16), (15, 16), (16, 16), (17, 16), (33, 16), (1025, 8192)])
+@pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_copy_conv_state_runtime_batch(requests, dim, graph_mode, dtype):
+    slots = max(64, requests + 1)
+    expected = torch.arange(slots * 4 * dim, dtype=torch.float32).remainder(127).to(dtype).reshape(slots, 4, dim)
+    backing = expected.npu()
+    cache = backing[:, ::2, :]
+    indices = torch.arange(requests, dtype=torch.int32, device="npu")
+    starts = torch.arange(requests + 1, dtype=torch.int32, device="npu")
+    packed = torch.empty((requests, 2, dim), dtype=dtype, device="npu")
+    packed_indices = torch.empty(requests, dtype=torch.int32, device="npu")
+
+    def run_copy(write_back):
+        saved = backing.clone() if graph_mode and write_back else None
+        copy_conv_state(cache, packed, indices, starts, packed_indices, write_back=write_back)
+        if graph_mode:
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                copy_conv_state(cache, packed, indices, starts, packed_indices, write_back=write_back)
+            if write_back:
+                backing.copy_(saved)
+            else:
+                packed.fill_(float("nan"))
+                packed_indices.fill_(-7)
+            graph.replay()
+            torch.npu.synchronize()
+
+    run_copy(False)
+    torch.testing.assert_close(packed.cpu(), expected[:requests, ::2, :], atol=0, rtol=0)
+    torch.testing.assert_close(packed_indices.cpu(), indices.cpu())
+
+    packed.add_(7)
+    run_copy(True)
+    expected[:requests, ::2, :].add_(7)
+    torch.testing.assert_close(backing.cpu(), expected, atol=0, rtol=0)
