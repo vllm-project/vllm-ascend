@@ -564,7 +564,10 @@ def test_bind_push_source_uses_npu_event():
     worker._producer_pushes.bind_source.assert_called_once_with("image-hash", tensor, event)
 
 
-def test_worker_initializes_ascend_data_plane_without_factory_hooks():
+@pytest.mark.parametrize("cross_encoder_cache", [False, True])
+def test_worker_initializes_ascend_data_plane_without_factory_hooks(
+    cross_encoder_cache: bool,
+):
     vllm_config = MagicMock()
     vllm_config.ec_transfer_config.is_ec_producer = True
     vllm_config.ec_transfer_config.ec_connector_extra_config = {}
@@ -572,6 +575,7 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks():
         protocol="ascend",
         buffer_device="npu",
         pool_size=1024,
+        cross_encoder_cache=cross_encoder_cache,
     )
     transfer = MagicMock()
     consumer = MagicMock()
@@ -611,6 +615,8 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks():
     assert worker._consumer_memory is consumer
     assert worker._producer_memory is producer
     assert worker._reservations is reservations
+    assert worker._store_config is None
+    assert worker._output_store is None
 
 
 @pytest.mark.parametrize(

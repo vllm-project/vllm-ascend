@@ -180,6 +180,14 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         assert ec_config is not None
 
         config = _resolve_ascend_config(vllm_config)
+        if getattr(config, "cross_encoder_cache", False):
+            logger.warning(
+                "cross_encoder_cache is not yet supported by the Ascend "
+                "ECMooncakeConnector; continuing with it disabled"
+            )
+        self._store_config = None
+        self._output_store = None
+
         resolved_bounce_arena_size = _resolve_bounce_arena_size(vllm_config)
         self._bounce_arena_size = resolved_bounce_arena_size if ec_config.is_ec_producer else 0
 

@@ -15,10 +15,7 @@ def _replace_cpu_connector() -> bool:
     try:
         importlib.import_module(upstream_module)
     except ModuleNotFoundError as exc:
-        if exc.name and (
-            exc.name == upstream_module
-            or upstream_module.startswith(f"{exc.name}.")
-        ):
+        if exc.name and (exc.name == upstream_module or upstream_module.startswith(f"{exc.name}.")):
             return False
         raise
 
