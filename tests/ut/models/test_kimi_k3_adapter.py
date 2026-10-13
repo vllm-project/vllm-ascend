@@ -739,8 +739,6 @@ def test_k3_dspark_embed_input_ids_merges_multimodal_embeddings():
 def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
     from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM as UpstreamK3DSpark
 
-    from vllm_ascend.models import kimi_k3_dspark
-
     loader = MagicMock()
     monkeypatch.setattr(kimi_k3_dspark, "AutoWeightsLoader", lambda model: loader)
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
