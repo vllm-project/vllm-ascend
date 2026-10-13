@@ -25,7 +25,11 @@ config:
     node_rank: 0
     master_addr: "${NODE_0_IP}"
     master_port: 7060
+<<<<<<< HEAD
     is_headless: false
+=======
+    is_headleass: false
+>>>>>>> 2a84ee97f (update)
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -41,7 +45,11 @@ config:
     node_rank: 1
     master_addr: "${NODE_0_IP}"
     master_port: 7060
+<<<<<<< HEAD
     is_headless: true
+=======
+    is_headleass: true
+>>>>>>> 2a84ee97f (update)
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
