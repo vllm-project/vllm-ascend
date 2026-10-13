@@ -33,7 +33,7 @@ BLOCK_SIZE = 128
 REUSABLE_TOKEN_COUNT = 8192
 PROMPT_TOKEN_COUNT = REUSABLE_TOKEN_COUNT + 1
 OUTPUT_TOKEN_COUNTS = (1, 8, 32)
-REPEAT_COUNT = 3
+ROUNDS_PER_RUN = 2
 REQUEST_COUNT = 8
 CONCURRENCIES = (1, 8)
 # Eight independent 8K prefixes occupy about 9 GiB; clear the dedicated pool between rounds.
@@ -60,6 +60,8 @@ CONNECTORS = (
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector",
     ),
 )
+# Separate server lifetimes balance early/late execution without colocating two models on one NPU.
+CROSSOVER_RUNS = CONNECTORS + CONNECTORS[::-1]
 
 pytestmark = pytest.mark.e2e_model(MODEL)
 
@@ -75,14 +77,12 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
     first_blocks = [tuple(sample.prompt[:BLOCK_SIZE]) for sample in inputs]
     assert len(set(first_blocks + [tuple(warmup.prompt[:BLOCK_SIZE])])) == len(first_blocks) + 1
 
-    exercises = {
-        implementation: _exercise_connector(tmp_path, model_path, tokenizer, inputs, warmup, connector_name, module)
-        for implementation, connector_name, module in CONNECTORS
-    }
+    exercises, execution_runs = _run_crossover(tmp_path, model_path, tokenizer, inputs, warmup)
     observations = {implementation: result["measurements"] for implementation, result in exercises.items()}
     diagnostics = {implementation: result["diagnostics"] for implementation, result in exercises.items()}
+    repeat_count = len(diagnostics["production"])
     diagnostic_comparisons = []
-    for round_index in range(REPEAT_COUNT):
+    for round_index in range(repeat_count):
         production = diagnostics["production"][round_index]["benchmark"]
         candidate = diagnostics["v1"][round_index]["benchmark"]
         instrumentation_effect = {}
@@ -100,6 +100,8 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
             }
         diagnostic_comparisons.append(
             {
+                "production_run": diagnostics["production"][round_index]["run"],
+                "v1_run": diagnostics["v1"][round_index]["run"],
                 "generated_texts_equal": candidate["generated_texts"] == production["generated_texts"],
                 "instrumentation_effect": instrumentation_effect,
             }
@@ -121,6 +123,8 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
                 for phase in ("cold", "external_hit"):
                     reference, actual = production[phase], candidate[phase]
                     comparison[phase] = {
+                        "production_run": production["run"],
+                        "v1_run": candidate["run"],
                         "generated_texts_equal": actual["generated_texts"] == reference["generated_texts"],
                         "different_request_indices": [
                             index
@@ -144,13 +148,15 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
         "prompt_tokens": PROMPT_TOKEN_COUNT,
         "external_hit_tokens_per_request": REUSABLE_TOKEN_COUNT,
         "output_tokens": OUTPUT_TOKEN_COUNTS,
-        "rounds_per_scene": REPEAT_COUNT,
+        "rounds_per_scene": repeat_count,
+        "rounds_per_run": ROUNDS_PER_RUN,
         "concurrencies": CONCURRENCIES,
         "requests_per_phase": REQUEST_COUNT,
         "reset_in_benchmark_timing": False,
         "same_prompts_across_scenes": True,
         "prompt_token_id_sha256": [sha256(json.dumps(sample.prompt).encode()).hexdigest() for sample in inputs],
-        "implementation_order": [implementation for implementation, _, _ in CONNECTORS],
+        "implementation_order": [implementation for implementation, _, _ in CROSSOVER_RUNS],
+        "execution_runs": execution_runs,
         "post_response_store_drain_in_benchmark_timing": False,
         "tpot_for_one_output_token": "not applicable",
         "measurements": observations,
@@ -190,6 +196,39 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
         assert comparison["generated_texts_equal"], ("diagnostic", round_index, "production/v1 outputs differ")
         for implementation, effect in comparison["instrumentation_effect"].items():
             assert effect["generated_texts_equal"], ("diagnostic", round_index, implementation, "hooks changed output")
+
+
+def _run_crossover(
+    tmp_path: Path, model_path: str, tokenizer: TokenizerLike, inputs: list[SampleRequest], warmup: SampleRequest
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    exercises: dict[str, Any] = {
+        implementation: {
+            "measurements": {
+                str(tokens): {str(concurrency): [] for concurrency in CONCURRENCIES} for tokens in OUTPUT_TOKEN_COUNTS
+            },
+            "diagnostics": [],
+        }
+        for implementation, _, _ in CONNECTORS
+    }
+    execution_runs = []
+    for run_index, (implementation, connector_name, module) in enumerate(CROSSOVER_RUNS, start=1):
+        run_path = tmp_path / f"run-{run_index}-{implementation}"
+        run_path.mkdir()
+        # Each call closes its server and private pool before the next implementation starts.
+        start = time.monotonic()
+        result = _exercise_connector(run_path, model_path, tokenizer, inputs, warmup, connector_name, module)
+        execution_runs.append(
+            {"run": run_index, "implementation": implementation, "duration_seconds": time.monotonic() - start}
+        )
+        accumulated = exercises[implementation]
+        for output_key, concurrency_measurements in result["measurements"].items():
+            for concurrency_key, rounds in concurrency_measurements.items():
+                accumulated["measurements"][output_key][concurrency_key].extend(
+                    {"run": run_index, "round_in_run": round_index, **observation}
+                    for round_index, observation in enumerate(rounds, start=1)
+                )
+        accumulated["diagnostics"].extend({"run": run_index, **observation} for observation in result["diagnostics"])
+    return exercises, execution_runs
 
 
 def _summarize_rounds(rounds: list[dict[str, Any]]) -> dict[str, Any]:
@@ -305,7 +344,7 @@ def _exercise_connector(
                 samples = [replace(sample, expected_output_len=output_tokens) for sample in inputs]
                 for concurrency in CONCURRENCIES:
                     rounds = []
-                    for _ in range(REPEAT_COUNT):
+                    for _ in range(ROUNDS_PER_RUN):
                         # Store must drain before force-removing objects from this test's private Mooncake master.
                         pool_reset = _call_worker_rpc(server, "reset_ascendstore_benchmark_pool", [pool.master_address])
                         assert pool_reset["removed_objects"] > 0, "The preceding requests did not publish external KV"
@@ -354,7 +393,7 @@ def _run_stage_timing_diagnostics(
     """Replay only C1/8/cold with temporary hooks; never mix these timings into the uninstrumented matrix."""
     observations: list[dict[str, Any]] = []
     checkpoint_path = scheduler_timing_path.with_name(f"{scheduler_timing_path.stem}-diagnostic-progress.json")
-    for round_index in range(REPEAT_COUNT):
+    for round_index in range(ROUNDS_PER_RUN):
         samples = [
             replace(
                 sample,
