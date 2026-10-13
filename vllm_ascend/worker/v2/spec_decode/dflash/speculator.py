@@ -154,6 +154,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = dp_sync
@@ -182,6 +183,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                **({"num_speculative_tokens": num_speculative_tokens} if num_speculative_tokens is not None else {}),
             )
 
 

@@ -82,6 +82,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        specialize_spec_tokens: bool = False,
     ) -> None:
         if not self.is_draft_model_prefill:
             self._capture_decode_per_step(
@@ -143,6 +144,10 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             )
         finally:
             AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]
+
+    def specialize_spec_tokens(self, desc: BatchExecutionDescriptor, num_speculative_tokens: int):
+        # 310P captures a single decode step and controls K in the host loop.
+        return desc
 
     def _capture_decode_per_step(
         self,

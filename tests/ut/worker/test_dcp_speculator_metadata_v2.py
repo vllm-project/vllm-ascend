@@ -11,7 +11,6 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
@@ -21,6 +20,7 @@ from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+from vllm_ascend.worker.v2.spec_decode.upstream import AutoRegressiveSpeculator
 
 
 def _local(lengths, rank=1, size=8, interleave=4):
