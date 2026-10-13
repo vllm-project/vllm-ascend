@@ -2,7 +2,7 @@
 
 ## 1 Introduction
 
-Gemma4 is a Gemma-family language model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for general text generation, reasoning, and instruction-following scenarios.
+Gemma4 is a Gemma-family multimodal model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for text generation, image understanding, reasoning, and instruction-following scenarios.
 
 This document describes the main validation steps for Gemma4 on Atlas A2, Atlas A3, and 950PR&950DT Products, including supported features, prerequisites, installation, single-node online deployment, functional verification, offline inference, accuracy and performance evaluation, performance tuning, and FAQs.
 
@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 quantization is supported on Ascend 950.
 
 ## 3 Prerequisites
 
@@ -22,26 +22,42 @@ Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A
 
 Download the Gemma4 model weight to a local or shared directory, such as `/root/.cache/`. In the following examples, replace `/root/.cache/path/to/gemma4` with your actual model path.
 
-| Model type | Description | Recommended hardware |
-| ---------- | ----------- | -------------------- |
-| Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Adjust the number of visible NPUs according to model size. |
-| Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
+| Weight version | Description | Recommended hardware | Download |
+| -------------- | ----------- | -------------------- | -------- |
+| `google/gemma-4-31B-it` | BF16 dense model. | Atlas A2, Atlas A3, or 950PR&950DT Products. Adjust the number of visible NPUs according to the available memory. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-31B-it) |
+| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 dense model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
+| `google/gemma-4-26B-A4B-it` | BF16 MoE model with approximately 26 billion total and 4 billion active parameters. | Atlas A2, Atlas A3, or 950PR&950DT Products. Use tensor parallelism or expert parallelism according to the deployment plan. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-26B-A4B-it) |
+| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | ModelSlim mixed W8A8 MXFP8 and W4A4 MXFP4 MoE model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
 
-The examples below assume a single node with visible NPUs. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
+The two ModelSlim checkpoints use mixed precision rather than quantizing every layer to W4A4 MXFP4:
+
+- The 31B dense checkpoint uses W8A8 MXFP8 for attention and vision layers, and W4A4 MXFP4 for most MLP layers. Precision-sensitive MLP layers remain at higher precision.
+- The 26B A4B checkpoint uses W8A8 MXFP8 for attention, non-expert MLP, and vision layers, and W4A4 MXFP4 for the MoE expert layers. The router and vision embedding layers are excluded from W4A4 quantization.
+
+Both checkpoints contain a ModelSlim `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing ModelSlim weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
+
+The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the Ascend 950 quantized commands use all 8 NPUs. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
 
 ## 4 Installation
 
-### 4.1 Image Availability
+### 4.1 Docker Image Installation
 
-If you need a prebuilt image, contact Huawei engineers to obtain the appropriate image and software stack for your target hardware.
+You can use the official all-in-one vLLM Ascend Docker image. Select the image tag for your vLLM Ascend version and hardware by following [Using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image). For example, pull the selected image with:
 
-After the environment is prepared, verify that the NPU devices are visible:
+```shell
+docker pull quay.io/ascend/vllm-ascend:{tag}
+```
+
+Follow the hardware-specific `docker run` command in the installation guide and mount the directory containing the Gemma4 weights into the container. The prebuilt image includes the matching CANN user-space environment, PyTorch, TorchNPU, vLLM, and vLLM Ascend versions.
+
+After entering the container, verify the environment:
 
 ```shell
 npu-smi info
+python -m pip show vllm vllm-ascend
 ```
 
-Expected result: `npu-smi info` lists the expected Ascend devices.
+Expected result: `npu-smi info` lists the expected Ascend devices, and both Python packages are installed.
 
 ### 4.2 Source Code Installation
 
@@ -101,12 +117,48 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
+#### Ascend 950 ModelSlim Quantized Models
+
+The following commands use all 8 NPUs on one 950DT Products node. The quantized checkpoints require `--quantization ascend`.
+
+=== "31B Dense"
+
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export MODEL_PATH=/root/.cache/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4
+
+    vllm serve ${MODEL_PATH} \
+      --served-model-name gemma4 \
+      --trust-remote-code \
+      --tensor-parallel-size 8 \
+      --quantization ascend \
+      --max-model-len 32768 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+
+=== "26B A4B MoE"
+
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export MODEL_PATH=/root/.cache/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4
+
+    vllm serve ${MODEL_PATH} \
+      --served-model-name gemma4 \
+      --trust-remote-code \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --max-model-len 32768 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 #### Key Parameters
 
 - `--tensor-parallel-size`: sets the tensor parallel size. Adjust it according to model size and available NPU devices.
 - `--enable-expert-parallel`: enables expert parallelism for MoE variants when the deployment plan uses EP.
+- `--quantization ascend`: enables the Ascend ModelSlim quantization path. It is required for the two quantized checkpoints listed in Section 3.1 and must be omitted for BF16 weights.
 - `--max-model-len`: sets the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
 - `--enforce-eager`: enables eager execution for baseline verification.
 - `--compilation-config`: configures graph execution. `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, and `PIECEWISE` is also supported.
@@ -231,6 +283,7 @@ The following configurations are for reference only. The optimal configuration d
 | Generation serving | Single-node online serving | 4 | Dense or MoE | Use ACLGraph with `FULL_DECODE_ONLY` to reduce decode dispatch overhead. |
 | Long context | Single-node online serving | 4 | Dense or MoE | Increase `--max-model-len` only when enough KV cache is available; lower concurrency if OOM occurs. |
 | MoE serving | Single-node online serving | 4 | MoE | Use tensor parallelism or expert parallelism according to model size and deployment plan. |
+| Quantized serving on Ascend 950 | Single-node online serving | 8 | Dense or MoE | Use the ModelSlim checkpoint for the selected architecture and add `--quantization ascend`. |
 
 ### 9.2 Tuning Guidelines
 
@@ -256,6 +309,7 @@ Recommended tuning order:
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
+| ModelSlim quantization | `--quantization ascend` | Reduces weight and activation memory and uses Ascend MXFP operators. | Required for the ModelSlim mixed-precision checkpoints; omit it for BF16 weights. |
 
 ## 10 FAQ
 
