@@ -116,8 +116,20 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts if num_logical_experts is not None else global_num_experts
         self.tid2eid = tid2eid
+        # (source tensor, int32 view) cache for tid2eid; see _get_tid2eid_int32.
+        self._tid2eid_int32_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+
+    def _get_tid2eid_int32(self, tid2eid: torch.Tensor) -> torch.Tensor:
+        # tid2eid is reassigned on EPLB rebalance (e.g. deepseek_v4/v41 model.py),
+        # so cache the int32 view keyed on the source tensor's identity instead of
+        # a plain attribute that could go stale after a rebalance.
+        cached = self._tid2eid_int32_cache
+        if cached is None or cached[0] is not tid2eid:
+            cached = (tid2eid, tid2eid.to(torch.int32))
+            self._tid2eid_int32_cache = cached
+        return cached[1]
 
     def is_fused_supported(
         self,
@@ -161,7 +173,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
                 input_ids = input_ids.to(torch.int64)
-                tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
+                tid2eid = self.tid2eid
+                tid2eid_ones = self._get_tid2eid_int32(tid2eid) if tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                     input_ids = prepare_finalize.all_gather_input_ids(input_ids)
