@@ -553,12 +553,41 @@ jobs:
         if: steps.decide.outputs.mode == 'ascendstore-v1'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test -f tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py
           pip install regex pyyaml -q
-          python3 .github/workflows/scripts/select_tests.py \
-            --explicit-e2e-tests tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py \
-            --runner-label-override linux-aarch64-a2b3-4 \
-            --skip-cpu-ut
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          # Each invocation keeps the public selector's image/cache/device configuration intact.
+          # Combining both files before applying an override would collapse them into one job.
+          routes = (
+              ("tests/e2e/pull_request/one_card/test_ascendstore_v1.py", "linux-aarch64-a2b3-1"),
+              ("tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py", "linux-aarch64-a2b3-4"),
+          )
+          selection_env = dict(os.environ)
+          selection_env.pop("GITHUB_OUTPUT", None)
+          groups = []
+          for test_path, runner in routes:
+              assert Path(test_path).is_file(), test_path
+              output = subprocess.check_output(
+                  [sys.executable, ".github/workflows/scripts/select_tests.py",
+                   "--explicit-e2e-tests", test_path, "--runner-label-override", runner, "--skip-cpu-ut"],
+                  env=selection_env, text=True,
+              )
+              selected = json.loads(next(line.split("=", 1)[1] for line in output.splitlines()
+                                         if line.startswith("test_groups=")))
+              assert len(selected) == 1 and selected[0]["runner"] == runner, selected
+              groups.extend(selected)
+          cache_targets = sorted({group["csrc_cache_target"] for group in groups if group.get("csrc_cache_target")})
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("has_tests=true", file=output)
+              print("test_groups=" + json.dumps(groups, separators=(",", ":")), file=output)
+              print("csrc_cache_target_ids=" + json.dumps(cache_targets, separators=(",", ":")), file=output)
+              print("matched_modules=ascendstore-v1", file=output)
+          PY
 
       - name: Select tests from coverage recommendations
         id: scope-rec
