@@ -162,6 +162,7 @@ templates:
       - "2"
       - "--node-rank"
       - "${NODE_RANK}"
+      - "--headless"
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
       - "--no-enable-prefix-caching"
