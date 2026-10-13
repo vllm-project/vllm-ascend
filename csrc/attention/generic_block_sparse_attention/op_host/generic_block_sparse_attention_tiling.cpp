@@ -20,14 +20,7 @@
 #include "graph/types.h"
 #include "graph/tensor.h"
 #include "tiling/platform/platform_ascendc.h"
-
-#ifndef ASCENDC_EXTERN_C
-#ifdef ASCENDC_OP_TEST
-#define ASCENDC_EXTERN_C extern "C"
-#else
-#define ASCENDC_EXTERN_C
-#endif
-#endif
+#include "tiling_base/tiling_base.h"
 
 constexpr int QUERY_INDEX = 0;
 constexpr int KEY_INDEX = 1;
@@ -191,8 +184,15 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext *context)
     if (maskTypePtr != nullptr) {
         maskType_ = *maskTypePtr;
     }
-    if (maskType_ != 1) {
-        OP_LOGE(context->GetNodeName(), "Unsupported maskType=%ld, only maskType=1 is supported.", maskType_);
+    // A5(Ascend 950) supports the built-in causal mask (1) only; A2/A3(Atlas A2/A3) also support no-mask (0).
+    if (maskType_ != 0 && maskType_ != 1) {
+        OP_LOGE(context->GetNodeName(), "Unsupported maskType=%ld, only 0 (none) or 1 (causal) are supported.",
+                maskType_);
+        return ge::GRAPH_FAILED;
+    }
+    if (maskType_ == 0 && socVer_ == SOC_VER_950_CODE) {
+        OP_LOGE(context->GetNodeName(),
+                "Unsupported maskType=0 on A5(Ascend 950); no-mask is only supported on A2/A3(Atlas A2/A3).");
         return ge::GRAPH_FAILED;
     }
 
@@ -221,11 +221,11 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext *context)
         residualBlockMode_ = *residualModePtr;
     }
     const bool residualModeSupported = residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_NONE ||
-        (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE && socVer_ == SOC_VER_950_CODE &&
+        (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE &&
          quantType_ == GBSA_QUANT_TYPE_NONE);
     if (!residualModeSupported) {
         OP_LOGE(context->GetNodeName(),
-                "Unsupported residual_block_mode=%ld; mode 1 only supports A5 non-quant currently.",
+                "Unsupported residual_block_mode=%ld; mode 1 only supports non-quant currently.",
                 residualBlockMode_);
         return ge::GRAPH_FAILED;
     }
@@ -333,10 +333,6 @@ ge::graphStatus GBSATiling::GetInputLayout(gert::TilingContext *context)
                 "KV layout must be PA_BBND with blockTable, or TND without blockTable.");
         return ge::GRAPH_FAILED;
     }
-    if (!isPaged_ && socVer_ != SOC_VER_950_CODE) {
-        OP_LOGE(context->GetNodeName(), "TND non-paged KV is only supported on chip 950.");
-        return ge::GRAPH_FAILED;
-    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -404,15 +400,9 @@ ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext *context)
                 return ge::GRAPH_FAILED;
             }
             const auto *stride = context->GetRequiredInputStride(index);
-            if (stride == nullptr || stride->GetDimNum() == 0) {
-                continue; // No explicit stride: infer a contiguous layout from storage shape.
-            }
-            if (stride->GetDimNum() != shape.GetDimNum()) {
-                OP_LOGE(context->GetNodeName(),
-                        "Dense TND Q/K/V explicit stride rank must equal storage shape rank, inputIndex=%d, "
-                        "storageRank=%zu, strideRank=%zu.",
-                        index, shape.GetDimNum(), stride->GetDimNum());
-                return ge::GRAPH_FAILED;
+            if (stride == nullptr || stride->GetDimNum() != shape.GetDimNum()) {
+                // No usable descriptor; the aclnn wrapper has made dense Q/K/V contiguous.
+                continue;
             }
             int64_t expected = 1;
             for (int axis = 2; axis >= 0; --axis) {
@@ -495,6 +485,17 @@ ge::graphStatus GBSATiling::ParseQueryKeyShapes(gert::TilingContext *context)
     if (q.GetDimNum() != 3U || k.GetDimNum() != kvRank || v.GetDimNum() != kvRank) {
         OP_LOGE(context->GetNodeName(), "Invalid Q/K/V ranks for the selected layouts.");
         return ge::GRAPH_FAILED;
+    }
+    // A2/A3(Atlas A2/A3) supports 1<=D<=256; A5(Ascend 950) non-quant supports D up to 512
+    // (validated in CheckCapabilityAttrs) and is further gated by the metadata check.
+    if (socVer_ != SOC_VER_950_CODE) {
+        const uint32_t embeddingSize = static_cast<uint32_t>(q.GetDim(2));
+        if (embeddingSize == 0U || embeddingSize > GBSA_TILE_SIZE_256) {
+            OP_LOGE(context->GetNodeName(),
+                    "Unsupported embeddingSize=%u, A2/A3(Atlas A2/A3) supports 1<=headDim<=256.",
+                    embeddingSize);
+            return ge::GRAPH_FAILED;
+        }
     }
     if (q.GetDim(0) < 0 || q.GetDim(0) > std::numeric_limits<int32_t>::max() ||
         q.GetDim(1) <= 0 || q.GetDim(1) > std::numeric_limits<int32_t>::max() || q.GetDim(2) <= 0 ||
@@ -582,8 +583,19 @@ ge::graphStatus GBSATiling::ParseSparseTensors(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
     constexpr int64_t GBSA_LEGACY_MAX_TOPK = 256;
-    const int64_t maxTopK = socVer_ == SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE ?
-                                std::numeric_limits<int32_t>::max() : GBSA_LEGACY_MAX_TOPK;
+    constexpr int64_t GBSA_A3_QSA_MAX_TOPK = 512;
+
+    const bool isA3QsaPath = socVer_ != SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE &&
+                         residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE && layoutQ_ == "TND" &&
+                         layoutKv_ == "PA_BBND" && blockShapeX_ == 1U && blockShapeY_ == 4U;
+
+    int64_t maxTopK = GBSA_LEGACY_MAX_TOPK;
+    if (socVer_ == SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE) {
+        maxTopK = std::numeric_limits<int32_t>::max();
+    } else if (isA3QsaPath) {
+        maxTopK = GBSA_A3_QSA_MAX_TOPK;
+    }
+
     if (topK > maxTopK) {
         OP_LOGE(context->GetNodeName(), "Unsupported topK=%lld, maximum is %lld for this configuration.", topK,
                 maxTopK);
@@ -697,13 +709,11 @@ ge::graphStatus GBSATiling::CalculateWorkSpace(gert::TilingContext *context)
     if (socVer_ != SOC_VER_950_CODE) {
         constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = 131072;
         constexpr uint32_t NUM3 = 3;
-        // Identity reserved after S/P/O buffers (must match kernel layout).
         mm1OutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
         smOnlineOutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(uint16_t) * NUM3;
         mm2OutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
         updateSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
-        uint64_t identityIdxSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
-        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_ + identityIdxSize;
+        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_;
     } else {
         pipelineWorkspaceSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
         if (quantType_ == 0U && embeddingSize_ > GBSA_TILE_SIZE_256 && qBaseTile_ > GBSA_TILE_SIZE_64) {
@@ -889,11 +899,6 @@ ge::graphStatus GBSATiling::CheckSoftmaxPrecision(gert::TilingContext *context)
 
 ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext *context)
 {
-    if (blockShapeY_ != 128U && (socVer_ != SOC_VER_950_CODE || quantType_ != 0 ||
-        (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16))) {
-        OP_LOGE(context->GetNodeName(), "Generalized blockShapeY requires arch35 FP16/BF16 quantType=0.");
-        return ge::GRAPH_FAILED;
-    }
     // Full-quant contract: quantType=5 iff Q/K/V dtype is FLOAT8_E4M3FN; FP8 only on 950.
     if (!isPaged_ && (quantType_ != 0 ||
         (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16))) {
@@ -917,12 +922,34 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext *context)
         OP_LOGE(context->GetNodeName(), "returnSoftmaxlse=1 is not supported for FP8 full-quant path.");
         return ge::GRAPH_FAILED;
     }
+    if (blockShapeY_ != 128U) {
+        const bool arch35NonQuant =
+            socVer_ == SOC_VER_950_CODE && quantType_ == 0 && (dataType_ == ge::DT_FLOAT16 || dataType_ == ge::DT_BF16);
+        const bool arch22NonQuant =
+            socVer_ != SOC_VER_950_CODE && quantType_ == 0 && (dataType_ == ge::DT_FLOAT16 || dataType_ == ge::DT_BF16);
+        const bool supportedArch22DenseY =
+            blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
+        const bool supportedArch22PagedY =
+            blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
+        const bool arch22DenseNonQuant = arch22NonQuant && !isPaged_ && layoutKv_ == "TND" && supportedArch22DenseY;
+        const bool arch22PagedNonQuant = arch22NonQuant && isPaged_ && layoutKv_ == "PA_BBND" && blockSize_ == 128U &&
+                                         supportedArch22PagedY && (128U % blockShapeY_) == 0U;
+        if (!arch35NonQuant && !arch22DenseNonQuant && !arch22PagedNonQuant) {
+            OP_LOGE(context->GetNodeName(),
+                    "Generalized blockShapeY=%u requires arch35 FP16/BF16 quantType=0, or arch22 "
+                    "FP16/BF16 quantType=0 with power-of-two Y in [1, 128] (PA page size 128).",
+                    blockShapeY_);
+            return ge::GRAPH_FAILED;
+        }
+    }
     if (socVer_ == SOC_VER_950_CODE && !isQuant5 && embeddingSize_ > GBSA_TILE_SIZE_512) {
         OP_LOGE(context->GetNodeName(),
                 "Arch35 FP16/BF16 non-quant supports headDim up to 512.");
         return ge::GRAPH_FAILED;
     }
-    const bool fdHeadDimSupported = embeddingSize_ == GBSA_TILE_SIZE_128 ||
+    // A2/A3(Atlas A2/A3): FD for 1<=headDim<=256; A5(Ascend 950) non-quant up to 512.
+    const bool fdHeadDimSupported =
+        (socVer_ != SOC_VER_950_CODE && embeddingSize_ >= 1U && embeddingSize_ <= GBSA_TILE_SIZE_256) ||
         (socVer_ == SOC_VER_950_CODE && !isQuant5 && embeddingSize_ <= GBSA_TILE_SIZE_512);
     fdStaticEnabled_ = topK_ >= 12U && fdHeadDimSupported;
     return ge::GRAPH_SUCCESS;
@@ -933,7 +960,7 @@ uint64_t GBSATiling::GenerateTilingKey()
     /**
      * BSA-style decimal bitfields (must match op_kernel tilingkey.h):
      * - [0-1]   Q Layout           2=TND
-     * - [2-4]   Mask Type          maskType_ * 1000 (current path: 1)
+     * - [2-4]   Mask Type          maskType_ * 1000 (A2/A3: 0=none, 1=causal; A5: 1 only)
      * - [5-7]   Softmax Precision  0=Float, 1=Half/BF16 (*100000)
      * - [8-10]  PagedCache         0=Dense, 1=WithCache (*1000000)
      * - [11-13] KV Layout          30=TND, 70=PA_BBND (*1000000)
@@ -968,7 +995,7 @@ uint64_t GBSATiling::GenerateTilingKey()
         tilingKey += 100000ULL;
     }
 
-    // maskType (current support: 1)
+    // maskType (A2/A3: 0=none or 1=causal; A5: 1 only)
     tilingKey += static_cast<uint64_t>(maskType_) * 1000ULL;
 
     // Q layout: TND = 2
@@ -1092,6 +1119,7 @@ ge::graphStatus GBSATiling::FillTilingData(gert::TilingContext *context)
     tilingData_->set_isConsistentTopk(static_cast<uint32_t>(isConsistentTopk_ ? 1 : 0));
     tilingData_->set_totalQTokens(totalQTokens_);
     tilingData_->set_totalKvTokens(totalKvTokens_);
+    tilingData_->set_maskType(static_cast<uint32_t>(maskType_));
 
     return ge::GRAPH_SUCCESS;
 }

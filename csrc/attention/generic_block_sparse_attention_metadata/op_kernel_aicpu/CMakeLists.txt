@@ -7,6 +7,7 @@ if (BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG)
     endif()
 
     file(GLOB_RECURSE JSON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/*.json)
+    set_property(GLOBAL APPEND PROPERTY AICPU_JSON_FILES ${JSON_FILE})
 
     file(GLOB AICPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/*_aicpu.cpp)
     add_aicpu_cust_kernel_modules(generic_block_sparse_attention_metadata "${AICPU_SRC}" "${JSON_FILE}")

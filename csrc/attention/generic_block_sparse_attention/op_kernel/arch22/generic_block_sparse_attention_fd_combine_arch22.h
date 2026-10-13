@@ -25,9 +25,9 @@ public:
     static constexpr uint32_t MAX_SPLIT_NUM = GbsaMetadata::MAX_DECODE_CORE_NUM;
     static constexpr uint32_t MAX_ROW_TILE = 8;
     static constexpr uint32_t FLOATS_PER_BLOCK = 8;
-    static constexpr uint32_t HEAD_DIM = 128;
+    static constexpr uint32_t MAX_HEAD_DIM = 256;
     static constexpr uint32_t MAX_LSE_ELEMS = MAX_SPLIT_NUM * MAX_ROW_TILE;
-    static constexpr uint32_t MAX_O_TILE_ELEMS = MAX_ROW_TILE * HEAD_DIM;
+    static constexpr uint32_t MAX_O_TILE_ELEMS = MAX_ROW_TILE * MAX_HEAD_DIM;
 
     __aicore__ inline GenericBlockSparseAttentionFdCombineArch22(Resource &resource)
     {
@@ -69,9 +69,11 @@ public:
         const uint32_t blockNum = AscendC::GetBlockNum();
         const uint32_t combineTaskNum = static_cast<uint32_t>(meta->combineTaskNum);
         const uint32_t groupSize = tilingData->groupSize;
-        if (subBlockNum == 0 || blockNum == 0 || combineTaskNum == 0 || groupSize == 0) {
+        headDim_ = tilingData->embeddingSize;
+        if (subBlockNum == 0 || blockNum == 0 || combineTaskNum == 0 || groupSize == 0 || headDim_ == 0) {
             return;
         }
+        const uint32_t partialOStride = RoundUp(headDim_, 16U);
 
         const uint32_t aivIdx = AscendC::GetBlockIdx();
         const uint32_t aivNum = blockNum * subBlockNum;
@@ -119,28 +121,28 @@ public:
             }
             const uint64_t baseOutputOffset =
                 (static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHead * groupSize + groupRowStart) *
-                HEAD_DIM;
+                headDim_;
             const uint64_t lseOutputOffset =
                 static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHead * groupSize + groupRowStart;
-            const uint32_t tileElems = rowCount * HEAD_DIM;
+            const uint32_t tileElems = rowCount * partialOStride;
             AscendC::Duplicate(oAccUb_, 0.0f, tileElems);
             AscendC::PipeBarrier<PIPE_V>();
 
             for (uint32_t split = 0; split < splitCount; ++split) {
                 const uint32_t partialTask = firstPartialTask + split;
                 const uint64_t partialOOffset =
-                    (static_cast<uint64_t>(partialTask) * groupSize + groupRowStart) * HEAD_DIM;
+                    (static_cast<uint64_t>(partialTask) * groupSize + groupRowStart) * partialOStride;
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                 AscendC::DataCopyPad(oTmpUb_, gPartialO[partialOOffset],
-                                     AscendC::DataCopyExtParams(rowCount, HEAD_DIM * sizeof(float), 0, 0, 0),
+                                     AscendC::DataCopyExtParams(rowCount, partialOStride * sizeof(float), 0, 0, 0),
                                      AscendC::DataCopyPadExtParams<float>(false, 0, 0, 0));
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
 
                 for (uint32_t row = 0; row < rowCount; ++row) {
                     const float weight = weightUb_.GetValue(split * rowCountAlign + row);
-                    AscendC::Muls(oTmpUb_[row * HEAD_DIM], oTmpUb_[row * HEAD_DIM], weight, HEAD_DIM);
+                    AscendC::Muls(oTmpUb_[row * partialOStride], oTmpUb_[row * partialOStride], weight, headDim_);
                 }
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Add(oAccUb_, oAccUb_, oTmpUb_, tileElems);
@@ -155,8 +157,12 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::DataCopyPad(gO[baseOutputOffset], oOutUb_,
-                                 AscendC::DataCopyExtParams(rowCount, HEAD_DIM * sizeof(ElementO), 0, 0, 0));
+            for (uint32_t row = 0; row < rowCount; ++row) {
+                AscendC::DataCopyPad(
+                    gO[baseOutputOffset + static_cast<uint64_t>(row) * headDim_],
+                    oOutUb_[row * partialOStride],
+                    AscendC::DataCopyExtParams(1, headDim_ * sizeof(ElementO), 0, 0, 0));
+            }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             if constexpr (OUTPUT_LSE) {
@@ -254,6 +260,8 @@ private:
     AscendC::LocalTensor<float> oAccUb_;
     AscendC::LocalTensor<ElementO> oOutUb_;
     AscendC::LocalTensor<uint8_t> reduceTmpUb_;
+
+    uint32_t headDim_ = 128;
 };
 
 } // namespace GbsaKernelArch22
