@@ -128,7 +128,7 @@ TITLES = {
     "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
     "tutorials/models/GLM5.3.md": {"en": "GLM-5.3", "zh": "GLM-5.3"},
     "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
-    "tutorials/models/GLM5.md": {"en": "GLM-5.1", "zh": "GLM-5.1"},
+    "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
     "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
