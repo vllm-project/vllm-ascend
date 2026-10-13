@@ -237,8 +237,8 @@ def main(args):
     def _drop_none(obj):
         if isinstance(obj, dict):
             return {k: _drop_none(v) for k, v in obj.items() if v is not None}
-        if isinstance(obj, list):
-            return [_drop_none(v) for v in obj]
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(_drop_none(v) for v in obj)
         return obj
 
     # asdict() preserves nested None defaults that pydantic CompilationConfig rejects
