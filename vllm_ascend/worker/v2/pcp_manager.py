@@ -33,7 +33,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
@@ -79,7 +78,6 @@ class AscendPCPManager(PCPManager):
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -598,25 +596,6 @@ class AscendPCPManager(PCPManager):
         local_num_tokens_padded = self._padded_gather_idx.shape[0] // self.pcp_world_size
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
-
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        """Return capture views backed by the persistent PCP-local tables.
-
-        FULL graph replay cannot rebind SFA's captured block-table pointer, so
-        capture must use the same storage that ``prepare_attn`` updates at
-        runtime instead of the model runner's global block-table buffers.
-        """
-        if self._local_block_tables is None:
-            raise RuntimeError("PCP-local block tables are not initialized.")
-
-        dummy_block_tables = []
-        for block_table in self._local_block_tables:
-            if num_reqs > block_table.shape[0]:
-                raise RuntimeError(
-                    f"PCP graph request count exceeds the local block table: {num_reqs} > {block_table.shape[0]}."
-                )
-            dummy_block_tables.append(block_table[:num_reqs].zero_())
-        return tuple(dummy_block_tables)
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         """Pad PCP slot mappings to the fixed FULL-decode graph layout.

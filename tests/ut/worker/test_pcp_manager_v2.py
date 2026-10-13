@@ -308,16 +308,10 @@ def _make_global_pcp_batch():
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
     global_batch = _make_global_pcp_batch()
-    req_states = SimpleNamespace(
-        last_sampled_tokens=torch.zeros(4, dtype=torch.int64),
-        prefill_len=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
-        draft_tokens=torch.empty((4, 0), dtype=torch.int64),
-    )
     manager = AscendPCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
-        req_states=req_states,
         max_num_reqs=1,
         max_num_tokens=18,
     )
@@ -670,16 +664,10 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     global_batch.positions[:4].copy_(torch.tensor([10, 999, 999, 999], dtype=torch.int64))
     global_batch.is_padding[:4].fill_(False)
 
-    req_states = SimpleNamespace(
-        last_sampled_tokens=torch.zeros(2, dtype=torch.int64),
-        prefill_len=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int32)),
-        draft_tokens=torch.empty((2, 0), dtype=torch.int64),
-    )
     manager = _ReplicatedPCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
-        req_states=req_states,
         max_num_reqs=2,
         max_num_tokens=4,
     )
