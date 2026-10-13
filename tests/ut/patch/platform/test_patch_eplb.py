@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -11,8 +12,11 @@ import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.platforms import current_platform
+from vllm.v1.executor.multiproc_executor import WorkerProc
 
+from tests.ut.distributed.eplb.test_hixl_communicator import _shared_models
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.patch.platform import patch_eplb
 
 
@@ -516,8 +520,9 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", MagicMock(return_value=object()))
     monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
     state = SimpleNamespace(
-        rearrange_event=SimpleNamespace(wait=wait_for_cycle),
+        wait_for_rearrangement=lambda stream: (wait_for_cycle(stream=stream), True)[1],
         model_states={"model": model_state},
+        _hixl_session=None,
     )
 
     def original_worker(state, cuda_stream, is_profile=False):
@@ -532,6 +537,68 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     assert published[0].layer_idx == changed_layer
     assert published[0].is_last_result
     assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
+
+
+@pytest.mark.parametrize("failure_stage", ["context", "synchronize"])
+def test_hixl_async_failure_outside_execute_exits_rpc_and_retains_shared_storage(monkeypatch, failure_stage):
+    session, communicators, engine = _shared_models(monkeypatch)
+    session.initialize(communicators)
+    storage_refs = list(session._storage_refs)
+    handles = list(session._registered_handles)
+    stream = MagicMock()
+    if failure_stage == "context":
+        session._acl_context = object()
+        monkeypatch.setattr(sys.modules["acl"].rt, "set_context", lambda _context: 1)
+    else:
+        stream.synchronize.side_effect = RuntimeError("NPU synchronization failed")
+    old_mapping = torch.tensor([[0, 1], [0, 1]])
+    new_mapping = torch.tensor([[1, 0], [0, 1]])
+    model_state = SimpleNamespace(
+        communicator=communicators["main"],
+        physical_to_logical_map=old_mapping,
+        logical_to_physical_map=torch.empty((2, 2, 1), dtype=torch.int32),
+        model=SimpleNamespace(expert_weights=[[object()], [object()]]),
+        expert_buffer=[object()],
+        rebalanced=True,
+        pending_result=None,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = session
+    state._close_error = None
+    state.model_states = {"main": model_state}
+    state.wait_for_rearrangement = lambda _stream: True
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=MagicMock(), cpu_group=MagicMock(size=lambda: 1)),
+    )
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", lambda *_args: new_mapping)
+    transfer = MagicMock(return_value=object())
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", transfer)
+    monkeypatch.setattr(torch.distributed, "all_reduce", MagicMock())
+
+    def original_worker(state, cuda_stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
+    message = "restore ACL context" if failure_stage == "context" else "NPU synchronization failed"
+    with pytest.raises(RuntimeError, match=message) as failure:
+        worker(state, stream)
+    assert session._error is failure.value
+    assert not session._usable
+    assert model_state.pending_result is None
+    assert transfer.call_count == int(failure_stage == "synchronize")
+    for communicator in communicators.values():
+        with pytest.raises(RuntimeError, match="HIXL EPLB session is closed or failed"):
+            communicator.set_stream(stream)
+    rpc = SimpleNamespace(rank=0, worker=SimpleNamespace(step=state.step), handle_output=MagicMock())
+    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+        WorkerProc._execute_worker_rpc(rpc, ("step", (), {}, None))
+    assert fatal.value.__cause__ is failure.value
+    rpc.handle_output.assert_not_called()
+    assert session._storage_refs == storage_refs
+    assert session._registered_handles == handles
+    assert not engine.deregistered and not engine.finalized
 
 
 def test_async_noop_result_finishes_without_moving_weights(monkeypatch):

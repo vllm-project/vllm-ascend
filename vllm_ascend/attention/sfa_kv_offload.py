@@ -11,11 +11,10 @@ Data plane (see zsc-sfa-kv-offload-merge-plan.md):
   cache as usual, then the layer's cache rows are committed D2H
   (``cache_cpu[slot] = cache_npu[slot]``) through the manager;
 - decode: no NPU main K/V cache at all (indexer K cache only). The current
-  token's K/V is produced compute-only and committed D2H directly; top-k
-  misses are loaded H2D into the resident (topk) buffer and a single
-  resident SFA attention runs.
-- fused_overlap decode (optional via ``use_fused_overlap``): replace resident
-  onload + SFA with ``npu_fused_sparse_attention_overlap``, reading full KV
+  token's K/V is produced compute-only. Fused LIM and Copy-SFA manage the
+  hot buffer and attend to the selected KV by default.
+- fused_overlap decode (optional via ``use_fused_overlap``): replace fused
+  LIM + Copy-SFA with ``npu_fused_sparse_attention_overlap``, reading full KV
   from the shared CPU pool while keeping a selection buffer on NPU.
 """
 
@@ -52,10 +51,8 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    build_valid_topk_mask,
     split_decodes_and_prefills,
 )
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -612,38 +609,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if manager.tp_rank != 0:
             return None, None
         return manager.k_caches_cpu[layer_id], manager.v_caches_cpu[layer_id]
-
-    @staticmethod
-    def _resident_views(manager, layer_name: str, rows: int):
-        layer_id = manager._get_offload_layer_id(layer_name)
-        buffer_k = manager.topk_buffers_k[layer_id]
-        buffer_v = manager.topk_buffers_v[layer_id]
-        pages_per_row = manager.topk_buffer_size // manager.block_size
-        resident_pages = rows * pages_per_row
-        resident_k = buffer_k.reshape(-1, buffer_k.shape[-2], buffer_k.shape[-1])[
-            : rows * manager.topk_buffer_size
-        ].view(
-            resident_pages,
-            manager.block_size,
-            buffer_k.shape[-2],
-            buffer_k.shape[-1],
-        )
-        resident_v = buffer_v.reshape(-1, buffer_v.shape[-2], buffer_v.shape[-1])[
-            : rows * manager.topk_buffer_size
-        ].view(
-            resident_pages,
-            manager.block_size,
-            buffer_v.shape[-2],
-            buffer_v.shape[-1],
-        )
-        return (
-            resident_k,
-            resident_v,
-            manager.current_slots_npu[:rows],
-            manager.resident_block_table_npu[:rows],
-            manager.resident_query_lens_npu[:rows],
-            manager.resident_seq_lens_npu[:rows],
-        )
 
     def _offload_layer_name(self) -> str:
         layer_name = self.layer_name or self._current_layer_name
@@ -1626,8 +1591,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             result = self._copy_sfa_attention(ql_nope, q_pe, topk_indices, attn_metadata, manager, layer_name)
             return self._pad_to_input_tokens(result, ql_nope.shape[0])
 
-        if num_decode_tokens == 0:
-            # Pure prefill batch (colocate debug only).
+        if num_decode_tokens == 0 or not self.use_fused_overlap:
+            # Prefill/mixed Copy-SFA debug batches retain the full device KV.
             _check_device_kv_cache_exist()
             return super()._execute_sparse_flash_attention_process(
                 ql_nope,
@@ -1643,112 +1608,17 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if attn_metadata.req_ids_tensor is None or attn_metadata.token_to_req is None:
             raise RuntimeError("Sparse KV offload requires req_ids_tensor/token_to_req metadata")
 
-        if self.use_fused_overlap:
-            decode_attn_output = self._execute_fused_overlap_offload_decode(
-                ql_nope[:num_decode_tokens],
-                q_pe[:num_decode_tokens],
-                topk_indices[:num_decode_tokens],
-                attn_metadata,
-                actual_seq_lengths_query[:num_decodes],
-                actual_seq_lengths_key[:num_decodes],
-                layer_name,
-            )
-            if num_prefills == 0:
-                return self._pad_to_input_tokens(decode_attn_output, ql_nope.shape[0])
-            _check_device_kv_cache_exist()
-            prefill_query_offset = actual_seq_lengths_query[num_decodes - 1]
-            prefill_query_lens = actual_seq_lengths_query[num_decodes:] - prefill_query_offset
-            prefill_block_table = attn_metadata.block_table[num_decodes : num_decodes + num_prefills]
-            prefill_attn_output = super()._execute_sparse_flash_attention_process(
-                ql_nope[num_decode_tokens:],
-                q_pe[num_decode_tokens:],
-                kv_cache,
-                topk_indices[num_decode_tokens:],
-                attn_metadata,
-                prefill_query_lens,
-                actual_seq_lengths_key[num_decodes:],
-                block_table=prefill_block_table,
-            )
-            attn_output = torch.cat([decode_attn_output, prefill_attn_output], dim=0)
-            return self._pad_to_input_tokens(attn_output, ql_nope.shape[0])
-
-        token_to_req = attn_metadata.token_to_req[:num_decode_tokens]
-        row_to_req = token_to_req.to(dtype=torch.int64)
-        decode_seq_lens = torch.index_select(
-            actual_seq_lengths_key[:num_decodes],
-            0,
-            row_to_req,
-        )
-        decode_cum_query_lens = actual_seq_lengths_query[:num_decodes]
-        decode_query_lens = decode_cum_query_lens.clone()
-        if num_decodes > 1:
-            decode_query_lens[1:] -= decode_cum_query_lens[:-1]
-        # Only the query span can be rewritten by the next MTP step.
-        stable_prefix_lens = (actual_seq_lengths_key[:num_decodes] - decode_query_lens).clamp_min_(0)
-        decode_stable_prefix_lens = torch.index_select(
-            stable_prefix_lens,
-            0,
-            row_to_req,
-        )
-        decode_topk = topk_indices[:num_decode_tokens]
-        seq_len_thresholds = decode_seq_lens.view(
-            decode_seq_lens.shape[0],
-            *([1] * (decode_topk.ndim - 1)),
-        )
-        valid_topk = build_valid_topk_mask(decode_topk, seq_len_thresholds)
-        decode_topk = torch.where(
-            valid_topk,
-            decode_topk,
-            torch.full_like(decode_topk, -1),
-        )
-        if decode_topk.ndim == 3 and decode_topk.shape[1] == 1:
-            decode_topk = decode_topk.squeeze(1)
-        if decode_topk.ndim != 2:
-            raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
-
-        (
-            resident_k,
-            resident_v,
-            resident_slot_indices,
-            resident_block_table,
-            resident_query_lens,
-            resident_seq_lens,
-        ) = self._resident_views(manager, layer_name, num_decode_tokens)
-        decode_req_ids = torch.index_select(
-            attn_metadata.req_ids_tensor[:num_decodes],
-            0,
-            row_to_req,
-        )
-        manager.onload_topk_kv(
-            layer_name,
-            num_decode_tokens,
-            num_decodes,
-            attn_metadata.block_table[:num_decodes],
-            decode_topk,
-            resident_slot_indices,
-            decode_req_ids,
-            decode_stable_prefix_lens,
-            token_to_req,
-            capturing=self._in_graph_runtime(),
-            skip_topk=self.skip_topk,
-        )
-        decode_attn_output = DeviceOperator.execute_sparse_flash_attention_process(
-            self,
+        decode_attn_output = self._execute_fused_overlap_offload_decode(
             ql_nope[:num_decode_tokens],
             q_pe[:num_decode_tokens],
-            (resident_k, resident_v),
-            resident_slot_indices.unsqueeze(1),
+            topk_indices[:num_decode_tokens],
             attn_metadata,
-            resident_query_lens,
-            resident_seq_lens,
-            block_table=resident_block_table,
+            actual_seq_lengths_query[:num_decodes],
+            actual_seq_lengths_key[:num_decodes],
+            layer_name,
         )
         if num_prefills == 0:
             return self._pad_to_input_tokens(decode_attn_output, ql_nope.shape[0])
-
-        # Mixed batch (colocate debug only): prefill rows still attend the NPU
-        # paged cache. The cumulative query lengths are rebased to the first
-        # prefill request.
         _check_device_kv_cache_exist()
         prefill_query_offset = actual_seq_lengths_query[num_decodes - 1]
         prefill_query_lens = actual_seq_lengths_query[num_decodes:] - prefill_query_offset

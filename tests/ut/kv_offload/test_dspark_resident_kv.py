@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -60,6 +61,8 @@ def _prefill_runner(
     connector="SfaRemoteD2HConnector",
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.debugger = None
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -436,7 +439,9 @@ def test_hot_cache_rows_follow_request_slots_not_query_width(monkeypatch, width,
     k, v = allocate_kv_offload_topk_buffer_pair(runtime, config)
     query_rows = min(64, 4 * width)
     request_rows = 2 * (4 + 2)
-    expected_rows = (max(query_rows, request_rows) if keep_device else request_rows) if fused else query_rows
+    # Mixed debug batches attend the retained device KV, so Copy-SFA hot
+    # buffers need only request-slot rows even with keep_device_kv_cache.
+    expected_rows = request_rows if fused else query_rows
     stride = 512 if fused else 256
     assert k.shape == (expected_rows, stride, 1, 4)
     assert v.shape == (expected_rows, stride, 1, 2)

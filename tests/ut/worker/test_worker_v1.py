@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -2310,6 +2311,39 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_closes_eplb_before_releasing_resources(self, _mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = None
+        state = MagicMock(spec=AscendEplbState)
+        worker.model_runner.eplb_state = state
+        cleanup = MagicMock()
+        cleanup.attach_mock(state.close, "close_eplb")
+        cleanup.attach_mock(engine.shutdown, "shutdown_engine")
+        cleanup.attach_mock(worker.model_runner.shutdown, "shutdown_runner")
+
+        worker.shutdown()
+
+        self.assertEqual([call[0] for call in cleanup.mock_calls], ["close_eplb", "shutdown_engine", "shutdown_runner"])
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_failed_eplb_close_blocks_resource_release(self, mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = MagicMock()
+        state = MagicMock(spec=AscendEplbState)
+        state.close.side_effect = SystemExit("EPLB cleanup failed")
+        worker.model_runner.eplb_state = state
+
+        with self.assertRaises(SystemExit):
+            worker.shutdown()
+
+        mock_kv_shutdown.assert_not_called()
+        worker.profiler.shutdown.assert_not_called()
+        engine.shutdown.assert_not_called()
+        worker.model_runner.shutdown.assert_not_called()
 
 
 class TestKVPPWorkerBudget(TestBase):

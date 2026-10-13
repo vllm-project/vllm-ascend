@@ -341,7 +341,11 @@ a3:
         os: linux-aarch64-a3-800t-16
         config_file_path: Qwen3-30B-A3B-W8A8-offload-test-acc.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
-  310p:
+      - name: GLM-5.1-w8a8c8-MTP-offload-test-perf
+        os: linux-aarch64-a3-800t-16
+        config_file_path: GLM-5.1-w8a8c8-MTP-offload-test-perf.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+310p:
   single_node:
     test_config:
       - name: Qwen3VL-8B-310p
