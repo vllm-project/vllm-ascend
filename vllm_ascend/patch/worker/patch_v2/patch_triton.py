@@ -1,3 +1,4 @@
+import vllm.v1.worker.gpu.model_runner as base_model_runner
 import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
@@ -28,12 +29,14 @@ from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )
+from vllm_ascend.worker.v2.batch import sort_batch_req_ids
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
-from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
+from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs, compute_topk_scores
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
@@ -45,6 +48,7 @@ penalties.apply_penalties = apply_penalties
 prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
 sampler.compute_topk_logprobs = compute_topk_logprobs
 rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
+sampler.compute_topk_scores = compute_topk_scores
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 bad_words.apply_bad_words = apply_bad_words
@@ -78,3 +82,7 @@ thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
 trace_replay.apply_trace_tokens = apply_trace_tokens
+
+# Seeded target sampling must use the same RNG stream as MRV1.
+base_model_runner.Sampler = AscendSampler
+base_model_runner.sort_batch_req_ids = sort_batch_req_ids

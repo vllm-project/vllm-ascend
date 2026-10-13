@@ -114,6 +114,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -329,6 +330,11 @@ class NPUModelRunner(GPUModelRunner):
             # batch to the same global padded length.
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
+
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        if isinstance(self.sampler, AscendSampler):
+            self.sampler.finish_requests(scheduler_output.finished_req_ids, scheduler_output.preempted_req_ids)
+        super().finish_requests(scheduler_output)
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
@@ -727,6 +733,16 @@ class NPUModelRunner(GPUModelRunner):
                 )
         return batch_state, uniform_token_count
 
+    def _get_idx_mapping(self, idx_mapping_np: np.ndarray) -> torch.Tensor:
+        # Retain the most recent immutable device mapping. On a batch change,
+        # allocate a new tensor rather than overwrite an in-flight step's map.
+        key = (idx_mapping_np.dtype.str, tuple(idx_mapping_np.tolist()))
+        buffers = self.input_buffers
+        if key != buffers.idx_mapping_key:
+            buffers.idx_mapping_gpu = async_copy_to_gpu(idx_mapping_np.copy(), device=self.device)
+            buffers.idx_mapping_key = key
+        return buffers.idx_mapping_gpu
+
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
@@ -766,7 +782,7 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        idx_mapping = self._get_idx_mapping(idx_mapping_np)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -794,10 +810,8 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+            cu_num_logits_np, cu_num_logits, expanded_local_pos = self.input_buffers.get_non_draft_inputs(num_reqs)
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
@@ -1259,10 +1273,22 @@ class NPUModelRunner(GPUModelRunner):
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        num_reqs = len(req_ids)
+        req_indices = np.fromiter(
+            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+            dtype=np.intp,
+            count=num_reqs,
+        )
+        scheduled_tokens = np.fromiter(
+            (num_scheduled_tokens[req_id] for req_id in req_ids),
+            dtype=self.input_buffers.seq_lens_np.dtype,
+            count=num_reqs,
+        )
+        np.add(
+            self.req_states.num_computed_tokens_cpu.numpy()[req_indices],
+            scheduled_tokens,
+            out=self.input_buffers.seq_lens_np[:num_reqs],
+        )
 
     def _pad_query_start_loc_for_fia(
         self,

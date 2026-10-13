@@ -21,6 +21,7 @@ import torch
 from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores as compute_topk_scores_upstream
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -66,22 +67,34 @@ def _topk_log_softmax_kernel(
 
 
 def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    batch_size, vocab_size = logits.shape
-    token_ids = token_ids.to(torch.int64)
-    num_logprobs = token_ids.shape[1]
-    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
-    _topk_log_softmax_kernel[(batch_size,)](
-        logprobs,
-        logits,
-        logits.stride(0),
-        token_ids,
+    # Match MRV1's normalization and rounding when returning logprobs.
+    logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
+    return logprobs.gather(-1, token_ids.to(torch.int64))
+
+
+def compute_topk_scores(
+    logits: torch.Tensor,
+    num_logprobs: int,
+    sampled_token_ids: torch.Tensor,
+    cu_num_logits=None,
+    logprob_token_ids_state=None,
+    expanded_idx_mapping: torch.Tensor | None = None,
+    max_per_req_token_ids: int = 0,
+    logits_mode: bool = False,
+) -> LogprobsTensors:
+    # MRV1 selects top-k and counts ranks after FP32 normalization.
+    # Rounding can turn distinct logits into equal logprobs.
+    scores = logits if logits_mode else logits.log_softmax(dim=-1, dtype=torch.float32)
+    return compute_topk_scores_upstream(
+        scores,
         num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=12944,
-        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
-        multibuffer=False,
+        sampled_token_ids,
+        cu_num_logits,
+        logprob_token_ids_state,
+        expanded_idx_mapping,
+        max_per_req_token_ids,
+        logits_mode=True,
     )
-    return logprobs
 
 
 @triton.jit(do_not_specialize=["batch_size", "rows_per_core"])
