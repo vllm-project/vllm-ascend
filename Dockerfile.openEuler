@@ -15,12 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# CANN_QUAY_URL (optional): Registry URL of the CANN base image.
-ARG CANN_QUAY_URL="quay.io/ascend/cann"
-# CANN_VERSION (optional): CANN toolkit version used to select the base image tag.
-ARG CANN_VERSION="9.1.0"
-
-FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-openeuler24.03-py3.12
+# Pin the v0.30.0rc2 CANN base image independently of workflow build arguments.
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260930220649-910b-openeuler24.03-py3.12
 
 # Build-time arguments (declared once at the top of the stage for clarity).
 # PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
@@ -149,6 +145,11 @@ RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 # Install daily packages via shared script
 COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
 RUN if [ "$BUILD_TYPE" = "daily" ]; then \
+        BUILD_TYPE="daily" \
+        MEMCACHE_VERSION="1.3.0" \
+        MEMCACHE_DATE="20261009.15" \
+        MEMFABRIC_VERSION="1.3.0" \
+        MEMFABRIC_DATE="20261009.10" \
         bash /tmp/install_daily_deps.sh; \
     else \
         echo "Building release version without daily packages"; \
