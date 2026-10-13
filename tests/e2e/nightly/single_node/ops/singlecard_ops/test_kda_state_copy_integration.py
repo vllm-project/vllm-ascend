@@ -31,37 +31,37 @@ def _forbid_compilation(monkeypatch):
 
 
 @pytest.mark.parametrize("to_cache", [False, True])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
-def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
-    """Direct launches preserve the complete Triton-bound kernel signature."""
-    state = torch.empty((8, 1, 1, 1), dtype=torch.float32, device="npu")
-    packed = torch.empty((2, 1, 1, 1), dtype=torch.float32, device="npu")
-    indices = torch.tensor([0, 1], dtype=torch.int32, device="npu")
-    flags = torch.ones(2, dtype=torch.bool, device="npu")
-    launches = []
+def test_direct_compiled_launch_uses_runtime_abi(to_cache, index_dtype, monkeypatch):
+    """Verify the runtime ABI, no-JIT execution, and cache-copy results."""
+    state = torch.arange(48, dtype=torch.float32, device="npu").reshape(8, 1, 2, 3)
+    original = state.cpu()
+    indices = torch.tensor([-1, 0, 3], dtype=index_dtype, device="npu")
+    flags = torch.tensor([True, True, False], dtype=torch.bool, device="npu")
+    packed = torch.full((3, 1, 2, 3), 101, dtype=state.dtype, device=state.device)
+    plan = KDAStateCopyPlan.prepare(state, 3)
+    plan.seal()
+    _forbid_compilation(monkeypatch)
 
-    class RecordingKernel:
-        def __getitem__(self, grid):
-            assert grid == (2, 3, 1)
-
-            def launch(*args):
-                launches.append(args)
-
-            return launch
-
-    plan = KDAStateCopyPlan()
-    plan._tiles = 3
-    plan._scalars = (8, 1, 1, 1)
-    plan._compiled = {(torch.int32, to_cache): RecordingKernel()}
+    # A real compiled kernel rejects the redundant constexpr arguments and
+    # validates the data results for dynamic inputs.
     plan._launch(state, packed, indices, flags, to_cache=to_cache)
 
-    (args,) = launches
-    assert len(args) == 12
-    for actual, expected in zip(args[:3], (state, packed, indices)):
-        assert actual is expected
-    assert args[3] is (indices if to_cache else flags)
-    assert args[4:9] == (*plan._scalars, 0 if to_cache else 1)
-    assert args[9:] == (to_cache, not to_cache, lowlevel.DEFAULT_KDA_BLOCK_SIZE)
+    if to_cache:
+        expected = original.clone()
+        expected[0] = 101
+        expected[3] = 101
+        # Invalid indices do not write, and the initial-state flag must not
+        # suppress the final state write-back.
+        torch.testing.assert_close(state.cpu(), expected, rtol=0, atol=0)
+    else:
+        expected = torch.zeros((3, 1, 2, 3), dtype=torch.float32)
+        expected[1] = original[0]
+        # Invalid indices and false flags are zeroed; gather leaves the cache
+        # untouched.
+        torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(state.cpu(), original, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
