@@ -514,63 +514,101 @@ class LayerwisePushProducerWorker:
     def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
         self.current_layer = 0
         self._pd_dispatched_layers = set()
-        if not metadata.requests:
-            return
         if len(metadata.producer_pp_layers) != self.pp_size:
             raise RuntimeError("Layerwise push producer PP topology has not been initialized")
         if tuple(metadata.producer_pp_layers[self.pp_rank]) != self._layer_order:
             raise RuntimeError("Layerwise push producer layer ownership differs from startup metadata")
         assert self.kv_send_layer_thread is not None
+        # vLLM main runs start_load_kv after the forward launch for producers
+        # (no sync KV loads), while layer saves enqueue during the forward.
+        # Propagate the static topology before the requests early-return so the
+        # send thread never handshakes with unset pp_layers/tp_size; mark the
+        # topology ready only after every advertised request got its route.
         self.kv_send_layer_thread._state.pp_layers = metadata.producer_pp_layers
         self.kv_send_layer_thread._state.tp_size = self.tp_size
         for req_id, req_meta in getattr(metadata, "requests", {}).items():
-            remote_tp_size = req_meta.remote_tp_size or self.tp_size
-            topology_id = req_meta.remote_topology_id
-            if not isinstance(topology_id, str) or not topology_id:
-                raise ValueError("Layerwise push requires the D startup topology ID")
-            remote_tp_rank = self._map_prefill_rank_to_decode_rank(
-                prefill_tp_size=self.tp_size,
-                decode_tp_size=remote_tp_size,
-                prefill_tp_rank=self.tp_rank,
+            self._ensure_req_route(req_id, req_meta)
+        self.kv_send_layer_thread.topology_ready.set()
+
+    def _ensure_req_route(self, req_id: str, req_meta) -> None:
+        """Build the per-request D-route (layer_endpoints/terminal_layers/tp slicing).
+
+        Idempotent per (topology, this worker's rank): a request routed for the
+        current (pp_rank, tp_rank) returns immediately, so start_load_kv and the
+        save/enqueue path can share it; re-called cheaply per layer. Called from
+        both start_load_kv and the save/enqueue path, because vLLM main now runs
+        start_load_kv AFTER the forward launch for connectors without sync
+        loads, while save_kv_layer enqueues layer tasks during the forward.
+        The send thread reads req_meta.layer_endpoints only after the enqueue
+        (queue put is the happens-before point), so building the route lazily
+        here keeps push correct regardless of that ordering.
+        """
+        if not req_meta.layer_endpoints:
+            pass  # first routing for this request: fall through to build below
+        else:
+            # Already routed: rebuild only if it was built for a different
+            # (topology, rank) — the rank attributes default to None so tests
+            # with partially-initialized workers reuse prebuilt routes as-is.
+            route_key = (
+                req_meta.remote_topology_id,
+                getattr(self, "pp_rank", None),
+                getattr(self, "tp_rank", None),
             )
-            req_meta.tp_ratio = self.tp_size // remote_tp_size
-            req_meta.group_member_idx = self.tp_rank % req_meta.tp_ratio
-            route = self._routes_by_topology.get(topology_id)
-            if route is None:
-                endpoints = req_meta.remote_endpoints
-                if not endpoints or len(endpoints) != req_meta.remote_pp_size:
-                    raise ValueError("Layerwise push requires the complete D worker endpoint table")
-                if any(len(stage) != remote_tp_size for stage in endpoints):
-                    raise ValueError("Layerwise push D endpoint table does not match its TP size")
-                destination_by_layer = {}
-                for stage in endpoints:
-                    endpoint = stage[remote_tp_rank]
-                    host, port, layers = endpoint["host"], endpoint["port"], endpoint["layer_ids"]
-                    if not host:
-                        raise ValueError("Layerwise push D endpoint has no host")
-                    _validate_tcp_port(port, description="Layerwise push remote D-side port")
-                    for layer in layers:
-                        if layer in destination_by_layer:
-                            raise ValueError(f"Layerwise push D has duplicate ownership of layer {layer}")
-                        destination_by_layer[layer] = (host, port)
-                missing = set(self._layer_order) - destination_by_layer.keys()
-                if missing:
-                    raise ValueError(f"Layerwise push D is missing destination layers {sorted(missing)}")
-                layer_endpoints = {layer: destination_by_layer[layer] for layer in self._layer_order}
-                last_by_endpoint = {endpoint: layer for layer, endpoint in layer_endpoints.items()}
-                route = (layer_endpoints, frozenset(last_by_endpoint.values()))
-                self._routes_by_topology[topology_id] = route
-            req_meta.layer_endpoints, req_meta.terminal_layers = route
-            # Register every destination before the first terminal WRITE can
-            # finish. A P stage may feed more than one D stage.
-            if req_meta.chunk_finish:
-                self.kv_send_layer_thread.track_requests({req_id}, set(req_meta.layer_endpoints.values()))
-            logger.debug(
-                "Layerwise push P prepared req %s: layer_endpoints=%s, blocks=%s",
-                req_id,
-                req_meta.layer_endpoints,
-                req_meta.local_block_ids,
-            )
+            if getattr(req_meta, "_route_built_for", route_key) == route_key:
+                return
+        remote_tp_size = req_meta.remote_tp_size or self.tp_size
+        route_key = (
+            req_meta.remote_topology_id,
+            getattr(self, "pp_rank", None),
+            getattr(self, "tp_rank", None),
+        )
+        topology_id = req_meta.remote_topology_id
+        if not isinstance(topology_id, str) or not topology_id:
+            raise ValueError("Layerwise push requires the D startup topology ID")
+        remote_tp_rank = self._map_prefill_rank_to_decode_rank(
+            prefill_tp_size=self.tp_size,
+            decode_tp_size=remote_tp_size,
+            prefill_tp_rank=self.tp_rank,
+        )
+        req_meta.tp_ratio = self.tp_size // remote_tp_size
+        req_meta.group_member_idx = self.tp_rank % req_meta.tp_ratio
+        route = self._routes_by_topology.get(topology_id)
+        if route is None:
+            endpoints = req_meta.remote_endpoints
+            if not endpoints or len(endpoints) != req_meta.remote_pp_size:
+                raise ValueError("Layerwise push requires the complete D worker endpoint table")
+            if any(len(stage) != remote_tp_size for stage in endpoints):
+                raise ValueError("Layerwise push D endpoint table does not match its TP size")
+            destination_by_layer = {}
+            for stage in endpoints:
+                endpoint = stage[remote_tp_rank]
+                host, port, layers = endpoint["host"], endpoint["port"], endpoint["layer_ids"]
+                if not host:
+                    raise ValueError("Layerwise push D endpoint has no host")
+                _validate_tcp_port(port, description="Layerwise push remote D-side port")
+                for layer in layers:
+                    if layer in destination_by_layer:
+                        raise ValueError(f"Layerwise push D has duplicate ownership of layer {layer}")
+                    destination_by_layer[layer] = (host, port)
+            missing = set(self._layer_order) - destination_by_layer.keys()
+            if missing:
+                raise ValueError(f"Layerwise push D is missing destination layers {sorted(missing)}")
+            layer_endpoints = {layer: destination_by_layer[layer] for layer in self._layer_order}
+            last_by_endpoint = {endpoint: layer for layer, endpoint in layer_endpoints.items()}
+            route = (layer_endpoints, frozenset(last_by_endpoint.values()))
+            self._routes_by_topology[topology_id] = route
+        req_meta.layer_endpoints, req_meta.terminal_layers = route
+        req_meta._route_built_for = route_key
+        # Register every destination before the first terminal WRITE can
+        # finish. A P stage may feed more than one D stage.
+        if req_meta.chunk_finish:
+            self.kv_send_layer_thread.track_requests({req_id}, set(req_meta.layer_endpoints.values()))
+        logger.debug(
+            "Layerwise push P prepared req %s: layer_endpoints=%s, blocks=%s",
+            req_id,
+            req_meta.layer_endpoints,
+            req_meta.local_block_ids,
+        )
 
     @staticmethod
     def _map_prefill_rank_to_decode_rank(
@@ -593,6 +631,11 @@ class LayerwisePushProducerWorker:
         return prefill_tp_rank // (prefill_tp_size // decode_tp_size)
 
     def _build_send_state(self) -> ProducerSendState:
+        # tp_size/pp_rank/tp_rank are static and known here; publish them at
+        # construction because vLLM main runs start_load_kv after the forward
+        # launch while layer saves enqueue during it. pp_layers needs the
+        # scheduler-aggregated cross-stage table, so for PP>1 it still arrives
+        # via start_load_kv (the send thread gates handshakes until then).
         return ProducerSendState(
             last_layer_idx=self.last_layer_idx,
             layer_layouts=self.layer_layouts,
@@ -602,6 +645,8 @@ class LayerwisePushProducerWorker:
             num_blocks=self.kv_cache_config.num_blocks,
             pp_rank=self.pp_rank,
             tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            pp_layers=(self._layer_order,) if self.pp_size == 1 else (),
             write_mode=self._write_mode,
         )
 
@@ -734,6 +779,11 @@ class LayerwisePushProducerWorker:
         send_requests = {}
         group_indices = {component.group_index for component in self.layer_layouts[layer_idx]}
         for req_id, req_meta in connector_metadata.requests.items():
+            # vLLM main runs start_load_kv after the forward launch for
+            # connectors without sync loads, while saves land here during the
+            # forward. Build the D-route lazily so the send thread never reads
+            # an empty layer_endpoints regardless of that ordering.
+            self._ensure_req_route(req_id, req_meta)
             has_ready_group = any(
                 group_idx < len(req_meta.local_block_ids) and bool(req_meta.local_block_ids[group_idx])
                 for group_idx in group_indices

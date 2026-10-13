@@ -148,6 +148,14 @@ class LayerwisePushSendingThread(threading.Thread):
         self._dealers: dict[str, Any] = {}
         self._stopped = False
         self.startup_error: BaseException | None = None
+        # vLLM main runs producer start_load_kv after the forward launch, while
+        # layer saves enqueue during the forward. The handshakes must not start
+        # before the worker published the static topology (pp_layers/tp_size) on
+        # _state. Complete-at-construction topology (PP=1, tests) opens the gate
+        # immediately; otherwise the first start_load_kv sets it.
+        self.topology_ready = threading.Event()
+        if state.pp_layers:
+            self.topology_ready.set()
         self._next_transfer_id = 0
         self._next_reservation_id = -1
         self._reservation_lock = threading.Lock()
@@ -259,13 +267,22 @@ class LayerwisePushSendingThread(threading.Thread):
                 self._check_handshake_deadlines()
                 self._dispatch_writes(encoder)
                 pending_count = sum(len(tasks) for tasks in self._pending.values()) + len(self._active)
-                if pending_count < MAX_PENDING_BATCHES:
+                if (
+                    self.topology_ready.is_set()
+                    and pending_count < MAX_PENDING_BATCHES
+                ):
                     try:
                         self._process_send_task(self.send_queue.get_nowait(), encoder)
                         continue
                     except queue.Empty:
                         pass
-                self._poller.poll(self._poll_timeout_ms())
+                poll_timeout = self._poll_timeout_ms()
+                if not self.topology_ready.is_set() and poll_timeout is None:
+                    # Topology is published by the first start_load_kv (after the
+                    # forward launch on vLLM main); spin briefly instead of
+                    # parking forever on the poller while tasks wait.
+                    poll_timeout = SOURCE_EVENT_POLL_MS
+                self._poller.poll(poll_timeout)
                 with suppress(BlockingIOError):
                     self._task_reader.recv(4096)
         except BaseException as error:
