@@ -461,6 +461,16 @@ def test_v10b_unknown_top_level_key_rejected_on_reload(tmp_path: Path):
 # ---------------------------------------------------------------- V12 (P1-A1)
 
 
+def test_req_index_for_flat_token_short_qsl():
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.detector.logits_finite import req_index_for_flat_token
+
+    qsl = np.asarray([0, 3], dtype=np.int64)  # only one interval, but num_reqs=3
+    assert req_index_for_flat_token(1, qsl, num_reqs=3) == 0
+    assert req_index_for_flat_token(5, qsl, num_reqs=3) is None
+
+
 def test_v12_logits_finite_unattributable_row_warns_not_misattributes():
     from ._helpers import capture_logger_text
 
