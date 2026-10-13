@@ -58,13 +58,13 @@ prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
 Use one of the following hardware configurations:
 
-- **A3 single-node colocated**: one Atlas 800 A3 server with 8 NPUs and 128GB
+- **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
   memory per NPU. The server exposes 16 logical devices to the container.
-- **A3 1P1D**: two Atlas 800 A3 servers with the same device configuration.
-- **A2 series**: four Atlas 800 A2 servers. Each server has 8 NPUs with 64GB
+- **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
+- **A2 series**: four Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
   memory per NPU and exposes 8 devices to the container. Its deployment
   configuration is retained unchanged in this update.
-- **A2 1P1D**: four Atlas 800 A2 servers with the same device configuration.
+- **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
 
 Store the checkpoint in a shared directory or copy it to the same absolute
 path on every server.
@@ -134,7 +134,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -759,6 +759,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -783,7 +784,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --reasoning-parser deepseek_v41 \
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
-        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":32}' \
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
@@ -865,6 +865,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     export VLLM_HOST_IP="$LOCAL_IP"
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_INTRA_ROCE_ENABLE=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -890,7 +891,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --reasoning-parser deepseek_v41 \
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
-        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.95 \
         --quantization ascend \
@@ -1220,8 +1220,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section
-5.2.2 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.1 after all Decode engines are ready.
 
 #### 5.3.3 Start the Decode Node with Pooling
 
@@ -1368,7 +1367,7 @@ CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
 Before starting vLLM, configure `mooncake.json`, and start the
-mooncake_master Service. The Prefill and Decode nodes must export`mooncake.json`.
+mooncake_master Service. The Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH` .
 
 #### 5.4.1 Prepare the Mooncake Services
 
@@ -1384,7 +1383,7 @@ Configure `mooncake.json`:
     "preferred_segment": false,
     "prefer_alloc_in_same_node": true
 }
-```json
+```
 
 Start mooncake_master:
 
@@ -1455,7 +1454,6 @@ vllm serve "$MODEL_PATH" \
     --reasoning-parser deepseek_v41 \
     --tool-call-parser deepseek_v41 \
     --enable-auto-tool-choice \
-    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":32}' \
     --safetensors-load-strategy lazy \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
@@ -1498,8 +1496,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section
-5.2.2 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.1 after all Decode engines are ready.
 
 #### 5.4.3 Start the Decode Node with Pooling
 
@@ -1559,7 +1556,6 @@ vllm serve "$MODEL_PATH" \
     --reasoning-parser deepseek_v41 \
     --tool-call-parser deepseek_v41 \
     --enable-auto-tool-choice \
-    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
     --safetensors-load-strategy lazy \
     --gpu-memory-utilization 0.95 \
     --quantization ascend \
