@@ -103,7 +103,6 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=2048
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_USE_V1=1
     export TASK_QUEUE_ENABLE=1

@@ -277,7 +277,7 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAImpl
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [2, 4, 8, 16, 32, 64, 128]
 
 
@@ -287,7 +287,7 @@ class AscendDSAC4Backend(AscendDSABackend):
         return "ASCEND_DSA_C4"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
         # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
         return [128, 256, 512]
@@ -299,7 +299,7 @@ class AscendDSAC128Backend(AscendDSABackend):
         return "ASCEND_DSA_C128"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
         # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
         return [4096, 8192, 16384]
@@ -311,7 +311,7 @@ class AscendDSASWABackend(AscendDSABackend):
         return "ASCEND_DSA_SWA"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [32, 64, 128]
 
 
@@ -321,7 +321,7 @@ class AscendDSAC4StateBackend(AscendDSABackend):
         return "ASCEND_DSA_C4_STATE"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [2, 4, 8]
 
 
@@ -331,7 +331,7 @@ class AscendDSAC128StateBackend(AscendDSABackend):
         return "ASCEND_DSA_C128_STATE"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
             return [4, 8, 16]
         return [8, 16, 32]
@@ -850,6 +850,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         fast_build: bool = False,
         *,
         can_use_rope_cache: bool = True,
+        full_graph_mode: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -883,7 +884,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else:
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
-            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            # FULL graphs replay fixed shapes, so cos/sin must span the padded
+            # token count. Other modes consume only real tokens; build at the
+            # actual length so consumers never need to re-slice.
+            num_position_tokens = num_input_tokens if full_graph_mode else common_attn_metadata.num_actual_tokens
+            input_positions = common_attn_metadata.positions[:num_position_tokens].long()
             need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
@@ -922,7 +927,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_actual_reqs,
             cos=cos,
             sin=sin,
-            full_graph_mode=kwargs.get("full_graph_mode", False),
+            full_graph_mode=full_graph_mode,
         )
 
         return self.metadata_cls(  # type: ignore
