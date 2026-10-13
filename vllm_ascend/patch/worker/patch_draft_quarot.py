@@ -53,7 +53,7 @@ def get_rotation_path(target_vllm_config):
     return Path(target_model_path) / rotation_relative_path
 
 
-def get_rotataion_matrix(rotation_path):
+def get_rotation_matrix(rotation_path):
     """
     Anti-rotate maxtrix.
     """
@@ -90,7 +90,7 @@ def patch_load_weights(target_vllm_config):
 
 def make_load_weights(target_model_path, rotation_path):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        Q = get_rotataion_matrix(rotation_path)
+        Q = get_rotation_matrix(rotation_path)
         Q3 = compute_rotataion_matrix3(Q)
         if isinstance(self.config.dtype, str):
             embed_dtype = getattr(torch, self.config.dtype)
