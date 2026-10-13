@@ -171,7 +171,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 43008 \
-      --tensor-parallel-size 16 \
+      --tensor-parallel-size 8 \
+      --data-parallel-size 2 \
       --enable-expert-parallel \
       --max-num-seqs 16 \
       --distributed_executor_backend "mp" \
@@ -233,11 +234,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "950DT products"
 
     ```bash
-    nic_name="xxxx"  # NIC corresponding to local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/op_api/lib/:${LD_LIBRARY_PATH}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
