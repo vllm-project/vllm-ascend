@@ -6,8 +6,8 @@ import torch
 
 import vllm_ascend.attention.mixed_quant_sparse_flash_mla as adapter
 from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
-    mixed_quant_sparse_flash_mla_turboquant,
     mixed_quant_sparse_flash_mla_metadata_turboquant,
+    mixed_quant_sparse_flash_mla_turboquant,
 )
 
 
@@ -56,5 +56,7 @@ def test_attention_defaults_to_c4_compression_ratio():
     q = torch.zeros(1, 4, 512, dtype=torch.bfloat16)
     op = Mock()
     with patch.object(adapter, "_get_mixed_quant_sparse_flash_mla_ops", return_value=(op, None)):
-        mixed_quant_sparse_flash_mla_turboquant(q, cmp_kv=torch.zeros(1, 1, 1, 258, dtype=torch.uint8), sinks=torch.zeros(4))
+        mixed_quant_sparse_flash_mla_turboquant(
+            q, cmp_kv=torch.zeros(1, 1, 1, 258, dtype=torch.uint8), sinks=torch.zeros(4)
+        )
     assert op.call_args.kwargs["cmp_ratio"] == 4
