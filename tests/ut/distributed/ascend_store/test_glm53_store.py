@@ -295,6 +295,7 @@ class TestGLM53Store(unittest.TestCase):
                 extra_config={"backend": "memcache"},
             )
             worker.m_store.batch_alloc.side_effect = alloc
+            worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
             worker.m_store.batch_get_key_info.side_effect = infos
             worker.m_store.batch_write_finish.side_effect = finish
             worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -424,6 +425,7 @@ class TestGLM53Store(unittest.TestCase):
         )
         worker.register_kv_caches(make_glm53_caches(plan))
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]
         metadata = self.make_metadata(blocks, hashes, req_id="null-kda-slots")
@@ -434,7 +436,7 @@ class TestGLM53Store(unittest.TestCase):
             self.assertEqual(request.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in worker._allocated_gvas, valid)
+                self.assertEqual(key in request.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:

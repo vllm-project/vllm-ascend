@@ -24,11 +24,18 @@ def make_config(v2, mtp):
 def make_fused_config(vllm_config, hot_tokens):
     config = SparseKVOffloadConfig.from_additional_config(
         vllm_config,
-        {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": hot_tokens},
+        {"enabled": True, "topk_buffer_size": hot_tokens},
     )
     # Kernel/layout constraints are checked during backend setup, not config import.
     _validate_fused_copy_sfa_config(vllm_config, config)
     return config
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("mtp", [0, 1, 3, 13])
+def test_auto_buffer_satisfies_copy_sfa_bounds(v2, mtp):
+    config = make_fused_config(make_config(v2, mtp), -1)
+    assert config.topk_buffer_size == (1 + mtp) * 2048
 
 
 @pytest.mark.parametrize("v2", [False, True])
@@ -137,11 +144,22 @@ def test_dspark_rejects_hot_budget_below_configured_width():
         make_fused_config(config, 26624)
 
 
-@pytest.mark.parametrize("fused_op_type", ["none", "fused_copy_sfa"])
-def test_remote_dspark_requires_v2_context_initialization(fused_op_type):
+@pytest.mark.parametrize("use_fused_overlap", [False, True])
+def test_remote_dspark_requires_v2_context_initialization(use_fused_overlap):
     config = make_dspark_config()
     config.use_v2_model_runner = False
     with pytest.raises(ValueError, match="V2 remote prompt-context initialization"):
         SparseKVOffloadConfig.from_additional_config(
-            config, {"enabled": True, "fused_op_type": fused_op_type, "topk_buffer_size": 18432}
+            config, {"enabled": True, "use_fused_overlap": use_fused_overlap, "topk_buffer_size": 18432}
         )
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_overlap_does_not_apply_copy_sfa_kernel_limits(v2):
+    vllm_config = make_config(v2, 0)
+    vllm_config.model_config.hf_text_config.index_topk = 128
+    config = SparseKVOffloadConfig.from_additional_config(
+        vllm_config, {"enabled": True, "use_fused_overlap": True, "topk_buffer_size": 256}
+    )
+    assert not config.use_fused_copy_sfa
+    _validate_fused_copy_sfa_config(vllm_config, config)

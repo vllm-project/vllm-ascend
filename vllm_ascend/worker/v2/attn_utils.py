@@ -79,7 +79,10 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    allocate_shared_indexer_cache,
+    get_layerwise_reuse_config,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
@@ -992,6 +995,20 @@ def _allocate_kv_cache(
         # Only the layerwise planner's zero-stride descriptors share a
         # physical slot. Ordinary packed descriptors still own private layers.
         if layerwise_reuse and kv_cache_tensor.layer_stride == 0:
+            if all(isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in shared_names):
+                indexer_specs = {
+                    name: spec
+                    for name in shared_names
+                    if isinstance((spec := layer_kv_cache_spec[name]), AscendSFAIndexerCacheSpec)
+                }
+                kv_cache_raw_tensors.update(
+                    allocate_shared_indexer_cache(
+                        indexer_specs,
+                        kv_cache_config.num_blocks,
+                        lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+                    )
+                )
+                continue
             owner = shared_names[0]
             if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner] for name in shared_names[1:]):
                 raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
