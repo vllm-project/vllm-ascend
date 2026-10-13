@@ -55,7 +55,7 @@ additional TCP metadata ports are required.
 
 ## Data and lifetime protocol
 
-The leader completes its synchronous P read, then atomically publishes its TE
+The leader completes its synchronous P read, then atomically publishes its TransferEngine
 host/port, registered transfer bases, layout and the actual local block table.
 Readers map the required P logical block IDs to the leader's received block IDs
 before constructing transfer descriptors. A reader with a shorter prefix hit
@@ -71,13 +71,13 @@ and readers validate the attempt in the publication. A retry must build a new
 entry rather than replay old metadata. Missing attempt metadata falls back to P.
 
 Each reader holds a shared filesystem lock from inspecting ready metadata until
-its synchronous TE read returns. It ACKs success or an exception before falling
+its synchronous TransferEngine read returns. It ACKs success or an exception before falling
 back. Readers that time out before publication send an early ACK and read from
 P. The leader waits for ACKs, then takes the exclusive lock and removes the
 publication before allowing the request to finish. After its ACK deadline,
 missing readers are no longer accepted. Already active readers continue to pin
-the leader's blocks until TE returns, even past that deadline. A permanently
-hung TE call therefore requires worker recovery; silently releasing its source
+the leader's blocks until TransferEngine returns, even past that deadline. A permanently
+hung TransferEngine call therefore requires worker recovery; silently releasing its source
 blocks would be unsafe.
 
 Contended lock acquisition logs `MLA fanout pin blocked` every five seconds,
@@ -94,7 +94,7 @@ counters. These are process-local diagnostics, not exported Prometheus metrics.
 Successful transfer events appear at DEBUG level; fallback logs include reason
 and a counter snapshot. The fallback reasons are missing attempt, ready timeout,
 expired publication, lock timeout and local read error (including
-layout/coverage/TE failures).
+layout/coverage/TransferEngine failures).
 
 Normal completion removes per-request metadata and ACKs. At most 4096 lock
 files remain per session; they must not be unlinked while workers are alive.
@@ -137,7 +137,7 @@ pytest -sv tests/ut/kv_offload/test_mla_fanout.py \
 ```
 
 The tests cover one P read for eight ranks, block remapping and divergent prefix
-coverage, TE/metadata errors, startup isolation, ready/ACK timeouts, late readers,
+coverage, TransferEngine/metadata errors, startup isolation, ready/ACK timeouts, late readers,
 actual cross-process locking and an active reader outliving the ACK deadline.
 Retry tests cover stale ready/ACK files, overlapping attempts, scheduler UUID
 creation/broadcast and forwarding through both worker queue branches.

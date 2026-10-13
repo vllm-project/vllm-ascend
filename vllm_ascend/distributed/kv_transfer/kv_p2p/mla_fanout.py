@@ -3,7 +3,7 @@
 
 The shared directory must be on a local filesystem supporting flock (also
 when mounted into multiple containers). A shared lock is held throughout
-TE reads. Closing publication takes the exclusive lock, so an ACK deadline
+TransferEngine reads. Closing publication takes the exclusive lock, so an ACK deadline
 can never release blocks underneath an in-flight reader.
 """
 
@@ -30,7 +30,7 @@ LOCK_STRIPES = 4096
 
 
 class _LockTimeout(TimeoutError):
-    """Distinguish rendezvous lock timeouts from TE read timeouts."""
+    """Distinguish rendezvous lock timeouts from TransferEngine read timeouts."""
 
 
 def transferred_blocks(req_meta: dict[str, Any]) -> list[list[int]]:
@@ -128,7 +128,7 @@ class MLAFanout:
                     if now >= warning_at:
                         logger.warning(
                             "MLA fanout pin blocked key=%s rank=%d exclusive=%s waited=%.1fs; "
-                            "KV remains pinned until active TE reads return; inspect/recover the worker",
+                            "KV remains pinned until active TransferEngine reads return; inspect/recover the worker",
                             key,
                             self.rank,
                             exclusive,
@@ -170,7 +170,7 @@ class MLAFanout:
         key = self._key(req_meta)
         ready = self.directory / f"{key}.json"
         if self.rank == self.leader:
-            # Publish only after the synchronous TE transfer succeeds.
+            # Publish only after the synchronous TransferEngine transfer succeeds.
             pull()
             self._count("leader_pull", req_meta)
             record = dict(metadata)
@@ -197,7 +197,7 @@ class MLAFanout:
                     self._count("ack_timeout", req_meta)
                     logger.warning("MLA leader fanout ACK deadline reached for %s", req_meta["request_id"])
             finally:
-                # A reader already inside TE holds the shared lock until TE
+                # A reader already inside TransferEngine holds the shared lock until TransferEngine
                 # returns, even past the deadline. Late readers see no ready
                 # record and fall back to P. Do not impose a timeout on this pin.
                 with self._lock(key, exclusive=True):
@@ -226,7 +226,7 @@ class MLAFanout:
                             return
                         finally:
                             # Includes incompatible layouts, insufficient leader
-                            # coverage and TE errors. ACK before fallback.
+                            # coverage and TransferEngine errors. ACK before fallback.
                             (self.directory / f"{key}.ack-{self.rank}").touch()
                             ack_sent = True
             except _LockTimeout:

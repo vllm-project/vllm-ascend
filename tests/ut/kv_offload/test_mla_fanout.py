@@ -101,8 +101,8 @@ class TestMLAFanout(unittest.TestCase):
 
     def test_reader_error_or_missing_metadata_acknowledges_then_falls_back(self):
         for error in (
-            RuntimeError("TE failed"),
-            TimeoutError("TE timed out"),
+            RuntimeError("TransferEngine failed"),
+            TimeoutError("TransferEngine timed out"),
             KeyError("rpc_port"),
             ValueError("layout mismatch"),
             AssertionError("reader failed"),

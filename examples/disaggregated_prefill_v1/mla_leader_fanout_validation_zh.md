@@ -173,7 +173,7 @@ workers，无需用户配置。重试必须创建新传输 metadata，不能重�
 ready/ACK 文件按 attempt 隔离；缺少 attempt 的旧 metadata 会回退到 P。
 
 排查时关注 `MLA fanout pin blocked`：锁等待每 5 秒告警，KV 仍保持 pin，需检查
-TE 或恢复故障 worker，不能靠超时强行释放正在被读取的 KV。
+TransferEngine 或恢复故障 worker，不能靠超时强行释放正在被读取的 KV。
 reader 等待锁和补发 ACK 受 ready_timeout 的剩余时间限制，超时回退；leader 清理 pin
 不设置强制超时，以免释放活跃 reader 正在访问的 KV。
 `MLAFanout.stats()` 提供每 worker 的 leader_pull、local_read、fallback、分原因 fallback、
@@ -220,18 +220,18 @@ vllm bench serve \
 记录 TTFT、TPOT、P95/P99、成功率、输出 token 数、fallback/ACK deadline 日志和跨节点
 网卡字节数。需要通过 TransferEngine profiling 区分跨机 P→D 流量与机内 leader→reader 流量；
 不能仅依据 TTFT 或混合网卡计数断言跨机流量减少到 1/8。理想的 TP8 正常路径应只有 leader
-发起 P 读取，其他 rank 的 TE session 应指向 D leader。
+发起 P 读取，其他 rank 的 TransferEngine session 应指向 D leader。
 
 故障测试在隔离测试实例上执行：
 
 - 配置不可共享的 rendezvous 目录：reader 应超时并回退 P。
-- Reader 机内 TE 读取失败：应 ACK 后回退 P。
+- Reader 机内 TransferEngine 读取失败：应 ACK 后回退 P。
 - Reader 读取超过 ACK deadline：leader 不应在 active reader 返回前完成并释放 KV。
 - 取消请求、并发 block reuse、worker crash/restart：验证无挂起、错误输出或 stale session。
 
 不要把 kill TP worker 当作“服务必须继续运行”的测试；worker failure 可导致整个引擎退出。
 重点检查是否正确失败、恢复，以及重启后是否读取旧状态。
-运行中的 session 目录不能删除。永久挂起的 TE 调用需要 worker recovery。
+运行中的 session 目录不能删除。永久挂起的 TransferEngine 调用需要 worker recovery。
 
 验收应同时满足：正常路径输出一致、无异常 fallback、跨机重复读取确实下降、长输入并发
 TTFT 改善且 TPOT 无明显回归。压缩包里的性能数字是旧原型结果，不是这个新镜像的保证。
