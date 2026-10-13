@@ -422,6 +422,104 @@ def test_is_pd_decode_recompute_scheduler_enabled_without_config():
     assert utils.is_pd_decode_recompute_scheduler_enabled() is False
 
 
+@pytest.mark.parametrize(
+    ("is_producer", "is_consumer", "expected"),
+    [
+        (True, False, True),
+        (False, True, False),
+        (True, True, False),
+    ],
+)
+def test_configure_fxrt_prefill_decompose_by_pd_role(
+    monkeypatch, is_producer, is_consumer, expected
+):
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "1")
+    kv_config = mock.MagicMock(
+        is_kv_producer=is_producer,
+        is_kv_consumer=is_consumer,
+    )
+    compilation_config = mock.MagicMock(mode=1, cudagraph_mode=0)
+    vllm_config = mock.MagicMock(
+        kv_transfer_config=kv_config,
+        compilation_config=compilation_config,
+    )
+
+    try:
+        assert utils.configure_fxrt_prefill_decompose(vllm_config) is expected
+        assert utils.fxrt_prefill_decompose_enabled() is expected
+    finally:
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
+
+
+def test_configure_fxrt_prefill_decompose_rejects_acl_decode(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "1")
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE", "1")
+    kv_config = mock.MagicMock(
+        is_kv_producer=False,
+        is_kv_consumer=True,
+    )
+    compilation_config = mock.MagicMock(
+        mode=3,
+        cudagraph_mode="FULL_DECODE_ONLY",
+    )
+    vllm_config = mock.MagicMock(
+        kv_transfer_config=kv_config,
+        compilation_config=compilation_config,
+    )
+
+    try:
+        assert utils.configure_fxrt_prefill_decompose(vllm_config) is False
+        assert utils.fxrt_moe_prefill_decompose_enabled() is False
+    finally:
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
+        utils._FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE = None
+
+
+@pytest.mark.parametrize("dsa", ["0", "1"])
+@pytest.mark.parametrize("moe", ["0", "1"])
+@pytest.mark.parametrize("eligible", [False, True])
+def test_dsa_and_moe_decomposition_are_independent(monkeypatch, dsa, moe, eligible):
+    info = mock.Mock()
+    monkeypatch.setattr(utils.logger, "info", info)
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", dsa)
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE", moe)
+    monkeypatch.setattr(utils, "_FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE", None)
+    monkeypatch.setattr(utils, "_FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE", None)
+    assert utils.fxrt_prefill_decompose_enabled() is (dsa == "1")
+    assert utils.fxrt_moe_prefill_decompose_enabled() is (moe == "1")
+    config = mock.MagicMock(
+        kv_transfer_config=mock.MagicMock(is_kv_producer=eligible, is_kv_consumer=not eligible),
+        compilation_config=mock.MagicMock(mode=1, cudagraph_mode=0),
+    )
+    try:
+        assert utils.configure_fxrt_prefill_decompose(config) is (dsa == "1" and eligible)
+        assert utils.fxrt_prefill_decompose_enabled() is (dsa == "1" and eligible)
+        assert utils.fxrt_moe_prefill_decompose_enabled() is (moe == "1" and eligible)
+        messages = [call.args[0] % call.args[1:] for call in info.call_args_list]
+        paths = [message for message in messages if message.startswith("[DSV4_PREFILL_PATH]")]
+        assert len(paths) == 1
+        for component, requested, opaque in (
+            ("DSA", dsa, "vllm::dsa_forward"),
+            ("MOE", moe, "vllm::moe_forward_shared"),
+        ):
+            active = requested == "1" and eligible
+            path = "decomposed" if active else opaque
+            assert f"{component}(requested={requested} active={int(active)} path={path})" in paths[0]
+    finally:
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
+        utils._FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE = None
+
+
+def test_old_combined_decomposition_switch_is_not_an_alias(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "1")
+    monkeypatch.delenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE", raising=False)
+    monkeypatch.setattr(utils, "_FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE", None)
+    monkeypatch.setattr(utils, "_FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE", None)
+    assert utils.fxrt_prefill_decompose_enabled() is False
+    assert utils.fxrt_moe_prefill_decompose_enabled() is False
+
+
 def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
     vllm_config = mock.MagicMock()
     vllm_config.kv_transfer_config = mock.MagicMock()

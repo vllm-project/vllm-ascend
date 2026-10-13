@@ -125,14 +125,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
     double swiglu_limit)
 {
-    int m = x.sizes()[0];
-    int n = weight.sizes()[2];
+    c10::SymInt m = x.sym_size(0);
+    c10::SymInt n = weight.sym_size(2);
     bool is_a8w4 = x.dtype() == at::kChar && weight.dtype() == at::kInt;
     if (is_a8w4) {
-        n *= INT4_NUMS_IN_INT32;
+        n = n * INT4_NUMS_IN_INT32;
     }
-    at::Tensor output = at::empty({m, n/2}, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::empty({m}, x.options().dtype(c10::ScalarType::Float));
+    at::SymDimVector output_shape{m, n / 2};
+    at::SymDimVector scale_shape{m};
+    at::Tensor output = at::empty_symint(
+        output_shape, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::empty_symint(
+        scale_shape, x.options().dtype(c10::ScalarType::Float));
     at::Tensor output_offset = at::empty({}, x.options().dtype(c10::ScalarType::Float));
     return {output, output_scale, output_offset};
 }
@@ -147,14 +151,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const c10::optional<at::Tensor> & offset,
     double swiglu_limit)
 {
-    auto x_size = x.sizes();
-    int n = weight[0].sizes()[1];
-    int m = x_size[0];
-    int k = x_size[1];
+    c10::SymInt m = x.sym_size(0);
+    c10::SymInt n = weight[0].sym_size(1);
+    at::SymDimVector output_shape{m, n / 2};
+    at::SymDimVector per_token_shape{m};
 
-    at::Tensor output = at::zeros({m, n/2}, c10::dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
+    at::Tensor output = at::empty_symint(
+        output_shape, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::empty_symint(
+        per_token_shape, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::empty_symint(
+        per_token_shape, x.options().dtype(c10::ScalarType::Float));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
@@ -177,16 +184,15 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
     at::IntArrayRef tuning_config,
     double swiglu_limit)
 {
+    c10::SymInt m = x.sym_size(0);
+    c10::SymInt n = weight_scale[0].sym_sizes().back();
+    at::SymDimVector output_shape{m, n / 2};
+    at::SymDimVector scale_shape{m};
 
-    auto x_size = x.sizes();
-    int n = weight_scale[0].sizes().back();
-    int m = x_size[0];
-    int k = x_size[1];
-
-    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
-
-
+    at::Tensor output = at::empty_symint(
+        output_shape, x.options().dtype(at::kChar));
+    at::Tensor output_scale = at::empty_symint(
+        scale_shape, x.options().dtype(at::kFloat));
 
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
@@ -918,18 +924,16 @@ std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, c
 {
     constexpr int DIM_3 = 3;
     auto x_dim = x.dim();
-    at::SmallVector<int64_t, 8> cmp_kv_size;
+    at::SymDimVector cmp_kv_size;
     at::Tensor cmp_kv;
-    auto cmp_s = 0;
     if (x_dim == DIM_3) {
-        cmp_s = (x.size(1) + cmp_ratio - 1) / cmp_ratio;
-        cmp_kv_size = {x.size(0), cmp_s, norm_weight.size(0)};
+        c10::SymInt cmp_s = (x.sym_size(1) + cmp_ratio - 1) / cmp_ratio;
+        cmp_kv_size = {x.sym_size(0), cmp_s, norm_weight.sym_size(0)};
     } else {
-        cmp_s = rope_sin.size(0);
-        cmp_kv_size = {cmp_s, norm_weight.size(0)};
+        cmp_kv_size = {rope_sin.sym_size(0), norm_weight.sym_size(0)};
     }
 
-    cmp_kv = at::empty(cmp_kv_size, x.options().dtype(x.dtype()));
+    cmp_kv = at::empty_symint(cmp_kv_size, x.options().dtype(x.dtype()));
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
@@ -955,7 +959,8 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
-    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual)
+    int64_t slot_mapping_format, int64_t compress_ratio, c10::SymInt num_compressed_tokens,
+    int64_t num_reqs_actual)
 {
     constexpr int64_t VALUE_0 = 0;
 
@@ -968,7 +973,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
                 "rope_cos shape should be non-empty");
     TORCH_CHECK(kv_block_size > VALUE_0, "kv_block_size should be greater than 0");
     TORCH_CHECK(compress_ratio > VALUE_0, "compress_ratio should be greater than 0");
-    TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
+    TORCH_SYM_CHECK(num_compressed_tokens.sym_gt(VALUE_0), "num_compressed_tokens should be greater than 0");
     TORCH_CHECK(num_reqs_actual > VALUE_0, "num_reqs_actual should be greater than 0");
     TORCH_CHECK(cu_seqlens.size(0) > num_reqs_actual,
                 "cu_seqlens dim0 should be greater than num_reqs_actual");
@@ -977,11 +982,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     TORCH_CHECK(kv_block_table.size(0) >= num_reqs_actual,
                 "kv_block_table dim0 should be greater than or equal to num_reqs_actual");
 
-    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens, 1, 1, rope_cos.size(1)};
-    at::Tensor compress_cos = at::empty(rope_output_size, rope_cos.options());
-    at::Tensor compress_sin = at::empty(rope_output_size, rope_sin.options());
+    at::SymDimVector rope_output_size = {num_compressed_tokens, rope_cos.sym_size(1)};
+    at::Tensor compress_cos = at::empty_symint(rope_output_size, rope_cos.options());
+    at::Tensor compress_sin = at::empty_symint(rope_output_size, rope_sin.options());
 
-    at::SmallVector<int64_t, 2> slot_mapping_size;
+    at::SymDimVector slot_mapping_size;
     if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
         slot_mapping_size = {num_compressed_tokens, 2};
     } else {
@@ -989,7 +994,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
                     "slot_mapping_format should be 1(flat) or 2(block_offset), but got ", slot_mapping_format);
         slot_mapping_size = {num_compressed_tokens};
     }
-    at::Tensor slot_mapping = at::empty(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
+    at::Tensor slot_mapping = at::empty_symint(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
     return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
@@ -997,31 +1002,33 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tens
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, bool return_value)
 {
-    constexpr int64_t SIZE = 8;
     constexpr int64_t DIM_0 = 0;
     constexpr int64_t DIM_1 = 1;
     constexpr int64_t DIM_2 = 2;
-    constexpr int64_t DIM_3 = 3;
-    at::SmallVector<int64_t, SIZE> output_size;
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-            "than 0, but shape[", i, "] is ", query.size(i));
+    at::SymDimVector output_size;
+    for (int64_t i = 0; i < query.dim(); i++) {
+        TORCH_SYM_CHECK(query.sym_size(i).sym_gt(0),
+            "All values within query's shape should be greater than 0");
     }
-    for (size_t i = 0; i < key.sizes().size(); i++) {
-        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
-            "than 0, but shape[", i, "] is ", key.size(i));
+    for (int64_t i = 0; i < key.dim(); i++) {
+        TORCH_SYM_CHECK(key.sym_size(i).sym_gt(0),
+            "All values within key's shape should be greater than 0");
     }
     TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
+    c10::SymInt keyHeadNum =
+        (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
     if (query_layout_str == "BSND") {
-        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+        output_size = {
+            query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, sparse_count};
     } else {
-        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+        output_size = {query.sym_size(DIM_0), keyHeadNum, sparse_count};
     }
-    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_indices_out =
+        at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        sparse_values_out = at::empty(output_size, query.options().dtype(at::kFloat));
+        sparse_values_out =
+            at::empty_symint(output_size, query.options().dtype(at::kFloat));
     } else {
         sparse_values_out = at::empty({0}, query.options().dtype(at::kFloat));
     }
@@ -1053,20 +1060,13 @@ std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
 std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
     bool return_softmax_lse)
 {
-    for (size_t i = 0; i < q.sizes().size(); i++) {
-        TORCH_CHECK(q.size(i) > 0,
-            "All values within query's shape should be greater "
-            "than 0, but shape[",
-            i,
-            "] is ",
-            q.size(i));
-    }
-    at::Tensor output = at::empty(q.sizes(), q.options().dtype(q.dtype()));
+    at::Tensor output = at::empty_like(q);
     at::Tensor softmax_lse;
     if (return_softmax_lse) {
-        std::vector<int64_t> lse_sizes(q.sizes().begin(), q.sizes().end());
-        lse_sizes.back() = 1;
-        softmax_lse = at::empty(lse_sizes, q.options().dtype(c10::ScalarType::Float));
+        at::SymDimVector lse_sizes(q.sym_sizes().begin(), q.sym_sizes().end());
+        lse_sizes.back() = c10::SymInt(1);
+        softmax_lse = at::empty_symint(
+            lse_sizes, q.options().dtype(c10::ScalarType::Float));
     } else {
         softmax_lse = at::empty({0}, q.options().dtype(c10::ScalarType::Float));
     }
@@ -1323,14 +1323,14 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
     const c10::optional<at::Tensor>& beta,
     double epsilon)
 {
-    constexpr int32_t SIZE = 8;
-    at::Tensor y_out = at::empty_like(x);
     auto options = x.options();
-    c10::SmallVector<int64_t, SIZE> scale_out_shape;
-    for (size_t i = 0; i < x.sizes().size() - 1; i++) {
-        scale_out_shape.push_back(x.sizes()[i]);
+    at::Tensor y_out = at::empty_like(x, options.dtype(at::kChar));
+    at::SymDimVector scale_out_shape;
+    scale_out_shape.reserve(x.dim() - 1);
+    for (int64_t i = 0; i < x.dim() - 1; i++) {
+        scale_out_shape.push_back(x.sym_size(i));
     }
-    at::Tensor scale_out = at::empty(scale_out_shape, options.dtype(at::kFloat));
+    at::Tensor scale_out = at::empty_symint(scale_out_shape, options.dtype(at::kFloat));
 
     return std::make_tuple(y_out, scale_out);
 }
@@ -1576,16 +1576,20 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     double glu_alpha,
     double glu_bias)
 {
-    c10::SmallVector<int64_t, 8> y_size;
-    c10::SmallVector<int64_t, 8> scale_size;
+    at::SymDimVector y_size;
+    at::SymDimVector scale_size;
+    y_size.reserve(x.dim());
+    scale_size.reserve(x.dim() - 1);
     for (int64_t i = 0; i < x.dim() - 1; ++i) {
-        y_size.push_back(x.size(i));
-        scale_size.push_back(x.size(i));
+        y_size.push_back(x.sym_size(i));
+        scale_size.push_back(x.sym_size(i));
     }
-    y_size.push_back(x.size(x.dim() - 1) / 2);
+    y_size.push_back(x.sym_size(x.dim() - 1) / 2);
 
-    at::Tensor y = at::empty(y_size, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor scale = at::empty(scale_size, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor y = at::empty_symint(
+        y_size, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor scale = at::empty_symint(
+        scale_size, x.options().dtype(c10::ScalarType::Float));
     return {y, scale};
 }
 

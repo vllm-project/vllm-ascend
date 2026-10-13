@@ -67,6 +67,99 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
+_FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
+_FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
+_FXRT_DUMMY_QUANT_ACTIVE = False
+
+
+def fxrt_dummy_quant_enabled() -> bool:
+    """Return the engine-resolved test switch; never infer dummy from dtype."""
+    return _FXRT_DUMMY_QUANT_ACTIVE
+
+
+def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
+    """Resolve independent DSA/MoE switches; return the DSA decision.
+
+    The environment variable is commonly inherited by both sides of a PD
+    deployment. Only a prefill-only direct-FX engine may expose the prefill
+    implementation; Decode and combined P/D engines must retain the opaque
+    custom operators used by ACL graph capture.
+    """
+    global _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE, _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE, _FXRT_DUMMY_QUANT_ACTIVE
+
+    _FXRT_DUMMY_QUANT_ACTIVE = (
+        envs_ascend.VLLM_ASCEND_FXRT_DUMMY_QUANT
+        and getattr(getattr(vllm_config, "load_config", None), "load_format", None) == "dummy"
+    )
+
+    requested = envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA
+    moe_requested = envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE
+    kv_config = vllm_config.kv_transfer_config
+    is_prefill_only = kv_config is None or (
+        kv_config.is_kv_producer and not kv_config.is_kv_consumer
+    )
+    compilation_config = vllm_config.compilation_config
+    mode = compilation_config.mode
+    cudagraph_mode = compilation_config.cudagraph_mode
+    is_direct_fx_mode = getattr(mode, "name", None) in {
+        "STOCK_TORCH_COMPILE",
+        "DYNAMO_TRACE_ONCE",
+    } or mode in {1, 2}
+    has_no_cudagraph = (
+        getattr(cudagraph_mode, "name", None) == "NONE"
+        or cudagraph_mode == 0
+    )
+    allowed = is_prefill_only and is_direct_fx_mode and has_no_cudagraph
+    _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = requested and allowed
+    _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE = moe_requested and allowed
+    if requested and not _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE:
+        logger.info(
+            "Ignoring VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA because this "
+            "engine is not a prefill-only direct-FX process"
+        )
+    if moe_requested and not _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE:
+        logger.info(
+            "Ignoring VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE because this "
+            "engine is not a prefill-only direct-FX process"
+        )
+    # Emit the resolved paths once per model-runner initialization, outside
+    # forward/Dynamo tracing. Requested=1 can still resolve to opaque ops.
+    logger.info(
+        "[DSV4_PREFILL_PATH] DSA(requested=%d active=%d path=%s) | "
+        "MOE(requested=%d active=%d path=%s) | "
+        "(prefill_only=%s direct_fx=%s no_acl_graph=%s)",
+        requested,
+        _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE,
+        "decomposed" if _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE else "vllm::dsa_forward",
+        moe_requested,
+        _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE,
+        "decomposed" if _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE else "vllm::moe_forward_shared",
+        is_prefill_only,
+        is_direct_fx_mode,
+        has_no_cudagraph,
+    )
+    return _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE
+
+
+def fxrt_prefill_decompose_enabled() -> bool:
+    """Whether P workers should expose DSV4 attention to the FXRT backend.
+
+    The environment switch is resolved against the engine's PD role before
+    model construction. Decode workers rely on opaque custom ops for ACL graph
+    capture even when they inherit the switch from a shared launch environment.
+    """
+    if _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE is not None:
+        return _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE
+    return envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA
+
+
+def fxrt_moe_prefill_decompose_enabled() -> bool:
+    """Resolve MoE independently of DSA, with the same engine eligibility."""
+    if _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE is not None:
+        return _FXRT_MOE_PREFILL_DECOMPOSE_ACTIVE
+    return envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE
+
+
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -436,6 +529,9 @@ def enable_custom_op():
 
         # register the meta implementation for custom kernel if necessary
         import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+        from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
+
+        register_rms_quant_meta()
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
@@ -447,6 +543,9 @@ def enable_custom_op():
                 bootstrap_custom_op_env(include_vendor_lib=True)
                 import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
                 import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+                from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
+
+                register_rms_quant_meta()
 
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
@@ -684,6 +783,12 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
+    # set_ is an eager-only lifetime hint.  When captured into the decomposed
+    # FXRT graph it mutates the producer tensor's metadata before the consumer
+    # custom call executes, turning e.g. routed MoE activations into shape [0].
+    # FXRT owns graph-buffer liveness, so the hint is unnecessary there.
+    if fxrt_moe_prefill_decompose_enabled():
+        return
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 

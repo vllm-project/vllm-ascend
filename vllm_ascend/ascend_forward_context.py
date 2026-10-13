@@ -11,6 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -341,7 +342,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version == AscendDeviceType.A2:
-        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        if envs.VLLM_ASCEND_FXRT_TEST_A3_ALLTOALL and num_tokens > mc2_tokens_capacity:
+            # A2 validation of A3's unfused high-token path. Do not select A3
+            # MC2 kernels on A2 or change the production/default selector.
+            moe_comm_type = _select_a3_moe_comm_method(
+                num_tokens, vllm_config, quant_type, mc2_tokens_capacity, 0
+            )
+            logger.info(
+                "FXRT_TEST_A3_ALLTOALL tokens=%d capacity=%d ep=%d method=%s",
+                num_tokens, mc2_tokens_capacity, get_ep_group().world_size, moe_comm_type.name,
+            )
+        else:
+            moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
     elif soc_version == AscendDeviceType.A3:
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
