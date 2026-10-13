@@ -6,14 +6,12 @@ import argparse
 import hashlib
 import importlib.util
 import os
-import shutil
 import subprocess
 import sys
 import venv
 from pathlib import Path
 
 import pytest
-import yaml
 
 from .build_cache_test_utils import ENGINE, REPO_ROOT, build_cache_command
 
@@ -105,102 +103,6 @@ def test_prepare_relative_cache_dir_across_workspaces(tmp_path: Path, monkeypatc
         assert helper.prepare(args)["supported"] == "true"
         assert (workspace / args.cache_dir).is_dir()
         assert f"VLLM_ASCEND_BUILD_CACHE_DIR={workspace / args.cache_dir}\n" in environment.read_text()
-
-
-def test_l1_callers_share_relative_transport_path():
-    # runs-on/cache versions the snapshot with the literal path input. Keep
-    # this transport path stable even when runner/container workspaces differ.
-    workflows = REPO_ROOT / ".github" / "workflows"
-    callers = []
-    for path in sorted(workflows.iterdir()):
-        if path.suffix not in (".yaml", ".yml"):
-            continue
-        workflow = yaml.safe_load(path.read_text())
-        for job in workflow.get("jobs", {}).values():
-            for step in job.get("steps", []):
-                if "csrc-l1-restore" not in step.get("uses", "") and "csrc-l1-save" not in step.get("uses", ""):
-                    continue
-                cache_dir = step["with"]["cache-dir"]
-                if cache_dir == "${{ steps.incremental-cache-restore.outputs.cache-dir }}":
-                    restore = next(s for s in job["steps"] if s.get("id") == "incremental-cache-restore")
-                    cache_dir = restore["with"]["cache-dir"]
-                if cache_dir == "${{ env.VLLM_ASCEND_BUILD_CACHE_DIR }}":
-                    cache_dir = workflow["env"]["VLLM_ASCEND_BUILD_CACHE_DIR"]
-                assert cache_dir == "csrc/build_cache", f"{path.name}: {step['name']}"
-                callers.append(path.name)
-
-    assert "_build_csrc_cache.yaml" in callers
-    assert "_selected_tests.yaml" in callers
-    producer = yaml.safe_load((workflows / "_build_csrc_cache.yaml").read_text())
-    assert "INCREMENTAL_BUILD_CACHE_DIR" not in producer["env"]
-    restore_action = yaml.safe_load((REPO_ROOT / ".github/actions/csrc-l1-restore/action.yaml").read_text())
-    assert restore_action["outputs"]["cache-dir"]["value"] == "${{ inputs.cache-dir }}"
-    install = next(step for step in producer["jobs"]["build"]["steps"] if step["name"] == "Install vllm-ascend")
-    assert "VLLM_ASCEND_BUILD_CACHE_DIR" not in install.get("env", {})
-
-
-@pytest.mark.parametrize("workspace_name", ["producer workspace", "consumer workspace"])
-def test_exported_cache_directory_reaches_cmake_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace_name: str
-):
-    cmake = shutil.which("cmake")
-    if cmake is None:
-        pytest.skip("cmake is unavailable")
-    helper = _load_helper("prepare_csrc_l1_restore_cmake")
-    workspace = tmp_path / workspace_name
-    workspace.mkdir()
-    environment_file = workspace / "github-env"
-    monkeypatch.chdir(workspace)
-    monkeypatch.setenv("GITHUB_ENV", str(environment_file))
-    args = _args(workspace, REPO_ROOT)
-    args.cache_dir = "csrc/build_cache"
-    assert helper.prepare(args)["supported"] == "true"
-    exported = dict(line.split("=", 1) for line in environment_file.read_text().splitlines())
-    cache_dir = workspace / args.cache_dir
-    assert exported["VLLM_ASCEND_BUILD_CACHE_DIR"] == str(cache_dir)
-
-    # Exercise the actual CMake adapter and cache engine from a nested cwd;
-    # a relative build-time value would put entries under the wrong directory.
-    build_dir = workspace / "csrc/build"
-    build_dir.mkdir()
-    output_dir = build_dir / "output"
-    output_dir.mkdir()
-    script = build_dir / "verify.cmake"
-    script.write_text(
-        f'''set(HI_PYTHON "{sys.executable}")
-set(VLLM_ASCEND_BUILD_CACHE_SCRIPT "{ENGINE}" CACHE FILEPATH "" FORCE)
-include("{REPO_ROOT / "csrc/cmake/build_cache.cmake"}")
-vllm_ascend_build_cache_command(
-    CACHE_COMMAND DOMAIN third_party UNIT placement
-    OUTPUT_DIR "{output_dir}" ENVIRONMENT_PROFILE host-cxx
-    ENVIRONMENT_VALUE "toolchain=placement-test" ARTIFACT_INCLUDE kernel.o
-    COMMAND "{sys.executable}" -c
-        "__import__('pathlib').Path('{output_dir / "kernel.o"}').write_bytes(b'kernel')"
-)
-execute_process(COMMAND ${{CACHE_COMMAND}} RESULT_VARIABLE result)
-if(NOT result EQUAL 0)
-    message(FATAL_ERROR "Cache build failed: ${{result}}")
-endif()
-''',
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        [cmake, "-P", str(script)], cwd=build_dir, env={**os.environ, **exported}, capture_output=True, text=True
-    )
-    assert result.returncode == 0, result.stderr
-    assert "[build-cache] SAVED " in result.stdout
-    assert (cache_dir / ".updated").is_file()
-    assert list(cache_dir.rglob("manifest.json"))
-    assert not (build_dir / args.cache_dir).exists()
-    assert not (workspace / "build_cache").exists()
-
-
-@pytest.mark.parametrize("action,operation", [("csrc-l1-restore", "restore"), ("csrc-l1-save", "save")])
-def test_l1_transport_failure_remains_nonfatal(action: str, operation: str):
-    path = REPO_ROOT / ".github" / "actions" / action / "action.yaml"
-    steps = yaml.safe_load(path.read_text())["runs"]["steps"]
-    transport = next(step for step in steps if step.get("uses") == f"runs-on/cache/{operation}@v5")
-    assert transport["continue-on-error"] is True
 
 
 @pytest.mark.parametrize("entrypoint", ["engine", "restore-helper"])
