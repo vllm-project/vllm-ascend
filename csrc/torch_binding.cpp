@@ -48,7 +48,6 @@
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
-#include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
@@ -3478,18 +3477,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             ") -> ()"
     );
     ops.impl("npu_scatter_nd_update_sk", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_sk);
-
-    // This operator is planned to be integrated into PTA in the near future.
-    // Once that happens, the implementation in csrc will be removed.
-    ops.def(
-        "npu_lightning_indexer_quant(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
-        "                            Tensor key_dequant_scale, *, Tensor? actual_seq_lengths_query=None, "
-        "                            Tensor? actual_seq_lengths_key=None, Tensor? block_table=None, "
-        "                            int query_quant_mode=0, int key_quant_mode=0, "
-        "                            str layout_query='BSND', str layout_key='BSND',"
-        "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
-    );
-    ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
