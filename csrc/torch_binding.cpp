@@ -48,6 +48,7 @@
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
+#include "attention/fused_quant_scatter_copy_sparse_flash_attention/fused_quant_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
@@ -3566,6 +3567,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_scatter_copy_sparse_flash_attention", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_scatter_copy_sparse_flash_attention);
+
+    ops.def(
+        "npu_fused_quant_scatter_copy_sparse_flash_attention("
+        "Tensor query, Tensor(a!) hbm_kv_bytes, Tensor dram_kv_bytes, "
+        "Tensor hbm_block_table, Tensor dram_block_table, "
+        "Tensor topk_dst_slots, Tensor topk_src_ids, "
+        "Tensor topk_miss_counts, Tensor actual_seq_lengths_query, "
+        "Tensor actual_seq_lengths_kv, Tensor num_cache_tokens, "
+        "Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, "
+        "float scale_value, "
+        "Tensor(b!) attention_out) -> ()"
+    );
+    ops.impl("npu_fused_quant_scatter_copy_sparse_flash_attention",
+             torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_quant_scatter_copy_sparse_flash_attention);
 
     ops.def(
         "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "
