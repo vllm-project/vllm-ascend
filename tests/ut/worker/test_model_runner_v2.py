@@ -415,9 +415,7 @@ def test_execute_model_dummy_syncs_empty_external_dp_step():
         (0, False, False, "external_launcher", 32, True),
     ],
 )
-def test_execute_model_skips_empty_dp_dummy_outside_the_stall(
-    tokens, dummy, profile, backend, dp_size, skip_allreduce
-):
+def test_execute_model_skips_empty_dp_dummy_outside_the_stall(tokens, dummy, profile, backend, dp_size, skip_allreduce):
     runner = _external_dp_runner()
     runner.vllm_config.parallel_config.distributed_executor_backend = backend
     runner.vllm_config.parallel_config.data_parallel_size = dp_size
