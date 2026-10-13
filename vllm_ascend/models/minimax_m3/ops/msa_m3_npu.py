@@ -539,14 +539,21 @@ def minimax_m3_sparse_attn_decode(
     *,
     select_num_idx: torch.Tensor | None = None,
     dequant_scale: torch.Tensor | None = None,
+    cu_seqlens_q: torch.Tensor | None = None,
 ) -> None:
     """Run sparse decode through CANN Ops generic block sparse attention."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
         raise ValueError("Decode query tokens must equal request count times decode_query_len")
 
     key, value = _split_main_kv_cache(kv_cache)
-    query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
-    cu_seqlens_q = _build_cu_seqlens_q(query_lens)
+    # The model metadata builder prepares this immutable uniform prefix once
+    # per query length, outside the per-layer attention/graph execution.
+    # Keep the fallback for direct callers that do not supply model metadata.
+    if cu_seqlens_q is None:
+        query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+        cu_seqlens_q = _build_cu_seqlens_q(query_lens)
+    elif cu_seqlens_q.shape != (seq_lens.shape[0] + 1,) or cu_seqlens_q.dtype != torch.int64:
+        raise ValueError("GBSA cu_seqlens_q must be int64 with request_count + 1 entries")
     if select_num_idx is None:
         select_num_idx = _select_num_idx_from_topk(topk_idx)
 

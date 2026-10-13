@@ -641,6 +641,7 @@ class AscendMiniMaxM3SparseDecodeMetadata:
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
+    cu_seqlens_q: torch.Tensor | None = None
 
 
 @dataclass
@@ -677,6 +678,23 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             device=device,
         )
         self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        # Retain buffers for the builder lifetime: captured graphs keep these
+        # addresses. Different speculative query lengths must not overwrite one
+        # another's prefix. Uniform padding follows the previous decode path.
+        self.decode_cu_seqlens_q_buffers: dict[int, torch.Tensor] = {}
+
+    def _get_decode_cu_seqlens_q(self, num_reqs: int, query_len: int) -> torch.Tensor:
+        if query_len < 1 or num_reqs < 0 or num_reqs > self.context_len_buffer.numel():
+            raise ValueError("Invalid uniform decode batch or query length")
+        if query_len not in self.decode_cu_seqlens_q_buffers:
+            self.decode_cu_seqlens_q_buffers[query_len] = torch.arange(
+                0,
+                (self.context_len_buffer.numel() + 1) * query_len,
+                query_len,
+                dtype=torch.int64,
+                device=self.context_len_buffer.device,
+            )
+        return self.decode_cu_seqlens_q_buffers[query_len][: num_reqs + 1]
 
     def build(
         self,
@@ -753,6 +771,9 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 block_table=block_table[:active_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
+                cu_seqlens_q=(
+                    self._get_decode_cu_seqlens_q(active_decodes, decode_query_len) if active_decodes > 0 else None
+                ),
             )
 
         return AscendMiniMaxM3SparseMetadata(
@@ -838,6 +859,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 block_size=self.block_size,
                 select_num_idx=decode_select_num_idx,
                 dequant_scale=self._dequant_scale,
+                cu_seqlens_q=d.cu_seqlens_q,
             )
 
         if main_md.num_prefills > 0:
