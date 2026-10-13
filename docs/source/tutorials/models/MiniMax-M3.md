@@ -162,6 +162,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "A3 series(BF16)"
 
     ```bash
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -195,6 +196,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "A3 series(W8A8)"
 
     ```bash
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -234,6 +236,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "950DT products"
 
     ```bash
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -280,7 +283,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export HCCL_IF_IP=$local_ip
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -316,7 +319,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export HCCL_IF_IP=$local_ip
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -355,7 +358,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export HCCL_IF_IP=$local_ip
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -392,7 +395,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export HCCL_IF_IP=$local_ip
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -564,16 +567,15 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
-    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -639,13 +641,11 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=2048
-    export VLLM_HOST_IP=$local_ip
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -670,14 +670,14 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
         --max-model-len 263000 \
-        --max-num-batched-tokens 2048 \
+        --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
         --max-num-seqs 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"num_redundant_experts":0}}' \
         --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
@@ -694,6 +694,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         }'
     ```
 
+    Set the short sequence max-num-batched-tokens to 2048.
     Once the preparation is done, start the server with the following command on each node:
 
     1. Prefill node
@@ -729,9 +730,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --vllm-start-port 31260
     ```
 
-    Set `local_ip` and `nic_name` in the Decode template for each node separately. Both Decode nodes use `node_d0_ip` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight Decode ranks to print `Application startup complete`.
+    Set `local_ip` and `nic_name` in the Decode template for each node separately. Both Decode nodes use `node_d0_ip` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight DP ranks to print `Application startup complete`.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to one Prefill rank and eight Decode ranks across three nodes.
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to one Prefill node and eight DP ranks across three nodes.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
@@ -768,9 +769,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
-
+    
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=256
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -833,8 +834,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -908,7 +909,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This starts two Decode API servers on ports `31060` and `31061`.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For 950DT products 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 Decode ranks.
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For 950DT products 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 DP ranks.
 
     ```bash
     unset ftp_proxy
@@ -970,9 +971,9 @@ Key Parameter Descriptions:
 
 **Request forwarding (proxy):**
 
-- Wait until every Prefill and Decode rank prints `Application startup complete` before starting the proxy.
+- Wait until Prefill node and DP ranks prints `Application startup complete` before starting the proxy.
 - The proxy maps every prefill engine endpoint and every decode engine endpoint to a single entry point on port `8009`.
-- If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that all nodes still have free NPU memory after the previous run.
+- If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill node and DP ranks, and that all nodes still have free NPU memory after the previous run.
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
@@ -1063,7 +1064,7 @@ Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donate
 
 Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
-Common pooling exports on every Prefill and Decode rank:
+Common pooling exports on Prefill node and DP ranks:
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1092,16 +1093,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
-    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
-
+    
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1179,15 +1179,14 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
-    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
-
+    
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1274,8 +1273,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=256
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1360,9 +1359,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
-
+    
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -1462,7 +1461,7 @@ Proxy (:8009)
     --client_ttl=120
     ```
 
-2. Start Decode. The A3 KV pool example above retains its two-node layout (`P: DP1/TP4/PP4`, `D: DP4/TP4/PP1`), so use the Section 5.3 launcher with these arguments on the Decode node:
+2. Start Decode. Use the Section 5.3 launcher with these arguments on the Decode node:
 
     ```bash
     python launch_online_dp.py \
@@ -1472,7 +1471,7 @@ Proxy (:8009)
         --vllm-start-port 31060
     ```
 
-    On 950DT, use the Section 5.3 950DT Decode command. Wait until every Decode rank prints `Application startup complete`.
+    On 950DT, use the Section 5.3 950DT Decode command. Wait until every DP ranks prints `Application startup complete`.
 
 3. Start Prefill. On A3, use:
 
