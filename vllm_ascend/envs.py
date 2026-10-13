@@ -36,6 +36,10 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Worker L1 KV read/write legality. 0 (default) disables all hooks, 1 enables
+    # five block states and state/violation logs. Dense PA/MLA only; unadapted
+    # features fail initialization. No KV content dumps or checksums. Not sensitive.
+    "VLLM_ASCEND_KV_GUARD": lambda: bool(int(os.getenv("VLLM_ASCEND_KV_GUARD", "0"))),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

@@ -64,12 +64,24 @@ class GraphUpdateTask:
     provider_index: int
     handle: Any
     event: Any
+    kv_guard: Any = None
 
     def bind(self, params: Params) -> "GraphUpdateTask":
         runtime_kwargs = {**self.kwargs, **params}
         return replace(self, kwargs=runtime_kwargs)
 
     def apply(self, update_stream) -> None:
+        if self.kv_guard is not None:
+            lengths = next(
+                (
+                    self.kwargs[key]
+                    for key in ("context_lens", "actual_seq_kvlen", "actual_seq_lengths_kv")
+                    if self.kwargs.get(key) is not None
+                ),
+                None,
+            )
+            if lengths is not None:
+                self.kv_guard.read(getattr(self.provider, "layer_name", ""), self.kwargs.get("block_table"), lengths)
         torch.npu.graph_task_update_begin(update_stream, self.handle)
         self.operation(**self.kwargs)
         torch.npu.graph_task_update_end(update_stream)
@@ -122,6 +134,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
         operation: Callable[..., Any],
         kwargs: dict[str, Any],
         provider: ParamProvider,
+        kv_guard: Any = None,
     ) -> None:
         stream = torch.npu.current_stream()
         event = torch.npu.ExternalEvent()
@@ -141,6 +154,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
                 provider_index,
                 handle,
                 event,
+                kv_guard,
             )
         )
 
@@ -178,12 +192,13 @@ def register_task(
     operation: Callable[..., Any],
     kwargs: dict[str, Any],
     provider: ParamProvider,
+    kv_guard: Any = None,
 ) -> None:
     graph = _ACTIVE_GRAPH.get()
     if graph is None:
         operation(**kwargs)
     else:
-        graph.register_task(operation, kwargs, provider)
+        graph.register_task(operation, kwargs, provider, kv_guard)
 
 
 def get_capture_resource(
