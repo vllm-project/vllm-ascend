@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_pcp_group,
@@ -449,6 +450,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        # Reuse the graph-stable real-token mask for EPLB statistics. It follows
+        # the same padding/gathers as the activations, so DP/PCP holes remain
+        # explicit rather than being approximated by a single valid prefix.
+        mc2_mask = None
+        if get_current_vllm_config().parallel_config.enable_eplb and _EXTRA_CTX.mc2_mask is not None:
+            mc2_mask = _EXTRA_CTX.mc2_mask[: hidden_states.shape[0]].to(torch.int32)
+
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -457,10 +465,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if mc2_mask is not None:
+                    mc2_mask = nn.functional.pad(mc2_mask, (0, pad_size))
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+            if mc2_mask is not None:
+                mc2_mask = self.moe_config.dp_group.all_gather(mc2_mask, 0)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -470,6 +482,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if mc2_mask is not None:
+                    mc2_mask = nn.functional.pad(mc2_mask, (0, pad_size))
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -479,11 +493,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if mc2_mask is not None:
+                mc2_mask = get_pcp_group().all_gather(mc2_mask, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=mc2_mask.to(torch.bool) if mc2_mask is not None else None,
             padded_hidden_states_shape=None,
             pertoken_scale=None,
         )

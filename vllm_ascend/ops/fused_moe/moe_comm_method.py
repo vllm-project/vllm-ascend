@@ -190,7 +190,11 @@ class MoECommMethod(ABC):
             before_combine_evt=before_combine_evt,
             shared_activation_overlap_start_evt=shared_activation_overlap_start_evt,
             group_list_type=token_dispatch_output.group_list_type,
-            expert_tokens=token_dispatch_output.group_list,
+            expert_tokens=(
+                token_dispatch_output.expert_tokens
+                if token_dispatch_output.expert_tokens is not None
+                else token_dispatch_output.group_list
+            ),
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:

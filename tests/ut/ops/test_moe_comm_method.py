@@ -426,6 +426,7 @@ class TestMoECommMethod(TestBase):
             hidden_states=torch.randn(6, 8),
             group_list=torch.tensor([2, 2, 2]),
             group_list_type=1,
+            expert_tokens=torch.tensor([1, 1, 1]),
             combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=dispatch_topk_weights,
                 expanded_row_idx=torch.arange(8, dtype=torch.int32),
@@ -489,6 +490,8 @@ class TestMoECommMethod(TestBase):
         self.assertFalse(mlp_compute_input.fusion)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
         self.assertIs(mock_apply_mlp.call_args.args[1], quant_method)
+        self.assertIs(mlp_compute_input.group_list, mock_td_instance.token_dispatch.return_value.group_list)
+        self.assertIs(result.expert_tokens, mock_td_instance.token_dispatch.return_value.expert_tokens)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(

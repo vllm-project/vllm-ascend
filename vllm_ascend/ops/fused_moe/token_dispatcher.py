@@ -48,6 +48,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoETokenDispatchOutput,
     TMoECombineMetadata,
 )
+from vllm_ascend.ops.fused_moe.eplb import count_valid_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
@@ -413,12 +414,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
+        valid_mask = token_dispatch_input.routing.mc2_mask
+        recorded_expert_tokens = (
+            count_valid_expert_tokens(topk_ids, valid_mask, first_expert_idx, last_expert_idx - first_expert_idx)
+            if valid_mask is not None
+            else None
+        )
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
             dynamic_scale=dynamic_scale if with_quant else None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
+            expert_tokens=recorded_expert_tokens,
             combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,

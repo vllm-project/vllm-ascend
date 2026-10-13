@@ -82,6 +82,8 @@ class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     combine_metadata: TMoECombineMetadata
     dynamic_scale: torch.Tensor | None = None
     topk_scales: torch.Tensor | None = None
+    # EPLB may exclude padding that must remain in the GMM group list.
+    expert_tokens: torch.Tensor | None = None
 
 
 def build_token_dispatch_input(

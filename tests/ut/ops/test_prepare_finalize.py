@@ -36,6 +36,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # instead of falling back to F.pad outside a worker context.
         mock_vllm_config = MagicMock()
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_vllm_config.parallel_config.enable_eplb = False
         config_context = set_current_vllm_config(mock_vllm_config)
         config_context.__enter__()
         self.addCleanup(config_context.__exit__, None, None, None)
@@ -282,6 +283,42 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(mock_dp_group.reduce_scatter.call_count, 1 if dp_size > 1 else 0)
                 self.assertEqual(mock_pcp_group.all_gather.call_count, 3 if pcp_size > 1 else 0)
                 self.assertEqual(mock_pcp_group.reduce_scatter.call_count, 1 if pcp_size > 1 else 0)
+
+
+def test_allgather_eplb_mask_follows_dp_and_pcp_padding():
+    config = MagicMock()
+    config.dp_size = config.pcp_size = 2
+    config.is_sequence_parallel = False
+    context = MagicMock()
+    context.mc2_mask = torch.tensor([True, True, False])
+    context.max_tokens_across_dp = 4
+    context.max_tokens_across_pcp = 9
+
+    def dp_gather(tensor, dim):
+        remote = torch.tensor([1, 0, 0, 0], dtype=tensor.dtype) if tensor.ndim == 1 else tensor + 10
+        return torch.cat([tensor, remote], dim=dim)
+
+    def pcp_gather(tensor, dim):
+        remote = torch.zeros_like(tensor) if tensor.ndim == 1 else tensor + 20
+        return torch.cat([tensor, remote], dim=dim)
+
+    config.dp_group.all_gather.side_effect = dp_gather
+    pcp_group = MagicMock()
+    pcp_group.all_gather.side_effect = pcp_gather
+    with (
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", context),
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=pcp_group),
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_current_vllm_config") as current_config,
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+    ):
+        current_config.return_value.parallel_config.enable_eplb = True
+        prepared = PrepareAndFinalizeWithAllGather(config).prepare(torch.randn(3, 4), torch.randn(3, 2))
+
+    expected = torch.tensor([1, 1, 0, 0, 1, 0, 0, 0, 0] + [0] * 9, dtype=torch.bool)
+    torch.testing.assert_close(prepared.mc2_mask, expected)
+    assert prepared.hidden_states.shape[0] == prepared.mc2_mask.numel()
+    # The source graph buffer is not mutated by the layout transformations.
+    torch.testing.assert_close(context.mc2_mask, torch.tensor([True, True, False]))
 
 
 class TestSequenceParallelPCP(unittest.TestCase):

@@ -675,6 +675,28 @@ def test_allgather_bf16_lora_skips_quant_backend_validation():
     assert output.dynamic_scale is None
 
 
+def test_allgather_dispatch_keeps_group_list_separate_from_valid_load():
+    dispatcher = TokenDispatcherWithAllGather(top_k=2, num_experts=4, num_local_experts=4)
+    ids = torch.tensor([[0, 1], [0, 0], [2, 3], [1, 1]], dtype=torch.int32)
+    raw_counts = torch.tensor([3, 3, 1, 1], dtype=torch.int64)
+    input = build_token_dispatch_input_fixture(
+        hidden_states=torch.randn(4, 8),
+        topk_weights=torch.full((4, 2), 0.5),
+        topk_ids=ids,
+        mc2_mask=torch.tensor([True, False, True, False]),
+    )
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=(torch.randn(8, 8), torch.arange(8), raw_counts, None),
+    ) as init:
+        result = dispatcher.token_dispatch(input)
+
+    torch.testing.assert_close(result.group_list, raw_counts)
+    torch.testing.assert_close(result.expert_tokens, torch.ones(4, dtype=torch.int64))
+    assert init.call_args.args[1] is ids
+    assert result.combine_metadata.topk_weights is input.topk_weights
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
     def setUp(self):
         # Mock dependencies

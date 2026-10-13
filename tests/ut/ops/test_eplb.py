@@ -1,11 +1,13 @@
 # SPDX-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import pytest
 import torch
 
 from vllm_ascend.ops.fused_moe.eplb import (
     EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
     build_expert_replica_routing_table,
+    count_valid_expert_tokens,
     map_to_physical,
     map_to_physical_for_ascend,
     record_expert_tokens,
@@ -93,3 +95,23 @@ def test_map_and_record_operator_counts():
     torch.testing.assert_close(expert_load, counts * 2)
     record_expert_tokens(counts, expert_load, torch.tensor(False), 1, 0)
     torch.testing.assert_close(expert_load, counts * 2)
+
+
+@pytest.mark.parametrize("mask", [[True] * 5, [False] * 5, [True, False, True, False, True]])
+@pytest.mark.parametrize("local_start,local_count", [(0, 8), (4, 4), (0, 0)])
+def test_count_valid_expert_tokens_excludes_padding_and_nonlocal_ids(mask, local_start, local_count):
+    ids = torch.tensor([[0, 4], [4, 4], [5, 7], [2, 7], [-1, 8]], dtype=torch.int32)
+    valid = torch.tensor(mask)
+    expected = torch.zeros(local_count, dtype=torch.int64)
+    for row, real in zip(ids.tolist(), mask):
+        if real:
+            for expert in row:
+                if local_start <= expert < local_start + local_count:
+                    expected[expert - local_start] += 1
+    actual = count_valid_expert_tokens(ids, valid, local_start, local_count)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_count_valid_expert_tokens_empty_input():
+    actual = count_valid_expert_tokens(torch.empty(0, 2, dtype=torch.int32), torch.empty(0, dtype=torch.bool), 3, 5)
+    torch.testing.assert_close(actual, torch.zeros(5, dtype=torch.int64))
