@@ -65,6 +65,10 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 !!! note
 
+    The v0.30.0rc1 release is compatible with both CANN 9.1.0 and CANN 9.2.0 (with the matching NNAL). The table lists the validated CANN 9.2.0 stack. The CANN 9.2.0 stack has been validated with the release models, and prebuilt images with the full package are available at [quay.io/ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags). For details, see [Installation Guide > Hardware and software stack](../getting_started/installation.md#installation-hardware-software-stack).
+
+!!! note
+
     If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/project/mindie-turbo) as well.
 
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
