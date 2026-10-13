@@ -398,6 +398,12 @@ Before you start, please:
             help="Tensor parallel size."
         )
         parser.add_argument(
+            "--pcp-size",
+            type=int,
+            default=1,
+            help="Prefill context parallel size within each DP rank."
+        )
+        parser.add_argument(
             "--dp-size-local",
             type=int,
             default=-1,
@@ -432,6 +438,8 @@ Before you start, please:
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
+    pcp_size = args.pcp_size
+    devices_per_dp_rank = tp_size * pcp_size
     dp_size_local = args.dp_size_local
     if dp_size_local == -1:
         dp_size_local = dp_size
@@ -451,6 +459,7 @@ Before you start, please:
             dp_address,
             dp_rpc_port,
             str(tp_size),
+            str(pcp_size),
         ]
         subprocess.run(command, check=True)
 
@@ -461,11 +470,11 @@ Before you start, please:
             sys.exit(1)
 
         processes = []
-        num_cards = dp_size_local * tp_size
+        num_cards = dp_size_local * devices_per_dp_rank
         for i in range(dp_size_local):
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
-            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+            visible_devices = ",".join(str(x) for x in range(i * devices_per_dp_rank, (i + 1) * devices_per_dp_rank))
             process = multiprocessing.Process(target=run_command,
                                             args=(visible_devices, dp_rank,
                                                     vllm_engine_port))
@@ -482,6 +491,7 @@ Before you start, please:
     |---------|----|--------|-------|-----------|
     |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
     |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+    |`--pcp-size`|int|No|1|Prefill context parallel size within each DP rank. Each rank uses `tp-size * pcp-size` devices.|
     |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
     |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
     |`--dp-address`|str|Yes|-|IP address of the data parallel master node.|
@@ -642,9 +652,17 @@ Before you start, please:
 
 === "A3 series with dspark"
 
+    This configuration uses the V2 model runner with 1P1D: DP4 × TP1 × PCP4 on the prefill node and DP16 × TP1 × PCP1 on the decode node, using 16 logical NPU devices per node.
+
     1. Prefill node
 
         ```shell
+        #!/usr/bin/env bash
+        set -e
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
+
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1 # change to your own ip
 
@@ -652,6 +670,7 @@ Before you start, please:
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
         export HCCL_EXEC_TIMEOUT=204
@@ -659,11 +678,11 @@ Before you start, please:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=1800
+        export HCCL_BUFFSIZE=1024
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Ensure the model path matches the directory recorded during download
@@ -675,6 +694,7 @@ Before you start, please:
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --prefill-context-parallel-size $8 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
@@ -694,7 +714,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -703,7 +723,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
-                                "tp_size": 4
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -716,11 +736,16 @@ Before you start, please:
     2. Decode node
 
         ```shell
+        #!/usr/bin/env bash
+        set -e
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
+
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
         export HCCL_EXEC_TIMEOUT=204
@@ -732,8 +757,9 @@ Before you start, please:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=2400
+        export HCCL_BUFFSIZE=1800
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
         
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -748,7 +774,7 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 480 \
+            --max-num-batched-tokens 360 \
             --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
@@ -764,7 +790,7 @@ Before you start, please:
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
             --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
@@ -773,7 +799,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
-                                "tp_size": 4
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -794,6 +820,8 @@ Before you start, please:
 
 3. Start the server with the following command on each node.
 
+    For **A3 series**:
+
     1. Prefill node
 
         ```shell
@@ -808,7 +836,25 @@ Before you start, please:
         python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
+    For **A3 series with dspark**:
+
+    1. Prefill node
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 4 --tp-size 1 --pcp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        ```
+
+    2. Decode node
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --pcp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+        ```
+
 4. Deploy the P-D disaggregation proxy.
+
+    Wait until all prefill and decode instances are ready before starting the proxy.
 
     Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
