@@ -32,6 +32,7 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -266,8 +267,9 @@ def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    # DFlash2 graph is on the V2 blacklist, so this case stays on V1 without
-    # an explicit runner env pin. test_dflash2_v2_acceptance covers V2 eager.
+    if not vllm_version_is("0.30.0"):
+        pytest.skip("vLLM #57934: Model Runner V1 rejects DFlash candidate-head drafts on main")
+
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
