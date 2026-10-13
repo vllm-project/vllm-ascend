@@ -62,6 +62,8 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
@@ -85,6 +87,9 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
+# The (use_mla, use_sparse, use_compress) key that selects the DeepSeek sparse
+# attention backend, the only Ascend backend that restricts the KV cache dtype.
+_DSV4_BACKEND_KEY = (True, False, True)
 
 
 class NPUPlatform(Platform):
@@ -251,6 +256,11 @@ class NPUPlatform(Platform):
         use_sparse = attn_selector_config.use_sparse
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
+
+        if backend_key == _DSV4_BACKEND_KEY:
+            from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+
+            _reject_unsupported_kv_cache_dtype(cls.device_name, AscendDSABackend, attn_selector_config)
 
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
@@ -730,6 +740,30 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
         ", ".join(gqa_layer_ids),
         cache_config.cache_dtype,
+    )
+
+
+def _reject_unsupported_kv_cache_dtype(
+    device_name: str,
+    backend_cls: type[AttentionBackend],
+    attn_selector_config: AttentionSelectorConfig,
+) -> None:
+    """Reject a KV cache dtype the selected backend does not accept.
+
+    Upstream has each backend declare ``supported_kv_cache_dtypes`` and raises
+    from the platform once no backend accepts the request, listing the dtypes
+    that would have worked (see ``vllm/platforms/rocm.py``). Ascend selects its
+    backends by name and has no ``get_valid_backends`` of its own, so the same
+    rejection is applied here for the backend it selected.
+    """
+    if backend_cls.supports_kv_cache_dtype(attn_selector_config.kv_cache_dtype):
+        return
+
+    supported = sorted(backend_cls.supported_kv_cache_dtypes)
+    hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+    raise ValueError(
+        f"No valid attention backend found for {device_name} with "
+        f"{attn_selector_config!r}. Reasons: kv_cache_dtype not supported.{hint}"
     )
 
 

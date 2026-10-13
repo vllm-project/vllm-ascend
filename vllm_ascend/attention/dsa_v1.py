@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -219,8 +220,33 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
     return max(compress_ratio, 1)
 
 
+# The KV cache dtypes the A5 sparse-attention path can store. It builds a single
+# implementation, ``kv_compress_epilog``, whose binding accepts only E5M2/E4M3;
+# its bf16 counterpart needs ``sparse_flash_mla``, which the ascend950 operator
+# set does not build.
+_A5_DSV4_KV_CACHE_DTYPES = ("fp8", "fp8_e4m3", "fp8_e5m2")
+
+
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "float16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype is None:
+            return True
+        if not get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            return kv_cache_dtype in cls.supported_kv_cache_dtypes
+        # "auto" is not accepted here: it resolves to the model dtype, which the
+        # single A5 implementation cannot run.
+        return kv_cache_dtype in _A5_DSV4_KV_CACHE_DTYPES
 
     @staticmethod
     def get_name() -> str:
