@@ -281,14 +281,8 @@ def test_simple_cpu_offload_connector_carries_class_name_alias(
     monkeypatch.setattr(KVConnectorFactory, "_registry", {})
     register_connector()
 
-    assert (
-        KVConnectorFactory._registry["SimpleCPUOffloadConnector"]()
-        is AscendSimpleCPUOffloadConnector
-    )
-    assert (
-        KVConnectorFactory._registry["AscendSimpleCPUOffloadConnector"]()
-        is AscendSimpleCPUOffloadConnector
-    )
+    assert KVConnectorFactory._registry["SimpleCPUOffloadConnector"]() is AscendSimpleCPUOffloadConnector
+    assert KVConnectorFactory._registry["AscendSimpleCPUOffloadConnector"]() is AscendSimpleCPUOffloadConnector
 
 
 def test_no_alias_connectors_inherit_base_stats_default() -> None:
