@@ -668,7 +668,13 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
         )
 
 
-def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
+@pytest.mark.parametrize(
+    ("num_speculative_blocks", "local_blocks", "expected_block"),
+    [(2, [1, 2, 3, 4], 2), (0, [4], 4)],
+)
+def test_compute_mamba_state_selects_pre_speculative_local_block(
+    num_speculative_blocks: int, local_blocks: list[int], expected_block: int
+) -> None:
     thread = make_thread(num_speculative_tokens=2)
 
     result = thread._compute_group_block_ids(
@@ -678,19 +684,19 @@ def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
         0,
         16,
         16,
-        [1, 2, 3, 4],
-        [1, 2, 3, 4],
+        local_blocks,
+        local_blocks,
         [8, 9, 10],
         32,
         31,
         0,
         1,
         1,
-        make_mamba_spec(),
+        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
         0,
     )
 
-    assert result == [(0, [2], [10])]
+    assert result == [(0, [expected_block], [10])]
 
 
 def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
