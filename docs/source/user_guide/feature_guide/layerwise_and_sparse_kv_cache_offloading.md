@@ -1,5 +1,8 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
+Layerwise and sparse KV cache offloading are supported only in disaggregated
+Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
+
 This guide explains how to configure:
 
 - Layerwise KV cache offloading during the Prefill phase
@@ -171,16 +174,7 @@ the referenced PR revision needs this device-check adjustment. The remaining
 inputs stay on NPU. Ordinary CPU allocations are not valid replacements for
 registered DRAM, and the Python integration does not move the host cache to NPU.
 
-For launch settings, see [Configure Fused LIM and Copy-SFA](#configure-fused-lim-and-copy-sfa).
-
 ## 2. Layerwise KV Cache Offload on Prefill
-
-Use this mode on a dedicated Prefill node with:
-
-- `kv_role: "kv_producer"`;
-- the Memcache backend;
-- an MLA, SFA, or DSA attention backend; and
-- eager execution.
 
 For a combined deployment, Prefill TP must be greater than or equal to Decode
 TP and divisible by it.
@@ -285,101 +279,9 @@ On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"
 
 | Parameter | Description |
 | :--- | :--- |
-| `use_fused_overlap` | Defaults to `false`, selecting fused LIM and Copy-SFA. Set to `true` to select the alternative fused sparse-attention overlap operator. |
-| `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. See the requirements below. |
+| `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
 | `dram_size_per_dp_GB` | Defaults to `128` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |
-
-### Configure Fused LIM and Copy-SFA
-
-After installing the [native operators](#fused-copy-sfa-operators),
-enable sparse offload in the Decode node's `--additional-config`.
-Fused LIM and Copy-SFA are selected by default:
-
-```json
-{
-    "sparse_kv_offload_config": {
-        "enabled": true
-    }
-}
-```
-
-The default hot buffer is `(1 + num_speculative_tokens) * 2048` tokens:
-2048 without speculation, or 8192 with MTP3. There is no need to set
-`topk_buffer_size`, `keep_device_kv_cache`, or `use_fused_overlap` explicitly.
-The host pool defaults to 128 GiB per DP rank; set `dram_size_per_dp_GB` only
-to override that budget for your deployment.
-
-Merge this object with any existing additional settings and pass
-`--additional-config` once. Keep the Prefill configuration from section 2;
-enable these fused operators only on Decode in a PD deployment.
-
-The fused path has these additional requirements:
-
-- The model must use `index_topk=2048` and a cache block size of `128`.
-- Let `Q_max = 1 + num_speculative_tokens`, or `1` without speculative decoding.
-  `Q_max` must be between `1` and `14`.
-- `topk_buffer_size` must be a multiple of `256`, at least `Q_max * 2048`,
-  and at most `32512` (the largest aligned value within LIM's `32640` limit).
-  The runtime allocates two additional tail blocks;
-  do not add them to this setting.
-- Keep `use_fused_overlap=false` for this path. Setting it to `true` selects
-  the alternative overlap operator instead.
-- Use BF16 for the main KV cache. Sparse SFA C8 is not supported.
-  Sparse LI C8 serving is supported for the device-resident indexer:
-  add `--attention_config.indexer_kv_dtype int8` so fused Copy-SFA
-  selects `npu_fused_quant_lightning_indexer_manage`.
-
-| Draft tokens | `Q_max` | Default / minimum `topk_buffer_size` |
-| :--- | :--- | :--- |
-| No speculative decoding | 1 | 2048 |
-| MTP1 | 2 | 4096 |
-| MTP2 | 3 | 6144 |
-| MTP3 | 4 | 8192 |
-| MTP5 | 6 | 12288 |
-| DSpark8 | 9 | 18432 |
-
-For example, the following A3 Decode command uses GLM-5.2 W4A8 with DP2 TP8,
-MTP3, and `FULL_DECODE_ONLY` target graphs. Replace the model path and size
-the model length, concurrency and host-cache budget for your deployment.
-The command assumes the dependency environment from section 1 is already set.
-
-```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/GLM-5.2-w4a8 \
-    --host 0.0.0.0 \
-    --port 8200 \
-    --tensor-parallel-size 8 \
-    --data-parallel-size 2 \
-    --enable-expert-parallel \
-    --quantization ascend \
-    --block-size 128 \
-    --max-model-len 131072 \
-    --max-num-seqs 4 \
-    --max-num-batched-tokens 8192 \
-    --no-enable-prefix-caching \
-    --speculative-config '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16]}' \
-    --additional-config '{
-        "sparse_kv_offload_config": {
-            "enabled": true
-        }
-    }' \
-    --kv-transfer-config '{
-        "kv_connector": "SfaRemoteD2HConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": 20050
-    }'
-```
-
-Here, `enforce_eager` applies only to the MTP draft model. The target uses the
-graph mode configured by `--compilation-config`; do not add a top-level
-`--enforce-eager` when using this graph example. Decode prefix caching is
-disabled, and `keep_device_kv_cache=false` keeps the full main KV in the host
-pool. With DP2, the example reserves `2 * 128 = 256` GiB of host KV memory.
-
-Model Runner V2 uses the same sparse-offload configuration, including MTP and
-`fused_copy_sfa`: set `VLLM_USE_V2_MODEL_RUNNER=1`. For an eager V2 launch,
-replace the graph compilation option with a top-level `--enforce-eager`.
 
 ### DSpark with Sparse Decode Offload
 
