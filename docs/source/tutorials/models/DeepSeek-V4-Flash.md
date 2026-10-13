@@ -657,8 +657,6 @@ Before you start, please:
     1. Prefill node
 
         ```shell
-        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
-
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1 # change to your own ip
 
@@ -732,8 +730,6 @@ Before you start, please:
     2. Decode node
 
         ```shell
-        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
-
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
