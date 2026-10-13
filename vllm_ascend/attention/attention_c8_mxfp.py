@@ -875,13 +875,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if self.vllm_config.kv_transfer_config is not None and not uses_mooncake_connector(
             self.vllm_config.kv_transfer_config
         ):
-            # Other connectors move only the K/V pair and would silently drop
-            # the scale caches.
+            # Other connectors may move only K/V and drop the dynamic K scales.
+            # V2 keeps static V scales local; the runner restores them from the
+            # checkpoint when an attention page is assigned.
             raise NotImplementedError(
-                "C8_MXFP v1 PD disaggregation (kv_transfer) is only supported with "
-                "MooncakeConnectorV1, whose block-level transfer registers and moves "
-                "every per-layer cache tensor (FP8 K/V plus both E8M0 scale caches) "
-                "as raw blocks."
+                "C8_MXFP PD disaggregation requires MooncakeConnectorV1 or "
+                "MooncakeConnectorV2 to transfer FP8 K/V and dynamic E8M0 K scales."
             )
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
