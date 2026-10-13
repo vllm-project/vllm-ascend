@@ -108,7 +108,7 @@ spec:
               - mountPath: /root/.cache
                 name: shared-volume
               - mountPath: /usr/local/Ascend/driver
-                name: driver-version
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -126,7 +126,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-version
+        - name: ascend-driver
           hostPath:
             path: /usr/local/Ascend/driver
     workerTemplate:
@@ -218,7 +218,7 @@ spec:
               - mountPath: /root/.cache
                 name: shared-volume
               - mountPath: /usr/local/Ascend/driver
-                name: driver-version
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -236,7 +236,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-version
+        - name: ascend-driver
           hostPath:
             path: /usr/local/Ascend/driver
 ---
