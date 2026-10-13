@@ -144,6 +144,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
+  # Initial routing estimate uses the selector's default; not a measured runtime or timeout.
+  tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py: 600
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
