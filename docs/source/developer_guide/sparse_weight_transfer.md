@@ -97,3 +97,9 @@ replace them with free device IDs on your host. The regression uses one trainer
 and two workers, six BF16 update chunks over the standard and packed paths, and repeated checkpoint names. Each
 worker compares its complete shard, including untouched elements, byte for byte
 after every chunk.
+
+An isolated Qwen3-30B-A3B integration run also completed on eight NPUs with
+TP2/PP2/EP2, a dense seed and three subsequent sparse updates. Steady update wall
+times were 50.6, 62.1 and 44.5 seconds with checksum and local verification enabled.
+These include training export/gather and the complete update lifecycle; they
+are not receiver apply times or evidence of an end-to-end speed improvement.
