@@ -561,7 +561,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This configuration retains the Prefill layout (`DP1 × TP4 × PP4`) on one node and eight Decode ranks (`DP8 × TP4 × PP1`) across two Decode nodes, with four ranks per node. Each node uses all 16 NPU chips. Set `node_p_ip`, `node_d0_ip`, and `node_d1_ip` to the three nodes' communication IP addresses before running the launch and proxy commands.
 
-    The Decode nodes use the default Model Runner V1 (leave `VLLM_USE_V2_MODEL_RUNNER` unset), `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. The Prefill settings are unchanged; only their Mooncake metadata describing the Decode group is updated to DP8. For multimodal requests, replace Decode's `--language-model-only` with the appropriate `--limit-mm-per-prompt` setting as described in [Section 5.5](#55-multimodal-and-vit-dp-optional).
+    The Decode nodes use the default Model Runner V1 (leave `VLLM_USE_V2_MODEL_RUNNER` unset), `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. The Prefill settings are unchanged; only their Mooncake metadata describing the Decode group is updated to DP8.
 
     1. Prefill node
 
@@ -678,7 +678,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-seqs 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
-        --language-model-only \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}' \
         --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
@@ -958,7 +958,7 @@ Key Parameter Descriptions:
 
 **Decode node-specific configurations:**
 
-- `--language-model-only` (optional): Enabled in the A3 text-only example to avoid reserving memory for multimodal processing. Remove it for multimodal requests.
+- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
 - `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
@@ -1542,7 +1542,7 @@ When using local media paths in requests, such as `file:///path/to/video.mp4`, a
 
 If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
 
-The A3 W8A8 Decode example in [Section 5.3](#53-prefill-decode-disaggregation) enables both FLASHCOMM1 and language-model-only mode. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while `--language-model-only` disables multimodal inputs and memory reservation. Omit `--language-model-only` when serving images or videos.
+FLASHCOMM1 and language-model-only mode should not be enabled at the same time for MiniMax-M3 serving. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`.
 
 ```bash
 # Enable FLASHCOMM1.
