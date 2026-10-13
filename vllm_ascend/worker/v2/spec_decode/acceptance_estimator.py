@@ -27,10 +27,11 @@ class AscendOnlineAcceptanceEstimator(OnlineAcceptanceEstimator):
     ) -> None:
         super().__init__(max_num_reqs, num_speculative_steps, device)
 
-        # ACL graph padded rows use idx_mapping == -1. Reserve a sink row so
-        # graph replay can keep fixed shapes without overwriting a live request.
+        # ACL graph padded rows use idx_mapping == -1. Reserve one sink row per
+        # batch position to keep graph shapes fixed without duplicate scatter
+        # destinations or overwriting a live request's persistent state.
         sentinel = torch.zeros(
-            1,
+            max_num_reqs,
             num_speculative_steps,
             dtype=torch.float32,
             device=device,
@@ -121,7 +122,13 @@ class AscendOnlineAcceptanceEstimator(OnlineAcceptanceEstimator):
         num_tokens = logits.shape[0]
         idx_mapping = idx_mapping.to(torch.long)
         valid = idx_mapping >= 0
-        safe_idx = torch.where(valid, idx_mapping, self._sentinel_idx)
+        batch_idx = torch.arange(num_tokens, device=self.device)
+        if draft_step.dim() > 0:
+            step_idx = draft_step.to(torch.long)
+            batch_idx = batch_idx // self.num_speculative_steps
+        else:
+            step_idx = draft_step.to(torch.long).expand(num_tokens)
+        safe_idx = torch.where(valid, idx_mapping, self._sentinel_idx + batch_idx)
         temperature_idx = torch.where(valid, idx_mapping, 0)
 
         row_temperature = temperature[temperature_idx].to(torch.float32)
@@ -132,22 +139,16 @@ class AscendOnlineAcceptanceEstimator(OnlineAcceptanceEstimator):
         )
         scaled_logits = logits.to(torch.float32) / row_temperature.unsqueeze(1)
 
-        max_logits = scaled_logits.amax(dim=-1)
-        log_max_prob = max_logits - torch.logsumexp(scaled_logits, dim=-1)
-        log_max_prob = torch.minimum(log_max_prob, torch.zeros_like(log_max_prob))
+        # Shift before reducing: subtracting logsumexp from a large unshifted
+        # maximum loses the low bits that encode the acceptance feature.
+        shifted_logits = scaled_logits - scaled_logits.amax(dim=-1, keepdim=True)
+        log_max_prob = -torch.logsumexp(shifted_logits, dim=-1)
         complement = (-torch.expm1(log_max_prob)).clamp_min(torch.finfo(torch.float32).tiny)
         features = (log_max_prob - torch.log(complement)).clamp(
             min=-self.MAX_LOG_ODDS,
             max=self.MAX_LOG_ODDS,
         )
         features = torch.where(valid, features, 0.0)
-
-        if draft_step.dim() > 0:
-            step_idx = draft_step.to(torch.long)
-            batch_idx = torch.arange(num_tokens, device=self.device) // self.num_speculative_steps
-        else:
-            step_idx = draft_step.to(torch.long).expand(num_tokens)
-            batch_idx = torch.arange(num_tokens, device=self.device)
 
         probabilities = torch.sigmoid(self.slope[0] * features + self.intercepts[step_idx])
         probabilities = torch.where(valid, probabilities, 0.0)
