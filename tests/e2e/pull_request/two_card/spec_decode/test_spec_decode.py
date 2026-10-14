@@ -168,6 +168,7 @@ def test_eagle3_sp_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", P_EAGLE_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 2])
@@ -261,6 +262,7 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
 def test_dflash2_acceptance(

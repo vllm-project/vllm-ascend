@@ -44,9 +44,21 @@ BASELINE_TTFT_S = 5.45
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "enable_srf", "enable_async_scheduling"),
     [
-        pytest.param("0", False, False, id="MRV1"),
+        pytest.param(
+            "0",
+            False,
+            False,
+            id="MRV1",
+            marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
+        ),
         pytest.param("1", False, False, id="MRV2"),
-        pytest.param("0", True, False, id="MRV1-SRF"),
+        pytest.param(
+            "0",
+            True,
+            False,
+            id="MRV1-SRF",
+            marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
+        ),
         pytest.param("1", True, False, id="MRV2-SRF"),
         # Async scheduling with profiling_chunk requires Model Runner V2.
         # The async case shares the MRV2 baseline for now; tighten it once

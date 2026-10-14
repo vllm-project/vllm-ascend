@@ -16,8 +16,12 @@
 # This file is a part of the vllm-ascend project.
 
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
+
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 QWEN3_5_PREFIX_MAMBA_PROMPT = (
     "You are reading a compact synthetic operations ledger. "

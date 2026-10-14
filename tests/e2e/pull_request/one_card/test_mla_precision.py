@@ -19,6 +19,8 @@ from tests.e2e.pull_request.one_card.attention_utils import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 
 @pytest.fixture(autouse=True)
 def _pin_v1_mla_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:

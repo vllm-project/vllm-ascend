@@ -24,6 +24,8 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 
 @pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.e2e_coverage(

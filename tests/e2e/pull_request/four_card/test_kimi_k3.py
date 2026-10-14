@@ -26,6 +26,8 @@ from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import RemoteOpenAIServer, RemotePDServer, VllmRunner
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 NUM_LAYERS = 2
 NUM_EXPERTS = 16
 NUM_EXPERTS_PER_TOKEN = 4

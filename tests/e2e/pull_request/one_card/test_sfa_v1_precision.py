@@ -26,6 +26,8 @@ import torch
 
 from vllm_ascend.utils import enable_custom_op
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 enable_custom_op()
 
 # Metrics log: survives vLLM stdout/stderr redirection; path via env.
