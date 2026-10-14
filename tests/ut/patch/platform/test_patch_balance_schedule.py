@@ -321,11 +321,15 @@ def _schedule_body_ast(source: str) -> str:
     class _BalanceDeltaStripper(ast.NodeTransformer):
         def visit_Call(self, node: ast.Call):  # noqa: N802
             if isinstance(node.func, ast.Name) and node.func.id == "vllm_version_is":
-                return ast.Constant(value=vllm_version_is(node.args[0].value))
+                version = node.args[0]
+                assert isinstance(version, ast.Constant) and isinstance(version.value, str)
+                return ast.Constant(value=vllm_version_is(version.value))
             return self.generic_visit(node)
 
         def visit_BoolOp(self, node: ast.BoolOp):  # noqa: N802
-            node = self.generic_visit(node)
+            visited = self.generic_visit(node)
+            assert isinstance(visited, ast.BoolOp)
+            node = visited
             is_and = isinstance(node.op, ast.And)
             values = []
             for value in node.values:
