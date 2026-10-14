@@ -147,9 +147,7 @@ class AscendInputBatch(InputBatch):
         return cls(
             **base_fields,
             seq_lens_np=seq_lens_np,
-            attn_state=(
-                AscendAttentionState.PrefillNoCache if is_cpp_profile else AscendAttentionState.DecodeOnly
-            ),
+            attn_state=(AscendAttentionState.PrefillNoCache if is_cpp_profile else AscendAttentionState.DecodeOnly),
             is_dummy=True,
             is_cpp_profile=is_cpp_profile,
         )
