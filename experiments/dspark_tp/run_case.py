@@ -43,6 +43,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--port", type=int, default=8006)
+    parser.add_argument("--model", default="/home/vllm/weights/Qwen3-4B/")
+    parser.add_argument("--draft-model", default="/home/vllm/weights/Qwen3-4b-dspark")
+    parser.add_argument("--max-model-len", type=int, default=256)
+    parser.add_argument("--max-num-seqs", type=int, default=16)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.86)
+    parser.add_argument("--input-len", type=int, default=128)
+    parser.add_argument("--output-len", type=int, default=128)
+    parser.add_argument("--max-concurrency", type=int, default=16)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-prompts", type=int, default=16)
@@ -96,12 +105,12 @@ def ensure_port_free(port: int) -> None:
             raise RuntimeError(f"port {port} is already in use")
 
 
-def speculative_config(case: str) -> dict | None:
+def speculative_config(case: str, draft_model: str) -> dict | None:
     if case == "target":
         return None
     config = {
         "method": "dspark",
-        "model": "/home/vllm/weights/Qwen3-4b-dspark",
+        "model": draft_model,
         "num_speculative_tokens": 5,
     }
     if case in ("adaptive", "physical"):
@@ -113,28 +122,28 @@ def serve_command(args: argparse.Namespace) -> list[str]:
     command = [
         "vllm",
         "serve",
-        "/home/vllm/weights/Qwen3-4B/",
+        args.model,
         "--host",
         "0.0.0.0",
         "--port",
         str(args.port),
         "--max-model-len",
-        "256",
+        str(args.max_model_len),
         "--served-model-name",
         "auto",
         "--gpu-memory-utilization",
-        "0.86",
+        str(args.gpu_memory_utilization),
         "--tensor-parallel-size",
         str(args.tp),
         "--max-num-seqs",
-        "16",
+        str(args.max_num_seqs),
         "--async-scheduling",
         "--compilation-config",
         json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY"}, separators=(",", ":")),
         "--safetensors-load-strategy",
         "prefetch",
     ]
-    spec = speculative_config(args.case)
+    spec = speculative_config(args.case, args.draft_model)
     if spec is not None:
         command.extend(("--speculative-config", json.dumps(spec, separators=(",", ":"))))
     if args.case == "physical":
@@ -172,19 +181,21 @@ def benchmark_command(args: argparse.Namespace, output_dir: Path, filename: str,
         "--model",
         "auto",
         "--tokenizer",
-        "/home/vllm/weights/Qwen3-4B/",
+        args.model,
         "--dataset-name",
         "random",
         "--random-input-len",
-        "128",
+        str(args.input_len),
         "--random-output-len",
-        "128",
+        str(args.output_len),
         "--num-prompts",
         str(prompts),
         "--max-concurrency",
-        "16",
+        str(args.max_concurrency),
         "--request-rate",
         "inf",
+        "--temperature",
+        str(args.temperature),
         "--ignore-eos",
         "--seed",
         "20261013",
@@ -224,6 +235,10 @@ def main() -> int:
         raise ValueError("tp must be one of 1, 2, 4, 8, 16")
     if args.device_offset < 0 or args.device_offset + args.tp > 16:
         raise ValueError("device-offset must select devices within 0..15")
+    if args.input_len + args.output_len > args.max_model_len:
+        raise ValueError("input-len + output-len must not exceed max-model-len")
+    if args.max_concurrency > args.max_num_seqs:
+        raise ValueError("max-concurrency must not exceed max-num-seqs")
     ensure_port_free(args.port)
 
     output_dir = Path(args.output_root) / f"tp{args.tp}" / args.case
@@ -254,6 +269,15 @@ def main() -> int:
         "visible_devices": env["ASCEND_RT_VISIBLE_DEVICES"],
         "device_offset": args.device_offset,
         "physical_min_k": args.physical_min_k,
+        "model": args.model,
+        "draft_model": args.draft_model if args.case != "target" else None,
+        "max_model_len": args.max_model_len,
+        "max_num_seqs": args.max_num_seqs,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "input_len": args.input_len,
+        "output_len": args.output_len,
+        "max_concurrency": args.max_concurrency,
+        "temperature": args.temperature,
         "serve_command": command,
         "num_prompts": args.num_prompts,
         "runs": args.runs,
