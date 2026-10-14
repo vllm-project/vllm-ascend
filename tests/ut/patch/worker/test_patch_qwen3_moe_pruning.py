@@ -13,6 +13,7 @@ import torch
 def _load_pruning_module():
     module_path = Path(__file__).parents[4] / "vllm_ascend" / "patch" / "worker" / "patch_qwen3_moe_pruning.py"
     spec = importlib.util.spec_from_file_location("patch_qwen3_moe_pruning_under_test", module_path)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

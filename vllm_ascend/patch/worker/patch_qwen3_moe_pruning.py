@@ -1,19 +1,3 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Patch Qwen3MoE expert pruning support into vLLM.
 
 The pruning table is passed by:
@@ -138,15 +122,17 @@ def _get_expert_pruning_map(vllm_config) -> dict[int, tuple[int, ...]] | None:
 
     config = vllm_config.model_config.hf_text_config
     ordered_map = _load_ordered_expert_map(expert_list_file)
-    return {
-        layer_idx: _get_pruned_expert_ids(
+    pruning_map: dict[int, tuple[int, ...]] = {}
+    for layer_idx in ordered_map:
+        expert_ids = _get_pruned_expert_ids(
             vllm_config,
             layer_idx,
             config.num_experts,
             config.num_experts_per_tok,
         )
-        for layer_idx in ordered_map
-    }
+        assert expert_ids is not None
+        pruning_map[layer_idx] = expert_ids
+    return pruning_map
 
 
 def _maybe_prune_gate_weight(
@@ -251,8 +237,10 @@ def _patch_qwen3_moe_pruning() -> None:
     def patched_load_weights(self, weights):
         def pruned_weights():
             for name, loaded_weight in weights:
-                if getattr(self, "expert_pruning_map", None) is not None and ".mlp.experts." in name and (
-                    ".weight_offset" in name or "_weight_offset" in name
+                if (
+                    getattr(self, "expert_pruning_map", None) is not None
+                    and ".mlp.experts." in name
+                    and (".weight_offset" in name or "_weight_offset" in name)
                 ):
                     continue
                 yield name, _maybe_prune_gate_weight(name, loaded_weight, getattr(self, "expert_pruning_map", None))
@@ -263,5 +251,6 @@ def _patch_qwen3_moe_pruning() -> None:
     qm.Qwen3MoeModel.get_expert_mapping = _patched_get_expert_mapping
     qm.Qwen3MoeModel.load_weights = patched_load_weights
     qm.Qwen3MoeModel._ascend_expert_pruning_patched = True
+
 
 _patch_qwen3_moe_pruning()
