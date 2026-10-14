@@ -34,6 +34,7 @@ struct alignas(8) RecurrentGatedDeltaRuleV310TilingData { // alignas(8)确保8�
     uint32_t hasGama;
     uint32_t hasGamaK;
     uint32_t hasAcceptedTokens;
+    uint32_t stateIndexStride; // 0: legacy packed indices; otherwise full per-request row width.
 };
 #pragma pack(pop)
 } // RecurrentGatedDeltaRuleV310
