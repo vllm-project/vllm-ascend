@@ -7,6 +7,7 @@ scope bodies, not full worker startup, ACL capture, or NPU kernels.
 """
 
 import ast
+import sys
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -35,6 +36,12 @@ def compile_nodes(nodes, scope):
     exec(
         compile(ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[])), str(ROOT), "exec"), scope
     )
+
+
+def class_node(name: str, bases: list[ast.expr], body: list[ast.stmt]) -> ast.ClassDef:
+    if sys.version_info >= (3, 12):
+        return ast.ClassDef(name=name, bases=bases, keywords=[], body=body, decorator_list=[], type_params=[])
+    return ast.ClassDef(name=name, bases=bases, keywords=[], body=body, decorator_list=[])
 
 
 @pytest.fixture
@@ -107,6 +114,8 @@ def wrapper(binding):
             events.append("dp_exit")
 
     class Parent:
+        parent_call: Mock
+
         def execute_model(self, *args, **kwargs):
             return self.parent_call(*args, **kwargs)
 
@@ -156,9 +165,7 @@ def wrapper(binding):
         nodes = [source_node(path, method, owner) for method in methods]
         for node in nodes:
             node.decorator_list = []
-        cls = ast.ClassDef(
-            name=name, bases=[ast.Name(id="Parent", ctx=ast.Load())], keywords=[], body=nodes, decorator_list=[]
-        )
+        cls = class_node(name, [ast.Name(id="Parent", ctx=ast.Load())], nodes)
         compile_nodes([cls], scope)
 
     def make(kind, executor):
@@ -274,6 +281,7 @@ def test_profile_then_set_attn_then_capture_and_propose(wrapper, external):
 
     def consume(*args, **kwargs):
         if external:
+            assert state is not None
             assert state.executor is obj.flashmla_executor and state.defer
         return "output"
 
@@ -281,6 +289,7 @@ def test_profile_then_set_attn_then_capture_and_propose(wrapper, external):
     obj.capture()
     wrapper.call(obj, "Draft")
     if external:
+        assert state is not None
         assert state.executor is None and not state.defer
 
 
@@ -343,15 +352,15 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
             np.array([True, False, True]) if contract == "main" else None,
             True,
         ]
-    state = namedtuple("BatchReqState", fields)(*values)
+    state: Any = namedtuple("BatchReqState", fields)(*values)
 
     class Parent:
         def gather_batch_req_state(self, scheduler_output, dummy_run):
             return state, 4
 
     method = source_node(RUNNER, "gather_batch_req_state", "NPUModelRunner")
-    cls = ast.ClassDef(name="Runner", bases=[ast.Name(id="Parent", ctx=ast.Load())], keywords=[], body=[method])
-    scope = {"np": np, "Parent": Parent}
+    cls = class_node("Runner", [ast.Name(id="Parent", ctx=ast.Load())], [method])
+    scope: dict[str, Any] = {"np": np, "Parent": Parent}
     compile_nodes([cls], scope)
     runner = scope["Runner"]()
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)

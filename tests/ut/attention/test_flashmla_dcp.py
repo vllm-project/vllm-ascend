@@ -89,7 +89,8 @@ def combine_outputs(recv, head_dim, *, scatter_dim, local_output=None, local_lse
 @pytest.fixture
 def runtime(monkeypatch):
     """Bind production DCP methods to CPU attention, stream and collective emulators."""
-    events, recorded_streams = [], []
+    events: list[tuple[str, ...]] = []
+    recorded_streams = []
     active_stream = ["main"]
 
     class Stream:
