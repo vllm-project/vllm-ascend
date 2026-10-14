@@ -75,12 +75,8 @@ def _get_tile_config() -> tuple[int, int]:
     if _tile_config_cache is None:
         init_device_properties_triton()
         ub_budget = int(get_ub_size_bytes() * _UB_USABLE_FRACTION)
-        single_pass_block = _largest_pow2_le(
-            max(_BLOCK_FLOOR, ub_budget // _SINGLE_PASS_BYTES_PER_ELEM)
-        )
-        tiled_block = _largest_pow2_le(
-            max(_BLOCK_FLOOR, ub_budget // _TILED_BYTES_PER_ELEM)
-        )
+        single_pass_block = _largest_pow2_le(max(_BLOCK_FLOOR, ub_budget // _SINGLE_PASS_BYTES_PER_ELEM))
+        tiled_block = _largest_pow2_le(max(_BLOCK_FLOOR, ub_budget // _TILED_BYTES_PER_ELEM))
         _tile_config_cache = (single_pass_block, tiled_block)
     return _tile_config_cache
 
@@ -325,7 +321,7 @@ def _launch(
     use_i32 = B * V < 2**31
     # si is not cast on the host (saves a full-vocab copy); index values stay < V < 2^31.
 
-    if V <= single_pass_block:
+    if single_pass_block >= V:
         block = max(triton.next_power_of_2(V), _BLOCK_FLOOR)
         _apply_topk_topp_single_pass_kernel[grid](
             sv,
