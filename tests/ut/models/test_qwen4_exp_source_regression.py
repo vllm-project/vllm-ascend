@@ -64,6 +64,19 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
         assert "def uses_per_group_kernel_block_sizes" in _source(proposer)
 
 
+def test_runner_customizes_compressed_attention_cache_specs() -> None:
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    branch_start = runner.index("elif self.use_compress:")
+    branch_end = runner.index(
+        "elif isinstance(attn_module, Attention):",
+        branch_start,
+    )
+    branch = runner[branch_start:branch_end]
+
+    assert "isinstance(spec, AttentionSpec)" in branch
+    assert "attn_module.get_attn_backend().customize_spec(spec)" in branch
+
+
 def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     qsa_sources = "\n".join(
         _source(path)
@@ -82,6 +95,8 @@ def test_qsa_normalization_uses_upstream_public_helper() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
     assert "upstream_indexer.apply_qsa_rmsnorm(" in qsa
     assert "upstream_indexer._gemma_rmsnorm(" not in qsa
+    assert "envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE" in qsa
+    assert "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE" not in qsa
 
 
 def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
@@ -93,7 +108,7 @@ def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
 
     monkeypatch.setattr(
         ascend_qsa.envs,
-        "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE",
+        "VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE",
         False,
     )
     monkeypatch.setattr(
