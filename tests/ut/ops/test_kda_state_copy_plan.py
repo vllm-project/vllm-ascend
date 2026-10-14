@@ -19,7 +19,7 @@ def test_fallback_matches_compiled_launcher_signature(monkeypatch, retains_const
     signature = {"src_ptrs": "*i64", "dst_ptrs": "*i64", "sizes": "*i64"}
     if retains_constexpr:
         signature["BLOCK_SIZE"] = "constexpr"
-    launches = []
+    launches: list[tuple[tuple[int, int, int], tuple[torch.Tensor, ...]]] = []
 
     class CompiledKernel:
         src = SimpleNamespace(signature=signature)
