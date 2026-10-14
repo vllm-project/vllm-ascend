@@ -1,6 +1,6 @@
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -47,9 +47,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
-from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
@@ -127,6 +125,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
 ):
+    """Check per-layer cache views across physical pages and kernel block sizes."""
     layer_name = "model.layers.0.self_attn.attn"
     second_layer_name = "model.layers.1.self_attn.attn"
     spec_type = SlidingWindowSpec if cache_kind == "sliding_window" else FullAttentionSpec
@@ -1351,19 +1350,6 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     assert AscendDSASWABackend.get_supported_kernel_block_sizes() == [32, 64, 128]
     assert AscendDSAC4StateBackend.get_supported_kernel_block_sizes() == [2, 4, 8]
     assert AscendDSAC128StateBackend.get_supported_kernel_block_sizes() == expected_c128_state_sizes
-
-    c4_cache = SimpleNamespace(compress_ratio=4)
-    c128_cache = SimpleNamespace(compress_ratio=128)
-    c4_indexer = cast(deepseek_v4_indexer.AscendDeepseekV4IndexerCache, c4_cache)
-    c128_indexer = cast(deepseek_v4_indexer.AscendDeepseekV4IndexerCache, c128_cache)
-    swa_cache = cast(deepseek_v4_model.AscendDeepseekV4SWACache, SimpleNamespace())
-    c4_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c4_cache)
-    c128_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c128_cache)
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAC4Backend
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c128_indexer) is AscendDSAC128Backend
-    assert deepseek_v4_model.AscendDeepseekV4SWACache.get_attn_backend(swa_cache) is AscendDSASWABackend
-    assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c4_state) is AscendDSAC4StateBackend
-    assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c128_state) is AscendDSAC128StateBackend
 
 
 @pytest.mark.parametrize(

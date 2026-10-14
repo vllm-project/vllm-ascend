@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
@@ -27,16 +26,3 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
 class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
     """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
     layered on upstream EagleSpeculator (flat/GQA attention)."""
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        # EAGLE draft models are dense even when the target is an MoE model.
-        # The base swaps in the draft model config without re-validating it;
-        # the draft-only settings on top turn EP/EPLB off (no experts).
-        draft_vllm_config = super()._create_draft_vllm_config()
-        draft_vllm_config.parallel_config = replace(
-            draft_vllm_config.parallel_config,
-            prefill_context_parallel_size=1,
-            enable_expert_parallel=False,
-            enable_eplb=False,
-        )
-        return draft_vllm_config

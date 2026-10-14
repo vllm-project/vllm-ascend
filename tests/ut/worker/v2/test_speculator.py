@@ -264,7 +264,7 @@ def test_build_uniform_attn_metadata_sets_decode_only():
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
     speculator.use_dcp = False
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator.vllm_config = SimpleNamespace(parallel_config=object())
     speculator._update_decode_attn_metadata = MagicMock()
     batch_desc = SimpleNamespace(num_tokens=2)
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
@@ -307,7 +307,7 @@ def test_build_attn_metadata_sets_decode_only():
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
     speculator.use_dcp = False
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator.vllm_config = SimpleNamespace(parallel_config=object())
     speculator._update_decode_attn_metadata = MagicMock()
     batch_desc = SimpleNamespace(num_tokens=2)
     query_start_loc_np = np.array([0, 1, 2], dtype=np.int32)
@@ -368,7 +368,7 @@ def test_build_attn_metadata_delegates_offload_kwargs_once():
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
     speculator.use_dcp = False
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator.vllm_config = SimpleNamespace(parallel_config=object())
     batch_desc = SimpleNamespace(num_tokens=2)
     query_start = np.array([0, 1, 2], dtype=np.int32)
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
@@ -524,10 +524,6 @@ def test_set_attn_detects_architecture():
         speculator.vllm_config = object()
         speculator.attn_groups = object()
         with (
-            patch(
-                "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.set_current_vllm_config",
-                return_value=nullcontext(),
-            ),
             patch.object(AutoRegressiveSpeculator, "set_attn"),
             patch(
                 "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator._get_graph_update_backend",
@@ -674,7 +670,7 @@ def test_propose_consumes_restored_global_inputs():
 def test_init_dcp_disabled():
     """Test DCP initialization when DCP is disabled."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
 
     speculator._init_dcp()
 
@@ -685,11 +681,12 @@ def test_init_dcp_disabled():
 def test_init_dcp_enabled():
     """Test DCP initialization when DCP is enabled."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
+    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
     speculator.max_num_tokens = 128
     speculator.max_num_reqs = 16
     speculator.device = torch.device("cpu")
-    speculator.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(async_scheduling=True))
+    speculator.vllm_config.scheduler_config = SimpleNamespace(async_scheduling=True)
+    speculator.draft_model_config = object()
     dcp_group = SimpleNamespace(rank_in_group=1)
 
     with (
@@ -703,13 +700,17 @@ def test_init_dcp_enabled():
 
     assert speculator.use_dcp is True
     assert speculator.dcp_manager is dcp_manager_cls.return_value
+    draft_config = dcp_manager_cls.call_args.kwargs["vllm_config"]
+    assert draft_config is not speculator.vllm_config
+    assert draft_config.model_config is speculator.draft_model_config
+    assert draft_config.parallel_config is speculator.vllm_config.parallel_config
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
         dcp_rank=1,
         max_buffer_num_tokens=128,
         max_num_reqs=16,
         device=torch.device("cpu"),
-        vllm_config=speculator.draft_vllm_config,
+        vllm_config=draft_config,
         use_async_scheduling=True,
     )
 
@@ -727,7 +728,7 @@ def test_update_decode_attn_metadata_mla_with_dcp():
         dcp_world_rank=1,
     )
     speculator.dcp_manager = dcp_manager
-    speculator.draft_vllm_config = SimpleNamespace(
+    speculator.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
             cp_kv_cache_interleave_size=1,

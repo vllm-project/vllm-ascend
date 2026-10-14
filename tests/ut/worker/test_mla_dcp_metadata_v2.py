@@ -116,7 +116,7 @@ def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, int
     speculator.use_dcp = True
     speculator.max_model_len = 128
     speculator.dcp_manager = _manager(size, rank, interleave)
-    speculator.draft_vllm_config = SimpleNamespace(
+    speculator.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=size, cp_kv_cache_interleave_size=interleave)
     )
     target = torch.tensor([7, 127, 0, 0], dtype=torch.int32)

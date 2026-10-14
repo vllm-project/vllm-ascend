@@ -81,7 +81,7 @@ def test_run_fullgraph_uses_updatable_graph():
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
-        draft_vllm_config=draft_vllm_config,
+        attn_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock(return_value="result")
@@ -111,7 +111,7 @@ def test_run_fullgraph_uses_legacy_graph():
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
-        draft_vllm_config=draft_vllm_config,
+        attn_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock()
@@ -271,10 +271,6 @@ def test_graph_replay_updates_full_graph_params():
             "run_fullgraph",
             return_value="result",
         ) as parent_replay,
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config",
-            return_value=nullcontext(),
-        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_forward_context",
             return_value=nullcontext(),

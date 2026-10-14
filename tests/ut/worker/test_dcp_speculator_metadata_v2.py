@@ -90,7 +90,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
-    spec.vllm_config = spec.draft_vllm_config = config
+    spec.vllm_config = config
     spec.requires_non_causal = kind == "dspark"
     spec._group_causal = {0: False} if kind == "dspark" else True
     spec.draft_attn_layer_names = {"draft.layer"}
@@ -329,7 +329,7 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
 
     assert len(seen) == 2
     for parallel_config, seq_lens_cpu, is_prefilling in seen:
-        assert parallel_config is spec.draft_vllm_config.parallel_config
+        assert parallel_config is spec.attn_vllm_config.parallel_config
         if use_dcp:
             assert seq_lens_cpu.tolist() == [32, 128]
             assert is_prefilling.tolist() == [False, False]

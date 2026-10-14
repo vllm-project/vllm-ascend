@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
@@ -57,7 +57,6 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.autoregressive.sparse_kv_offload import SparseKVOffloadMetadata
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
@@ -96,7 +95,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
-        self.draft_vllm_config = self._create_draft_vllm_config()
         self._init_dcp()
 
         del self.input_buffers
@@ -129,48 +127,24 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         )
 
     def _init_dcp(self) -> None:
-        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        attn_config = self.attn_vllm_config
+        self.use_dcp = attn_config.parallel_config.decode_context_parallel_size > 1
         self.dcp_manager: DCPManager | None = None
         if not self.use_dcp:
             return
+        # DCPManager checks the draft architecture to allocate its attention
+        # mask. The backend itself is already bound to the loaded draft layer.
+        draft_dcp_config = copy(attn_config)
+        draft_dcp_config.model_config = self.draft_model_config
         self.dcp_manager = DCPManager(
-            dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=attn_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
             max_buffer_num_tokens=self.max_num_tokens,
             max_num_reqs=self.max_num_reqs,
             device=self.device,
-            vllm_config=self.draft_vllm_config,
+            vllm_config=draft_dcp_config,
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config the way V1's proposer does: validate the
-        target-derived config, then swap in the draft model config without
-        re-validating it."""
-        source_parallel_config = self.vllm_config.parallel_config
-        dcp_size = source_parallel_config.decode_context_parallel_size
-        parallel_config = replace(
-            source_parallel_config,
-            pipeline_parallel_size=1,
-            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
-        )
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            draft_config = replace(
-                self.vllm_config,
-                parallel_config=parallel_config,
-                cache_config=replace(self.vllm_config.cache_config),
-            )
-        # V1 parity: swap in the draft model config after validation —
-        # re-validating would reject the dense head (fine-grained TP is MoE-only).
-        draft_config.model_config = self.draft_model_config
-        # replace() used to re-run post_init's is_moe_model recompute; mirror it.
-        draft_config.parallel_config.is_moe_model = self.draft_model_config.is_moe
-        if self.replicated_pcp:
-            # TODO: Separate draft execution settings from worker topology.
-            # Restore DCP only after the complete draft config reconstruction;
-            # this does not rerun validation or recompute DCP-dependent settings.
-            draft_config.parallel_config.decode_context_parallel_size = dcp_size
-        return draft_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -249,7 +223,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
             if not input_batch.is_dummy:
                 pcp_manager = getattr(self, "pcp_manager", None)
-                if pcp_manager is None or not pcp_manager.is_decode_sharded:
+                if (pcp_manager is None or not pcp_manager.is_decode_sharded) and attn_metadata:
                     return attn_metadata, slot_mappings
             if int(query_start_loc_np[num_reqs]) < num_tokens_padded:
                 # DP dummy runs can also select a graph larger than their input.
@@ -369,19 +343,17 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
 
-            # Use the first executable draft attention layer as the architecture
-            # discriminator and cache it for ACL graph parameter updates.
-            self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        # Use the first executable draft attention layer as the architecture
+        # discriminator and cache it for ACL graph parameter updates.
+        self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -581,7 +553,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             batch_desc.num_tokens,
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
-            parallel_config=self.draft_vllm_config.parallel_config,
+            parallel_config=self.attn_vllm_config.parallel_config,
             offload_kwargs=offload_kwargs,
         ):
             attn_metadata = super()._build_attn_metadata(
@@ -720,7 +692,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             decode_metadata.actual_seq_lengths_q = query_lens_list
             if dcp_local_seq_lens_cpu is not None:
                 assert self.dcp_manager is not None
-                parallel_config = self.draft_vllm_config.parallel_config
+                parallel_config = self.attn_vllm_config.parallel_config
                 decode_metadata.update_dcp_seq_lens_cpu(
                     next_seq_lens_cpu,
                     dcp_local_seq_lens_cpu,
@@ -795,7 +767,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 )
             ]
         assert self.input_batch is not None
-        parallel_config = self.draft_vllm_config.parallel_config
+        parallel_config = self.attn_vllm_config.parallel_config
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
