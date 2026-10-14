@@ -183,8 +183,9 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     the legacy separate NoPE/RoPE protocol.
 
     Without PD, local layout selection is unrestricted. With supported PD,
-    both endpoints must use component-major pages because raw transfers carry
-    no metadata distinguishing them from token-fused FlashMLA pages.
+    both endpoints must agree on the page layout: raw transfers carry no
+    metadata distinguishing component-major from token-fused FlashMLA pages.
+    This helper identifies connector support, not cross-endpoint agreement.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:

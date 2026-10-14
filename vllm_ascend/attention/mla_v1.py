@@ -2194,7 +2194,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=128,
+            tile_size=128 if self.use_flashmla else writer_cache[0].shape[1],
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer

@@ -720,6 +720,7 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     # Slots -1 are real current rows owned by another DCP rank, not padding.
     prefill_slots = torch.tensor([-1, BLOCK_SIZE, -1, BLOCK_SIZE + 1])
     metadata = SimpleNamespace(
+        external_flashmla=None,
         causal=True,
         decode=None,
         num_decode_tokens=0,
@@ -813,6 +814,7 @@ def test_mla_preprocess_prolog_v3_keeps_mixed_dcp_current_kv_disjoint():
     nope, rope = _component_major_cache()
     hidden = torch.randn(total_tokens, 128)
     metadata = SimpleNamespace(
+        external_flashmla=None,
         causal=True,
         decode=SimpleNamespace(
             cos=torch.randn(num_decode_tokens, ROPE_DIM),

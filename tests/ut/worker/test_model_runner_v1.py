@@ -2668,6 +2668,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
+        attn_module.num_heads = 64
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
             enable_sparse_sfa_c8=False,
@@ -2680,6 +2681,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers.return_value = {layer_name: attn_module}
 
         spec = runner.get_kv_cache_spec()[layer_name]
+        self.assertEqual(spec.num_query_heads, 64)
+        self.assertEqual(spec.num_kv_heads, 1)
 
         self.assertTrue(spec.cache_sparse_sfa_turboquant)
         self.assertFalse(spec.cache_sparse_sfa_c8)
@@ -2710,6 +2713,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
+        attn_module.num_heads = 64
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
             enable_sparse_sfa_c8=False,
@@ -2722,6 +2726,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers.return_value = {layer_name: attn_module}
 
         spec = runner.get_kv_cache_spec()[layer_name]
+        self.assertEqual(spec.num_query_heads, 64)
+        self.assertEqual(spec.num_kv_heads, 1)
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
@@ -3175,6 +3181,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
+        attn_module.num_heads = 64
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
         indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
@@ -3194,6 +3201,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         specs = runner.get_kv_cache_spec()
         main_spec = specs[attn_layer_name]
+        self.assertEqual(main_spec.num_query_heads, 64)
+        self.assertEqual(main_spec.num_kv_heads, 1)
         indexer_spec = specs[indexer_layer_name]
 
         self.assertEqual(
