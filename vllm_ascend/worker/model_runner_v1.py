@@ -413,6 +413,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
+        # Set only while profile_run is active.  Chunked prefill limits the
+        # query tokens in one dummy step, but the attention workspace still
+        # depends on the longest context that a request may already have.
+        self._profile_seq_lens: int | None = None
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
@@ -4005,6 +4009,15 @@ class NPUModelRunner(GPUModelRunner):
         # it only happens for cudagraph_runtime_mode=FULL.
         return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
 
+    def _get_profile_seq_lens(self) -> int | None:
+        """Return the context length needed for a safe prefill memory profile."""
+        if not self.scheduler_config.enable_chunked_prefill:
+            return None
+        max_model_len = int(self.model_config.max_model_len)
+        if max_model_len <= self.max_num_tokens:
+            return None
+        return max_model_len
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -4024,6 +4037,8 @@ class NPUModelRunner(GPUModelRunner):
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if is_profile and profile_seq_lens is None:
+            profile_seq_lens = self._profile_seq_lens
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
             # The current dummy run only covers LM execution, so we can skip it.
@@ -4423,6 +4438,21 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def profile_run(self) -> None:
+        previous_profile_seq_lens = self._profile_seq_lens
+        self._profile_seq_lens = self._get_profile_seq_lens()
+        if self._profile_seq_lens is not None:
+            logger.info(
+                "Profile chunked-prefill attention workspace with max_model_len=%d "
+                "instead of max_num_batched_tokens=%d.",
+                self._profile_seq_lens,
+                self.max_num_tokens,
+            )
+        try:
+            self._profile_run_impl()
+        finally:
+            self._profile_seq_lens = previous_profile_seq_lens
+
+    def _profile_run_impl(self) -> None:
         self.eplb_warmup()
         if self.sparse_kv_offload_enabled:
             allocate_kv_offload_topk_profile_buffers(

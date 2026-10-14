@@ -4238,5 +4238,23 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
         group.backend.get_kv_cache_shape.assert_not_called()
 
 
+def test_profile_seq_lens_uses_max_model_len_for_chunked_prefill():
+    runner = object.__new__(NPUModelRunner)
+    runner.max_num_tokens = 4096
+    runner.scheduler_config = SimpleNamespace(enable_chunked_prefill=True)
+    runner.model_config = SimpleNamespace(max_model_len=131072)
+
+    assert runner._get_profile_seq_lens() == 131072
+
+
+def test_profile_seq_lens_is_unset_when_profile_shape_covers_model_len():
+    runner = object.__new__(NPUModelRunner)
+    runner.max_num_tokens = 131072
+    runner.scheduler_config = SimpleNamespace(enable_chunked_prefill=True)
+    runner.model_config = SimpleNamespace(max_model_len=131072)
+
+    assert runner._get_profile_seq_lens() is None
+
+
 if __name__ == "__main__":
     unittest.main()
