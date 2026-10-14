@@ -562,10 +562,9 @@ jobs:
           from pathlib import Path
 
           # Each invocation keeps the public selector's image/cache/device configuration intact.
-          # Combining both files before applying an override would collapse them into one job.
+          # TEMPORARY: restore the ordinary Bulk and four-card TP benchmark routes after collecting evidence.
           routes = (
-              ("tests/e2e/pull_request/one_card/test_ascendstore_v1.py", "linux-aarch64-a2b3-1"),
-              ("tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py", "linux-aarch64-a2b3-4"),
+              ("tests/e2e/pull_request/one_card/test_ascendstore_v1_diagnostic.py", "linux-aarch64-a2b3-1"),
           )
           selection_env = dict(os.environ)
           selection_env.pop("GITHUB_OUTPUT", None)
