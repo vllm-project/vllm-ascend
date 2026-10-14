@@ -11,7 +11,6 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
