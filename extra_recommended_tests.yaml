@@ -1,0 +1,4 @@
+# Extra pytest targets appended to coverage-recommended tests.
+# Each item needs a path.
+
+- path: tests/e2e/pull_request/one_card/test_msa_index_score.py::test_does_not_exist
