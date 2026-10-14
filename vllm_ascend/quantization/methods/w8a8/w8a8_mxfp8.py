@@ -418,7 +418,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
 
-
         if not hasattr(layer, "_mxfp8_moe_parameters"):
             layer._mxfp8_moe_parameters = {
                 name: getattr(layer, name)
