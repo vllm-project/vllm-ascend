@@ -14,7 +14,7 @@ The main strategy is as follows:
 2. Estimate and reserve KV cache budget in advance for running requests
    to reduce preemption.
 
-Inherits from the base ``Scheduler`` and replaces the waiting queue with
+Inherits from ``AscendScheduler`` and replaces the waiting queue with
 a custom queue that:
 
 1. Groups requests by **job name** (extracted from ``#job_name[${JOB_NAME}]#``
@@ -52,6 +52,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.ascend_config import BatchJobSchedConfig
+from vllm_ascend.core.scheduler import AscendScheduler
 
 
 class JobNameParser:
@@ -619,7 +620,7 @@ class BatchJobAwareRequestQueue(RequestQueue):
         return self._find_admittable() is not None
 
 
-class BatchJobAwareScheduler(Scheduler):
+class BatchJobAwareScheduler(AscendScheduler):
     """Batch‑job‑aware scheduler for offline / batched inference workloads."""
 
     def __init__(self, *args, **kwargs) -> None:
@@ -673,13 +674,15 @@ class BatchJobAwareAsyncScheduler(AsyncScheduler, BatchJobAwareScheduler):
     - ``AsyncScheduler`` — imported from ``vllm.v1.core.sched.async_scheduler``,
       provides the asynchronous scheduling loop and async-schedule interface.
     - ``BatchJobAwareScheduler`` — defined in this same module, inherits from
-      ``Scheduler`` and provides batch-job-aware scheduling logic (LPT
+      ``AscendScheduler`` and provides batch-job-aware scheduling logic (LPT
       strategy, KV cache reservation, job grouping, etc.).
-    - ``Scheduler`` — base class imported from
-      ``vllm.v1.core.scheduler`` (via ``BatchJobAwareScheduler``), provides
-      the core scheduling primitive that the async scheduler wraps.
+    - ``AscendScheduler`` — explicitly imported from ``vllm_ascend.core.scheduler``
+      so shared reservations and existing Balance/SWA hooks do not depend on
+      when the upstream Scheduler alias was installed.
 
-    MRO: BatchJobAwareAsyncScheduler -> AsyncScheduler -> BatchJobAwareScheduler -> Scheduler
+    MRO: BatchJobAwareAsyncScheduler -> AsyncScheduler -> BatchJobAwareScheduler
+         -> AscendScheduler -> BalanceScheduler -> SpecDecodeReservationMixin
+         -> upstream Scheduler
     """
 
     pass

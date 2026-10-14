@@ -22,13 +22,14 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, cast
 
 from vllm.logger import logger
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
 )
 from vllm.v1.request import Request, RequestStatus
+
+from vllm_ascend.core.scheduler import AscendAsyncScheduler
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler
@@ -367,7 +368,7 @@ def install_short_request_first_waiting_queue(
     return queue
 
 
-class ShortRequestFirstAsyncScheduler(AsyncScheduler):
+class ShortRequestFirstAsyncScheduler(AscendAsyncScheduler):
     """Async scheduler that installs the ShortRequestFirst waiting queue."""
 
     def __init__(self, *args, **kwargs) -> None:

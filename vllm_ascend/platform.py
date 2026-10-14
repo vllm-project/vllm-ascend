@@ -1424,6 +1424,16 @@ def _setup_worker_and_scheduler(
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
 
+    # Preserve explicit/specialized choices and upstream diffusion selection.
+    # Both defaults retain the existing Balance/SWA hooks through inheritance;
+    # async keeps the upstream asynchronous scheduling policy.
+    if vllm_config.scheduler_config.scheduler_cls is None and getattr(vllm_config, "diffusion_config", None) is None:
+        vllm_config.scheduler_config.scheduler_cls = (
+            "vllm_ascend.core.scheduler.AscendAsyncScheduler"
+            if vllm_config.scheduler_config.async_scheduling
+            else "vllm_ascend.core.scheduler.AscendScheduler"
+        )
+
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
 
 

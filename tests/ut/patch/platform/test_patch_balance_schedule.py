@@ -103,9 +103,9 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
-# resolve to ``BalanceScheduler``. Its base class is the installed upstream
-# scheduler and remains unmodified by the BalanceScheduler class replacement.
-_UpstreamScheduler = BalanceScheduler.__bases__[0]
+# resolve to ``BalanceScheduler``. Find the installed upstream scheduler in
+# its MRO, independently of the Ascend mixin and class replacement.
+_UpstreamScheduler = next(cls for cls in BalanceScheduler.__mro__ if cls.__module__ == _upstream_sched_mod.__name__)
 
 # ---------------------------------------------------------------------------
 # Scheduler config compatibility

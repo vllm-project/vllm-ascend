@@ -79,6 +79,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.core.scheduler_kv_reservation import SpecDecodeReservationMixin, async_load_reserved_blocks
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -102,7 +103,7 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     return False
 
 
-class BalanceScheduler(Scheduler):
+class BalanceScheduler(SpecDecodeReservationMixin, Scheduler):
     def __init__(
         self,
         vllm_config,
@@ -646,9 +647,9 @@ class BalanceScheduler(Scheduler):
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    # only if it fits after reserving other in-flight requests
+                    # and this request's speculative decode margin.
+                    reserved_blocks = async_load_reserved_blocks(self)
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -940,11 +941,9 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
         return result
 
 
-# The scheduler is constructed as ``Scheduler(...)`` from
-# ``vllm.v1.core.sched.scheduler``. This takes effect when scheduler_cls is
-# unset, covering ordinary synchronous, PD-prefill, and PD-mixed paths.
-# vLLM-Ascend's recompute, dynamic-batch, and profiling schedulers set
-# scheduler_cls and correctly bypass this name.
+# Retain the existing alias for scheduler extensions that import this base
+# during platform setup. The default Ascend scheduler classes also inherit
+# BalanceScheduler, preserving its queue setup and existing payload patches.
 _sched_mod.Scheduler = BalanceScheduler
 
 # The patch for engine core has been moved to patch_engine_core.py

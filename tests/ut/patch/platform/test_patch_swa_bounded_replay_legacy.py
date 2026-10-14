@@ -13,20 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Release-lane configuration and bounded replay allocation regression tests."""
+"""Legacy installation and both-baseline bounded replay allocation regressions."""
 
 import argparse
 import dataclasses
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import msgspec
 import pytest
 import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -44,6 +45,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
+from vllm_ascend.core.scheduler import AscendAsyncScheduler, AscendScheduler
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import (
     _mark_prefix_replay,
     _patch_scheduler,
@@ -52,7 +54,7 @@ from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import (
     register_legacy_replay_argument,
 )
 
-pytestmark = pytest.mark.skipif(
+legacy_only = pytest.mark.skipif(
     hasattr(Scheduler, "_mark_prefix_replay")
     and Scheduler._mark_prefix_replay.__module__ != apply_legacy_replay_patch.__module__,
     reason="vLLM supplies native bounded replay",
@@ -68,11 +70,13 @@ def enable_legacy_replay():
     apply_legacy_replay_patch(SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True)))
 
 
+@legacy_only
 @pytest.mark.parametrize("enabled", [False, True])
 def test_replay_installation_is_opt_in_and_idempotent_in_fresh_process(enabled):
     # A fresh interpreter catches import-time mutations that an already-patched
     # pytest process cannot observe. Exercise the worker wire schema as well.
     script = """
+import runpy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import msgspec
@@ -85,6 +89,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, CachedRequestData
+runpy.run_path(CONFTEST_PATH)
 originals = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
 assert not hasattr(Scheduler, '_mark_prefix_replay')
@@ -97,11 +102,14 @@ installed = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCach
 assert (originals != installed) == ENABLED
 apply_legacy_replay_patch(config)
 assert installed == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
-""".replace("ENABLED", repr(enabled))
+""".replace("ENABLED", repr(enabled)).replace(
+        "CONFTEST_PATH", repr(str(Path(__file__).resolve().parents[2] / "conftest.py"))
+    )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@legacy_only
 def test_native_replay_is_preserved():
     config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
     with (
@@ -115,6 +123,7 @@ def test_native_replay_is_preserved():
         install.assert_not_called()
 
 
+@legacy_only
 def test_changed_scheduler_body_does_not_partially_patch_scheduler():
     class UnsupportedScheduler:
         def __init__(self):
@@ -130,6 +139,7 @@ def test_changed_scheduler_body_does_not_partially_patch_scheduler():
         assert UnsupportedScheduler.__init__ is original_init
 
 
+@legacy_only
 @pytest.mark.parametrize("enabled", [False, True])
 def test_uniform_group_propagates_replay_window(enabled):
     spec = AscendSlidingWindowMLASpec(
@@ -144,11 +154,14 @@ def test_uniform_group_propagates_replay_window(enabled):
     assert group.prefix_replay_tokens == (WINDOW if enabled else 0)
 
 
+@legacy_only
 @pytest.mark.parametrize(
     "flag,expected", [(None, False), ("--swa-bounded-replay", True), ("--no-swa-bounded-replay", False)]
 )
 def test_cli_switch_reaches_engine_args_and_cache_schema(flag, expected):
+    fake_model = str(Path(__file__).resolve().parents[2] / "_fake_weight")
     parser = argparse.ArgumentParser()
+    parser.set_defaults(model=fake_model)
     register_legacy_replay_argument(parser)
     register_legacy_replay_argument(parser)
     parsed = parser.parse_args([] if flag is None else [flag])
@@ -157,9 +170,10 @@ def test_cli_switch_reaches_engine_args_and_cache_schema(flag, expected):
     cache = CacheConfig(swa_bounded_replay=args.swa_bounded_replay)
     assert cache.swa_bounded_replay is expected
     assert dataclasses.asdict(cache)["swa_bounded_replay"] is expected
-    assert EngineArgs(swa_bounded_replay=expected).swa_bounded_replay is expected
+    assert EngineArgs(model=fake_model, swa_bounded_replay=expected).swa_bounded_replay is expected
 
 
+@legacy_only
 @pytest.mark.parametrize("hit,start,replayed", [(0, 0, 0), (16, 0, 16), (32, 0, 32), (96, 64, 32)])
 def test_admission_rewind_clears_previous_preemption_boundary(hit, start, replayed):
     scheduler = SimpleNamespace(prefix_replay_tokens=WINDOW)
@@ -168,12 +182,14 @@ def test_admission_rewind_clears_previous_preemption_boundary(hit, start, replay
     assert request.replay_start == start
 
 
+@legacy_only
 def test_disabled_replay_clears_boundary():
     request = SimpleNamespace(replay_start=64)
     assert _mark_prefix_replay(SimpleNamespace(prefix_replay_tokens=0), request, HIT_TOKENS) == 0
     assert request.replay_start == 0
 
 
+@legacy_only
 def test_new_request_replay_boundary_survives_msgpack():
     payload = NewRequestData(
         req_id="replayed",
@@ -190,6 +206,7 @@ def test_new_request_replay_boundary_survives_msgpack():
     assert restored.replay_start == 64
 
 
+@legacy_only
 def test_replay_window_is_private_and_does_not_cache_swa_blocks():
     pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=BLOCK_SIZE)
     spec = AscendSlidingWindowMLASpec(
@@ -219,6 +236,7 @@ def test_replay_window_is_private_and_does_not_cache_swa_blocks():
     assert spec.prefix_replay_tokens == WINDOW
 
 
+@legacy_only
 def test_cacheable_group_adopts_entire_hit_when_first_replay_chunk_is_short():
     pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=BLOCK_SIZE)
     manager = FullAttentionManager(
@@ -235,6 +253,7 @@ def test_cacheable_group_adopts_entire_hit_when_first_replay_chunk_is_short():
     assert all(block.ref_cnt == 2 for block in shared)
 
 
+@legacy_only
 def test_changed_scheduler_body_fails_before_installing_method():
     class UnsupportedScheduler:
         def schedule(self):
@@ -246,9 +265,21 @@ def test_changed_scheduler_body_fails_before_installing_method():
     assert UnsupportedScheduler.schedule is original
 
 
-@pytest.fixture(params=[(False, False), (True, False), (True, True)], ids=["v1", "v2", "v2-async"])
+@pytest.fixture(
+    params=[
+        (False, Scheduler),
+        (True, Scheduler),
+        (True, AsyncScheduler),
+        (False, AscendScheduler),
+        (True, AscendScheduler),
+        (False, AscendAsyncScheduler),
+        (True, AscendAsyncScheduler),
+    ],
+    ids=["v1", "v2", "v2-async", "ascend-v1", "ascend-v2", "ascend-v1-async", "ascend-v2-async"],
+)
 def replay_scheduler(request):
-    use_v2_model_runner, async_scheduling = request.param
+    use_v2_model_runner, scheduler_cls = request.param
+    async_scheduling = issubclass(scheduler_cls, AsyncScheduler)
     with (
         patch.object(ModelConfig, "__post_init__", lambda self, *args, **kwargs: None),
         patch.object(VllmConfig, "__post_init__", lambda self, *args, **kwargs: None),
@@ -262,6 +293,7 @@ def replay_scheduler(request):
         model.hf_config = MagicMock()
         model.hf_config.architectures = ["DeepseekV41ForCausalLM"]
         model.hf_config.canvas_length = None
+        model.runner_type = "generate"
         model.multimodal_config = None
         model.pooler_config = None
         cache = CacheConfig(block_size=BLOCK_SIZE, enable_prefix_caching=True, swa_bounded_replay=True)
@@ -269,6 +301,7 @@ def replay_scheduler(request):
         config = VllmConfig(
             model_config=model,
             cache_config=cache,
+            device_config=DeviceConfig("cpu"),
             scheduler_config=SchedulerConfig(
                 max_model_len=256,
                 max_num_seqs=1,
@@ -298,7 +331,6 @@ def replay_scheduler(request):
                 KVCacheGroupSpec(["swa"], swa),
             ],
         )
-        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
         yield scheduler_cls(config, kv, MagicMock(), BLOCK_SIZE)
 
 
@@ -344,6 +376,7 @@ def test_actual_scheduler_replays_across_chunks_and_preserves_shared_blocks(repl
             assert resumed.scheduled_cached_reqs.replay_start == {req.request_id: hit - WINDOW}
 
 
+@legacy_only
 @pytest.mark.parametrize("enabled,connector", [(True, False), (True, True), (False, False)])
 def test_scheduler_created_before_patch_initializes_replay_on_first_schedule(replay_scheduler, enabled, connector):
     scheduler = replay_scheduler

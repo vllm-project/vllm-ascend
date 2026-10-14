@@ -51,6 +51,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.core.scheduler_kv_reservation import async_load_reserved_blocks
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -908,9 +909,9 @@ class ProfilingChunkScheduler(Scheduler):
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    # only if it fits after reserving other in-flight requests
+                    # and this request's speculative decode margin.
+                    reserved_blocks = async_load_reserved_blocks(self)
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

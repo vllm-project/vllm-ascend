@@ -367,6 +367,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.scheduler_config.async_scheduling = False
         mock_vllm_config.scheduler_config.scheduler_cls = None
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.diffusion_config = None
         mock_vllm_config.engram_config = None
         mock_vllm_config.kv_transfer_config = None
         mock_vllm_config.additional_config = {}
@@ -1814,7 +1815,10 @@ class TestNPUPlatform(TestBase):
                 ):
                     self.platform.check_and_update_config(vllm_config)
 
-                self.assertIsNone(vllm_config.scheduler_config.scheduler_cls)
+                self.assertEqual(
+                    vllm_config.scheduler_config.scheduler_cls,
+                    "vllm_ascend.core.scheduler.AscendScheduler",
+                )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
@@ -1883,7 +1887,10 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.assert_not_called()
         self.assertFalse(vllm_config.additional_config["scheduler_config"]["recompute_scheduler_enable"])
         self.assertTrue(ascend_config.scheduler_config.short_request_first_config.enabled)
-        self.assertIsNone(vllm_config.scheduler_config.scheduler_cls)
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.scheduler.AscendScheduler",
+        )
         self.assertIn("recompute_scheduler_enable is ignored", mock_warning.call_args.args[0])
 
     def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
@@ -2608,3 +2615,142 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "mode,sync_cls,async_cls",
+    [
+        (
+            None,
+            "vllm_ascend.core.scheduler.AscendScheduler",
+            "vllm_ascend.core.scheduler.AscendAsyncScheduler",
+        ),
+        (
+            "dyntra_lb_config",
+            "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
+            "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler",
+        ),
+        (
+            "profiling_chunk_config",
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
+        ),
+        (
+            "batch_job_sched_config",
+            "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler",
+            "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler",
+        ),
+    ],
+)
+def test_setup_worker_and_scheduler_selects_reservation_subclasses(async_scheduling, mode, sync_cls, async_cls):
+    from vllm.config import SchedulerConfig
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+    from vllm_ascend import platform
+    from vllm_ascend.core.scheduler_kv_reservation import SpecDecodeReservationMixin
+
+    vllm_config = TestNPUPlatform.mock_vllm_config()
+    vllm_config.scheduler_config.async_scheduling = async_scheduling
+    ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+    if mode is not None:
+        getattr(ascend_config.scheduler_config, mode).enabled = True
+    expected_cls = async_cls if async_scheduling else sync_cls
+
+    with (
+        patch.object(platform, "refresh_block_size"),
+        patch.object(platform, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
+    ):
+        # Validation may run more than once on the same configuration.
+        for _ in range(2):
+            platform._setup_worker_and_scheduler(vllm_config, ascend_config)
+            assert vllm_config.scheduler_config.scheduler_cls == expected_cls
+            scheduler_cls = SchedulerConfig.get_scheduler_cls(vllm_config.scheduler_config)
+            assert scheduler_cls.__mro__.count(SpecDecodeReservationMixin) == 1
+            assert scheduler_cls._request_remaining_blocks is SpecDecodeReservationMixin._request_remaining_blocks
+            assert issubclass(scheduler_cls, AsyncScheduler) is async_scheduling
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("class_value", ["custom.scheduler.CustomScheduler", object])
+def test_setup_worker_and_scheduler_preserves_explicit_scheduler(async_scheduling, class_value):
+    from vllm_ascend import platform
+
+    vllm_config = TestNPUPlatform.mock_vllm_config()
+    vllm_config.scheduler_config.async_scheduling = async_scheduling
+    vllm_config.scheduler_config.scheduler_cls = class_value
+    ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+
+    with (
+        patch.object(platform, "refresh_block_size"),
+        patch.object(platform, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
+    ):
+        for _ in range(2):
+            platform._setup_worker_and_scheduler(vllm_config, ascend_config)
+            assert vllm_config.scheduler_config.scheduler_cls is class_value
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("diffusion_config_present", [False, True])
+def test_setup_worker_and_scheduler_preserves_upstream_diffusion_selection(async_scheduling, diffusion_config_present):
+    from vllm_ascend import platform
+
+    # The release has no diffusion_config attribute; main selects a diffusion
+    # scheduler after the platform hook if scheduler_cls is still unset.
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(worker_cls="custom.Worker"),
+        compilation_config=SimpleNamespace(custom_ops=[]),
+        cache_config=SimpleNamespace(swa_bounded_replay=False),
+        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling, scheduler_cls=None),
+    )
+    if diffusion_config_present:
+        vllm_config.diffusion_config = SimpleNamespace()
+    ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+
+    with (
+        patch.object(platform, "refresh_block_size"),
+        patch.object(platform, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
+    ):
+        platform._setup_worker_and_scheduler(vllm_config, ascend_config)
+
+    if diffusion_config_present:
+        assert vllm_config.scheduler_config.scheduler_cls is None
+    else:
+        assert not hasattr(vllm_config, "diffusion_config")
+        expected_cls = (
+            "vllm_ascend.core.scheduler.AscendAsyncScheduler"
+            if async_scheduling
+            else "vllm_ascend.core.scheduler.AscendScheduler"
+        )
+        assert vllm_config.scheduler_config.scheduler_cls == expected_cls
+
+
+@pytest.mark.parametrize(
+    "scheduler_path",
+    [
+        "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler",
+        "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
+        "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
+        "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
+        "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
+    ],
+)
+def test_setup_worker_and_scheduler_preserves_preselected_reservation_subclasses(scheduler_path):
+    from vllm.config import SchedulerConfig
+
+    from vllm_ascend import platform
+    from vllm_ascend.core.scheduler_kv_reservation import SpecDecodeReservationMixin
+
+    vllm_config = TestNPUPlatform.mock_vllm_config()
+    vllm_config.scheduler_config.scheduler_cls = scheduler_path
+    ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+
+    with (
+        patch.object(platform, "refresh_block_size"),
+        patch.object(platform, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
+    ):
+        platform._setup_worker_and_scheduler(vllm_config, ascend_config)
+    assert vllm_config.scheduler_config.scheduler_cls == scheduler_path
+    scheduler_cls = SchedulerConfig.get_scheduler_cls(vllm_config.scheduler_config)
+    assert scheduler_cls.__mro__.count(SpecDecodeReservationMixin) == 1
+    assert scheduler_cls._request_remaining_blocks is SpecDecodeReservationMixin._request_remaining_blocks
