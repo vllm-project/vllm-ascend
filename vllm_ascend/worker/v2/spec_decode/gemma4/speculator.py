@@ -38,7 +38,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
+    build_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
@@ -215,7 +215,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         is_prefilling_true = torch.ones(num_reqs, dtype=torch.bool)
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
                 is_prefilling_true,
@@ -250,7 +250,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             self.input_buffers.seq_lens[:num_reqs] = committed_t.to(self.input_buffers.seq_lens.dtype).to(
                 self.input_buffers.seq_lens.device
             )
-            with build_draft_attn_metadata_factory(
+            with build_attn_metadata_factory(
                 self.input_buffers.positions,
                 batch_desc.num_tokens,
                 torch.from_numpy(self.input_batch.is_prefilling_np),
