@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="724" viewBox="0 0 1120 724" role="img" aria-labelledby="ascendstore-v1-resource-lifetimes-title ascendstore-v1-resource-lifetimes-desc">
 <title id="ascendstore-v1-resource-lifetimes-title">请求、读源、额外引用与本地注册的不同寿命</title>
-<desc id="ascendstore-v1-resource-lifetimes-desc">单 Worker job17 的一种合法时序，从Store规划开始截取。请求被取消、进度清理后，Store仍在读源；Backend按同步约定返回后读源结束，Worker处理fence并返回计数，Scheduler收齐回执后归还job引用。本地buffer注册继续供后续操作使用，到所有相关操作和线程的关闭条件成立后才注销。阶段等距表示先后，不表示实际耗时。</desc>
+<desc id="ascendstore-v1-resource-lifetimes-desc">仅对需要额外来源引用的单Worker job17示例，请求取消后Store仍在读源，Backend按同步约定返回后Worker发释放回执，Scheduler收齐后归还引用，本地注册继续保留到关闭条件成立；普通FullAttention Store不创建该引用，阶段间距不表示耗时。</desc>
 <defs><marker id="ascendstore-v1-resource-lifetimes-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#526a76"/></marker></defs>
 <style>text{font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif;fill:#223036}</style>
 <rect width="1120" height="724" fill="white"/>
 <text x="32" y="44" font-size="28" font-weight="600" text-anchor="start" style="fill:#223036">请求结束以后，哪些责任还在</text>
-<text x="32" y="80" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">job17 · 单 Worker 例子 · 从 Store 规划开始截取 · 阶段先后，不按耗时绘制</text>
-<text x="32" y="112" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">本例请求取消后，Store 仍在读源；正常返回分支以 Backend 同步约定成立为条件。</text>
+<text x="32" y="80" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">仅适用于需要额外引用的来源 · job17 · 单 Worker · 阶段先后，不按耗时绘制</text>
+<text x="32" y="112" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">普通 FullAttention Store 不创建该引用；本例假定 Backend 正常返回且同步读源约定成立。</text>
 <line x1="264" y1="236" x2="952" y2="236" stroke="#c8d4d9"/>
 <line x1="976" y1="236" x2="1060" y2="236" stroke="#c8d4d9"/>
 <path d="M956,242 L964,230 M966,242 L974,230" stroke="#526a76" fill="none"/>

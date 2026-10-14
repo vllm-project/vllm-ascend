@@ -50,7 +50,7 @@
 <text x="80" y="364" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Scheduler</text>
 <text x="80" y="392" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">命中采用与范围规划</text>
 <text x="80" y="420" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">请求进度</text>
-<text x="80" y="448" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">Store 来源引用</text>
+<text x="80" y="448" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">按需保留 Store 来源引用</text>
 </g>
 <g data-node="worker" data-x="416" data-y="332" data-w="640" data-h="148">
 <rect x="416" y="332" width="640" height="148" rx="8" fill="#eef2fc" stroke="#2a52be"/>
