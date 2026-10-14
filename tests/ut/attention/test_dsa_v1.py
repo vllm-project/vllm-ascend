@@ -29,6 +29,8 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSACPImpl,
     AscendDSACPLayerMetadata,
     AscendDSACPMetadataBuilder,
+    AscendDSADCPImpl,
+    AscendDSADCPMetadataBuilder,
     AscendDSAPCPImpl,
     AscendDSAPCPMetadata,
     AscendDSAPCPMetadataBuilder,
@@ -638,7 +640,8 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
-def test_build_compressor_metadata_out_uses_fixed_outputs():
+@pytest.mark.parametrize("dcp_args", [(), (2, 1)])
+def test_build_compressor_metadata_out_uses_fixed_outputs(dcp_args):
     metadata = SimpleNamespace(
         full_compress_cos=torch.ones((8, 1, 1, 4)),
         full_compress_sin=torch.zeros((8, 1, 1, 4)),
@@ -648,6 +651,8 @@ def test_build_compressor_metadata_out_uses_fixed_outputs():
         storage_block_size=128,
         num_actual_reqs=1,
     )
+    if dcp_args:
+        metadata.compressor_dcp_size, metadata.compressor_dcp_rank = dcp_args
     outputs = (
         torch.empty((2, 1, 1, 4)),
         torch.empty((2, 1, 1, 4)),
@@ -662,7 +667,7 @@ def test_build_compressor_metadata_out_uses_fixed_outputs():
     ):
         build_compressor_metadata_out(metadata, 4, outputs, vllm_config)
 
-    assert metadata_out.call_args.args[-3:] == outputs
+    assert metadata_out.call_args.args[9:] == (*outputs, *dcp_args)
     assert metadata_out.call_args.args[6] == 2
 
 
@@ -1800,6 +1805,7 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
 def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
     with (
         patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=False),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
     ):
         assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
@@ -1814,6 +1820,7 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
 
     with (
         patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=False),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
     ):
         for get_backend_cls in (
@@ -1821,6 +1828,30 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
             AscendDSABackend.get_impl_cls,
         ):
             with pytest.raises(ValueError, match="cannot be enabled at the same time"):
+                get_backend_cls()
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_dsa_backend_selects_dcp_without_changing_default_backend(use_dcp):
+    with (
+        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=use_dcp),
+        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
+    ):
+        expected_builder = AscendDSADCPMetadataBuilder if use_dcp else AscendDSAMetadataBuilder
+        expected_impl = AscendDSADCPImpl if use_dcp else AscendDSAImpl
+        assert AscendDSABackend.get_builder_cls() is expected_builder
+        assert AscendDSABackend.get_impl_cls() is expected_impl
+
+
+def test_dsa_backend_rejects_pcp_with_dcp():
+    with (
+        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=True),
+        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
+    ):
+        for get_backend_cls in (AscendDSABackend.get_builder_cls, AscendDSABackend.get_impl_cls):
+            with pytest.raises(NotImplementedError, match="PCP and DCP cannot be enabled at the same time"):
                 get_backend_cls()
 
 

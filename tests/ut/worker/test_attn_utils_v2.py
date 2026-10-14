@@ -336,6 +336,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     assert spec.scale_dim == (1 if li_c8 else 0)
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
 @pytest.mark.parametrize(
     ("device_type", "cache_dtype", "scale_dtype", "component_dims"),
     [
@@ -349,6 +350,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
 )
 def test_mrv2_initializes_dsv4_cache_only_layer(
     monkeypatch,
+    dcp_size,
     device_type,
     cache_dtype,
     scale_dtype,
@@ -375,7 +377,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         cache_config=cache_config,
         kv_transfer_config=None,
         quant_config=None,
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size, prefill_context_parallel_size=1),
     )
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
@@ -418,6 +420,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert set(discovered_specs) == {layer_name}
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
+    assert getattr(spec, "dcp_scheduler_replication_size", 1) == dcp_size
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])
