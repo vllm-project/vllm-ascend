@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, fields
 
 from vllm.config import SchedulerConfig, VllmConfig
@@ -46,7 +47,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config
+from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
 
 @dataclass
@@ -463,47 +464,76 @@ class RecomputeScheduler(Scheduler):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and not self._recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
+            # v0.30.0 keeps a single `skipped_waiting` queue. Upstream main
+            # (#58947) split it into `kv_holding_waiting` (a queue) and
+            # `deferred_waiting` (a set), and renamed the blocked-status helper.
+            if vllm_version_is("0.30.0"):
+                legacy_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if input_budget <= draft_slots:
-                    break
+                def _skip_request(from_queue) -> None:
+                    legacy_skipped_waiting.prepend_request(from_queue.pop_request())
+
+            else:
+                step_skipped_waiting: deque[Request] = deque()
+                step_skipped_kv_holding: deque[Request] = deque()
+
+                def _skip_request(from_queue) -> None:
+                    skipped = from_queue.pop_request()
+                    self.deferred_waiting.add(skipped)
+                    if self._holds_kv_blocks(skipped):
+                        step_skipped_kv_holding.appendleft(skipped)
+                    else:
+                        step_skipped_waiting.appendleft(skipped)
+
+            while token_budget > 0:
+                if vllm_version_is("0.30.0"):
+                    if not (self.waiting or self.skipped_waiting) or input_budget <= draft_slots:
+                        break
+                    request_queue = self._select_waiting_queue_for_scheduling()
+                    assert request_queue is not None
+                else:
+                    # Requests holding KV blocks are always drained first.
+                    request_queue = self.kv_holding_waiting or self.waiting
+                    if not request_queue or input_budget <= draft_slots:
+                        break
+
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
+                if vllm_version_is("0.30.0"):
+                    if num_running >= self.max_num_running_reqs:
+                        break
+                elif num_running >= self.max_num_active_reqs:
                     break
-
-                request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                if vllm_version_is("0.30.0"):
+                    if self._is_blocked_waiting_status(
+                        request.status
+                    ) and not self._try_promote_blocked_waiting_request(request):
+                        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request_id,
+                            )
+                        _skip_request(request_queue)
+                        continue
+                elif not self._handle_blocked_waiting_request(request):
+                    _skip_request(request_queue)
                     continue
 
                 if request.num_stale_output_tokens > 0 and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 if not self._can_admit_waiting_request(request):
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -517,8 +547,7 @@ class RecomputeScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 num_external_computed_tokens = 0
@@ -551,8 +580,7 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            _skip_request(request_queue)
                             continue
 
                         if partial_tail and ext_tokens > partial_tail:
@@ -594,8 +622,7 @@ class RecomputeScheduler(Scheduler):
 
                     # Skip request with pending mm encoding prefetches
                     if self._ec_transfer_pending(request, num_computed_tokens):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        _skip_request(request_queue)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -613,8 +640,7 @@ class RecomputeScheduler(Scheduler):
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
                     if self._ec_transfer_pending(request, num_computed_tokens):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        _skip_request(request_queue)
                         continue
 
                 encoder_inputs_to_schedule = None
@@ -781,12 +807,10 @@ class RecomputeScheduler(Scheduler):
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -812,8 +836,12 @@ class RecomputeScheduler(Scheduler):
                                 num_computed_tokens,
                             )
                         )
+                    _skip_request(request_queue)
                     continue
 
+                request = request_queue.pop_request()
+                if not vllm_version_is("0.30.0"):
+                    self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
@@ -858,13 +886,23 @@ class RecomputeScheduler(Scheduler):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
-            if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+            if vllm_version_is("0.30.0"):
+                if legacy_skipped_waiting:
+                    self.skipped_waiting.prepend_requests(legacy_skipped_waiting)
+            else:
+                if step_skipped_kv_holding:
+                    self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
+                if step_skipped_waiting:
+                    self.waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                if vllm_version_is("0.30.0"):
+                    self.prefill_capacity_bound = bool(self.waiting)
+                else:
+                    _, num_waiting = self.get_request_counts()
+                    self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

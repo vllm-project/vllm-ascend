@@ -697,6 +697,31 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 self.max_num_tokens = global_max_num_tokens
 
+    if vllm_version_is("0.30.0"):
+
+        def _pd_uniform_decode_token_count(self, batch_state: BatchReqState) -> int | None:
+            # vLLM 0.30.0 keys the helper on has_prefill.
+            return vllm_model_runner.get_uniform_decode_token_count(
+                len(batch_state.req_ids),
+                batch_state.num_tokens,
+                int(batch_state.num_scheduled_tokens.max()),
+                batch_state.has_prefill,
+            )
+
+    else:
+
+        def _pd_uniform_decode_token_count(self, batch_state: BatchReqState) -> int | None:
+            # vLLM main renamed the helper argument to decode_graph_eligible;
+            # after the PD reclassification above, has_prefill is False exactly
+            # when no genuinely-prefilling row remains, i.e. the batch is
+            # graph-eligible.
+            return vllm_model_runner.get_uniform_decode_token_count(
+                len(batch_state.req_ids),
+                batch_state.num_tokens,
+                int(batch_state.num_scheduled_tokens.max()),
+                not batch_state.has_prefill,
+            )
+
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
         kv_cfg = self.vllm_config.kv_transfer_config
@@ -719,12 +744,7 @@ class NPUModelRunner(GPUModelRunner):
             if np.any(pd_decode_recompute):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
                 batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
-                )
+                uniform_token_count = self._pd_uniform_decode_token_count(batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -981,6 +1001,17 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            # vLLM main added decode_graph_eligible (required) and
+            # prefill_runs_as_decode_np to InputBatch; the v0.30.0 lane has no
+            # such fields.
+            **(
+                {
+                    "prefill_runs_as_decode_np": batch_req_state.prefill_runs_as_decode_np,
+                    "decode_graph_eligible": batch_req_state.decode_graph_eligible,
+                }
+                if not vllm_version_is("0.30.0")
+                else {}
+            ),
         )
         # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
         # helper; PCPManager.partition_batch now takes the batch descriptor.

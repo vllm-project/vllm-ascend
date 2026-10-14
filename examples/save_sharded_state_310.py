@@ -233,7 +233,22 @@ def main(args):
 
     # 2. Run VLLM Engine and save sharded states
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+
+    def _drop_none(obj):
+        if isinstance(obj, dict):
+            return {k: _drop_none(v) for k, v in obj.items() if v is not None}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(_drop_none(v) for v in obj)
+        return obj
+
+    engine_kwargs = dataclasses.asdict(engine_args)
+    # asdict() fills CompilationConfig with nested None defaults that pydantic
+    # rejects. Only that field is sanitized; other explicit Nones stay, because
+    # omitting a key is not the same as passing None.
+    compilation_config = engine_kwargs.get("compilation_config")
+    if isinstance(compilation_config, dict):
+        engine_kwargs["compilation_config"] = _drop_none(compilation_config)
+    llm = LLM(**engine_kwargs)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     llm.llm_engine.engine_core.save_sharded_state(path=str(output_dir))
