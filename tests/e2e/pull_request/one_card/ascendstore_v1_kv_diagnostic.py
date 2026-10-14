@@ -129,7 +129,9 @@ class KVByteAudit:
             assert isinstance(pair, (tuple, list)) and len(pair) == 2, "Only ordinary K/V attention is in scope"
             for role, cache in zip(("K", "V"), pair, strict=True):
                 assert cache.dtype == torch.bfloat16 and cache.ndim == 4 and cache.shape[1] == block_size
-                assert cache.is_contiguous(), "Only the explicitly selected contiguous NHD layout is in scope"
+                assert cache[0].is_contiguous() and cache.stride(0) >= cache[0].numel(), (
+                    "Expected dense NHD block payloads"
+                )
                 self.entries.append((f"{layer_name}/{role}", cache))
         assert self.entries
         self.prefix_bytes_per_request = sum(cache[0].numel() * cache.element_size() for _, cache in self.entries)
@@ -154,7 +156,15 @@ class KVByteAudit:
             "prefix_bytes_per_request": self.prefix_bytes_per_request,
             "comparison": "full byte equality; SHA-256 is recorded as supporting evidence, not the comparison oracle",
             "entries": [
-                {"name": name, "dtype": str(cache.dtype), "shape": list(cache.shape), "stride": list(cache.stride())}
+                {
+                    "name": name,
+                    "dtype": str(cache.dtype),
+                    "shape": list(cache.shape),
+                    "stride": list(cache.stride()),
+                    "storage_offset_bytes": cache.storage_offset() * cache.element_size(),
+                    "block_payload_bytes": cache[0].numel() * cache.element_size(),
+                    "physical_block_stride_bytes": cache.stride(0) * cache.element_size(),
+                }
                 for name, cache in self.entries
             ],
         }
@@ -360,7 +370,7 @@ def consecutive_runs(blocks: list[int]) -> list[tuple[int, int]]:
 
 
 def read_prefix_bytes(cache: torch.Tensor, blocks: list[int]) -> bytes:
-    # Copy BF16 bits to CPU without converting dtype; assemble logical blocks, not physical allocation order.
+    # Preserve BF16 bits, but exclude the sibling K/V region and page padding from block-strided views.
     return b"".join(
         cache.narrow(0, start, count).detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
         for start, count in consecutive_runs(blocks)

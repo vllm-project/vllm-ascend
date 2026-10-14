@@ -21,9 +21,9 @@ from tests.e2e.pull_request.one_card.ascendstore_v1_kv_diagnostic import (
 
 class ByteAuditFixture:
     def __init__(self, implementation: str = "v1") -> None:
-        self.caches = {
-            "layer.0": tuple((torch.arange(80).reshape(20, 2, 1, 2) + i).to(torch.bfloat16) for i in (0, 100))
-        }
+        self.backing = torch.arange(240).reshape(20, 3, 2, 1, 2).to(torch.bfloat16)
+        # Match native combined K/V pages, with an extra padding region to detect accidental overwrites.
+        self.caches = {"layer.0": (self.backing[:, 0], self.backing[:, 2])}
         self.source_blocks = [1, 3, 5]
         self.destination_blocks = [7, 9, 11]
         self.payload: list[torch.Tensor] = []
@@ -110,6 +110,7 @@ class ByteAuditFixture:
 @pytest.mark.parametrize("mode", ("observe", "poison"))
 def test_audit_compares_relocated_prefix_bytes_and_separates_recomputed_tail(implementation: str, mode: str) -> None:
     fixture = ByteAuditFixture(implementation)
+    padding = fixture.backing[:, 1].clone()
     try:
         reference = fixture.record()
         fixture.begin(mode)
@@ -128,6 +129,11 @@ def test_audit_compares_relocated_prefix_bytes_and_separates_recomputed_tail(imp
         assert result["requests"][0]["poison_verified"] == (mode == "poison")
         assert all(
             entry["recomputed_last_prompt_token"]["different_bytes"] > 0 for entry in result["requests"][1]["entries"]
+        )
+        assert torch.equal(fixture.backing[:, 1], padding), "The probe must not inspect or poison page padding"
+        assert (
+            fixture.audit.layout["entries"][0]["physical_block_stride_bytes"]
+            > (fixture.audit.layout["entries"][0]["block_payload_bytes"])
         )
     finally:
         fixture.audit.close()
