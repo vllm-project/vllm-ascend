@@ -300,7 +300,8 @@ __aicore__ inline void MoeV2SortMultiCore::Init(GM_ADDR expertIdx, GM_ADDR exper
   this->vmsTilingData = &(tilingData->vmsMiddleComputeParamsOp);
   this->sortOutTilingData = &(tilingData->sortOutComputeParamsOp);
 
-  this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
+  this->blockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+      AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
   this->tileLength = this->vbsTilingData->perCorePerLoopElements;
   this->sortTotalLength = this->vbsTilingData->perCoreElements;
   if (this->blockIdx == tilingData->vbsComputeParamsOp.needCoreNum - 1) {
