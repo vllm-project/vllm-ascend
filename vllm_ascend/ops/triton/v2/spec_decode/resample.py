@@ -51,11 +51,13 @@ def _resample_kernel(
     expanded_idx_mapping_ptr,
     draft_sampled_ptr,
     temp_ptr,
+    cumulative_log_p_ptr,
     num_reqs,
     num_blocks,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     """Compute one probability-mass statistic per request/vocabulary block."""
     worker_id = tl.program_id(0)
@@ -80,6 +82,11 @@ def _resample_kernel(
         req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
         temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         is_bonus = resample_token_idx == end_idx - 1
+        use_target = is_bonus
+        if USE_BLOCK_VERIFICATION:
+            rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
+            # A placeholder is not a proposal: recover from the target directly.
+            use_target |= rejected_draft_token < 0
         needs_resample = (temperature != 0.0) | is_bonus
 
         if needs_resample:
@@ -91,7 +98,7 @@ def _resample_kernel(
                 other=float("-inf"),
             ).to(tl.float32)
 
-            if is_bonus:
+            if use_target:
                 block_max, block_argmax = tl.max(target_block_logits, axis=0, return_indices=True)
                 has_mass = block_max > float("-inf")
                 safe_block_max = tl.where(has_mass, block_max, 0.0)
@@ -103,7 +110,12 @@ def _resample_kernel(
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, block_sumexp)
             else:
                 target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
-                target_prob = tl.exp(target_block_logits - target_lse)
+                target_log_probs = target_block_logits - target_lse
+                if USE_BLOCK_VERIFICATION and HAS_DRAFT_LOGITS:
+                    # Upstream block residual: max(p_tau * M_b - M_s, 0).
+                    log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1, mask=resample_idx > 0, other=0.0)
+                    target_log_probs += log_p_tau
+                target_prob = tl.exp(target_log_probs)
 
                 if HAS_DRAFT_LOGITS:
                     draft_block_logits = tl.load(
@@ -172,12 +184,14 @@ def _categorical_finalize_kernel(
     temp_ptr,
     seed_ptr,
     pos_ptr,
+    cumulative_log_p_ptr,
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     RESAMPLE_NOISE_SALT: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     """Select the final token using one global categorical threshold per request."""
     req_idx = tl.program_id(0)
@@ -193,10 +207,14 @@ def _categorical_finalize_kernel(
     temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temperature == 0.0
     is_bonus = resample_token_idx == end_idx - 1
+    use_target = is_bonus
+    if USE_BLOCK_VERIFICATION:
+        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
+        use_target |= rejected_draft_token < 0
     is_greedy_bonus = is_greedy & is_bonus
     is_random = ~is_greedy
-    is_random_bonus = is_random & is_bonus
-    is_random_residual = is_random & (~is_bonus)
+    is_random_bonus = is_random & use_target
+    is_random_residual = is_random & (~use_target)
 
     block_ids = tl.arange(0, PADDED_NUM_BLOCKS)
     valid_block_mask = block_ids < num_blocks
@@ -237,7 +255,7 @@ def _categorical_finalize_kernel(
     bonus_global_max = tl.max(bonus_block_max, axis=0)
     safe_bonus_global_max = tl.where(bonus_global_max > float("-inf"), bonus_global_max, 0.0)
     bonus_block_mass = stored_block_mass * tl.exp(bonus_block_max - safe_bonus_global_max)
-    block_mass = tl.where(is_bonus, bonus_block_mass, stored_block_mass)
+    block_mass = tl.where(use_target, bonus_block_mass, stored_block_mass)
     block_mass = tl.where(valid_block_mask & is_random, block_mass, 0.0)
 
     total_mass = tl.sum(block_mass, axis=0)
@@ -283,7 +301,15 @@ def _categorical_finalize_kernel(
         target_block_logits,
         float("-inf"),
     )
-    target_prob = tl.exp(residual_target_logits - target_lse)
+    target_log_probs = residual_target_logits - target_lse
+    if USE_BLOCK_VERIFICATION and HAS_DRAFT_LOGITS:
+        log_p_tau = tl.load(
+            cumulative_log_p_ptr + resample_token_idx - 1,
+            mask=is_random_residual & has_total_mass & (resample_idx > 0),
+            other=0.0,
+        )
+        target_log_probs += log_p_tau
+    target_prob = tl.exp(target_log_probs)
 
     if HAS_DRAFT_LOGITS:
         draft_block_logits = tl.load(
@@ -303,7 +329,7 @@ def _categorical_finalize_kernel(
         )
         residual_token_mass = tl.where(token_ids != rejected_draft_token, target_prob, 0.0)
 
-    token_mass = tl.where(is_bonus, bonus_token_mass, residual_token_mass)
+    token_mass = tl.where(use_target, bonus_token_mass, residual_token_mass)
     token_mass = tl.where(active_token_mask, token_mass, 0.0)
     selected_block_mass = tl.sum(token_mass, axis=0)
     has_selected_block_mass = selected_block_mass > 0.0
@@ -342,6 +368,8 @@ def resample(
     seed: torch.Tensor,
     pos: torch.Tensor,
     has_draft_logits: bool | None = None,
+    cumulative_log_p: torch.Tensor | None = None,
+    use_block_verification: bool = False,
 ) -> None:
     """Resample the first rejected token or the bonus token in place.
 
@@ -359,7 +387,13 @@ def resample(
     contiguous. ``draft_logits=None`` selects the one-hot draft path. Callers
     that already replaced ``None`` with a dummy tensor can pass
     ``has_draft_logits=False`` explicitly to preserve the same semantics.
+
+    Block verification scales full-draft residuals by the accepted prefix's
+    joint ratio from ``cumulative_log_p``. For one-hot drafts that factor
+    cancels under normalization, as in upstream.
     """
+    if use_block_verification:
+        assert cumulative_log_p is not None
     num_reqs = cu_num_logits.shape[0] - 1
     if num_reqs == 0:
         return
@@ -411,11 +445,13 @@ def resample(
         expanded_idx_mapping,
         draft_sampled,
         temperature,
+        cumulative_log_p,
         num_reqs,
         num_blocks,
         vocab_size,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        USE_BLOCK_VERIFICATION=use_block_verification,
         has_auto_blockify_blacklist_op=True,
     )
 
@@ -443,10 +479,12 @@ def resample(
         temperature,
         seed,
         pos,
+        cumulative_log_p,
         vocab_size,
         num_blocks,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         HAS_DRAFT_LOGITS=has_draft_logits,
         RESAMPLE_NOISE_SALT=1 << 29,
+        USE_BLOCK_VERIFICATION=use_block_verification,
     )
