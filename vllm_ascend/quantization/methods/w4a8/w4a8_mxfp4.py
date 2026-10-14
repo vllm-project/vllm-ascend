@@ -518,6 +518,10 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         return param_dict
 
     def process_weights_after_loading(self, layer):
+        if use_cann_megamoe(get_current_vllm_config()):
+            super().process_weights_after_loading(layer)
+            return
+
         layer.w13_weight.data = torch_npu.npu_format_cast(
             layer.w13_weight.data.view(torch.uint8),
             ACL_FORMAT_FRACTAL_NZ,
