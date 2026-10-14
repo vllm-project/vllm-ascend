@@ -507,7 +507,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
-        self.assertFalse("return_softmax_lse", call_kwargs)
+        self.assertNotIn("return_softmax_lse", call_kwargs)
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         self._check_prolog_v3_enables_packed_kv_cache(AscendW8A8DynamicLinearMethod)
