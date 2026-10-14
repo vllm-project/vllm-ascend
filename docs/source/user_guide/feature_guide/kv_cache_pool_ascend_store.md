@@ -29,28 +29,28 @@ KV Cache supports the following three external storage backends, choose the stor
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
 | Feature Mutex | `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends. |
 
-**Backend-specific**
+#### Backend-specific
 
-=== "Mooncake backend"
+##### Mooncake backend
 
-    | Category | Constraints |
-    | :--- | :--- |
-    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35. |
-    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
+| Category | Constraints |
+| :--- | :--- |
+| Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35. |
+| Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
 
-=== "Memcache backend"
+##### Memcache backend
 
-    | Category | Constraints |
-    | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
-    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
+| Category | Constraints |
+| :--- | :--- |
+| Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+| Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
-=== "Yuanrong backend"
+##### Yuanrong backend
 
-    | Category | Constraints |
-    | :--- | :--- |
-    | Software Dependencies | Requires `openyuanrong-datasystem` |
-    | Feature Mutex | • Worker cannot configure both Coordinator and etcd discovery backends simultaneously.<br>• Under `P2P_TRANSFER` or FabricMem mode, client-side device memory pre-registration is always skipped regardless of `enable_dev_mem_pregister` value. |
+| Category | Constraints |
+| :--- | :--- |
+| Software Dependencies | Requires `openyuanrong-datasystem` |
+| Feature Mutex | • Worker cannot configure both Coordinator and etcd discovery backends simultaneously.<br>• Under `P2P_TRANSFER` or FabricMem mode, client-side device memory pre-registration is always skipped regardless of `enable_dev_mem_pregister` value. |
 
 ## Scenario 1: Mooncake Backend
 
