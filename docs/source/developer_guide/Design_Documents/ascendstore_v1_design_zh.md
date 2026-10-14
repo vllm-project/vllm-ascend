@@ -303,7 +303,7 @@ TTFT 是收到首个输出 token 的时间；表中“平均 TTFT”是四个逐
 
 两次 TP Mismatch 测试均通过，请求完成数、输入输出长度、命中来源和零抢占检查通过。每轮 16 个消费者请求合计从 External 恢复 131072 token，本地只计算 16 个输入尾 token，本地前缀命中为 0。**文本比较仍有差异，测试只记录、不阻断，原因未在这两次实验中查清；通过状态不能证明严格文本一致、精度无损或 KV 逐字节一致。**
 
-复核入口为[第一次 NPU Job](https://github.com/vllm-project/vllm-ascend/actions/runs/38424325266/job/115396004245)、[第二次 NPU Job](https://github.com/vllm-project/vllm-ascend/actions/runs/38493078274/job/115624542367)，以及对应的[第一次日志 Artifact](https://github.com/vllm-project/vllm-ascend/actions/runs/38424325266/artifacts/11832383952)和[第二次日志 Artifact](https://github.com/vllm-project/vllm-ascend/actions/runs/38493078274/artifacts/11865083012)。日志中 `ASCENDSTORE_TP_PERFORMANCE` 后的 JSON 包含逐轮指标、命中统计与文本差异；Artifact 受保留期限制。[固定版本测试代码](https://github.com/ChenZhuo888/vllm-ascend/blob/d783ffdec83aaf804ece24289f39cbaaa864c2d9/tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py)给出可复核的执行流程。
+复核入口为[第一次 NPU Job](https://github.com/vllm-project/vllm-ascend/actions/runs/38424325266/job/115396004245)、[第二次 NPU Job](https://github.com/vllm-project/vllm-ascend/actions/runs/38493078274/job/115624542367)。日志中 `ASCENDSTORE_TP_PERFORMANCE` 后的 JSON 包含逐轮指标、命中统计与文本差异；需要下载时，可登录 GitHub，在[第一次运行](https://github.com/vllm-project/vllm-ascend/actions/runs/38424325266)和[第二次运行](https://github.com/vllm-project/vllm-ascend/actions/runs/38493078274)页面的 Artifacts 区域查找名称以 `a2-4card-1-1` 结尾的日志包。Artifact 受保留期限制。[固定版本测试代码](https://github.com/ChenZhuo888/vllm-ascend/blob/d783ffdec83aaf804ece24289f39cbaaa864c2d9/tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py)给出可复核的执行流程。
 
 ### 7.3 可以推出什么，尚不能推出什么
 
