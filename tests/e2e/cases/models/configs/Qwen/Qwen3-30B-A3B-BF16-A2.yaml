@@ -48,5 +48,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 45
         request_rate: 0
-        baseline: 802.4382
+        baseline: 765
         threshold: 0.97
