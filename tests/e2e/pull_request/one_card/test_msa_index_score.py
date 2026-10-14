@@ -190,7 +190,7 @@ def _run_case(
     ],
 )
 @torch.inference_mode()
-def test_msa_index_score_vllm_matches_cpu_golden(
+def test_msa_index_score_matches_cpu_golden(
     dtype: torch.dtype,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],

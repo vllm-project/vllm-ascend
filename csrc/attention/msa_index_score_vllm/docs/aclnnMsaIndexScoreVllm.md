@@ -1,6 +1,6 @@
 # aclnnMsaIndexScoreVllm
 
-[View upstream source](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score_vllm)
+[View upstream source](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score)
 
 ## Product Support
 
