@@ -35,7 +35,7 @@ def test_sp_shard_pads_token_axis_of_3d_input(set_tp):
 
 
 def test_sp_shard_does_not_materialize_global_padding(set_tp):
-    set_tp(4, 3)
+    set_tp(4, 2)
     x = torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2)
     out = _ascend_sp_shard_impl(x)
 
