@@ -849,6 +849,12 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
+        if getattr(self, "_dp_peer_disconnected", False):
+            # A DP peer already disconnected: the all_reduce below would only
+            # block until timeout on every step. Fall back to local metadata.
+            num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
+            return num_tokens, num_tokens_after_padding, cudagraph_mode
+
         packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value

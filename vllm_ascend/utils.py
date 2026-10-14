@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -716,8 +716,7 @@ def _patch_sync_dp_state():
     """
     from vllm.config.parallel import ParallelConfig
 
-    if getattr(ParallelConfig.__dict__.get("sync_dp_state"),
-               "_ascend_dp_patched", False):
+    if getattr(ParallelConfig.__dict__.get("sync_dp_state"), "_ascend_dp_patched", False):
         return
 
     _original_sync_dp_state = ParallelConfig.sync_dp_state
@@ -757,8 +756,7 @@ def _patch_has_unfinished_dp():
     """
     from vllm.config.parallel import ParallelConfig
 
-    if getattr(ParallelConfig.__dict__.get("has_unfinished_dp"),
-               "_ascend_dp_patched", False):
+    if getattr(ParallelConfig.__dict__.get("has_unfinished_dp"), "_ascend_dp_patched", False):
         return
 
     _original_has_unfinished_dp = ParallelConfig.has_unfinished_dp
@@ -791,14 +789,16 @@ def _patch_monitor_engine_liveness():
 
     Patched behavior: in DP mode, log the dead engine but do NOT set
     failed_proc_name and do NOT call self.shutdown() while surviving engines
-    remain. When ALL engines are dead, shutdown is called even in DP mode.
+    remain. When ALL engines are dead, set failed_proc_name (so the main
+    thread's wait_for_completion_or_failure loop is notified) and call
+    shutdown even in DP mode.
     """
     from multiprocessing import connection as mp_connection
     from typing import cast as t_cast
+
     from vllm.v1.engine.utils import CoreEngineProcManager
 
-    if getattr(CoreEngineProcManager.__dict__.get("monitor_engine_liveness"),
-               "_ascend_dp_patched", False):
+    if getattr(CoreEngineProcManager.__dict__.get("monitor_engine_liveness"), "_ascend_dp_patched", False):
         return
 
     _original_init = CoreEngineProcManager.__init__
@@ -806,8 +806,13 @@ def _patch_monitor_engine_liveness():
     def _patched_init(self, *args, **kwargs):
         _original_init(self, *args, **kwargs)
         vllm_config = kwargs.get("vllm_config")
-        if vllm_config is None and len(args) >= 4:
-            vllm_config = args[3]
+        if vllm_config is None:
+            # Locate the VllmConfig by type instead of a hardcoded positional
+            # index: the constructor signature may change across vllm versions.
+            for arg in args:
+                if type(arg).__name__ == "VllmConfig":
+                    vllm_config = arg
+                    break
         if vllm_config is not None:
             self._dp_size = vllm_config.parallel_config.data_parallel_size
         else:
@@ -836,8 +841,15 @@ def _patch_monitor_engine_liveness():
                         logger.warning(
                             "DP fault tolerance: Engine core process %s died "
                             "(exitcode=%s). %d surviving engines alive.",
-                            proc.name, exitcode, len(sentinels),
+                            proc.name,
+                            exitcode,
+                            len(sentinels),
                         )
+                        if len(sentinels) == 0:
+                            # All engines are gone: notify the main thread so
+                            # it can shut the API servers down instead of
+                            # hanging forever.
+                            self.failed_proc_name = proc.name
                     else:
                         self.failed_proc_name = proc.name
 
@@ -863,11 +875,10 @@ def _patch_wait_for_completion_or_failure():
     """
     import multiprocessing.connection as mp_connection
     import threading
-    import vllm.v1.utils as vllm_utils_mod
-    from vllm.v1.utils import wait_for_completion_or_failure as _orig_fn
 
-    if getattr(vllm_utils_mod.__dict__.get("wait_for_completion_or_failure"),
-               "_ascend_dp_patched", False):
+    import vllm.v1.utils as vllm_utils_mod
+
+    if getattr(vllm_utils_mod.__dict__.get("wait_for_completion_or_failure"), "_ascend_dp_patched", False):
         return
 
     def _tolerant_wait_for_completion_or_failure(
@@ -878,31 +889,30 @@ def _patch_wait_for_completion_or_failure():
         """Wait for processes with DP fault tolerance."""
         is_dp = False
         if engine_manager is not None:
-            try:
+            # CoreEngineActorManager has no .processes; treat it as non-DP.
+            with suppress(TypeError, AttributeError):
                 is_dp = len(engine_manager.processes) > 1
-            except (TypeError, AttributeError):
-                pass
 
         try:
             logger.info("Waiting for API servers to complete ...")
-            sentinel_to_proc = {
-                proc.sentinel: proc for proc in api_server_manager.processes
-            }
+            sentinel_to_proc = {proc.sentinel: proc for proc in api_server_manager.processes}
 
             if coordinator:
                 sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
             if engine_manager:
-                core_shutdown_recv, core_shutdown_send = mp_connection.Pipe(
-                    duplex=False
-                )
+                core_shutdown_recv, core_shutdown_send = mp_connection.Pipe(duplex=False)
 
                 def monitor_engines():
                     try:
                         engine_manager.monitor_engine_liveness()
                     finally:
+                        # Only close the send end here. Closing the recv end
+                        # from this thread races with the main thread waiting
+                        # on it in mp_connection.wait() (OSError: bad file
+                        # descriptor). The main thread closes the recv end
+                        # after it observes the EOF.
                         core_shutdown_send.close()
-                        core_shutdown_recv.close()
 
                 threading.Thread(target=monitor_engines, daemon=True).start()
                 sentinel_to_proc[core_shutdown_recv] = None
@@ -913,50 +923,42 @@ def _patch_wait_for_completion_or_failure():
                 for sentinel in ready_sentinels:
                     proc = sentinel_to_proc.pop(sentinel)
 
-                    if proc is not None and proc.exitcode != 0:
+                    if proc is None:
+                        # core_shutdown_recv signalled EOF: the engine monitor
+                        # thread has finished. Close the recv end on this
+                        # (main) thread, then fall through to the
+                        # failed_proc_name check below so a total engine-core
+                        # failure is surfaced immediately.
+                        sentinel.close()
+                    elif proc.exitcode != 0:
                         if is_dp:
                             logger.warning(
                                 "DP fault tolerance: Process %s (PID: %s) "
                                 "died with exit code %s. "
                                 "Continuing with remaining processes.",
-                                proc.name, proc.pid, proc.exitcode,
+                                proc.name,
+                                proc.pid,
+                                proc.exitcode,
                             )
                             continue
-                        raise RuntimeError(
-                            f"Process {proc.name} (PID: {proc.pid}) "
-                            f"died with exit code {proc.exitcode}"
-                        )
-                    if (
-                        engine_manager
-                        and engine_manager.failed_proc_name is not None
-                    ):
-                        raise RuntimeError(
-                            f"Engine core process "
-                            f"{engine_manager.failed_proc_name} "
-                            "died unexpectedly."
-                        )
+                        raise RuntimeError(f"Process {proc.name} (PID: {proc.pid}) died with exit code {proc.exitcode}")
+                    if engine_manager and engine_manager.failed_proc_name is not None:
+                        raise RuntimeError(f"Engine core process {engine_manager.failed_proc_name} died unexpectedly.")
 
         except KeyboardInterrupt:
-            logger.info(
-                "Received KeyboardInterrupt, shutting down API servers..."
-            )
+            logger.info("Received KeyboardInterrupt, shutting down API servers...")
         except Exception as e:
-            logger.exception(
-                "Exception occurred while running API servers: %s", str(e)
-            )
+            logger.exception("Exception occurred while running API servers: %s", str(e))
             raise
 
-    vllm_utils_mod.wait_for_completion_or_failure = (
-        _tolerant_wait_for_completion_or_failure
-    )
+    vllm_utils_mod.wait_for_completion_or_failure = _tolerant_wait_for_completion_or_failure
 
     _tolerant_wait_for_completion_or_failure._ascend_dp_patched = True
 
     try:
         import vllm.entrypoints.cli.serve as serve_mod
-        serve_mod.wait_for_completion_or_failure = (
-            _tolerant_wait_for_completion_or_failure
-        )
+
+        serve_mod.wait_for_completion_or_failure = _tolerant_wait_for_completion_or_failure
     except ImportError:
         pass
 
