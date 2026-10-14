@@ -34,6 +34,17 @@ def test_sp_shard_pads_token_axis_of_3d_input(set_tp):
             assert torch.equal(out[0], torch.zeros(2, 3))
 
 
+def test_sp_shard_does_not_materialize_global_padding(set_tp):
+    set_tp(4, 3)
+    x = torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2)
+    out = _ascend_sp_shard_impl(x)
+
+    assert out.shape == (2, 2)
+    assert torch.equal(out[0], x[4])
+    assert torch.equal(out[1], torch.zeros(2))
+    assert out.data_ptr() != x.data_ptr()
+
+
 def test_sp_shard_chunks_2d_input_without_padding(set_tp):
     set_tp(8, 3)
     x = torch.arange(16 * 4, dtype=torch.float32).reshape(16, 4)

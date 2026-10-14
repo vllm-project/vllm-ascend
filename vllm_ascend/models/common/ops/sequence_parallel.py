@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn.functional as F
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -30,17 +29,25 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 
 
 def _ascend_sp_shard_impl(x: torch.Tensor) -> torch.Tensor:
-    """Pad the token axis (dim 0) to the TP multiple, then take this rank's chunk."""
+    """Return this rank's padded token chunk without materializing global padding."""
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
-    sp_pad = (-x.shape[0]) % tp_size
-    # Upstream counterpart: vllm/models/common/ops/sequence_parallel.py
-    # sp_shard L45-48 (introduced in 38a466e7b6, #46789).
-    if sp_pad > 0:
-        x = F.pad(x, (0, 0) * (x.ndim - 1) + (0, sp_pad))
-    chunk = x.shape[0] // tp_size
-    out = x[tp_rank * chunk : (tp_rank + 1) * chunk]
-    return out.clone() if sp_pad == 0 else out
+    num_tokens = x.shape[0]
+    chunk = cdiv(num_tokens, tp_size)
+    start = tp_rank * chunk
+    valid = min(max(num_tokens - start, 0), chunk)
+
+    # Allocate only the local result.  The previous implementation padded the
+    # complete token tensor first, so every rank kept the full padded backing
+    # storage alive even though it consumed one chunk.
+    out_shape = list(x.shape)
+    out_shape[0] = chunk
+    out = torch.empty(out_shape, dtype=x.dtype, device=x.device)
+    if valid > 0:
+        out.narrow(0, 0, valid).copy_(x.narrow(0, start, valid))
+    if valid < chunk:
+        out.narrow(0, valid, chunk - valid).zero_()
+    return out
 
 
 def _ascend_sp_shard_fake(x: torch.Tensor) -> torch.Tensor:
