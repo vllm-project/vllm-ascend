@@ -10,6 +10,7 @@ import shutil
 from contextlib import ExitStack
 from hashlib import sha256
 from importlib import import_module
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ def test_temporary_ascendstore_text_divergence(tmp_path: Path) -> None:
     assert len({tuple(prompt[:BLOCK_SIZE]) for prompt in prompts}) == len(prompts)
     report: dict[str, Any] = {
         "model": MODEL,
+        "vllm_package_version": version("vllm"),
         "prompt_sha256": hashes,
         "prompt_tokens": PROMPT_TOKEN_COUNT,
         "output_tokens": OUTPUT_TOKEN_COUNT,
