@@ -15,7 +15,7 @@ from vllm_ascend.models.deepseek_mtp import AscendGlmMoeDsaForCausalLM
 def test_eplb_layer_count_matches_local_weights_only_for_v2_pp(use_v2, pp_size, local_layers):
     config = SimpleNamespace(
         use_v2_model_runner=use_v2,
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, use_sequence_parallel_moe=False),
     )
     original_count = 75 if local_layers else 0
 
