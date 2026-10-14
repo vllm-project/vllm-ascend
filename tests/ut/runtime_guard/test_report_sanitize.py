@@ -62,6 +62,19 @@ def test_truncate_token_id_fields_caps_and_flags():
     assert out["output_token_count"] == 30
 
 
+def test_truncate_nested_token_ids_with_empty_step():
+    """Nested truncation keeps empty steps and caps long int lists."""
+    long_step = list(range(20))
+    detail = {"window_token_ids": [[1, 2], [], long_step]}
+    out = truncate_token_id_fields(
+        detail,
+        max_prompt_token_ids=1000,
+        max_output_token_ids=5,
+    )
+    assert out["window_token_ids"] == [[1, 2], [], long_step[:5]]
+    assert out["window_token_ids_truncated"] is True
+
+
 def test_sanitize_nested_requests_redact_and_truncate():
     nested = {
         "requests": [
