@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU contracts for the temporary byte probe; native transfer is validated only by the NPU CI."""
 
-from types import SimpleNamespace
+import sys
+from collections.abc import Callable
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
 import torch
+from msgspec import msgpack
+from torch.torch_version import TorchVersion
 
+from tests.e2e.pull_request.one_card import ascendstore_v1_kv_diagnostic as diagnostic
 from tests.e2e.pull_request.one_card.ascendstore_v1_kv_diagnostic import (
+    AscendStoreKVByteDiagnosticWorkerExtension,
     KVByteAudit,
     bf16_all_finite,
     bf16_difference,
@@ -51,7 +58,7 @@ class ByteAuditFixture:
         if self.corrupt_load:
             self.caches["layer.0"][0][self.destination_blocks[0]].view(torch.uint8).flatten()[0] ^= 1
 
-    def begin(self, mode: str) -> None:
+    def begin(self, mode: str, begin_phase: Callable[[str, str], Any] | None = None) -> Any:
         phase_id = f"v1-c1-{mode}-cold" if mode == "record" else f"v1-c1-{mode}-external"
         request_id = f"cmpl-ascendstore-diag-{phase_id}-p0-0-uuid"
         blocks = self.source_blocks if mode == "record" else self.destination_blocks
@@ -92,8 +99,9 @@ class ByteAuditFixture:
             is_prefilling_np=np.array([True]),
             attn_state=SimpleNamespace(name="PrefillNoCache"),
         )
-        self.audit.begin_phase(phase_id, mode)
+        result = (begin_phase or self.audit.begin_phase)(phase_id, mode)
         assert self.runner._prepare_inputs_impl(batch) is batch
+        return result
 
     def record(self) -> dict:
         self.begin("record")
@@ -104,6 +112,77 @@ class ByteAuditFixture:
             for block in self.source_blocks:
                 cache[block].fill_(-100)
         return result
+
+
+@pytest.mark.parametrize("implementation", ("production", "v1"))
+def test_worker_rpc_returns_round_trip_through_msgpack_without_custom_hooks(
+    monkeypatch: pytest.MonkeyPatch, implementation: str
+) -> None:
+    fixture = ByteAuditFixture(implementation)
+    fixture.audit.close()
+    fixture.runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, pipeline_parallel_size=1),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        model_config=SimpleNamespace(
+            enforce_eager=True,
+            hf_text_config=SimpleNamespace(num_hidden_layers=1, to_json_string=lambda: '{"num_hidden_layers": 1}'),
+            revision=None,
+        ),
+        speculative_config=None,
+    )
+    kind = "AscendStoreConnector" if implementation == "production" else "AscendStoreV1Connector"
+    fixture.connector = type(kind, (SimpleNamespace,), {})(**vars(fixture.connector))
+    if implementation == "production":
+        fixture.connector.connector_worker = SimpleNamespace(
+            use_layerwise=False, load_async=False, kv_caches=fixture.caches
+        )
+    else:
+        fixture.connector._use_layerwise = False
+        fixture.connector.worker = SimpleNamespace(
+            _load_timeline=type("SynchronousLoadTimeline", (), {})(),
+            _resources=SimpleNamespace(kv_caches=fixture.caches),
+        )
+    transfer_module = ModuleType("vllm.distributed.kv_transfer")
+    monkeypatch.setattr(transfer_module, "get_kv_transfer_group", lambda: fixture.connector, raising=False)
+    monkeypatch.setitem(sys.modules, transfer_module.__name__, transfer_module)
+    monkeypatch.setattr(diagnostic, "AUDIT_BLOCK_SIZE", 2)
+    monkeypatch.setattr(diagnostic, "AUDIT_PREFIX_TOKENS", 4)
+    monkeypatch.setattr(diagnostic, "AUDIT_REQUESTS", 1)
+    monkeypatch.setattr(torch, "__version__", TorchVersion("2.13.0"))
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda: None, get_device_name=lambda: "CPU test device"),
+        raising=False,
+    )
+    worker = AscendStoreKVByteDiagnosticWorkerExtension()
+    worker.model_runner = fixture.runner
+    replies = []
+    try:
+        replies.append(worker.start_ascendstore_kv_byte_audit())
+        fixture.audit = worker._kv_byte_audit
+        for mode in ("record", "observe", "poison"):
+            replies.append(fixture.begin(mode, worker.begin_ascendstore_kv_byte_phase))
+            if mode != "record":
+                fixture.connector.start_load_kv()
+            fixture.connector.wait_for_save()
+            replies.append(worker.end_ascendstore_kv_byte_phase())
+    finally:
+        if hasattr(worker, "_kv_byte_audit"):
+            replies.append(worker.stop_ascendstore_kv_byte_audit())
+
+    # JSON accepts TorchVersion's str subclass; vLLM's MessagePack RPC transport does not.
+    encoder, decoder = msgpack.Encoder(), msgpack.Decoder()
+    with pytest.raises(TypeError, match="TorchVersion"):
+        encoder.encode({"torch_version": torch.__version__})
+    assert len(replies) == 8
+    for reply in replies:
+        assert decoder.decode(encoder.encode(reply)) == reply
+    assert type(replies[0]["torch_version"]) is str
+    assert replies[-1] == {"hooks_restored": True, "temporary_reference_closed": True}
+    assert fixture.audit.reference.closed
+    assert fixture.runner._prepare_inputs_impl is fixture.original_prepare
+    assert fixture.connector.start_load_kv == fixture.load and fixture.connector.wait_for_save == fixture.store
 
 
 @pytest.mark.parametrize("implementation", ("production", "v1"))
