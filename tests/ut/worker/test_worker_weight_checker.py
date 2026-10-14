@@ -5,11 +5,13 @@
 The checksum/reset behavior comes from the paired vLLM's
 ``vllm.model_executor.model_loader.weight_checksum`` (PR #51350); these tests
 only cover the NPUWorker wiring: method presence, rank-key prefixes, model
-access for both runner shapes, and the clear error for an outdated vLLM.
+access for both runner shapes, the weight_nz_mode warning, and the clear
+error for an outdated vLLM.
 """
 
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -89,6 +91,27 @@ def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_asce
 
     assert torch.all(model.linear.weight == 0)
     assert model.scale.item() == 2.0
+
+
+def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
+    """weight_nz_mode=1: reset still zeroes params and logs the NZ warning."""
+    pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
+    monkeypatch.setattr(
+        npu_worker_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(weight_nz_mode=1),
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr(npu_worker_module, "logger", mock_logger)
+    model = _TinyModel()
+    worker = _make_worker(dp_rank=0)
+    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
+
+    worker.reset_weights()
+
+    assert torch.all(model.linear.weight == 0)
+    mock_logger.warning.assert_called_once()
+    assert "weight_nz_mode" in mock_logger.warning.call_args.args[0]
 
 
 def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_config):
