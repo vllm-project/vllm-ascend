@@ -622,6 +622,8 @@ class NPUModelRunner(GPUModelRunner):
             execution_start_time,
         )
 
+        # TODO: Remove this workaround once upstream vLLM restores idle DP ranks'
+        # logical request counts before draft DP synchronization.
         # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
         # Restore their request counts before draft DP sync to avoid inflating all ranks.
         if (
