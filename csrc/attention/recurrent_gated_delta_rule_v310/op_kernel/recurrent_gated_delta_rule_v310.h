@@ -595,8 +595,9 @@ private:
                 uint64_t curQKOffset = (seq_i - seq0) * alignK_;
                 uint64_t curVOffset = (seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (seq_i * NV_ + head_i) * realV_ + v_i;
-                uint64_t curStateOutOffset =
-                    ((ssmStateIndicesGm_.GetValue(stateRowStart + seq_i - seq0) * NV_ + head_i) * realV_ + v_i) * realK_;
+                uint64_t stateOutIndex =
+                    static_cast<uint64_t>(ssmStateIndicesGm_.GetValue(stateRowStart + seq_i - seq0));
+                uint64_t curStateOutOffset = ((stateOutIndex * NV_ + head_i) * realV_ + v_i) * realK_;
                 gama_ = hasGama_ ? gamaInUb.GetValue(gbOffset) : 1;
                 beta_ = betaInUb.GetValue(gbOffset);
                 Compute(curSingleV, curQKOffset, curVOffset);
