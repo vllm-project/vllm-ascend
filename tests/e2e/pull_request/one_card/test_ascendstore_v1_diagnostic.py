@@ -220,7 +220,7 @@ def _exercise_implementation(
                     ("external", "observe"),
                     ("external", "poison"),
                 ):
-                    phase = {
+                    phase: dict[str, Any] = {
                         "id": f"{implementation}-{case}-{mode}-{source}",
                         "implementation": implementation,
                         "case": case,
