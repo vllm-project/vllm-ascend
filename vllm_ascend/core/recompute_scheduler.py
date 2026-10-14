@@ -762,6 +762,8 @@ class RecomputeScheduler(Scheduler):
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if not vllm_version_is("0.30.0"):
+                        reserved_blocks += self._spec_decode_step_blocks()
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

@@ -65,6 +65,7 @@ import vllm.v1.core.sched.scheduler as _sched_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
@@ -73,13 +74,56 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.engine.core import DPEngineCoreProc
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import vllm_version_is
+
+
+def _spec_decode_step_blocks(self: Scheduler) -> int:
+    if not self.num_spec_tokens:
+        return 0
+    num_tokens = 1 + self.num_spec_tokens + self.num_lookahead_tokens
+    return sum(
+        cdiv(num_tokens, manager.block_size)
+        for manager in self.kv_cache_manager.coordinator.single_type_managers
+        if not isinstance(manager.kv_cache_spec, MambaSpec)
+    )
+
+
+def _request_remaining_blocks(self: Scheduler, request: Request) -> int:
+    full_num_tokens = min(request.num_tokens, self.max_model_len)
+    extra_tokens = 1 + self.num_spec_tokens + self.num_lookahead_tokens if self.num_spec_tokens else 0
+    return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        request_id=request.request_id,
+        num_tokens=full_num_tokens + extra_tokens,
+        new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+        num_encoder_tokens=0,
+        total_computed_tokens=request.num_computed_tokens,
+        num_local_computed_tokens=request.num_computed_tokens,
+        num_tokens_main_model=full_num_tokens,
+        apply_admission_cap=True,
+    )
+
+
+def _inflight_prefill_reserved_blocks(self: Scheduler) -> int:
+    # v0.30.0's schedule() has no separate current-request speculative margin.
+    # Only that baseline returns I+C here; main's caller already adds C.
+    return sum(self._request_remaining_blocks(req) for req in self._inflight_prefills) + self._spec_decode_step_blocks()
+
+
+# Backport https://github.com/vllm-project/vllm/pull/59880 without changing
+# schedule()/__init__, which also participate in the SWA replay backport.
+# Patch the original class so subclasses imported before this alias swap work.
+# Keep the callable contract of both pins; remove this backport when both pins
+# include the upstream fix (whose _spec_decode_step_blocks is an integer).
+Scheduler._request_remaining_blocks = _request_remaining_blocks
+Scheduler._spec_decode_step_blocks = _spec_decode_step_blocks
+if vllm_version_is("0.30.0"):
+    Scheduler._inflight_prefill_reserved_blocks = _inflight_prefill_reserved_blocks
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -634,7 +678,7 @@ class BalanceScheduler(Scheduler):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                limit_lookahead_tokens = load_kv_async and self.use_eagle
+                limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
                 effective_lookahead_tokens = 0 if limit_lookahead_tokens else self.num_lookahead_tokens
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -649,6 +693,8 @@ class BalanceScheduler(Scheduler):
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if not vllm_version_is("0.30.0"):
+                        reserved_blocks += self._spec_decode_step_blocks()
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

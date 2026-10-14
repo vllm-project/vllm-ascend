@@ -224,6 +224,9 @@ class DyntraLBPolicyMixin(_SchedulerBase):
             if not load_async or not ext_tokens:
                 continue
 
+            reserved_blocks = self._inflight_prefill_reserved_blocks()
+            if not vllm_version_is("0.30.0"):
+                reserved_blocks += self._spec_decode_step_blocks()
             new_blocks = self.kv_cache_manager.allocate_slots(
                 request,
                 0,
@@ -233,6 +236,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
                 num_external_computed_tokens=ext_tokens,
                 delay_cache_blocks=True,
                 full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                reserved_blocks=reserved_blocks,
             )
             if new_blocks is None:
                 kv_not_ready_req_ids.add(request.request_id)
@@ -994,6 +998,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if not vllm_version_is("0.30.0"):
+                        reserved_blocks += self._spec_decode_step_blocks()
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
