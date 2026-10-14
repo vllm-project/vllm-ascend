@@ -1271,6 +1271,22 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
         assert args[1].num_tokens == dummy.num_tokens
 
 
+def test_capture_input_without_cpp_marker_uses_staging_path():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"))
+    legacy_batch = SimpleNamespace()
+    staged_batch = _make_local_pcp_batch()
+
+    with (
+        patch.object(PCPManager, "prepare_inputs_to_capture", return_value=staged_batch) as stage,
+        patch.object(manager, "partition_batch") as partition,
+    ):
+        result = manager.prepare_inputs_to_capture(legacy_batch)
+
+    assert result is staged_batch
+    stage.assert_called_once_with(legacy_batch)
+    partition.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "counts,prefilling,expected",
     [

@@ -365,7 +365,7 @@ class AscendPCPManager(PCPManager):
         input_batch: AscendInputBatch,
     ) -> AscendInputBatch:
         """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-        if not input_batch.is_cpp_profile:
+        if not getattr(input_batch, "is_cpp_profile", False):
             staged = super().prepare_inputs_to_capture(input_batch)
             assert isinstance(staged, AscendInputBatch)
             return staged
