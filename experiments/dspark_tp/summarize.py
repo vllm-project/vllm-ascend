@@ -21,6 +21,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-root")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--tps", nargs="+", type=int, default=TPS)
+    parser.add_argument(
+        "--cases", nargs="+", choices=CURRENT_CASES, default=CURRENT_CASES
+    )
     return parser.parse_args()
 
 
@@ -29,16 +32,22 @@ def read_json(path: Path):
 
 
 def throughput(case_dir: Path) -> tuple[list[float], float]:
-    values = [read_json(path)["output_throughput"] for path in sorted(case_dir.glob("benchmark-*.json"))]
-    if not values:
-        return [], float("nan")
+    metadata = read_json(case_dir / "metadata.json")
+    if metadata.get("status") != "passed":
+        raise ValueError(f"case did not pass: {case_dir}")
+    values = [
+        read_json(path)["output_throughput"]
+        for path in sorted(case_dir.glob("benchmark-*.json"))
+    ]
+    if len(values) != metadata.get("runs"):
+        raise ValueError(f"incomplete benchmark runs: {case_dir}")
     return values, statistics.median(values)
 
 
 def texts(case_dir: Path) -> list[str] | None:
     path = case_dir / "accuracy.json"
     if not path.exists():
-        return None
+        raise FileNotFoundError(f"missing accuracy results: {path}")
     return [item["text"] for item in read_json(path)]
 
 
@@ -66,7 +75,7 @@ def main() -> int:
         target_dir = current_root / f"tp{tp}" / "target"
         target_values, target_median = throughput(target_dir)
         target_texts = texts(target_dir)
-        for case in CURRENT_CASES:
+        for case in args.cases:
             case_dir = current_root / f"tp{tp}" / case
             values, median = throughput(case_dir)
             case_texts = texts(case_dir)

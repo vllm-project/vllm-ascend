@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-prompts", type=int, default=16)
     parser.add_argument("--startup-timeout", type=int, default=1200)
+    parser.add_argument("--port", type=int, default=8006)
     parser.add_argument("--physical-min-k", type=int)
     parser.add_argument("--device-offset", type=int, default=0)
     parser.add_argument("--rerun", action="store_true")
@@ -82,6 +83,8 @@ def main() -> int:
                 str(args.warmup_prompts),
                 "--startup-timeout",
                 str(args.startup_timeout),
+                "--port",
+                str(args.port),
                 "--device-offset",
                 str(args.device_offset),
             ]
