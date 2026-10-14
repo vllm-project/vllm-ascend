@@ -289,13 +289,12 @@ class StridedKDAFallbackPlan:
             src = torch.tensor([source.data_ptr()], dtype=torch.int64, device=state.device)
             dst = torch.tensor([dest.data_ptr()], dtype=torch.int64, device=state.device)
             size = torch.tensor([32], dtype=torch.int64, device=state.device)
-            compiled = batch_memcpy_kernel[(1,)](src, dst, size, BLOCK_SIZE=_FALLBACK_COPY_BLOCK_SIZE)
-            plan._compiled = compiled
+            plan._compiled = batch_memcpy_kernel[(1,)](src, dst, size, BLOCK_SIZE=_FALLBACK_COPY_BLOCK_SIZE)
             # Newer Triton launchers retain constexpr slots; older signatures
             # contain only runtime arguments. Resolve this once during prepare
             # so direct serving launches match the compiled kernel's ABI.
             plan._launch_constants = (
-                (_FALLBACK_COPY_BLOCK_SIZE,) if "constexpr" in compiled.src.signature.values() else ()
+                (_FALLBACK_COPY_BLOCK_SIZE,) if "constexpr" in plan._compiled.src.signature.values() else ()
             )
             torch.npu.synchronize()
         return plan
