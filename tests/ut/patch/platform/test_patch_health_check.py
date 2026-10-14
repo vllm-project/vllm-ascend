@@ -259,6 +259,7 @@ class TestPatchApplied:
     def test_health_ping_patched(self):
         """EngineCore.health_ping should be the patch function."""
         import vllm.v1.engine.core as core_module
+
         from vllm_ascend.patch.platform.patch_health_check import _health_ping
 
         assert core_module.EngineCore.health_ping is _health_ping
@@ -266,6 +267,7 @@ class TestPatchApplied:
     def test_async_mp_client_patched(self):
         """AsyncMPClient.check_health_async should be the patch function."""
         import vllm.v1.engine.core_client as core_client_module
+
         from vllm_ascend.patch.platform.patch_health_check import _async_mp_client_check_health_async
 
         assert core_client_module.AsyncMPClient.check_health_async is _async_mp_client_check_health_async
@@ -273,6 +275,7 @@ class TestPatchApplied:
     def test_dp_lb_client_patched(self):
         """DPLBAsyncMPClient.check_health_async should be the patch function."""
         import vllm.v1.engine.core_client as core_client_module
+
         from vllm_ascend.patch.platform.patch_health_check import _dp_lb_client_check_health_async
 
         assert core_client_module.DPLBAsyncMPClient.check_health_async is _dp_lb_client_check_health_async
@@ -280,6 +283,7 @@ class TestPatchApplied:
     def test_async_llm_check_health_wrapped(self):
         """AsyncLLM.check_health should be wrapped to call check_health_async."""
         import vllm.v1.engine.async_llm as async_llm_module
+
         from vllm_ascend.patch.platform.patch_health_check import _wrapped_check_health
 
         assert async_llm_module.AsyncLLM.check_health is _wrapped_check_health
