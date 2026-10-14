@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
-FP8_E4M3_MAX: tl.constexpr = 448.0
+FP8_E4M3_MAX = 448.0
 
 
 @triton.jit
@@ -90,6 +90,7 @@ def _minimax_qknorm_rope_cache_kernel(
     INDEX_BLOCK_SIZE: tl.constexpr,
     CACHE_FP8: tl.constexpr,
     INDEX_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
@@ -106,8 +107,8 @@ def _minimax_qknorm_rope_cache_kernel(
         k = k.to(packed.dtype.element_ty).to(tl.float32)
         v = tl.load(row + (Q_HEADS + KV_HEADS) * HEAD_DIM + tl.arange(0, KV_HEADS)[:, None] * HEAD_DIM + dim[None, :])
         if CACHE_FP8:
-            k = tl.minimum(tl.maximum(k, -FP8_E4M3_MAX), FP8_E4M3_MAX)
-            v = tl.minimum(tl.maximum(v.to(tl.float32), -FP8_E4M3_MAX), FP8_E4M3_MAX)
+            k = tl.minimum(tl.maximum(k, -FP8_MAX), FP8_MAX)
+            v = tl.minimum(tl.maximum(v.to(tl.float32), -FP8_MAX), FP8_MAX)
         k_offset = slot // BLOCK_SIZE * K_BLOCK + slot % BLOCK_SIZE * K_TOKEN
         v_offset = slot // BLOCK_SIZE * V_BLOCK + slot % BLOCK_SIZE * V_TOKEN
         tl.store(key_cache + k_offset + tl.arange(0, KV_HEADS)[:, None] * K_HEAD + dim[None, :], k)
@@ -115,7 +116,7 @@ def _minimax_qknorm_rope_cache_kernel(
     row = index_packed + token * INDEX_INPUT_STRIDE + INDEX_OFFSET
     iqk = _norm_rope(row, iq_weight, cs, IQ_HEADS + 1, HEAD_DIM, ROTARY_DIM, EPS, ik_weight, IQ_HEADS)
     if INDEX_FP8:
-        iqk = tl.minimum(tl.maximum(iqk, -FP8_E4M3_MAX), FP8_E4M3_MAX)
+        iqk = tl.minimum(tl.maximum(iqk, -FP8_MAX), FP8_MAX)
     iq = extract_slice(iqk, (0, 0), (IQ_HEADS, HEAD_DIM), (1, 1))
     offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
     tl.store(index_query + offsets, iq)
@@ -224,6 +225,7 @@ def minimax_qknorm_rope_cache(
         index_cache.shape[1],
         key_cache.dtype == torch.float8_e4m3fn,
         index_cache.dtype == torch.float8_e4m3fn,
+        FP8_MAX=FP8_E4M3_MAX,
         enable_fp_fusion=False,
     )
     return query, index_query
