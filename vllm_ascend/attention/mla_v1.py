@@ -1028,6 +1028,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
+        self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
@@ -1312,6 +1313,33 @@ class AscendMLAImpl(MLAAttentionImpl):
             # captured tensor addresses remain valid while the values follow
             # the reloaded source weights and scales.
             self._refresh_prolog_v3_weights()
+        if self.use_flashmla and self.supports_prolog_v3_writer():
+            self._prepare_flashmla_writer_buffers()
+
+    def _prepare_flashmla_writer_buffers(self) -> None:
+        """Keep a bounded dense PROLOG workspace alive across graph replay."""
+        if self._flashmla_writer_buffers is not None:
+            return
+        capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
+        block_size = self.vllm_config.cache_config.block_size
+        shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
+        self._flashmla_writer_buffers = (
+            torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
+            torch.empty((*shape, self.qk_rope_head_dim), dtype=self.dtype, device=self.W_UV.device),
+            torch.arange(capacity, dtype=torch.int64, device=self.W_UV.device),
+        )
+
+    def _prolog_v3_writer_workspace(self, num_tokens, kv_cache, slots):
+        """Stage interleaved components without copying the history cache."""
+        needs_dense_writer = any(cache.stride(1) != cache.shape[2] * cache.shape[3] for cache in kv_cache)
+        if not getattr(self, "use_flashmla", False) or not needs_dense_writer:
+            return kv_cache, slots, False
+        buffers = self._flashmla_writer_buffers
+        if buffers is None or num_tokens > buffers[2].numel():
+            raise RuntimeError("FlashMLA PROLOG writer workspace does not cover the scheduled token rows")
+        nope, rope, indices = buffers
+        num_blocks = cdiv(num_tokens, nope.shape[1])
+        return (nope[:num_blocks], rope[:num_blocks]), indices[:num_tokens], True
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
@@ -2023,7 +2051,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         A2/A3 use component-major views whose trailing axes are dense.  A5 may
         instead expose NoPE and RoPE as trailing slices of one token-fused
-        FlashMLA page; PROLOG_V3 supports those interleaved slices as well.
+        FlashMLA page; the external reader's writer stages those interleaved
+        slices through its dense workspace before scattering into history.
         """
         nope_cache, rope_cache = kv_cache
         if nope_cache.dim() != 4 or rope_cache.dim() != 4:
@@ -2143,8 +2172,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         token_x, branch, weights = self._prepare_prolog_v3_token(hidden_states)
         rope_sin = self._flatten_prolog_rope_table(sin, num_tokens)
         rope_cos = self._flatten_prolog_rope_table(cos, num_tokens)
-
-        return torch_npu.npu_mla_prolog_v3(
+        writer_cache, writer_slots, scatter_history = self._prolog_v3_writer_workspace(num_tokens, kv_cache, slots)
+        outputs = torch_npu.npu_mla_prolog_v3(
             token_x=token_x,
             weight_dq=weights["weight_dq"],
             weight_uq_qr=weights["weight_uq_qr"],
@@ -2154,9 +2183,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
             rope_sin=rope_sin,
             rope_cos=rope_cos,
-            kv_cache=kv_cache[0],
-            kr_cache=kv_cache[1],
-            cache_index=slots.view(-1).to(torch.int64).contiguous(),
+            kv_cache=writer_cache[0],
+            kr_cache=writer_cache[1],
+            cache_index=writer_slots.view(-1).to(torch.int64).contiguous(),
             rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
             rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
             cache_mode="PA_BSND",
@@ -2165,7 +2194,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=kv_cache[0].shape[1],
+            tile_size=writer_cache[0].shape[1],
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer
@@ -2173,6 +2202,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             ),
             **branch,
         )
+        if scatter_history:
+            # PROLOG accepts a strided page axis, but the component's trailing
+            # axes must be dense. FlashMLA token-fused slices have token stride
+            # 576, so write bounded scratch rows then scatter into the original
+            # cache. The workspace never escapes this call as current KV.
+            DeviceOperator.reshape_and_cache(
+                key=writer_cache[0].flatten(0, 1)[:num_tokens],
+                value=writer_cache[1].flatten(0, 1)[:num_tokens],
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
+        return outputs
 
     @staticmethod
     def _gather_current_kv_from_cache(
@@ -2384,8 +2426,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ``aclnnKvRmsNormRopeCache`` marks both cache references
         ``AutoContiguous``.  PROLOG_V3 instead marks them
-        ``IgnoreContiguous`` and supports both component-major and
-        token-interleaved strided MLA caches.
+        ``IgnoreContiguous``. External token-interleaved caches are written
+        through the bounded dense workspace and scattered back in place.
         """
         if not hasattr(torch_npu, "npu_mla_prolog_v3"):
             raise RuntimeError("CANN does not expose npu_mla_prolog_v3 for DSpark context KV writes.")
