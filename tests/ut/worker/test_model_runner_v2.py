@@ -120,29 +120,41 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
     assert events == expected
 
 
+@pytest.mark.parametrize("legacy_worker", [False, True])
+@pytest.mark.parametrize("ordinary_logprobs,fixed_token_scores", [(True, False), (False, True), (True, True)])
+def test_lmhead_tp_rejects_unpadded_prompt_scoring(ordinary_logprobs, fixed_token_scores, legacy_worker):
+    runner = _make_runner()
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        uses_prompt_logprobs=np.array([ordinary_logprobs]),
+        token_id_scores={"request": object()} if fixed_token_scores else {},
+    )
+    if legacy_worker:
+        if not ordinary_logprobs:
+            pytest.skip("fixed token scoring does not exist on verified main")
+        del runner.prompt_logprobs_worker.token_id_scores
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
+        pytest.raises(NotImplementedError, match="not supported with lmhead TP"),
+    ):
+        runner.sample_tokens(None)
+
+
 def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
     num_reqs = len(computed)
     is_prefilling = np.array(computed) < np.array(prefill_lens)
-    has_prefill = bool(is_prefilling.any())
-    # vLLM main added num_draft_tokens_np/prefill_runs_as_decode_np/
-    # decode_graph_eligible to BatchReqState; 0.30.0 predates them.
-    version_kwargs: dict = {}
-    if not vllm_version_is("0.30.0"):
-        version_kwargs = {
-            "num_draft_tokens_np": None,
-            "prefill_runs_as_decode_np": None,
-            "decode_graph_eligible": not has_prefill,
-        }
     return BatchReqState(
         req_ids=[f"req-{i}" for i in range(num_reqs)],
         num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
         num_tokens=sum(scheduled),
+        num_draft_tokens_np=None,
         idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
         prefill_len_np=np.array(prefill_lens, dtype=np.int32),
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
-        has_prefill=has_prefill,
-        **version_kwargs,
+        has_prefill=bool(is_prefilling.any()),
+        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=not bool(is_prefilling.any()),
     )
 
 
@@ -239,6 +251,29 @@ def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     switch.assert_called_once_with()
 
 
+@pytest.mark.parametrize("prefill_runs_as_decode", [False, True])
+def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_decode):
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    batch_state = _make_batch_state([127, 0], [1, 1], [128, 1])
+    batch_state = batch_state._replace(prefill_runs_as_decode_np=np.array([False, prefill_runs_as_decode]))
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch.object(
+            runner.vllm_config,
+            "kv_transfer_config",
+            SimpleNamespace(is_kv_consumer=True, is_kv_producer=False),
+        ),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
+    assert gathered.has_prefill is True
+    assert gathered.decode_graph_eligible is prefill_runs_as_decode
+    assert uniform == (1 if prefill_runs_as_decode else None)
+
+
 def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
@@ -272,6 +307,8 @@ def test_execute_model_records_profiling_time():
         "context_len": 0,
         "valid_dummy_state_slots": False,
     }
+    if vllm_version_is("0.31.0"):
+        expected_kwargs["randomize_inputs"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -448,23 +485,17 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
     runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    if vllm_version_is("0.30.0"):
-        # v0.30.0 restores aux outside restore_for_sampling, so the Ascend
-        # pre-restore only covers the target hidden states.
-        runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
-        state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
-    else:
-        # vLLM main (#57980) folded the aux restore into restore_for_sampling,
-        # which the replicated-PCP fast path bypasses; the pre-restore must
-        # cover aux too or the draft reads PCP-local rows.
-        assert runner.pcp_manager.restore_hidden_states.call_args_list == [
-            call(hidden_states),
-            call(aux_hidden_states),
-        ]
-        state._replace.assert_called_once_with(
-            hidden_states=restored_hidden_states,
-            aux_hidden_states=[restored_hidden_states],
-        )
+    # vLLM main (#57980) folded the aux restore into restore_for_sampling,
+    # which the replicated-PCP fast path bypasses; the pre-restore must
+    # cover aux too or the draft reads PCP-local rows.
+    assert runner.pcp_manager.restore_hidden_states.call_args_list == [
+        call(hidden_states),
+        call(aux_hidden_states),
+    ]
+    state._replace.assert_called_once_with(
+        hidden_states=restored_hidden_states,
+        aux_hidden_states=[restored_hidden_states],
+    )
     assert runner.execute_model_state is restored_state
 
 
@@ -480,24 +511,21 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     partition_calls = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "maybe_partition_pcp_batch"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "partition_batch"
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the whole descriptor (upstream vLLM #53867
-    # changed maybe_partition_pcp_batch from padded_num_tokens to a
-    # BatchExecutionDescriptor).
+    # graph descriptor, and forwards the whole descriptor through the retained
+    # v0.31 PCPManager API (vLLM #57980).
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]
-    batch_desc_kw = next(keyword.value for keyword in partition_call.keywords if keyword.arg == "batch_desc")
-    assert isinstance(batch_desc_kw, ast.Name)
-    assert batch_desc_kw.id == "batch_desc"
+    assert ast.unparse(partition_call.func) == "self.pcp_manager.partition_batch"
+    assert [ast.unparse(arg) for arg in partition_call.args] == ["input_batch", "batch_desc"]
+    assert partition_call.keywords == []
 
 
 def _make_dump_runner(debugger=None):
@@ -853,12 +881,9 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    # vLLM main (#58149) made max_model_len a read-only property backed by
-    # model_config; v0.30.0 keeps the plain instance attribute.
-    if vllm_version_is("0.30.0"):
-        state.max_model_len = 32
-    else:
-        state.model_config = SimpleNamespace(max_model_len=32)
+    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # model_config.
+    state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
     runner.model_state = state
     batch = SimpleNamespace(
@@ -1188,7 +1213,8 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
-def test_profile_run_dummy_reserves_mc2(moe_type):
+@pytest.mark.parametrize("randomize_inputs", [False, True])
+def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
     runner = _make_runner()
     runner.max_num_tokens = 16
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
@@ -1201,9 +1227,10 @@ def test_profile_run_dummy_reserves_mc2(moe_type):
         patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
         patch.object(GPUModelRunner, "profile_run") as parent,
     ):
-        runner.profile_run()
-    runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True)
-    parent.assert_called_once_with()
+        runner.profile_run(randomize_inputs=randomize_inputs)
+    profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+    runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True, **profile_kwargs)
+    parent.assert_called_once_with(**profile_kwargs)
 
 
 def test_profile_run_skips_mc2_dummy_without_capacity():
@@ -1221,12 +1248,15 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
 
 @pytest.mark.parametrize(("pcp_size", "tokens", "expected"), [(1, 16384, 16384), (16, 16384, 1024), (4, 17, 5)])
 @pytest.mark.parametrize("fail", [False, True])
-def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail):
+@pytest.mark.parametrize("randomize_inputs", [False, True])
+def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail, randomize_inputs):
+    expected_randomize = randomize_inputs if vllm_version_is("0.31.0") else False
     runner = _make_runner()
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
     runner.max_num_tokens = tokens
 
-    def parent_profile(self):
+    def parent_profile(self, randomize_inputs=False):
+        assert randomize_inputs == expected_randomize
         assert self.max_num_tokens == expected
         if fail:
             raise RuntimeError("profile failed")
@@ -1237,9 +1267,9 @@ def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens,
     ):
         if fail:
             with pytest.raises(RuntimeError, match="profile failed"):
-                runner.profile_run()
+                runner.profile_run(randomize_inputs=randomize_inputs)
         else:
-            runner.profile_run()
+            runner.profile_run(randomize_inputs=randomize_inputs)
     assert runner.max_num_tokens == tokens
 
 
@@ -1376,13 +1406,12 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
         idx_mapping_np=np.array([0, 1], dtype=np.int32),
         has_prefill=True,
+        decode_graph_eligible=False,
+        prefill_runs_as_decode_np=None,
+        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
-        # vLLM main added these BatchReqState fields; ignored by the
-        # version-gated 0.30.0 prepare_inputs wrapper.
-        decode_graph_eligible=False,
-        prefill_runs_as_decode_np=None,
     )
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
@@ -1431,7 +1460,7 @@ def _run_prepare_inputs(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
-        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch) as make_batch,
         patch.object(
             vllm_model_runner,
             "pcp",
@@ -1439,14 +1468,20 @@ def _run_prepare_inputs(
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
-        # vLLM main (#56456) added num_active_loras to prepare_inputs.
-        if vllm_version_is("0.30.0"):
-            return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
-        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0), batch
+        prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
+        assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
+        assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
+        if vllm_version_is("0.31.0"):
+            assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
+        else:
+            assert "max_seq_len_np" not in make_batch.call_args.kwargs
+        return prepared, batch
 
 
 def test_prepare_inputs_common_path():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner()
+    batch_req_state.prefill_runs_as_decode_np = np.array([False, False])
+    batch_req_state.max_seq_len_np = np.array([8, 8], dtype=np.int32)
     out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)

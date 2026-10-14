@@ -1,53 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Upstream-drift guards for the balance-scheduling platform patch.
+"""Guard the balance scheduler against both supported upstream contracts.
 
-These tests watch the upstream vLLM surfaces that ``patch_balance_schedule.py``
-depends on. If upstream changes any of them in a way that would silently break
-the patch (or stop it from taking effect), CI turns red here so we notice and
-sync. They also include a lightweight CPU scheduler-path smoke test; full
-behavior/equivalence tests still need a running DP+MoE engine on NPU and live
-under e2e/nightly.
-
-What is guarded here (everything reachable from CPU UT):
-
-* the ``schedule`` override signature stays aligned with the installed
-  scheduler signature shared by both supported vLLM refs;
-* the ``BalanceScheduler.__init__`` signature stays drop-in compatible with
-  upstream's ``Scheduler.__init__`` (upstream constructs ``Scheduler(...)``
-  with kwargs, which after the swap constructs our subclass);
-* upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
-  module-global name -- the whole reason the consolidated engine-core patch
-  (``patch_engine_core.py``) can swap the module-level symbol instead of
-  copying ``run_engine_core``;
-* the module-level class swaps and the consolidated engine-core entry-point
-  patch (``patch_engine_core._run_engine_core_patch_func``) actually took
-  effect;
-* the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
-  still exist;
-* the Mamba-aligned waiting path can schedule a request through the real
-  upstream helper without an argument mismatch;
-* the 3 balance deltas remain present in ``schedule()`` (intent lock);
-* the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
-  at vllm-ascend's pinned vLLM release tag (read from
-  ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 3 deltas. Reading the tag from the pin file means a pin advance
-  auto-flips this guard to the new tag until the copy is re-synced.
-
-What is NOT guarded here (structurally unreachable without a real engine):
-
-* instance-attribute renames (``self.running``, ``self.dp_group``,
-  ``self.kv_cache_manager`` ...) -- only surface when balance runs;
-* behavioral drift of the copied ``schedule()`` body vs the *installed* (main-
-  verified) vLLM -- the body deliberately targets the pinned release tag (the
-  production pin), not the installed commit; the two diverge by design and only
-  converge on real NPU+DP+MoE hardware (e2e/nightly).
+The complete schedule body is compared with the installed upstream after
+selecting version branches and removing four intentional Ascend differences:
+the disabled fast path, the DP admission gate, the drained-queue guard and the
+scheduler-local connector snapshot cleanup. CPU tests exercise admission,
+streaming slots, Mamba alignment and the engine collective hook. Distributed
+execution and graph replay still require the NPU e2e suite.
 """
 
 import ast
 import inspect
-import subprocess
 import textwrap
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -158,7 +122,8 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
         self.vllm_config = args[0]
         self.policy = SchedulingPolicy.FCFS
         self.waiting = create_request_queue(self.policy)
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.deferred_waiting = set()
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -345,22 +310,7 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
 
 
 def _schedule_body_ast(source: str) -> str:
-    """Canonical AST dump of a ``schedule`` method body with the 3 balance
-    deltas stripped, so the remainder can be compared verbatim against the
-    pinned release tag's ``schedule()``. AST-based on purpose: it is blind to
-    comments and whitespace, so the only differences that surface are real code
-    drift (not the escape-quoting of a comment or reformatting).
-
-    The 3 deltas removed:
-      * delta 1 -- the disabled-path early return (``if not
-        self._balance_enabled: ... super().schedule(...)``);
-      * delta 2 -- the ``balance_flag`` gate (``max(t.item() for t in
-        self.balance_queue) == self.max_num_running_reqs``);
-      * delta 3 -- the ``request_queue is None`` check, which exists in our
-        copy as ``if request_queue is None: break`` and in upstream as
-        ``assert request_queue is not None``. Both are stripped so the two
-        bodies align.
-    """
+    """Select the current version branch and strip the four Ascend deltas."""
     tree = ast.parse(textwrap.dedent(source))
     func = next(
         (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "schedule"),
@@ -369,13 +319,35 @@ def _schedule_body_ast(source: str) -> str:
     assert func is not None, "no schedule() in source"
 
     class _BalanceDeltaStripper(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call):  # noqa: N802
+            if isinstance(node.func, ast.Name) and node.func.id == "vllm_version_is":
+                return ast.Constant(value=vllm_version_is(node.args[0].value))
+            return self.generic_visit(node)
+
+        def visit_BoolOp(self, node: ast.BoolOp):  # noqa: N802
+            node = self.generic_visit(node)
+            is_and = isinstance(node.op, ast.And)
+            values = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, bool):
+                    if value.value != is_and:
+                        return value
+                else:
+                    values.append(value)
+            if not values:
+                return ast.Constant(value=is_and)
+            if len(values) == 1:
+                return values[0]
+            node.values = values
+            return node
+
         def visit_If(self, node: ast.If):  # noqa: N802
             test = ast.dump(node.test)
             # delta 1: disabled-path early return.
             if "_balance_enabled" in test:
                 return None
             # delta 2: the balance admission gate inside the WAITING loop.
-            if "balance_queue" in test and "max_num_running_reqs" in test:
+            if "balance_queue" in test and "max_num_active_reqs" in test:
                 return None
             # delta 3 (ours): if request_queue is None: break.
             if "request_queue" in test and "None" in test and "Is" in test:
@@ -389,60 +361,21 @@ def _schedule_body_ast(source: str) -> str:
                 return None
             return self.generic_visit(node)
 
+        def visit_Assign(self, node: ast.Assign):  # noqa: N802
+            # Ascend consumes the local connector snapshot before dispatch.
+            if (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Attribute)
+                and node.targets[0].attr == "kv_connector_block_state"
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is None
+            ):
+                return None
+            return self.generic_visit(node)
+
     stripped = _BalanceDeltaStripper().visit(func)
     assert isinstance(stripped, ast.FunctionDef)
     return ast.dump(ast.Module(body=stripped.body, type_ignores=[]))
-
-
-def _vllm_ascend_repo_root() -> Path | None:
-    """Walk up from this test file to find the vllm-ascend repo root -- the dir
-    holding ``.github/vllm-release-tag.commit``. Robust to the test being run
-    from anywhere under the repo; returns ``None`` outside a source checkout."""
-    here = Path(__file__).resolve()
-    for parent in (here, *here.parents):
-        if (parent / ".github" / "vllm-release-tag.commit").is_file():
-            return parent
-    return None
-
-
-def _pinned_release_tag() -> str | None:
-    """The vLLM release tag vllm-ascend pins to, read from
-    ``.github/vllm-release-tag.commit`` -- the SAME file CI reads (via
-    ``tr -d '[:space:]'``) to pick the tag. This is the single dynamic source
-    of truth; do NOT hardcode a version here or read it from a design doc
-    (docs go stale). Returns ``None`` when the pin file is absent."""
-    root = _vllm_ascend_repo_root()
-    if root is None:
-        return None
-    return (root / ".github" / "vllm-release-tag.commit").read_text(encoding="utf-8").strip() or None
-
-
-def _pinned_release_schedule_source() -> tuple[str, str] | None:
-    """Return ``(tag, source)`` of the pinned release tag's
-    ``Scheduler.schedule()``, or ``None`` if anything is unreachable: no pin
-    file, vllm not a git checkout, the tag absent from the repo, git not on
-    PATH. Locates the vllm git repo from the imported scheduler file (the
-    dev/CI vllm is a source checkout whose repo carries every release tag)."""
-    tag = _pinned_release_tag()
-    if not tag:
-        return None
-    sched_file = Path(_UPSTREAM_SCHED_FILE).resolve()
-    # <repo>/vllm/v1/core/sched/scheduler.py -> parents[4] is the repo root.
-    if len(sched_file.parents) < 5:
-        return None
-    repo = sched_file.parents[4]
-    try:
-        rel = sched_file.relative_to(repo).as_posix()
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{tag}:{rel}"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
-        return None
-    return (tag, proc.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +389,7 @@ def test_schedule_signature_matches_installed_vllm():
 
 
 # ---------------------------------------------------------------------------
-# 1b. the 3 balance deltas remain present in schedule() (intent lock)
+# 1b. the intentional Ascend deltas remain present in schedule() (intent lock)
 # ---------------------------------------------------------------------------
 
 
@@ -472,53 +405,22 @@ def test_balance_deltas_present_in_schedule():
 
     # delta 2: the balance_flag admission gate (leader-at-cap => global freeze).
     assert "max(t.item() for t in self.balance_queue)" in src
-    assert "self.max_num_running_reqs" in src
+    assert "self.max_num_active_reqs" in src
 
     # delta 3: `if request_queue is None: break` replaces upstream's assert.
     assert "if request_queue is None:" in src
 
 
 # ---------------------------------------------------------------------------
-# 1c. copied schedule() body stays verbatim with the pinned release tag
+# 1c. copied schedule() body stays aligned with the installed upstream
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_body_matches_pinned_release_tag():
-    """The copied ``schedule()`` body must stay a verbatim copy of the
-    ``schedule()`` at vllm-ascend's pinned vLLM release tag, modulo exactly the
-    3 balance deltas.
-
-    The tag is read dynamically from ``.github/vllm-release-tag.commit`` -- the
-    same file CI uses to pick the tag, NOT a hardcoded string or a design doc
-    (both go stale). So when the pin advances, this test AUTOMATICALLY compares
-    against the new tag and goes red until the copy is re-synced -- the
-    maintenance signal we want. Skipped (not failed) when the pin file or the
-    tag is unreachable: vllm installed from a wheel, the tag absent from the
-    repo, git not on PATH, or the test run outside the vllm-ascend tree.
-    Also skipped when the copied body already differs from the pin (or from
-    the installed scheduler): re-syncing ``schedule()`` is a separate
-    maintenance task. The 3 balance deltas are locked by
-    ``test_balance_deltas_present_in_schedule``."""
-    ref = _pinned_release_schedule_source()
-    if ref is None:
-        pytest.skip(
-            "pinned vLLM release tag or its schedule() not retrievable "
-            "(no .github/vllm-release-tag.commit, vllm not a git checkout, "
-            "or tag absent)"
-        )
-    assert ref is not None
-    tag, pinned_src = ref
-
-    theirs = _schedule_body_ast(pinned_src)
+def test_schedule_body_matches_installed_supported_vllm():
+    """Compare the complete scheduling algorithm, selecting the current version branch."""
     ours = _schedule_body_ast(inspect.getsource(BalanceScheduler.schedule))
-    installed = _schedule_body_ast(inspect.getsource(_UpstreamScheduler.schedule))
-    if ours != theirs or installed != theirs:
-        pytest.skip(
-            f"BalanceScheduler.schedule is not a verbatim {tag} copy modulo "
-            "the 3 balance deltas (or installed vLLM already differs from "
-            "the pin). Re-sync is a separate maintenance task; the 3 deltas "
-            "are locked by test_balance_deltas_present_in_schedule."
-        )
+    upstream = _schedule_body_ast(inspect.getsource(_UpstreamScheduler.schedule))
+    assert ours == upstream, "BalanceScheduler differs from installed upstream beyond the four Ascend deltas"
 
 
 # ---------------------------------------------------------------------------
@@ -612,38 +514,21 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
+    "_holds_kv_blocks",
+    "_is_blocked_waiting_status",
+    "_handle_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
     "_inflight_prefill_reserved_blocks",
 ]
 
-# v0.30.0 keeps the single `skipped_waiting` queue and its helpers; upstream
-# main (#58947) replaced them with `kv_holding_waiting`/`deferred_waiting` and
-# the `_handle_blocked_waiting_request`/`_holds_kv_blocks` helpers.
-_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS = [
-    "_select_waiting_queue_for_scheduling",
-    "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
-]
-_MAIN_ONLY_SCHEDULER_METHOD_SEAMS = [
-    "_is_blocked_waiting_status",
-    "_handle_blocked_waiting_request",
-    "_holds_kv_blocks",
-]
-
-
-def _scheduler_method_seams() -> list[str]:
-    if vllm_version_is("0.30.0"):
-        return [*_SCHEDULER_METHOD_SEAMS, *_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS]
-    return [*_SCHEDULER_METHOD_SEAMS, *_MAIN_ONLY_SCHEDULER_METHOD_SEAMS]
-
 
 def test_upstream_scheduler_seams_still_exist():
     """Guard the upstream method names the patch depends on. The copied
     ``schedule()`` body calls a fixed set of Scheduler internals by name; if
     upstream renames/removes any, the body breaks when balance runs."""
-    missing = [n for n in _scheduler_method_seams() if not hasattr(_UpstreamScheduler, n)]
+    missing = [n for n in _SCHEDULER_METHOD_SEAMS if not hasattr(_UpstreamScheduler, n)]
     assert not missing, "upstream Scheduler lost methods the patch depends on: " + ", ".join(missing)
     assert hasattr(_UpstreamDPEngineCoreProc, "run_busy_loop"), (
         "upstream DPEngineCoreProc lost run_busy_loop (BalanceDPEngineCoreProc inherits it)"
@@ -709,7 +594,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -729,8 +613,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
-        if not vllm_version_is("0.27.1"):
-            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+        stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
         stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
 
@@ -866,17 +749,16 @@ def test_balance_schedule_pause_freeze_and_v2():
     out = v2_sched.schedule()
     assert out.total_num_scheduled_tokens > 0
 
-    # Fresh scheduler: lowering max_num_running_reqs below len(running) trips
-    # schedule()'s running-cap assert.
+    # Active admission includes parked streaming sessions, independently of the running-slot cap.
     cap_sched = _make_balance_scheduler()
-    cap_sched.max_num_running_reqs = 0
+    cap_sched.max_num_active_reqs = 0
     cap_sched.balance_queue = [torch.tensor([0], dtype=torch.int)]
     cap_sched.add_request(_create_requests(1, num_tokens=8, id_offset=10)[0])
     capped = cap_sched.schedule()
     assert capped.total_num_scheduled_tokens == 0
 
     freeze_sched = _make_balance_scheduler()
-    freeze_sched.max_num_running_reqs = 1
+    freeze_sched.max_num_active_reqs = 1
     freeze_sched.balance_queue = [torch.tensor([1], dtype=torch.int)]
     freeze_sched.add_request(_create_requests(1, num_tokens=8, id_offset=20)[0])
     frozen = freeze_sched.schedule()
@@ -914,7 +796,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler.add_request(blocked)
     blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
     scheduler.schedule()
 
     preempt = _make_balance_scheduler()
@@ -1101,3 +983,35 @@ def test_balance_full_pool_does_not_cascade_preempt_on_deferred_free():
 
     # With balance disabled schedule() delegates to upstream Scheduler.
     assert run(balance_enabled=True) == run(balance_enabled=False)
+
+
+@pytest.mark.parametrize("remote_active", [2, 3])
+def test_balance_freezes_when_remote_active_cap_is_reached_or_exceeded(remote_active):
+    scheduler = _make_balance_scheduler()
+    scheduler.max_num_active_reqs = 2
+    scheduler.max_num_running_reqs = 4
+    scheduler.balance_queue = [torch.tensor([remote_active], dtype=torch.int)]
+    scheduler.add_request(_create_requests(1, num_tokens=8)[0])
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+    assert not scheduler.running
+
+
+def test_balance_admission_counts_parked_streaming_sessions():
+    scheduler = _make_balance_scheduler()
+    scheduler.max_num_active_reqs = 1
+    scheduler.max_num_running_reqs = 4
+    scheduler.num_waiting_for_streaming_input = 1
+    scheduler.add_request(_create_requests(1, num_tokens=8)[0])
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+    assert not scheduler.running
+
+
+def test_balance_gather_counts_parked_streaming_sessions():
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+
+    scheduler = _make_balance_scheduler()
+    scheduler.dp_group = object()
+    scheduler.num_waiting_for_streaming_input = 2
+    with patch.object(pbs.dist, "all_gather") as gather:
+        scheduler.balance_gather()
+    assert gather.call_args.args[1].item() == 2
