@@ -828,6 +828,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     prefill_sin = torch.randn(num_prefill + padding, 1, 1, ROPE_DIM)
     original_cos, original_sin = prefill_cos.clone(), prefill_sin.clone()
     metadata = SimpleNamespace(
+        external_flashmla=None,
         num_decode_tokens=num_decode,
         num_actual_tokens=num_decode + num_prefill,
         slot_mapping=torch.tensor([0, 1][:num_decode] + [129, 130, 131] + [-1] * padding),
@@ -927,6 +928,7 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
     output = torch.empty(3, impl.num_heads * impl.v_head_dim)
     cache = _component_major_cache()
     metadata = SimpleNamespace(
+        external_flashmla=None,
         num_actual_tokens=3,
         num_decodes=1,
         num_prefills=2,
@@ -969,6 +971,7 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     hidden = torch.zeros(2, 128)
     output = torch.empty(2, impl.num_heads * impl.v_head_dim)
     metadata = SimpleNamespace(
+        external_flashmla=None,
         num_actual_tokens=2,
         num_decodes=2,
         num_prefills=0,
@@ -1228,6 +1231,7 @@ def test_mla_preprocess_prolog_v3_supports_dcp_current_kv_split(monkeypatch):
     nope, rope = _component_major_cache()
     hidden = torch.randn(num_decode_tokens, 128)
     metadata = SimpleNamespace(
+        external_flashmla=None,
         num_decode_tokens=num_decode_tokens,
         num_actual_tokens=num_decode_tokens,
         slot_mapping=torch.tensor([10]),
@@ -1294,6 +1298,7 @@ def test_mla_preprocess_prolog_v3_keeps_prefill_query_unquantized_for_fa_quant()
     num_prefill = 2
     hidden = torch.randn(num_decode + num_prefill, 128)
     metadata = SimpleNamespace(
+        external_flashmla=None,
         num_decode_tokens=num_decode,
         num_actual_tokens=num_decode + num_prefill,
         slot_mapping=torch.tensor([0, 128, 129]),
