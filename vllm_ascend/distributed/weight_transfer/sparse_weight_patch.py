@@ -5,6 +5,7 @@
 import math
 
 import torch
+from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseNCCLTrainerWeightTransferEngine
 from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch as SparseWeightPatch
 
 SPARSE_HCCL_VALUE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
@@ -12,16 +13,13 @@ SPARSE_HCCL_VALUE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.
 
 def validate_sparse_patch(patch: SparseWeightPatch) -> None:
     """Reject invalid payloads before starting a worker lifecycle or collective."""
+    # Keep this standalone validator complete while sharing the trainer's
+    # structural checks for shape presence, int32 indices and flattened payloads.
+    SparseNCCLTrainerWeightTransferEngine._validate_patch(patch)
     if not isinstance(patch.name, str) or not patch.name:
         raise ValueError("Sparse checkpoint name must be non-empty")
-    if patch.full_shape is None or any(type(dim) is not int or dim < 0 for dim in patch.full_shape):
+    if any(type(dim) is not int or dim < 0 for dim in patch.full_shape):
         raise ValueError(f"Invalid checkpoint full_shape for {patch.name}")
-    if patch.indices.dtype != torch.int32:
-        raise ValueError(f"Sparse HCCL indices must be int32: {patch.name}")
-    if patch.indices.ndim != 1 or patch.values.ndim != 1:
-        raise ValueError(f"Sparse indices and values must be 1D: {patch.name}")
-    if patch.indices.numel() != patch.values.numel():
-        raise ValueError(f"Sparse indices and values must have matching lengths: {patch.name}")
     if patch.values.dtype not in SPARSE_HCCL_VALUE_DTYPES:
         raise ValueError(f"Sparse values require an HCCL-supported floating dtype: {patch.name}")
     numel = math.prod(patch.full_shape)

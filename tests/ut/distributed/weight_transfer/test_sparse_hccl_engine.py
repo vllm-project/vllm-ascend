@@ -53,9 +53,11 @@ def test_sparse_public_types_and_lifecycle_are_reused():
     "kwargs",
     [
         {"name": ""},
+        {"name": 1},
         {"full_shape": None},
         {"full_shape": (-1,)},
         {"full_shape": (1.5,)},
+        {"full_shape": (True, 16)},
         {"indices": torch.tensor([0], dtype=torch.int64)},
         {"indices": torch.tensor([-1, 15], dtype=torch.int32)},
         {"indices": torch.tensor([0, 16], dtype=torch.int32)},
@@ -64,9 +66,12 @@ def test_sparse_public_types_and_lifecycle_are_reused():
         {"values": torch.tensor([float("nan"), 3.0])},
         {"values": torch.tensor([2, 3])},
         {"values": torch.tensor([2.0])},
+        {"values": torch.tensor([[2.0, 3.0]])},
     ],
 )
 def test_bad_patch_rejected_before_start(kwargs):
+    with pytest.raises(ValueError):
+        validate_sparse_patch(make_patch(**kwargs))
     engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock())
     engine.model_update_group = MagicMock(device=torch.device("cpu"))
     with pytest.raises(ValueError):
