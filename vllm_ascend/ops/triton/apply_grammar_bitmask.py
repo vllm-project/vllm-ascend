@@ -33,13 +33,13 @@ def _apply_grammar_bitmask_kernel_impl(
     bitmask_ptr,
     bitmask_stride: tl.constexpr,
     vocab_size: tl.constexpr,
-    total_tasks: tl.constexpr,
-    NUM_PROGRAMS: tl.constexpr,
+    total_tasks,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    NUM_PROGRAMS = tl.num_programs(0)
 
     tasks_per_program = total_tasks // NUM_PROGRAMS
     remainder = total_tasks % NUM_PROGRAMS
@@ -125,7 +125,6 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 bitmask_stride,
                 vocab_size,
                 total_tasks,
-                NUM_PROGRAMS=num_programs,
                 NUM_VOCAB_BLOCKS=num_vocab_blocks,
                 MASK_STRIDE=MASK_STRIDE,
                 BLOCK_SIZE=BLOCK_SIZE,
