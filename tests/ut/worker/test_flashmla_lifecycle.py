@@ -7,12 +7,14 @@ scope bodies, not full worker startup, ACL capture, or NPU kernels.
 """
 
 import ast
+from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -315,3 +317,53 @@ def test_draft_preserves_dependency_dp_coordination(wrapper, replicated, adaptiv
     wrapper.call(obj, "Draft", is_profile=profile)
     expected = None if replicated or (adaptive and not profile) else "target-dp"
     assert obj.parent_call.call_args.args[11] == expected
+
+
+@pytest.mark.parametrize("contract", ["legacy", "main", "main_without_optional_arrays"])
+@pytest.mark.parametrize("external", [False, True])
+def test_request_order_keeps_new_batch_fields_aligned(contract, external):
+    fields = (
+        "req_ids num_scheduled_tokens idx_mapping_np prefill_len_np "
+        "num_computed_prefill_tokens_np is_prefilling_np has_prefill num_tokens"
+    )
+    values = [
+        ["prefill-a", "decode", "prefill-b"],
+        np.array([1, 4, 1]),
+        np.array([10, 20, 30]),
+        np.array([100, 200, 300]),
+        np.array([11, 22, 33]),
+        np.array([True, False, True]),
+        True,
+        6,
+    ]
+    if contract != "legacy":
+        fields += " num_draft_tokens_np prefill_runs_as_decode_np decode_graph_eligible"
+        values += [
+            np.array([0, 3, 0]) if contract == "main" else None,
+            np.array([True, False, True]) if contract == "main" else None,
+            True,
+        ]
+    state = namedtuple("BatchReqState", fields)(*values)
+
+    class Parent:
+        def gather_batch_req_state(self, scheduler_output, dummy_run):
+            return state, 4
+
+    method = source_node(RUNNER, "gather_batch_req_state", "NPUModelRunner")
+    cls = ast.ClassDef(name="Runner", bases=[ast.Name(id="Parent", ctx=ast.Load())], keywords=[], body=[method])
+    scope = {"np": np, "Parent": Parent}
+    compile_nodes([cls], scope)
+    runner = scope["Runner"]()
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.flashmla_executor = object() if external else None
+    result, uniform_count = runner.gather_batch_req_state(None, False)
+    order = [1, 0, 2] if external else [0, 1, 2]
+    assert result.req_ids == [state.req_ids[index] for index in order]
+    for field in state._fields:
+        expected = getattr(state, field)
+        actual = getattr(result, field)
+        if isinstance(expected, np.ndarray):
+            np.testing.assert_array_equal(actual, expected[order])
+        elif field != "req_ids":
+            assert actual == expected
+    assert uniform_count == 4
