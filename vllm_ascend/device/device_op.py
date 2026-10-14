@@ -28,6 +28,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
@@ -446,6 +447,8 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -603,27 +606,50 @@ class BaseDeviceAdaptor:
         # torch.cat allocates a fresh contiguous output, so no extra
         # .contiguous() pass is needed here.
         query = torch.cat([ql_nope, q_pe], dim=-1)
-        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-            query=query,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=sparse_mode,
-            attention_mode=2,
-            quant_scale_repo_mode=1,
-            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-            key_quant_mode=2,
-            value_quant_mode=2,
-            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
-            return_softmax_lse=return_lse,
-        )
+        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1])
+        if return_lse or qk_rope_head_dim == 0:
+            return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+                return_softmax_lse=return_lse,
+            )
+        else:
+            return torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+            )
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1479,6 +1505,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,

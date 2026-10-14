@@ -38,6 +38,11 @@ on:
         required: false
         default: ''
         type: string
+      download_path:
+        description: 'File or directory in the test container to upload as a GitHub artifact'
+        required: false
+        default: ''
+        type: string
       skip_build_image:
         description: 'Skip build-image job (used when triggered by /nightly command)'
         required: false
@@ -223,6 +228,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
