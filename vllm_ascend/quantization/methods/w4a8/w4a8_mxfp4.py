@@ -519,6 +519,8 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
 
     def process_weights_after_loading(self, layer):
         if use_cann_megamoe(get_current_vllm_config()):
+            layer.w13_weight.data = layer.w13_weight.data.view(torch.uint8)
+            layer.w2_weight.data = layer.w2_weight.data.view(torch.uint8)
             super().process_weights_after_loading(layer)
             return
 
