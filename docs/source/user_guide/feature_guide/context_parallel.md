@@ -147,9 +147,11 @@ vllm serve <glm-5.2-model> \
 
 Standalone DCP reuses only the TP ranks and does not increase the world size.
 
-- For an MLA or SFA model:
+- For an MLA model:
     - `tensor_parallel_size >= decode_context_parallel_size`
     - `tensor_parallel_size % decode_context_parallel_size == 0`
+- For a sparse SFA model with DCP enabled (`decode_context_parallel_size>1`):
+    - `decode_context_parallel_size == tensor_parallel_size`
 - For a GQA model such as Qwen3-235B:
     - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
     - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
