@@ -894,6 +894,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1171,6 +1172,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+        if getattr(self, "_prolog_v3_weights", None) is not None:
+            # RL weight updates can call this method after ACL graph capture.
+            # Refresh the private PROLOG_V3 projection cache in place so the
+            # captured tensor addresses remain valid while the values follow
+            # the reloaded source weights and scales.
+            self._refresh_prolog_v3_weights()
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
@@ -1546,6 +1553,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
         return False
 
+    def _prefill_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        return False
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1592,6 +1602,681 @@ class AscendMLAImpl(MLAAttentionImpl):
         if return_current_kv:
             return k_pe, k_nope, current_k_pe, current_k_nope
         return k_pe, k_nope
+
+    @staticmethod
+    def _get_context_prolog_quant_method(layer: torch.nn.Module | None):
+        return getattr(getattr(layer, "quant_method", None), "quant_method", None)
+
+    def supports_prolog_v3_quantization(self) -> bool:
+        """Whether both PROLOG_V3 projections use a supported quantization scheme.
+
+        PROLOG_V3's weight-quantization modes describe the complete projection
+        set. Mixed native/quantized projections and FP8 W8A8 must therefore
+        keep the legacy cache layout and preprocessing path.
+        """
+        fused_quant_type = type(self._get_context_prolog_quant_method(self.fused_qkv_a_proj))
+        q_quant_type = type(self._get_context_prolog_quant_method(self.q_proj))
+        if fused_quant_type != q_quant_type:
+            return False
+        return fused_quant_type in (
+            type(None),
+            AscendW8A8LinearMethod,
+            AscendW8A8DynamicLinearMethod,
+            AscendW8A8MXFP8DynamicLinearMethod,
+        )
+
+    def supports_prolog_v3_projection(self) -> bool:
+        """Whether this MLA layer has the compressed-query ProLog contract."""
+        return (
+            self.fused_qkv_a_proj is not None
+            and self.q_proj is not None
+            and self.q_lora_rank is not None
+            and self.q_a_layernorm is not None
+            and self.kv_a_layernorm is not None
+        )
+
+    def supports_prolog_v3_dtype(self) -> bool:
+        """Whether the layer dtype matches PROLOG_V3's BF16 contract.
+
+        The integration does not cast FP16 activations, native weights,
+        normalization parameters, RoPE tables, or the unquantized cache.
+        Quantized projections still require BF16 normalization/RoPE/cache
+        tensors, so unsupported FP16 layers stay on the legacy dense layout.
+        """
+        return self.dtype == torch.bfloat16
+
+    def supports_prolog_v3_writer(self) -> bool:
+        """Whether this layer can use PROLOG_V3 for a strided MLA cache.
+
+        This checks the static writer contract only.  Cache geometry and stride
+        validation remain in :meth:`_cache_requires_prolog_v3_writer` because a
+        concrete cache is needed for those checks.
+        """
+        return (
+            self.use_mla_rope
+            and self.qk_rope_head_dim > 0
+            and self.supports_prolog_v3_dtype()
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and hasattr(torch_npu, "npu_mla_prolog_v3")
+            and self.supports_prolog_v3_projection()
+            and self.supports_prolog_v3_quantization()
+            and not getattr(self.q_proj, "_chunk_size", 0)
+        )
+
+    def _prepare_prolog_v3_weights(self) -> dict[str, Any]:
+        """Return the cached private PROLOG_V3 projection weights.
+
+        The cache is intentionally stable after the first call: ACL graphs may
+        capture these tensor addresses.  Weight reloads refresh it in place
+        through ``_refresh_prolog_v3_weights``.
+        """
+        prepared = getattr(self, "_prolog_v3_weights", None)
+        if prepared is not None:
+            return prepared
+        prepared = self._build_prolog_v3_weights()
+        self._prolog_v3_weights = prepared
+        return prepared
+
+    def _build_prolog_v3_weights(self) -> dict[str, Any]:
+        """Build private PROLOG_V3 weights without changing native projections.
+
+        Both DSpark context writes and the strided-cache MLA path need the
+        operator's projection layout while the original linear modules remain
+        available for their regular forward paths.
+        """
+        assert self.fused_qkv_a_proj is not None, "PROLOG_V3 requires fused_qkv_a_proj"
+        assert self.q_proj is not None, "PROLOG_V3 requires q_proj"
+        assert self.q_lora_rank is not None, "PROLOG_V3 requires q_lora_rank"
+        assert self.q_a_layernorm is not None, "PROLOG_V3 requires q_a_layernorm"
+        assert self.kv_a_layernorm is not None, "PROLOG_V3 requires kv_a_layernorm"
+        if getattr(self.q_proj, "_chunk_size", 0):
+            raise RuntimeError("PROLOG_V3 does not support chunked q_proj weights.")
+
+        quant_method = self._get_context_prolog_quant_method(self.fused_qkv_a_proj)
+        quant_type = type(quant_method) if quant_method is not None else None
+        if quant_type is not None and quant_type not in (
+            AscendW8A8LinearMethod,
+            AscendW8A8DynamicLinearMethod,
+            AscendW8A8MXFP8DynamicLinearMethod,
+        ):
+            raise RuntimeError(
+                "PROLOG_V3 supports native, W8A8, W8A8Dynamic, and "
+                f"W8A8MXFP8Dynamic projections, got {quant_type.__name__}."
+            )
+
+        # MLAPO and FA-quant already prepare the exact PROLOG_V3 weight layout.
+        # Reuse it when present: some PD decode configurations free the source
+        # linear weights after this preparation to save NPU memory.
+        existing_weights = (
+            getattr(self, "weight_dq", None),
+            getattr(self, "weight_dkv_kr", None),
+            getattr(self, "weight_uq_qr", None),
+        )
+        if all(weight is not None for weight in existing_weights):
+            prepared = {
+                "quant_type": quant_type,
+                "weight_dq": self.weight_dq,
+                "weight_dkv_kr": self.weight_dkv_kr,
+                "weight_uq_qr": self.weight_uq_qr,
+                "weight_uk": self.mlapo_W_UK_T,
+                "num_heads": self.mlapo_num_heads,
+            }
+            if quant_type is not None:
+                prepared.update(
+                    dequant_scale_w_dq=self.dequant_scale_w_dq,
+                    dequant_scale_w_dkv_kr=self.dequant_scale_w_dkv_kr,
+                    dequant_scale_w_uq_qr=self.dequant_scale_w_uq_qr,
+                )
+            return prepared
+
+        fused_weight = self.fused_qkv_a_proj.weight.data
+        weight_uq_qr = self.q_proj.weight.data
+        weight_uk = self.mlapo_W_UK_T
+        prolog_num_heads = getattr(self, "num_heads", weight_uk.shape[0])
+        if quant_type is None:
+            # Native Linear stores [out, in], while PROLOG_V3 consumes [in, out].
+            fused_weight = fused_weight.T
+            weight_uq_qr = weight_uq_qr.T
+            if getattr(self, "head_padding", 0) > 0:
+                weight_uq_qr = weight_uq_qr.view(
+                    self.q_lora_rank,
+                    self.num_heads,
+                    self.qk_head_dim,
+                )
+                weight_uq_qr = F.pad(weight_uq_qr, (0, 0, 0, self.head_padding))
+                weight_uq_qr = weight_uq_qr.view(
+                    self.q_lora_rank,
+                    self.num_heads_padded * self.qk_head_dim,
+                )
+                if weight_uk.shape[0] == self.num_heads:
+                    weight_uk = F.pad(weight_uk, (0, 0, 0, 0, 0, self.head_padding))
+                prolog_num_heads = self.num_heads_padded
+
+        prepared = {
+            "quant_type": quant_type,
+            "weight_dq": torch_npu.npu_format_cast(
+                fused_weight[..., : self.q_lora_rank].contiguous(), ACL_FORMAT_FRACTAL_NZ
+            ),
+            "weight_dkv_kr": torch_npu.npu_format_cast(
+                fused_weight[..., self.q_lora_rank :].contiguous(), ACL_FORMAT_FRACTAL_NZ
+            ),
+            "weight_uq_qr": torch_npu.npu_format_cast(weight_uq_qr.contiguous(), ACL_FORMAT_FRACTAL_NZ),
+            "weight_uk": weight_uk.contiguous(),
+            "num_heads": prolog_num_heads,
+        }
+
+        if quant_type in (AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod):
+            # W8A8 and W8A8_DYNAMIC both keep per-channel scales as 1-D
+            # tensors after weight processing. A5's FP8-attention capability
+            # does not change this INT8 scheme's scale layout.
+            fused_scale = self.fused_qkv_a_proj.weight_scale.to(torch.float).unsqueeze(0)  # type: ignore[union-attr]
+            uq_scale = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
+            prepared.update(
+                dequant_scale_w_dq=fused_scale[..., : self.q_lora_rank],
+                dequant_scale_w_dkv_kr=fused_scale[..., self.q_lora_rank :],
+                dequant_scale_w_uq_qr=uq_scale,
+            )
+        elif quant_type is AscendW8A8MXFP8DynamicLinearMethod:
+            fused_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1)  # type: ignore[union-attr]
+            fused_scale = fused_scale.reshape(-1, fused_scale.shape[1] * fused_scale.shape[2])
+            uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)  # type: ignore[union-attr]
+            uq_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
+            prepared.update(
+                dequant_scale_w_dq=fused_scale[: self.q_lora_rank, ...],
+                dequant_scale_w_dkv_kr=fused_scale[self.q_lora_rank :, ...],
+                dequant_scale_w_uq_qr=uq_scale,
+            )
+
+        return prepared
+
+    def _refresh_prolog_v3_weights(self) -> None:
+        """Refresh cached PROLOG_V3 projections after a weight reload.
+
+        The existing dictionary and tensors are retained so ACL graphs capture
+        stable addresses.  The rebuilt values are copied into those tensors;
+        incompatible geometry is rejected instead of silently rebinding a
+        graph-visible buffer.
+        """
+        current = getattr(self, "_prolog_v3_weights", None)
+        if current is None:
+            return
+
+        try:
+            refreshed = self._build_prolog_v3_weights()
+            self._copy_prolog_v3_weights(current, refreshed)
+        finally:
+            # Keep the graph-visible dictionary even if rebuilding or copying
+            # fails.  A failed reload must not leave the runtime without its
+            # previously captured projection buffers.
+            self._prolog_v3_weights = current
+
+    @staticmethod
+    def _copy_prolog_v3_weights(current: dict[str, Any], refreshed: dict[str, Any]) -> None:
+        """Copy rebuilt PROLOG_V3 values into graph-visible buffers."""
+        if current.keys() != refreshed.keys():
+            raise RuntimeError(
+                "PROLOG_V3 weight fields changed after graph capture; "
+                f"captured={sorted(current)} refreshed={sorted(refreshed)}."
+            )
+        for key in ("quant_type", "num_heads"):
+            if current[key] != refreshed[key]:
+                raise RuntimeError(
+                    f"PROLOG_V3 {key} changed after graph capture: "
+                    f"{current[key]!r} -> {refreshed[key]!r}. Recapture the graph."
+                )
+
+        for key, old_value in current.items():
+            new_value = refreshed[key]
+            if not isinstance(old_value, torch.Tensor):
+                current[key] = new_value
+                continue
+            if (
+                not isinstance(new_value, torch.Tensor)
+                or old_value.shape != new_value.shape
+                or old_value.dtype != new_value.dtype
+                or old_value.device != new_value.device
+            ):
+                raise RuntimeError(
+                    f"PROLOG_V3 tensor {key!r} changed after graph capture: "
+                    f"captured={old_value.shape}/{old_value.dtype}/{old_value.device}, "
+                    f"refreshed={getattr(new_value, 'shape', None)}/"
+                    f"{getattr(new_value, 'dtype', None)}/{getattr(new_value, 'device', None)}."
+                )
+            if old_value.data_ptr() != new_value.data_ptr():
+                old_value.copy_(new_value)
+
+    def _validate_context_prolog_v3_cache(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> None:
+        nope_cache, rope_cache = kv_cache
+        if nope_cache.dim() != 4 or rope_cache.dim() != 4:
+            raise RuntimeError(
+                "PROLOG_V3 DSpark caches must be 4-D, got "
+                f"nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
+            )
+        if self.num_kv_heads != 1 or nope_cache.shape[2] != 1 or rope_cache.shape[2] != 1:
+            raise RuntimeError("PROLOG_V3 DSpark context writes require one KV head.")
+        if nope_cache.shape[-1] != self.kv_lora_rank or rope_cache.shape[-1] != self.qk_rope_head_dim:
+            raise RuntimeError(
+                "PROLOG_V3 DSpark cache dimensions do not match MLA geometry: "
+                f"nope={tuple(nope_cache.shape)}, rope={tuple(rope_cache.shape)}, "
+                f"kv_lora_rank={self.kv_lora_rank}, rope_dim={self.qk_rope_head_dim}."
+            )
+
+        fused_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        same_storage = nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
+        token_interleaved = (
+            same_storage
+            and rope_cache.storage_offset() - nope_cache.storage_offset() == self.kv_lora_rank
+            and nope_cache.stride(3) == rope_cache.stride(3) == 1
+            and nope_cache.stride(2) == rope_cache.stride(2) == fused_dim
+            and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
+        )
+        if token_interleaved:
+            return
+
+        # Component-major PROLOG_V3 caches accept a non-contiguous first axis,
+        # but all trailing axes must remain dense.
+        for name, cache in (("kv_cache", nope_cache), ("kr_cache", rope_cache)):
+            if cache.stride(3) != 1:
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous last axis.")
+            if cache.stride(2) != cache.shape[3]:
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous head axis.")
+            if cache.stride(1) != cache.shape[2] * cache.stride(2):
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous token axis.")
+
+    def _validate_prolog_v3_cache(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> bool:
+        """Validate the two cache forms accepted by the PROLOG_V3 writer.
+
+        A2/A3 use component-major views whose trailing axes are dense.  A5 may
+        instead expose NoPE and RoPE as trailing slices of one token-fused
+        FlashMLA page; PROLOG_V3 supports those interleaved slices as well.
+        """
+        nope_cache, rope_cache = kv_cache
+        if nope_cache.dim() != 4 or rope_cache.dim() != 4:
+            raise RuntimeError(
+                "PROLOG_V3 MLA caches must be 4-D, got "
+                f"nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
+            )
+        if self.num_kv_heads != 1 or nope_cache.shape[2] != 1 or rope_cache.shape[2] != 1:
+            raise RuntimeError("PROLOG_V3 MLA preprocessing requires one KV head.")
+        if nope_cache.shape[-1] != self.kv_lora_rank or rope_cache.shape[-1] != self.qk_rope_head_dim:
+            raise RuntimeError(
+                "PROLOG_V3 MLA cache dimensions do not match MLA geometry: "
+                f"nope={tuple(nope_cache.shape)}, rope={tuple(rope_cache.shape)}, "
+                f"kv_lora_rank={self.kv_lora_rank}, rope_dim={self.qk_rope_head_dim}."
+            )
+        if nope_cache.shape[:2] != rope_cache.shape[:2] or nope_cache.stride(0) != rope_cache.stride(0):
+            raise RuntimeError(
+                "PROLOG_V3 MLA caches must share block geometry: "
+                f"nope shape={tuple(nope_cache.shape)} stride={tuple(nope_cache.stride())}, "
+                f"rope shape={tuple(rope_cache.shape)} stride={tuple(rope_cache.stride())}."
+            )
+
+        fused_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        same_storage = nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
+        fused_offset_gap = rope_cache.storage_offset() - nope_cache.storage_offset()
+        token_interleaved = (
+            same_storage
+            and fused_offset_gap == self.kv_lora_rank
+            and nope_cache.stride(3) == rope_cache.stride(3) == 1
+            and nope_cache.stride(2) == rope_cache.stride(2) == fused_dim
+            and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
+        )
+        if token_interleaved:
+            return True
+
+        self._validate_context_prolog_v3_cache(kv_cache)
+        return True
+
+    def _cache_requires_prolog_v3_writer(self, kv_cache: tuple[torch.Tensor, ...] | torch.Tensor) -> bool:
+        """Whether the legacy RMSNorm/RoPE cache writer is unsafe for this cache.
+
+        ``aclnnKvRmsNormRopeCache`` marks its cache references ``AutoContiguous``.
+        Component-major and token-fused MLA pages are intentionally strided, so
+        routing them through that operator materializes a large contiguous copy.
+        PROLOG_V3 marks the same references ``IgnoreContiguous`` and is the
+        supported writer on A2/A3/A5.
+        """
+        if not self.supports_prolog_v3_writer():
+            return False
+        if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+            return False
+        nope_cache, rope_cache = kv_cache
+        if nope_cache.is_contiguous() and rope_cache.is_contiguous():
+            return False
+        try:
+            if not self._validate_prolog_v3_cache(kv_cache):
+                return False
+        except RuntimeError:
+            return False
+        return True
+
+    @staticmethod
+    def _flatten_prolog_rope_table(table: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        if table.dim() < 2:
+            raise RuntimeError(f"PROLOG_V3 rope table must be at least 2-D, got shape={tuple(table.shape)}.")
+        table = table.reshape(-1, table.shape[-1])
+        if table.shape[0] != num_tokens:
+            raise RuntimeError(f"PROLOG_V3 rope table length mismatch: table={table.shape[0]}, tokens={num_tokens}.")
+        return table.contiguous()
+
+    def _prepare_prolog_v3_token(self, token_x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any], dict[str, Any]]:
+        weights = self._prepare_prolog_v3_weights()
+        quant_type = weights["quant_type"]
+        token_x = token_x.contiguous()
+        branch: dict[str, Any] = {
+            "dequant_scale_x": None,
+            "dequant_scale_w_dq": None,
+            "dequant_scale_w_uq_qr": None,
+            "dequant_scale_w_dkv_kr": None,
+            "weight_quant_mode": 0,
+        }
+        if quant_type in (AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod):
+            token_x, dequant_scale_x = torch_npu.npu_dynamic_quant(token_x)
+            branch.update(
+                dequant_scale_x=dequant_scale_x.view(-1, 1),
+                dequant_scale_w_dq=weights["dequant_scale_w_dq"],
+                dequant_scale_w_uq_qr=weights["dequant_scale_w_uq_qr"],
+                dequant_scale_w_dkv_kr=weights["dequant_scale_w_dkv_kr"],
+                weight_quant_mode=2,
+            )
+        elif quant_type is AscendW8A8MXFP8DynamicLinearMethod:
+            token_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(token_x, dst_type=torch.float8_e4m3fn)
+            branch.update(
+                dequant_scale_x=dynamic_scale.reshape(token_x.shape[0], -1).view(torch.float8_e8m0fnu),
+                dequant_scale_w_dq=weights["dequant_scale_w_dq"].view(torch.float8_e8m0fnu),
+                dequant_scale_w_uq_qr=weights["dequant_scale_w_uq_qr"].view(torch.float8_e8m0fnu),
+                dequant_scale_w_dkv_kr=weights["dequant_scale_w_dkv_kr"].view(torch.float8_e8m0fnu),
+                weight_quant_mode=3,
+            )
+        return token_x, branch, weights
+
+    def _run_prolog_v3(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        slots: torch.Tensor,
+        *,
+        quantize_query: bool,
+    ):
+        if cos is None or sin is None:
+            raise RuntimeError("PROLOG_V3 MLA preprocessing requires cos/sin tables.")
+        assert self.q_a_layernorm is not None
+        assert self.kv_a_layernorm is not None
+        num_tokens = hidden_states.shape[0]
+        token_x, branch, weights = self._prepare_prolog_v3_token(hidden_states)
+        rope_sin = self._flatten_prolog_rope_table(sin, num_tokens)
+        rope_cos = self._flatten_prolog_rope_table(cos, num_tokens)
+
+        return torch_npu.npu_mla_prolog_v3(
+            token_x=token_x,
+            weight_dq=weights["weight_dq"],
+            weight_uq_qr=weights["weight_uq_qr"],
+            weight_uk=weights["weight_uk"],
+            weight_dkv_kr=weights["weight_dkv_kr"],
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
+            rope_sin=rope_sin,
+            rope_cos=rope_cos,
+            kv_cache=kv_cache[0],
+            kr_cache=kv_cache[1],
+            cache_index=slots.view(-1).to(torch.int64).contiguous(),
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+            cache_mode="PA_BSND",
+            query_norm_flag=False,
+            query_quant_mode=1 if (quantize_query and self.fa_quant_layer) else 0,
+            kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
+            ckvkr_repo_mode=0,
+            quant_scale_repo_mode=0,
+            tile_size=kv_cache[0].shape[1],
+            quant_scale_ckv=(
+                (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
+                if self.fa_quant_layer
+                else None
+            ),
+            **branch,
+        )
+
+    @staticmethod
+    def _gather_current_kv_from_cache(
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Read the current token KV rows back from a strided paged cache."""
+        block_size = kv_cache[0].shape[1]
+        indices = slots.to(torch.int64).view(-1)
+        valid = indices >= 0
+        safe_indices = indices.clamp_min(0)
+        block_ids = torch.div(safe_indices, block_size, rounding_mode="floor")
+        offsets = safe_indices % block_size
+        nope = kv_cache[0][block_ids, offsets]
+        rope = kv_cache[1][block_ids, offsets]
+        valid_view = valid.view(-1, *([1] * (nope.dim() - 1)))
+        nope = nope * valid_view.to(nope.dtype)
+        rope = rope * valid_view.to(rope.dtype)
+        return nope, rope
+
+    def _get_dcp_current_kv_workspace(
+        self,
+        num_tokens: int,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        *,
+        prefill: bool = False,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return a private full current-KV workspace for one DCP graph phase."""
+        attribute = "_dcp_prefill_current_kv_buffers" if prefill else "_dcp_current_kv_buffers"
+        dcp_current_kv_buffers = getattr(self, attribute, None)
+        assert dcp_current_kv_buffers is not None
+        current_nope_cache, current_pe_cache, current_indices = dcp_current_kv_buffers
+        assert num_tokens <= current_indices.numel()
+        block_size = kv_cache[0].shape[1]
+        num_current_blocks = cdiv(num_tokens, block_size)
+        current_nope_cache = current_nope_cache[:num_current_blocks]
+        current_pe_cache = current_pe_cache[:num_current_blocks]
+        return (
+            (current_nope_cache, current_pe_cache),
+            current_indices[:num_tokens],
+            current_nope_cache.flatten(0, 1)[:num_tokens],
+            current_pe_cache.flatten(0, 1)[:num_tokens],
+        )
+
+    def mla_preprocess_prolog_v3(self, hidden_states, kv_cache, attn_metadata):
+        """Use PROLOG_V3 for both decode and prefill MLA preprocessing.
+
+        This path is selected only for strided MLA caches.  It lets PROLOG_V3
+        own Q projection, KV RMSNorm, RoPE, and the cache write, avoiding the
+        ``AutoContiguous`` copy in ``aclnnKvRmsNormRopeCache``.  DCP keeps the
+        complete current chunk in a private workspace and scatters only its
+        rank-owned rows into the strided history cache.
+        """
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
+        decode_result = None
+        prefill_result = None
+        assert self.layer_name is not None
+
+        if self.layerwise_kv_cache_hook is not None:
+            self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
+
+        if num_decode_tokens > 0:
+            history_slots = attn_metadata.slot_mapping[:num_decode_tokens]
+            current_k_nope = current_k_pe = None
+            if decode_requires_current_kv:
+                # DCP split attention needs the complete current chunk while the
+                # paged cache keeps only this rank's history rows. Write the
+                # current chunk to stable private buffers first, then scatter the
+                # rank-owned rows into the strided history cache.
+                prolog_cache, prolog_slots, current_k_nope, current_k_pe = self._get_dcp_current_kv_workspace(
+                    num_decode_tokens, kv_cache
+                )
+            else:
+                prolog_cache = kv_cache
+                prolog_slots = history_slots
+
+            prolog_outputs = self._run_prolog_v3(
+                hidden_states[:num_decode_tokens],
+                attn_metadata.decode.cos,
+                attn_metadata.decode.sin,
+                prolog_cache,
+                prolog_slots,
+                quantize_query=True,
+            )
+            decode_q_nope, decode_q_pe, decode_dequant_scale = prolog_outputs[:3]
+            prolog_num_heads = self._prolog_v3_weights["num_heads"]
+            decode_q_nope = decode_q_nope.view(num_decode_tokens, prolog_num_heads, self.kv_lora_rank)
+            decode_q_pe = decode_q_pe.view(num_decode_tokens, prolog_num_heads, self.qk_rope_head_dim)
+            if prolog_num_heads > self.num_heads:
+                decode_q_nope = decode_q_nope[:, : self.num_heads]
+                decode_q_pe = decode_q_pe[:, : self.num_heads]
+            decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+            if decode_requires_current_kv:
+                DeviceOperator.reshape_and_cache(
+                    key=current_k_nope,
+                    value=current_k_pe,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[1],
+                    slot_mapping=history_slots,
+                )
+            decode_result = DecodeMLAPreprocessResult(
+                decode_q_nope,
+                decode_q_pe,
+                kv_cache[0],
+                kv_cache[1],
+                dequant_scale_q_nope=decode_dequant_scale,
+                current_k_nope=current_k_nope,
+                current_k_pe=current_k_pe,
+            )
+
+        if num_actual_tokens > num_decode_tokens:
+            if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
+                raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
+            wait_for_kv_layer_from_connector(self.layer_name)
+            prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
+            num_prefill_tokens = num_actual_tokens - num_decode_tokens
+
+            # PROLOG_V3 returns the MLAPO-absorbed query (latent dimension).
+            # The prefill attention kernel below consumes the unabsorbed query
+            # (qk_nope_head_dim), so keep the original query projection here.
+            assert self.fused_qkv_a_proj is not None
+            assert self.q_a_layernorm is not None
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, _ = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
+            prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+            prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
+            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
+            prefill_q_pe = self.rope_single(
+                prefill_q_pe,
+                attn_metadata.prefill.cos,
+                attn_metadata.prefill.sin,
+            )
+
+            if prefill_requires_current_kv:
+                # DCP slot mappings use -1 for real current rows owned by
+                # another rank. Keep the complete chunk in the private
+                # workspace, then scatter only this rank's owned rows.
+                (
+                    prolog_cache,
+                    prolog_slots,
+                    prefill_current_k_nope,
+                    prefill_current_k_pe,
+                ) = self._get_dcp_current_kv_workspace(num_prefill_tokens, kv_cache, prefill=True)
+            else:
+                prolog_cache = kv_cache
+                prolog_slots = prefill_slots
+
+            prolog_outputs = self._run_prolog_v3(
+                hidden_states[num_decode_tokens:num_actual_tokens],
+                attn_metadata.prefill.cos,
+                attn_metadata.prefill.sin,
+                prolog_cache,
+                prolog_slots,
+                quantize_query=False,
+            )
+
+            if prefill_requires_current_kv:
+                DeviceOperator.reshape_and_cache(
+                    key=prefill_current_k_nope,
+                    value=prefill_current_k_pe,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[1],
+                    slot_mapping=prefill_slots,
+                )
+            else:
+                prefill_current_k_nope, prefill_current_k_pe = self._gather_current_kv_from_cache(
+                    kv_cache, prefill_slots
+                )
+            if self.fa_quant_layer and self.support_fp8_attention:
+                prefill_current_k_nope = torch.mul(
+                    prefill_current_k_nope.to(self.fak_descale_float.dtype), self.fak_descale_float
+                ).to(prefill_current_k_nope.dtype)
+            projected = self.kv_b_proj(prefill_current_k_nope.reshape(-1, self.kv_lora_rank))[0]
+            projected = projected.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            prefill_k_nope, prefill_value = projected.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            prefill_k_pe = prefill_current_k_pe.view(-1, self.num_kv_heads, self.qk_rope_head_dim).expand(
+                (*prefill_k_nope.shape[:-1], -1)
+            )
+            prefill_result = PrefillMLAPreprocessResult(
+                prefill_q_nope,
+                prefill_q_pe,
+                prefill_k_nope,
+                prefill_k_pe,
+                prefill_value,
+            )
+
+        if num_decode_tokens > 0 or num_actual_tokens > num_decode_tokens:
+            notify_kv_cache_written(self.layer_name)
+        return decode_result, prefill_result
+
+    def exec_context_kv_prolog_v3(
+        self,
+        context_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        slots: torch.Tensor,
+    ) -> None:
+        """Write DSpark context KV through the stride-aware PROLOG_V3 operator.
+
+        ``aclnnKvRmsNormRopeCache`` marks both cache references
+        ``AutoContiguous``.  PROLOG_V3 instead marks them
+        ``IgnoreContiguous`` and supports both component-major and
+        token-interleaved strided MLA caches.
+        """
+        if not hasattr(torch_npu, "npu_mla_prolog_v3"):
+            raise RuntimeError("CANN does not expose npu_mla_prolog_v3 for DSpark context KV writes.")
+        if not self.use_mla_rope:
+            raise RuntimeError("DSpark PROLOG_V3 context writes require an MLA RoPE draft.")
+        if self.fa_quant_layer:
+            raise RuntimeError("DSpark PROLOG_V3 context writes do not support FA-quant caches yet.")
+        if context_states.shape[0] != slots.numel():
+            raise RuntimeError(
+                "PROLOG_V3 DSpark context requires one cache index per token, "
+                f"got context={context_states.shape[0]} and slots={slots.numel()}."
+            )
+        if cos is None or sin is None:
+            raise RuntimeError("PROLOG_V3 DSpark context writes require cos/sin.")
+
+        self._validate_prolog_v3_cache(kv_cache)
+        # Query outputs are intentionally ignored: DSpark only needs the
+        # context KV side effect from the stride-aware writer.
+        self._run_prolog_v3(
+            context_states,
+            cos,
+            sin,
+            kv_cache,
+            slots,
+            quantize_query=False,
+        )
 
     def exec_kv_prefill(
         self,
@@ -2257,7 +2942,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -2274,6 +2959,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
+        # The runner stores a fused MLA cache as one tensor, while the legacy
+        # MLA implementation still expects separate NoPE/RoPE logical tensors.
+        # Split it here as zero-copy views.
+        fused_mla_cache = isinstance(kv_cache, torch.Tensor)
+        if isinstance(kv_cache, torch.Tensor):
+            kv_cache = (
+                kv_cache[..., : self.kv_lora_rank],
+                kv_cache[..., self.kv_lora_rank :],
+            )
+
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
@@ -2285,7 +2980,32 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
+        dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
+        dcp_prefill_current_kv_buffers = getattr(self, "_dcp_prefill_current_kv_buffers", None)
+        num_prefill_tokens = max(num_actual_tokens - num_decode_tokens, 0)
+        use_prolog_v3_strided_cache = (
+            self._cache_requires_prolog_v3_writer(kv_cache)
+            and not self.pcp_enabled
+            and not self.is_pcp_decode_sharded
+            and (not decode_requires_current_kv or self.dcp_enabled)
+            and (not prefill_requires_current_kv or self.dcp_enabled)
+            and (
+                not self.dcp_enabled
+                or (
+                    dcp_current_kv_buffers is not None
+                    and num_decode_tokens <= dcp_current_kv_buffers[2].numel()
+                    and (
+                        not prefill_requires_current_kv
+                        or (
+                            dcp_prefill_current_kv_buffers is not None
+                            and num_prefill_tokens <= dcp_prefill_current_kv_buffers[2].numel()
+                        )
+                    )
+                )
+            )
+        )
         can_use_dcp_prolog = (
             self.enable_mlapo
             and not self.fa_quant_layer
@@ -2293,9 +3013,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             and not self.enable_kv_nz
             and attn_metadata.num_decode_tokens > 0
         )
-        if (
+        if use_prolog_v3_strided_cache:
+            decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_prolog_v3(
+                hidden_states, kv_cache, attn_metadata
+            )
+        elif (
             (self.fa_quant_layer or self.enable_mlapo)
-            and (not requires_current_kv or can_use_dcp_prolog)
+            and not fused_mla_cache
+            and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
