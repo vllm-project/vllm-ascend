@@ -26,7 +26,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
-- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D, or 3 nodes, 1P + 2D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
 - `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency and compatibility with the target model. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
 
 It is recommended to place the model weight in a shared cache directory.
@@ -262,7 +262,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-      --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
+      --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3,\"kv_cache_dtype\": \"bfloat16\"}" \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```
 
@@ -432,7 +432,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
 ### 5.3 Prefill-Decode Disaggregation
 
-This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P1D), or two 950DT nodes (1P1D).
+This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P1D), or two 950DT nodes (1P1D). The 950DT tab also includes the three-node 1P + 2D variant.
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
@@ -761,7 +761,11 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
+    Prefill-Decode disaggregation can be deployed on two 950DT nodes (96GB × 8, 1P1D) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`, or three nodes (1P + 2D) as described below. These examples use the default Model Runner V1; leave `VLLM_USE_V2_MODEL_RUNNER` unset.
+
+    The templates target SuperPod systems with UB fabric. Export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` to let Mooncake negotiate local endpoints, and omit `ascend_local_comm_res_path`. For RoCE-attached 950DT, omit that export, mount `/etc/hixlep/`, and add `"ascend_local_comm_res_path":"/etc/hixlep"` inside `kv_connector_extra_config` on both roles. In the verified UB setup, using static `/etc/hixlep` endpoint IDs caused E19999 KV transfer failures (`ret=-1` in Mooncake logs and HTTP 500).
+
+    Set `node_p_ip` and `node_d_ip` to the Prefill and Decode communication IPs. For the three-node variant, also set `node_d0_ip` and `node_d1_ip`. Set `local_ip` and `nic_name` separately in each node's template. The example uses `--max-model-len 150000`: the verified 96GB configuration with EAGLE3 and fp8 KV cache could not allocate enough KV cache for 263000 tokens. Check the startup KV capacity before increasing this limit.
 
     1. Prefill node
 
@@ -773,10 +777,14 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
-    
+
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
+    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -799,7 +807,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --dtype bfloat16 \
         --max-num-seqs 128 \
         --max-num-batched-tokens 32768 \
-        --max-model-len 263000 \
+        --max-model-len 150000 \
         --enable-expert-parallel \
         --quantization mxfp8 \
         --gpu-memory-utilization 0.92 \
@@ -807,7 +815,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3,\"kv_cache_dtype\":\"bfloat16\"}" \
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
@@ -820,7 +828,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "ascend_local_comm_res_path":"/etc/hixlep",
                 "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
                 "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
             }
@@ -841,6 +848,10 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
+    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -862,7 +873,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
-        --max-model-len 263000 \
+        --max-model-len 150000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --max-num-seqs 256 \
@@ -870,8 +881,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3,\"kv_cache_dtype\":\"bfloat16\"}" \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -880,7 +891,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "engine_id":"1",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "ascend_local_comm_res_path":"/etc/hixlep",
                 "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
                 "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
             }
@@ -935,6 +945,48 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
+    **Scaling to three nodes (1P + 2D)**
+
+    The deployment above scales to three nodes: one Prefill node (DP2 × TP4) plus two Decode nodes forming one global DP4 group (two local DP ranks per Decode node, TP4 each; 24 NPUs in total). Only one template change is required: in **both** the Prefill and Decode `run_dp_template.sh`, update the Mooncake extra config to describe the new Decode group — `"decode":{"dp_size":4,"tp_size":4,"pp_size":1}` (Prefill stays `dp_size: 2`). Also set `local_ip` in each node's template to that node's compute-network IP.
+
+    Start the Prefill node exactly as in the two-node example. Then start the first Decode node (`node_d0_ip`, global DP ranks 0–1), which also acts as the DP group master:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 4 --tp-size 4 --pp-size 1 \
+        --dp-size-local 2 --dp-rank-start 0 \
+        --dp-address $node_d0_ip --dp-rpc-port 5964 \
+        --vllm-start-port 31060
+    ```
+
+    Wait for rank 0 to print `Started DP Coordinator process`. From another shell, start the second Decode node (`node_d1_ip`, global DP ranks 2–3), which joins the same DP group:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 4 --tp-size 4 --pp-size 1 \
+        --dp-size-local 2 --dp-rank-start 2 \
+        --dp-address $node_d0_ip --dp-rpc-port 5964 \
+        --vllm-start-port 31062
+    ```
+
+    The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four Decode DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) and `engine_id` (`"1"`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four Decode ranks:
+
+    ```bash
+    python load_balance_proxy_server_example.py \
+    --port 8009 \
+    --host $node_p_ip \
+    --prefiller-hosts \
+        $node_p_ip $node_p_ip \
+    --prefiller-ports \
+        31050 31051 \
+    --decoder-hosts \
+        $node_d0_ip $node_d0_ip $node_d1_ip $node_d1_ip \
+    --decoder-ports \
+        31060 31061 31062 31063
+    ```
+
+    In a contributor-verified text-only run using this three-node layout with MXFP8, EAGLE3, fp8 KV cache and the optional `--language-model-only` flag, all 232 requests succeeded at 128k input / 1k output and concurrency 58. Average TPOT was 27.3 ms and aggregate output throughput was about 1840 tokens/s. In that setup, enabling Decode FlashComm1 increased output throughput from 1807.9 to 1840.7 tokens/s (about 1.8%). These measurements describe that workload and configuration; the launch templates leave `--language-model-only` optional.
+
 Key Parameter Descriptions:
 
 **`launch_online_dp.py` parameters:**
@@ -970,8 +1022,8 @@ Key Parameter Descriptions:
 - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
 - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT products `30000`/`26900`.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
-- `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT products only): Required for UBOE / Ascend direct communication on 950DT products.
-- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on every node. A3 uses `prefill: dp1 tp4 pp4` on one node and `decode: dp8 tp4 pp1` across two nodes (four local DP ranks per Decode node). 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
+- `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT products only): Used for RoCE-attached 950DT with `/etc/hixlep/` mounted. On SuperPod UB fabric, omit this option and export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` instead, as in the Section 5.3 templates. The Section 5.4 950DT KV-pool templates retain the static-path setup; adapt the Mooncake connector inside the `MultiConnector` the same way when using UB fabric.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on every node. A3 uses `prefill: dp1 tp4 pp4` on one node and `decode: dp8 tp4 pp1` across two nodes (four local DP ranks per Decode node). 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1` for two nodes, or `decode: dp4 tp4 pp1` for three nodes.
 
 **Request forwarding (proxy):**
 
@@ -1318,7 +1370,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
       --kv-cache-dtype fp8 \
       --reasoning-parser minimax_m3 \
       --safetensors-load-strategy prefetch \
-      --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+      --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3,\"kv_cache_dtype\":\"bfloat16\"}" \
       --enforce-eager \
       --enable-chunked-prefill \
       --enable-prefix-caching \
@@ -1405,7 +1457,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3,\"kv_cache_dtype\":\"bfloat16\"}" \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{
@@ -1544,7 +1596,7 @@ When using local media paths in requests, such as `file:///path/to/video.mp4`, a
 
 If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
 
-FLASHCOMM1 and language-model-only mode should not be enabled at the same time for MiniMax-M3 serving. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`.
+FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`. For A3, keep the existing compatibility guidance and avoid enabling both together. In the verified 950DT text-only PD setup in [Section 5.3](#53-prefill-decode-disaggregation), both options worked together. The `--language-model-only` flag remains optional and must be omitted for multimodal inputs.
 
 ```bash
 # Enable FLASHCOMM1.
