@@ -21,38 +21,18 @@ Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported wi
 
 ## Supported Models
 
-vLLM-Ascend reuses the upstream LoRA implementation. A model supports LoRA when its
-architecture implements `SupportsLoRA` in vLLM, and its linear layers and experts are
-ones the Ascend LoRA wrappers can replace. Architectures that vLLM already supports
-therefore work here as well, except for the ones listed below.
+vLLM-Ascend reuses the upstream LoRA implementation and keeps no separate list of
+LoRA models. A model can be served with `--enable-lora` when its architecture
+implements `SupportsLoRA` in vLLM and its linear layers and experts are ones the
+Ascend LoRA wrappers replace. That covers the dense, MoE, and hybrid-attention
+models served on this platform. For the exact set, see the upstream
+[supported models](https://docs.vllm.ai/en/latest/models/supported_models/) list.
 
-### Supported Architectures
+An architecture without a LoRA implementation in vLLM cannot use `--enable-lora`.
+Enabling one requires LoRA for that architecture upstream, or a dedicated Ascend
+wrapper here.
 
-| Structure | Model families |
-| --- | --- |
-| Dense | Qwen2 / Qwen2.5 / Qwen3 / Qwen3.5 / Qwen3.6, Llama, Mistral, Phi, Gemma 1-4, MiniCPM, InternLM, HY3 / HY4, GLM-4 |
-| MoE | Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE / Qwen3.6-MoE, DeepSeek-V2 / V3 / V3.2 (including R1), GLM-4.5 / 4.6 / 4.7, GLM-5 / 5.1 / 5.2 |
-| Hybrid attention | Qwen3-Next |
-| Multimodal | Qwen2-VL / Qwen2.5-VL / Qwen3-VL, Qwen3.5, Qwen3-Omni, Gemma 3, Llama 4, InternVL, MiniCPM-V, Mistral 3, Keye-VL, GLM-4V, Molmo, Ultravox, Qwen3-ASR |
-
-### Unsupported Architectures
-
-These models are served on vLLM-Ascend, but their architectures have no LoRA
-implementation, so `--enable-lora` cannot be used with them. Supporting one requires
-adding LoRA to the architecture upstream, or wrapping its Ascend-specific layers here.
-
-| Model | Architecture |
-| --- | --- |
-| DeepSeek-V4, DeepSeek-V4-Pro, DeepSeek-V4.1-Flash | `DeepseekV4ForCausalLM` |
-| GLM-5.3-Flash | `Glm5NextForCausalLM`, `Glm5NextForConditionalGeneration` |
-| MiniMax-M3 | `MiniMaxM3SparseForCausalLM`, `MiniMaxM3SparseForConditionalGeneration` |
-| Kimi-K2.5, Kimi-K2.6 | `KimiK25ForConditionalGeneration` |
-| Kimi-K3 | `KimiK3ForConditionalGeneration` |
-| Kimi-Linear | `KimiLinearForCausalLM` |
-| PaddleOCR-VL | `PaddleOCRVLForConditionalGeneration` |
-| Qwen2-Audio | `Qwen2AudioForConditionalGeneration` |
-
-### Additional Restrictions
+### Restrictions
 
 - Model Runner V2 context parallel (PCP) does not support LoRA.
 - On multimodal models, LoRA applies to the language backbone. LoRA for the tower and
