@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
+from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -48,6 +49,10 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.spec_decode.dspark.local_argmax import (
+    MAX_EXACT_FP32_TOKEN_ID,
+    reduce_local_argmax,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -71,6 +76,74 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
         self._init_dcp()
+
+    @staticmethod
+    def _unwrap_draft_model(
+        model: torch.nn.Module,
+    ) -> torch.nn.Module:
+        """Unwrap ModelWithContext during draft graph capture."""
+        while hasattr(model, "get_original_model"):
+            original_model = model.get_original_model()
+            if original_model is model:
+                break
+            model = original_model
+        return model
+
+    def _validate_local_argmax_reduction(self) -> None:
+        """Validate the DSpark-specific local reduction instead of the
+        generic ``model.get_top_tokens`` contract.
+        """
+        if not self.use_local_argmax_reduction:
+            return
+        if self.speculative_config.draft_sample_method == "probabilistic":
+            raise ValueError("DSpark local argmax requires draft_sample_method='greedy'.")
+        if self._draft_topk is not None:
+            raise ValueError("DSpark local argmax cannot be combined with dspark_draft_topk.")
+        model = self._unwrap_draft_model(self.model)
+        if not isinstance(model, DSparkDeepseekV4ForCausalLM):
+            raise ValueError(
+                "MRV2 DSpark local argmax currently supports only "
+                "DSparkDeepseekV4ForCausalLM, but got "
+                f"{type(model).__name__}."
+            )
+        if not hasattr(model, "compute_local_draft_logits"):
+            raise ValueError(
+                "use_local_argmax_reduction is enabled but draft model "
+                f"{type(model).__name__} does not implement "
+                "compute_local_draft_logits()."
+            )
+        if model.draft_id_to_target_id is not None:
+            raise ValueError("MRV2 DSpark local argmax does not support draft-to-target vocabulary remapping.")
+        tp_group = get_tp_group()
+        lm_head = model.lm_head
+        lm_head_tp_size = getattr(lm_head, "tp_size", None)
+        if lm_head_tp_size != tp_group.world_size:
+            raise ValueError(
+                "DSpark local argmax requires the LM head TP size to "
+                "match the model TP group: "
+                f"lm_head_tp_size={lm_head_tp_size}, "
+                f"tp_world_size={tp_group.world_size}."
+            )
+        if lmhead_tp_enable():
+            raise ValueError("MRV2 DSpark local argmax does not currently support fine-grained LM-head TP.")
+        lm_head_group = getattr(lm_head, "comm_group", None)
+        lm_head_group_name = getattr(lm_head_group, "unique_name", None)
+        tp_group_name = getattr(tp_group, "unique_name", None)
+        if (
+            lm_head_group is not None
+            and lm_head_group_name is not None
+            and tp_group_name is not None
+            and lm_head_group_name != tp_group_name
+        ):
+            raise ValueError(
+                "DSpark local argmax requires the LM head communication group to match the model TP group."
+            )
+        if model.config.vocab_size > MAX_EXACT_FP32_TOKEN_ID:
+            raise ValueError(
+                "DSpark vocabulary exceeds the exact FP32 token-ID range: "
+                f"vocab_size={model.config.vocab_size}, "
+                f"limit={MAX_EXACT_FP32_TOKEN_ID}."
+            )
 
     def _init_dcp(self) -> None:
         self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -102,6 +175,78 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_wrap_draft_logits(model)
 
         return model
+
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> None:
+        if not self.use_local_argmax_reduction:
+            return super()._sample_sequential(
+                num_reqs,
+                head_hidden,
+            )
+        runtime_model = self.model
+        base_model = cast(
+            DSparkDeepseekV4ForCausalLM,
+            self._unwrap_draft_model(runtime_model),
+        )
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        local_logits = runtime_model.compute_local_draft_logits(sample_hidden)
+        local_logits = local_logits.view(
+            num_reqs,
+            n_spec,
+            -1,
+        )
+        lm_head = base_model.lm_head
+        shard = lm_head.shard_indices
+        vocab_start = shard.org_vocab_start_index
+        vocab_end = shard.org_vocab_end_index
+        tp_group = get_tp_group()
+        lm_head_tp_size = getattr(lm_head, "tp_size", None)
+        if lm_head_tp_size != tp_group.world_size:
+            raise RuntimeError(
+                "LM-head TP size changed after initialization: "
+                f"lm_head_tp_size={lm_head_tp_size}, "
+                f"tp_world_size={tp_group.world_size}."
+            )
+        confidence_markov_embeds: list[torch.Tensor] = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        for step in range(n_spec):
+            markov_embed = runtime_model.markov_embed(prev)
+            if self.use_confidence_head:
+                confidence_markov_embeds.append(markov_embed)
+            full_bias = runtime_model.markov_bias(markov_embed)
+            valid_local_vocab = vocab_end - vocab_start
+            scores = local_logits[:, step, :valid_local_vocab] + full_bias[:, vocab_start:vocab_end]
+            draft_ids = reduce_local_argmax(
+                scores,
+                vocab_start=vocab_start,
+                vocab_end=vocab_end,
+                vocab_size=base_model.config.vocab_size,
+                tp_size=tp_group.world_size,
+                all_gather=lambda pair: tp_group.all_gather(
+                    pair,
+                    dim=-1,
+                ),
+            )
+            sampled = runtime_model.map_draft_to_target(draft_ids)
+            self.draft_tokens[
+                :num_reqs,
+                step,
+            ].copy_(sampled)
+            prev = sampled
+        if self.use_confidence_head:
+            confidence = runtime_model.compute_confidence(
+                sample_hidden,
+                torch.stack(
+                    confidence_markov_embeds,
+                    dim=1,
+                ).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs].copy_(confidence.view(num_reqs, n_spec))
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
         """Pad/trim the DSpark draft LM head around its collectives.

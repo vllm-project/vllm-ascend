@@ -14,10 +14,12 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
 from vllm_ascend.models import register_model
+from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
+from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -190,6 +192,209 @@ def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_
         assert inputs_seen[0].shape == (8, 2)
         torch.testing.assert_close(inputs_seen[0][:num_rows], hidden)
         assert torch.count_nonzero(inputs_seen[0][num_rows:]) == 0
+
+
+def _deepseek_v4_local_argmax_model(
+    *,
+    tp_size: int = 2,
+    vocab_size: int = 6,
+    comm_group=None,
+):
+    model = DSparkDeepseekV4ForCausalLM.__new__(DSparkDeepseekV4ForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(vocab_size=vocab_size)
+    model.draft_id_to_target_id = None
+    lm_head_fields = {
+        "tp_size": tp_size,
+        "shard_indices": SimpleNamespace(
+            org_vocab_start_index=0,
+            org_vocab_end_index=vocab_size // tp_size,
+        ),
+    }
+    if comm_group is not None:
+        lm_head_fields["comm_group"] = comm_group
+    model.lm_head = SimpleNamespace(**lm_head_fields)
+    return model
+
+
+def _local_argmax_spec(model) -> AscendDSparkSpeculator:
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_local_argmax_reduction = True
+    spec.speculative_config = SimpleNamespace(draft_sample_method="greedy")
+    spec._draft_topk = None
+    spec.model = model
+    return spec
+
+
+def test_local_argmax_validation_accepts_wrapped_head_without_comm_group(monkeypatch):
+    model = _deepseek_v4_local_argmax_model()
+    spec = _local_argmax_spec(ModelWithContext(model))
+    tp_group = SimpleNamespace(world_size=2, unique_name="tp")
+    monkeypatch.setattr(dspark_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: False)
+
+    spec._validate_local_argmax_reduction()
+    assert spec._unwrap_draft_model(spec.model) is model
+
+
+@pytest.mark.parametrize(
+    "mutate,message",
+    [
+        (
+            lambda spec, model: setattr(spec.speculative_config, "draft_sample_method", "probabilistic"),
+            "requires draft_sample_method='greedy'",
+        ),
+        (
+            lambda spec, model: setattr(spec, "_draft_topk", 16),
+            "cannot be combined with dspark_draft_topk",
+        ),
+        (
+            lambda spec, model: setattr(model, "draft_id_to_target_id", torch.arange(6)),
+            "does not support draft-to-target vocabulary remapping",
+        ),
+        (
+            lambda spec, model: setattr(model.lm_head, "tp_size", 1),
+            "LM head TP size",
+        ),
+    ],
+)
+def test_local_argmax_validation_rejects_unsupported_config(monkeypatch, mutate, message):
+    model = _deepseek_v4_local_argmax_model()
+    spec = _local_argmax_spec(model)
+    mutate(spec, model)
+    monkeypatch.setattr(
+        dspark_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=2, unique_name="tp"),
+    )
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: False)
+
+    with pytest.raises(ValueError, match=message):
+        spec._validate_local_argmax_reduction()
+
+
+def test_local_argmax_disabled_uses_upstream_sampling(monkeypatch):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_local_argmax_reduction = False
+    hidden_states = torch.ones(2, 3)
+    upstream = MagicMock()
+    monkeypatch.setattr(DSparkSpeculator, "_sample_sequential", upstream)
+
+    spec._sample_sequential(2, hidden_states)
+
+    upstream.assert_called_once_with(2, hidden_states)
+
+
+def test_local_argmax_sampling_matches_full_vocab_markov_reference(monkeypatch):
+    batch_size, num_steps, vocab_size = 2, 3, 6
+    shard_size = vocab_size // 2
+    full_logits = torch.tensor(
+        [
+            [
+                [4.0, 1.0, 0.0, 2.0, 3.0, 0.0],
+                [0.0, 3.0, 2.0, 4.0, 1.0, 0.0],
+                [1.0, 0.0, 4.0, 3.0, 2.0, 0.0],
+            ],
+            [
+                [0.0, 2.0, 3.0, 1.0, 4.0, 0.0],
+                [3.0, 0.0, 1.0, 2.0, 4.0, 0.0],
+                [0.0, 4.0, 1.0, 3.0, 2.0, 0.0],
+            ],
+        ]
+    )
+    anchors = torch.tensor([0, 1])
+
+    def markov_bias(previous: torch.Tensor) -> torch.Tensor:
+        bias = torch.zeros(previous.shape[0], vocab_size)
+        favored = (previous + 1) % vocab_size
+        return bias.scatter_(1, favored.unsqueeze(-1), 5.0)
+
+    expected_steps = []
+    remote_pairs = []
+    previous = anchors
+    for step in range(num_steps):
+        bias = markov_bias(previous)
+        scores = full_logits[:, step] + bias
+        sampled = scores.argmax(dim=-1)
+        expected_steps.append(sampled)
+        remote_scores = scores[:, shard_size:]
+        remote_values, remote_indices = remote_scores.max(dim=-1)
+        remote_pairs.append(
+            torch.stack(
+                (remote_values, (remote_indices + shard_size).float()),
+                dim=-1,
+            ).float()
+        )
+        previous = sampled
+    expected = torch.stack(expected_steps, dim=1)
+
+    class DraftModel(DSparkDeepseekV4ForCausalLM):
+        def __init__(self) -> None:
+            torch.nn.Module.__init__(self)
+            self.config = SimpleNamespace(vocab_size=vocab_size)
+            self.draft_id_to_target_id = None
+            self.lm_head = SimpleNamespace(
+                tp_size=2,
+                shard_indices=SimpleNamespace(
+                    org_vocab_start_index=0,
+                    org_vocab_end_index=shard_size,
+                ),
+            )
+            self.previous_tokens = []
+            self.seen_hidden_states = None
+
+        def compute_local_draft_logits(self, hidden_states):
+            self.seen_hidden_states = hidden_states
+            return full_logits[:, :, :shard_size].flatten(0, 1)
+
+        def markov_embed(self, token_ids):
+            self.previous_tokens.append(token_ids.clone())
+            return token_ids
+
+        def markov_bias(self, markov_embed):
+            return markov_bias(markov_embed)
+
+        def map_draft_to_target(self, draft_ids):
+            return draft_ids
+
+    class TPGroup:
+        world_size = 2
+        unique_name = "tp"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def all_gather(self, local_pair, dim=-1):
+            assert dim == -1
+            remote_pair = remote_pairs[self.calls]
+            self.calls += 1
+            return torch.cat((local_pair, remote_pair), dim=-1)
+
+    base_model = DraftModel()
+    runtime_model = ModelWithContext(base_model)
+    tp_group = TPGroup()
+    monkeypatch.setattr(dspark_module, "get_tp_group", lambda: tp_group)
+
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_local_argmax_reduction = True
+    spec.model = runtime_model
+    spec.num_speculative_steps = num_steps
+    spec.sample_indices = torch.arange(batch_size * num_steps)
+    spec.input_buffers = SimpleNamespace(input_ids=anchors)
+    spec._anchor_idx = torch.arange(batch_size)
+    spec.draft_tokens = torch.full((batch_size, num_steps), -1, dtype=torch.int64)
+    spec.use_confidence_head = False
+    head_hidden = torch.arange(batch_size * num_steps * 2, dtype=torch.float32).view(-1, 2)
+
+    spec._sample_sequential(batch_size, head_hidden)
+
+    torch.testing.assert_close(spec.draft_tokens, expected)
+    torch.testing.assert_close(base_model.seen_hidden_states, head_hidden)
+    assert tp_group.calls == num_steps
+    assert len(base_model.previous_tokens) == num_steps
+    torch.testing.assert_close(base_model.previous_tokens[0], anchors)
+    for step in range(1, num_steps):
+        torch.testing.assert_close(base_model.previous_tokens[step], expected[:, step - 1])
 
 
 def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):
