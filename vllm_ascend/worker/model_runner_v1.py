@@ -5837,6 +5837,7 @@ class NPUModelRunner(GPUModelRunner):
                             kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
                         )
+                        assert attn_module is not None
                         if attn_module.impl.use_flashmla:
                             # A5 interleaves [NoPE | RoPE] per token in every
                             # kernel slot: token0[NoPE|RoPE], token1[...], ...
