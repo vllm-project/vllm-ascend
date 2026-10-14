@@ -518,19 +518,18 @@ gpus_per_dp_rank = tp_size * pp_size
 
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
-    command = [
-        "bash",
-        "./run_dp_template.sh",
-        visible_devices,
-        str(vllm_engine_port),
-        str(dp_size),
-        str(dp_rank),
-        dp_address,
-        dp_rpc_port,
-        str(tp_size),
-        str(pp_size),
-    ]
-    subprocess.run(command, check=True)
+    env = os.environ.copy()
+    env.update(
+        VISIBLE_DEVICES=visible_devices,
+        SERVICE_PORT=str(vllm_engine_port),
+        DP_SIZE=str(dp_size),
+        DP_RANK=str(dp_rank),
+        DP_ADDRESS=dp_address,
+        DP_RPC_PORT=dp_rpc_port,
+        TP_SIZE=str(tp_size),
+        PP_SIZE=str(pp_size),
+    )
+    subprocess.run(["bash", "./run_dp_template.sh"], env=env, check=True)
 
 
 if __name__ == "__main__":
@@ -557,9 +556,40 @@ if __name__ == "__main__":
         process.join()
 ```
 
-`launch_online_dp.py` passes the visible devices, port, DP size, DP rank, DP address, DP RPC port, TP size, and PP size as `$1` through `$8`.
+The templates use named environment variables instead of positional shell arguments. Replace the `<...>` IP, NIC and weight-path placeholders in each template, or export those variables in the shell before launching. The numeric defaults below describe one engine; `launch_online_dp.py` overrides the per-rank values when it starts all local engines. You do not need to calculate a different port or device list for every rank. When using the launcher, edit `export DP_SIZE=...`, `export TP_SIZE=...`, `export PP_SIZE=...` and the other values in the node-specific launch block; these take precedence over the `${VARIABLE:-default}` values in the template.
 
-Then prepare `run_dp_template.sh` on each node and start the engines.
+| Variable | Meaning | How it is set |
+| -------- | ------- | ------------- |
+| `LOCAL_IP` | Current node's communication IP | Fill in `<CURRENT_NODE_IP>` separately on each node. |
+| `NIC_NAME` | NIC associated with `LOCAL_IP` | Fill in `<CURRENT_NODE_NIC>`. |
+| `MODEL_PATH` / `EAGLE3_WEIGHT_PATH` | Target / draft weight directories | Use the same mounted paths on every node. |
+| `DP_SIZE` / `TP_SIZE` / `PP_SIZE` | Global DP size / TP and PP size within one rank | Numeric values are exported in each launch command below. |
+| `LOCAL_DP_SIZE` | Number of engines on the current node | Passed to the launcher as `--dp-size-local`. |
+| `DP_RANK_START` | First global DP rank on this node | Passed as `--dp-rank-start`; differs between the two Decode nodes. |
+| `DP_ADDRESS` | DP coordinator IP for this role | Prefill's IP for P; the first Decode node's IP for every D node. |
+| `DP_RPC_PORT` | DP coordinator port | All nodes in the same role use the same value. |
+| `SERVICE_PORT` | First local API port in the launch shell | The launcher adds the local rank index for each engine. |
+| `DP_RANK` | Engine's global DP rank | The launcher sets `DP_RANK_START + local_rank`. |
+| `VISIBLE_DEVICES` | NPU IDs for one engine | The launcher assigns `TP_SIZE × PP_SIZE` consecutive IDs per local rank. |
+
+Save the Prefill template as `run_dp_template.sh` on the P node and the Decode template under that name on each D node. Run the launcher from the directory containing the matching template. If using a shared filesystem, keep P and D templates in separate directories. Changing TP/DP/PP also requires updating the matching `prefill` and `decode` layouts in both roles' `--kv-transfer-config`.
+
+The following values match the configurations in Sections 5.3 and 5.4. P/D node counts refer to machines; `DP_SIZE` is the global number of ranks for that role.
+
+| Section / platform | Role / node | `DP_SIZE` | `TP_SIZE` | `PP_SIZE` | `LOCAL_DP_SIZE` | `DP_RANK_START` | First `SERVICE_PORT` |
+| ------------------ | ----------- | --------- | --------- | --------- | --------------- | --------------- | -------------------- |
+| 5.3 A3, three nodes | P | 1 | 4 | 4 | 1 | 0 | 31050 |
+| 5.3 A3, three nodes | First D | 8 | 4 | 1 | 4 | 0 | 31260 |
+| 5.3 A3, three nodes | Second D | 8 | 4 | 1 | 4 | 4 | 31260 |
+| 5.3 950DT, two nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
+| 5.3 950DT, two nodes | D | 2 | 4 | 1 | 2 | 0 | 31060 |
+| 5.3 950DT, three nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
+| 5.3 950DT, three nodes | First D | 4 | 4 | 1 | 2 | 0 | 31060 |
+| 5.3 950DT, three nodes | Second D | 4 | 4 | 1 | 2 | 2 | 31062 |
+| 5.4 A3, two nodes | P | 1 | 4 | 4 | 1 | 0 | 31050 |
+| 5.4 A3, two nodes | D | 4 | 4 | 1 | 4 | 0 | 31060 |
+| 5.4 950DT, two nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
+| 5.4 950DT, two nodes | D | 2 | 4 | 1 | 2 | 0 | 31060 |
 
 === "A3 series(W8A8)"
 
@@ -571,19 +601,30 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     ```bash
     unset http_proxy https_proxy ftp_proxy
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Prefill node IP
-    model_path="xxxx"               # MiniMax-M3 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-1}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-4}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-$LOCAL_IP}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-6884}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -593,15 +634,15 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enforce-eager \
         --distributed-executor-backend mp \
         --served-model-name minimax-m3 \
@@ -618,7 +659,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -638,18 +679,29 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Decode node IP
-    model_path="xxxx"               # MiniMax-M3 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-8}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<DECODE_COORDINATOR_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-31422}
+    export SERVICE_PORT=${SERVICE_PORT:-31260}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -657,15 +709,15 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enable-expert-parallel \
         --enable-chunked-prefill \
         --enable-prefix-caching \
@@ -682,14 +734,14 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
             "kv_buffer_device":"npu",
             "kv_role":"kv_consumer",
             "kv_port":"36100",
-            "engine_id":"minimax-m3-decode-dp'"$4"'",
+            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
@@ -704,53 +756,91 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     1. Prefill node
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export LOCAL_IP="$PREFILL_IP"
+    export DP_SIZE=1
+    export TP_SIZE=4
+    export PP_SIZE=4
+    export LOCAL_DP_SIZE=1
+    export DP_RANK_START=0
+    export DP_ADDRESS="$PREFILL_IP"
+    export DP_RPC_PORT=6884
+    export SERVICE_PORT=31050
+
     python launch_online_dp.py \
-        --dp-size 1 --tp-size 4 --pp-size 4 \
-        --dp-size-local 1 --dp-rank-start 0 \
-        --dp-address $node_p_ip --dp-rpc-port 6884 \
-        --vllm-start-port 31050
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     This starts one Prefill API server on port `31050`. Wait until it prints `Application startup complete`.
 
-    2. First Decode node (`node_d0_ip`, global ranks 0–3)
+    2. First Decode node (`DECODE0_IP`, global ranks 0–3)
 
     ```bash
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE0_IP"
+    export DP_SIZE=8
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=4
+    export DP_RANK_START=0
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
+
     python launch_online_dp.py \
-        --dp-size 8 --tp-size 4 --pp-size 1 \
-        --dp-size-local 4 --dp-rank-start 0 \
-        --dp-address $node_d0_ip --dp-rpc-port 31422 \
-        --vllm-start-port 31260
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
 
-    3. Second Decode node (`node_d1_ip`, global ranks 4–7)
+    3. Second Decode node (`DECODE1_IP`, global ranks 4–7)
 
     ```bash
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE1_IP"
+    export DP_SIZE=8
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=4
+    export DP_RANK_START=4
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
+
     python launch_online_dp.py \
-        --dp-size 8 --tp-size 4 --pp-size 1 \
-        --dp-size-local 4 --dp-rank-start 4 \
-        --dp-address $node_d0_ip --dp-rpc-port 31422 \
-        --vllm-start-port 31260
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
-    Set `local_ip` and `nic_name` in the Decode template for each node separately. Both Decode nodes use `node_d0_ip` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight DP ranks to print `Application startup complete`.
+    Set `LOCAL_IP` and `NIC_NAME` in the Decode template for each node separately. Both Decode nodes use `DECODE0_IP` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight DP ranks to print `Application startup complete`.
 
     To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to one Prefill node and eight DP ranks across three nodes.
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $node_p_ip \
+    --host $PREFILL_IP \
     --prefiller-hosts \
-        $node_p_ip \
+        $PREFILL_IP \
     --prefiller-ports \
         31050 \
     --decoder-hosts \
-        $node_d0_ip $node_d0_ip $node_d0_ip $node_d0_ip \
-        $node_d1_ip $node_d1_ip $node_d1_ip $node_d1_ip \
+        $DECODE0_IP $DECODE0_IP $DECODE0_IP $DECODE0_IP \
+        $DECODE1_IP $DECODE1_IP $DECODE1_IP $DECODE1_IP \
     --decoder-ports \
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
@@ -765,7 +855,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     The templates target SuperPod systems with UB fabric. Export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` to let Mooncake negotiate local endpoints, and omit `ascend_local_comm_res_path`. For RoCE-attached 950DT, omit that export, mount `/etc/hixlep/`, and add `"ascend_local_comm_res_path":"/etc/hixlep"` inside `kv_connector_extra_config` on both roles. In the verified UB setup, using static `/etc/hixlep` endpoint IDs caused E19999 KV transfer failures (`ret=-1` in Mooncake logs and HTTP 500).
 
-    Set `node_p_ip` and `node_d_ip` to the Prefill and Decode communication IPs. For the three-node variant, also set `node_d0_ip` and `node_d1_ip`. Set `local_ip` and `nic_name` separately in each node's template. The example uses `--max-model-len 150000`: the verified 96GB configuration with EAGLE3 and fp8 KV cache could not allocate enough KV cache for 263000 tokens. Check the startup KV capacity before increasing this limit.
+    Set `PREFILL_IP` and `DECODE_IP` to the Prefill and Decode communication IPs. For the three-node variant, also set `DECODE0_IP` and `DECODE1_IP`. Set `LOCAL_IP` and `NIC_NAME` separately in each node's template. The example uses `--max-model-len 150000`: the verified 96GB configuration with EAGLE3 and fp8 KV cache could not allocate enough KV cache for 263000 tokens. Check the startup KV capacity before increasing this limit.
 
     1. Prefill node
 
@@ -773,35 +863,46 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     unset ftp_proxy https_proxy http_proxy all_proxy
     unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Prefill node IP
-    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-2}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-$LOCAL_IP}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-6884}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export HCCL_BUFFSIZE=256
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
     # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
     # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --served-model-name minimax-m3 \
         --trust-remote-code \
         --dtype bfloat16 \
@@ -840,34 +941,45 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     unset ftp_proxy https_proxy http_proxy all_proxy
     unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Decode node IP
-    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-2}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<DECODE_COORDINATOR_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-5964}
+    export SERVICE_PORT=${SERVICE_PORT:-31060}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
     # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
     # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name minimax-m3 \
@@ -902,11 +1014,22 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     1. Prefill node
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export LOCAL_IP="$PREFILL_IP"
+    export DP_SIZE=2
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=0
+    export DP_ADDRESS="$PREFILL_IP"
+    export DP_RPC_PORT=6884
+    export SERVICE_PORT=31050
+
     python launch_online_dp.py \
-        --dp-size 2 --tp-size 4 --pp-size 1 \
-        --dp-size-local 2 --dp-rank-start 0 \
-        --dp-address $node_p_ip --dp-rpc-port 6884 \
-        --vllm-start-port 31050
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
@@ -914,11 +1037,22 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     2. Decode node
 
     ```bash
+    export DECODE_IP="<DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE_IP"
+    export DP_SIZE=2
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=0
+    export DP_ADDRESS="$DECODE_IP"
+    export DP_RPC_PORT=5964
+    export SERVICE_PORT=31060
+
     python launch_online_dp.py \
-        --dp-size 2 --tp-size 4 --pp-size 1 \
-        --dp-size-local 2 --dp-rank-start 0 \
-        --dp-address $node_d_ip --dp-rpc-port 5964 \
-        --vllm-start-port 31060
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     This starts two Decode API servers on ports `31060` and `31061`.
@@ -926,19 +1060,22 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For 950DT products 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 DP ranks.
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export DECODE_IP="<DECODE_NODE_IP>"
+
     unset ftp_proxy
     unset https_proxy
     unset http_proxy
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $node_p_ip \
+    --host $PREFILL_IP \
     --prefiller-hosts \
-        $node_p_ip $node_p_ip \
+        $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
         31050 31051 \
     --decoder-hosts \
-        $node_d_ip $node_d_ip \
+        $DECODE_IP $DECODE_IP \
     --decoder-ports \
         31060 31061
     ```
@@ -947,40 +1084,67 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     **Scaling to three nodes (1P + 2D)**
 
-    The deployment above scales to three nodes: one Prefill node (DP2 × TP4) plus two Decode nodes forming one global DP4 group (two local DP ranks per Decode node, TP4 each; 24 NPUs in total). Only one template change is required: in **both** the Prefill and Decode `run_dp_template.sh`, update the Mooncake extra config to describe the new Decode group — `"decode":{"dp_size":4,"tp_size":4,"pp_size":1}` (Prefill stays `dp_size: 2`). Also set `local_ip` in each node's template to that node's compute-network IP.
+    The deployment above scales to three nodes: one Prefill node (DP2 × TP4) plus two Decode nodes forming one global DP4 group (two local DP ranks per Decode node, TP4 each; 24 NPUs in total). Only one template change is required: in **both** the Prefill and Decode `run_dp_template.sh`, update the Mooncake extra config to describe the new Decode group — `"decode":{"dp_size":4,"tp_size":4,"pp_size":1}` (Prefill stays `dp_size: 2`). Also set `LOCAL_IP` in each node's template to that node's compute-network IP.
 
-    Start the Prefill node exactly as in the two-node example. Then start the first Decode node (`node_d0_ip`, global DP ranks 0–1), which also acts as the DP group master:
+    Start the Prefill node exactly as in the two-node example. Then start the first Decode node (`DECODE0_IP`, global DP ranks 0–1), which also acts as the DP group master:
 
     ```bash
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE0_IP"
+    export DP_SIZE=4
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=0
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=5964
+    export SERVICE_PORT=31060
+
     python launch_online_dp.py \
-        --dp-size 4 --tp-size 4 --pp-size 1 \
-        --dp-size-local 2 --dp-rank-start 0 \
-        --dp-address $node_d0_ip --dp-rpc-port 5964 \
-        --vllm-start-port 31060
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
-    Wait for rank 0 to print `Started DP Coordinator process`. From another shell, start the second Decode node (`node_d1_ip`, global DP ranks 2–3), which joins the same DP group:
+    Wait for rank 0 to print `Started DP Coordinator process`. From another shell, start the second Decode node (`DECODE1_IP`, global DP ranks 2–3), which joins the same DP group:
 
     ```bash
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE1_IP"
+    export DP_SIZE=4
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=2
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=5964
+    export SERVICE_PORT=31062
+
     python launch_online_dp.py \
-        --dp-size 4 --tp-size 4 --pp-size 1 \
-        --dp-size-local 2 --dp-rank-start 2 \
-        --dp-address $node_d0_ip --dp-rpc-port 5964 \
-        --vllm-start-port 31062
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four Decode DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) and `engine_id` (`"1"`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four Decode ranks:
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $node_p_ip \
+    --host $PREFILL_IP \
     --prefiller-hosts \
-        $node_p_ip $node_p_ip \
+        $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
         31050 31051 \
     --decoder-hosts \
-        $node_d0_ip $node_d0_ip $node_d1_ip $node_d1_ip \
+        $DECODE0_IP $DECODE0_IP $DECODE1_IP $DECODE1_IP \
     --decoder-ports \
         31060 31061 31062 31063
     ```
@@ -1139,7 +1303,7 @@ fi
 
 #### 5.4.3 Prefill / Decode Scripts
 
-Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `$4` (DP rank) — do not hardcode the same values across ranks.
+Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `DP_RANK` — do not hardcode the same values across ranks.
 
 === "A3 series(W8A8)"
 
@@ -1150,19 +1314,30 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Prefill node IP
-    model_path="xxxx"               # MiniMax-M3 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-1}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-4}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-$LOCAL_IP}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-6884}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
     
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
 
@@ -1176,15 +1351,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enforce-eager \
         --distributed-executor-backend mp \
         --served-model-name minimax-m3 \
@@ -1200,12 +1375,12 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --gpu-memory-utilization 0.92 \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_producer",
-            "engine_id":"minimax-m3-prefill-dp'"$4"'",
+            "engine_id":"minimax-m3-prefill-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1224,7 +1399,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_role":"kv_producer",
                         "kv_connector_extra_config":{
                             "backend":"mooncake",
-                            "lookup_rpc_port":'$((37000 + $4))'
+                            "lookup_rpc_port":'$((37000 + $DP_RANK))'
                         }
                     }
                 ]
@@ -1237,18 +1412,29 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Decode node IP
-    model_path="xxxx"               # MiniMax-M3 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-4}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<DECODE_COORDINATOR_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-5964}
+    export SERVICE_PORT=${SERVICE_PORT:-31060}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
     
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
 
@@ -1260,15 +1446,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name minimax-m3 \
@@ -1282,12 +1468,12 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$4"'",
+            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1306,7 +1492,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_role":"kv_consumer",
                         "kv_connector_extra_config":{
                             "backend":"mooncake",
-                            "lookup_rpc_port":'$((37100 + $4))'
+                            "lookup_rpc_port":'$((37100 + $DP_RANK))'
                         }
                     }
                 ]
@@ -1314,7 +1500,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         }'
     ```
 
-    Start order on A3: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 A3 (`--vllm-start-port 31050` / `31060`, proxy on `8009`).
+    Start order on A3: Mooncake Master → Decode → Prefill → Proxy. Use the two-node launch and proxy commands in Section 5.4.4; the three-node A3 commands in Section 5.3 use a different Decode DP size.
 
 === "950DT products"
 
@@ -1326,17 +1512,28 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     unset ftp_proxy https_proxy http_proxy all_proxy
     unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Prefill node IP
-    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-2}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-$LOCAL_IP}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-6884}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export HCCL_BUFFSIZE=256
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1348,15 +1545,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
-      --port $2 \
-      --data-parallel-size $3 \
-      --data-parallel-rank $4 \
-      --data-parallel-address $5 \
-      --data-parallel-rpc-port $6 \
-      --tensor-parallel-size $7 \
-      --pipeline-parallel-size $8 \
+      --port "$SERVICE_PORT" \
+      --data-parallel-size "$DP_SIZE" \
+      --data-parallel-rank "$DP_RANK" \
+      --data-parallel-address "$DP_ADDRESS" \
+      --data-parallel-rpc-port "$DP_RPC_PORT" \
+      --tensor-parallel-size "$TP_SIZE" \
+      --pipeline-parallel-size "$PP_SIZE" \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --dtype bfloat16 \
@@ -1379,7 +1576,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
       '{
           "kv_connector":"MultiConnector",
           "kv_role":"kv_producer",
-          "engine_id":"minimax-m3-prefill-dp'"$4"'",
+          "engine_id":"minimax-m3-prefill-dp'"$DP_RANK"'",
           "kv_connector_extra_config":{
               "connectors":[
                   {
@@ -1399,7 +1596,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                       "kv_role":"kv_producer",
                       "kv_connector_extra_config":{
                           "backend":"mooncake",
-                          "lookup_rpc_port":'$((37000 + $4))'
+                          "lookup_rpc_port":'$((37000 + $DP_RANK))'
                       }
                   }
               ]
@@ -1413,17 +1610,28 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     unset ftp_proxy https_proxy http_proxy all_proxy
     unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
 
-    nic_name="xxxx"                 # NIC corresponding to local_ip
-    local_ip="xxxx"                 # Decode node IP
-    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+    # Replace IP, NIC and weight-path placeholders for this node.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
+    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+
+    # Role defaults; the launcher overrides these for each engine.
+    export DP_SIZE=${DP_SIZE:-2}
+    export TP_SIZE=${TP_SIZE:-4}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<DECODE_COORDINATOR_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-5964}
+    export SERVICE_PORT=${SERVICE_PORT:-31060}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
     
     export HCCL_BUFFSIZE=2048
-    export HCCL_IF_IP=$local_ip
+    export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -1435,15 +1643,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
 
-    vllm serve "$model_path" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name minimax-m3 \
@@ -1463,7 +1671,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$4"'",
+            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1483,7 +1691,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_role":"kv_consumer",
                         "kv_connector_extra_config":{
                             "backend":"mooncake",
-                            "lookup_rpc_port":'$((37100 + $4))'
+                            "lookup_rpc_port":'$((37100 + $DP_RANK))'
                         }
                     }
                 ]
@@ -1491,7 +1699,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         }'
     ```
 
-    Start order on 950DT: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 950DT (`DP2` on both roles, proxy on `8009`).
+    Start order on 950DT: Mooncake Master → Decode → Prefill → Proxy. Use the Section 5.3 950DT two-node commands (`DP2` on both roles, proxy on `8009`), with the pooled templates above; do not use the three-node scaling commands for this two-node example.
 
 #### 5.4.4 Start the Services
 
@@ -1522,11 +1730,22 @@ Proxy (:8009)
 2. Start Decode. Use the Section 5.3 launcher with these arguments on the Decode node:
 
     ```bash
+    export DECODE_IP="<DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE_IP"
+    export DP_SIZE=4
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=4
+    export DP_RANK_START=0
+    export DP_ADDRESS="$DECODE_IP"
+    export DP_RPC_PORT=5964
+    export SERVICE_PORT=31060
+
     python launch_online_dp.py \
-        --dp-size 4 --tp-size 4 --pp-size 1 \
-        --dp-size-local 4 --dp-rank-start 0 \
-        --dp-address $node_d_ip --dp-rpc-port 5964 \
-        --vllm-start-port 31060
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     On 950DT, use the Section 5.3 950DT Decode command. Wait until every DP ranks prints `Application startup complete`.
@@ -1534,11 +1753,22 @@ Proxy (:8009)
 3. Start Prefill. On A3, use:
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export LOCAL_IP="$PREFILL_IP"
+    export DP_SIZE=1
+    export TP_SIZE=4
+    export PP_SIZE=4
+    export LOCAL_DP_SIZE=1
+    export DP_RANK_START=0
+    export DP_ADDRESS="$PREFILL_IP"
+    export DP_RPC_PORT=6884
+    export SERVICE_PORT=31050
+
     python launch_online_dp.py \
-        --dp-size 1 --tp-size 4 --pp-size 4 \
-        --dp-size-local 1 --dp-rank-start 0 \
-        --dp-address $node_p_ip --dp-rpc-port 6884 \
-        --vllm-start-port 31050
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
     ```
 
     On 950DT, use the Section 5.3 950DT Prefill command. Wait until every Prefill rank prints `Application startup complete`.
@@ -1546,11 +1776,14 @@ Proxy (:8009)
 4. Start the proxy. On A3, register the one Prefill and four Decode endpoints:
 
     ```bash
+    export PREFILL_IP="<PREFILL_NODE_IP>"
+    export DECODE_IP="<DECODE_NODE_IP>"
+
     python load_balance_proxy_server_example.py \
-        --port 8009 --host $node_p_ip \
-        --prefiller-hosts $node_p_ip \
+        --port 8009 --host $PREFILL_IP \
+        --prefiller-hosts $PREFILL_IP \
         --prefiller-ports 31050 \
-        --decoder-hosts $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
+        --decoder-hosts $DECODE_IP $DECODE_IP $DECODE_IP $DECODE_IP \
         --decoder-ports 31060 31061 31062 31063
     ```
 
