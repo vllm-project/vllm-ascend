@@ -74,7 +74,7 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 
-        def fused(q, k, v, **kwargs):
+        def fused(q, k, v, *args, **kwargs):
             for got, original in zip((q, k), qkv[:2]):
                 torch.testing.assert_close(got, torch.nn.functional.normalize(original, dim=-1).squeeze(0))
             torch.testing.assert_close(v, qkv[2].squeeze(0))
