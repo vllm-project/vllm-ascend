@@ -156,6 +156,37 @@ class TestCaMem(PytestBase):
         assert data.cpu_backup_tensor is None
         assert mock_memcpy.called
 
+    @patch("vllm_ascend.device_allocator.camem.unmap_and_release")
+    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    def test_sleep_releases_every_tag(self, mock_memcpy, mock_unmap):
+        allocator = CaMemAllocator.get_instance()
+        assert not hasattr(CaMemAllocator, "sleep_persistent_tag")
+        assert not hasattr(allocator, "use_allocation_tag")
+
+        handle = (1, 10, 3000, 0)
+        data = AllocationData(handle, "sleep_persistent")
+        allocator.pointer_to_data = {3000: data}
+
+        allocator.sleep(offload_tags="default")
+
+        assert data.cpu_backup_tensor is None
+        mock_unmap.assert_called_once_with(handle)
+        mock_memcpy.assert_not_called()
+
+    @patch("vllm_ascend.device_allocator.camem.create_and_map")
+    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    def test_wake_up_restores_every_tag(self, mock_memcpy, mock_create_and_map):
+        allocator = CaMemAllocator.get_instance()
+
+        handle = (1, 10, 3000, 0)
+        data = AllocationData(handle, "sleep_persistent")
+        allocator.pointer_to_data = {3000: data}
+
+        allocator.wake_up()
+
+        mock_create_and_map.assert_called_once_with(handle)
+        mock_memcpy.assert_not_called()
+
     def test_use_memory_pool_context_manager(self):
         allocator = CaMemAllocator.get_instance()
         old_tag = allocator.current_tag
