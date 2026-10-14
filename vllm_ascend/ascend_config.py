@@ -615,6 +615,9 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
+    # Opt-in GDN checkpoint/replay: eager MRV1, FP32 SSM, TP/PP/DP=1,
+    # native eager MTP, prefix cache off and Mamba none. Default native route.
+    enable_gdn_recover: bool = False
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
@@ -680,6 +683,10 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.enable_gdn_recover:
+            from vllm_ascend.ops.gdn_recover import validate_gdn_recover_config
+
+            validate_gdn_recover_config(vc)
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
@@ -1935,6 +1942,11 @@ def clear_ascend_config():
     from vllm_ascend.utils import clear_enable_sp
 
     clear_enable_sp()
+
+
+def is_gdn_recover_enabled() -> bool:
+    """Default native state shapes also work before worker config initialization."""
+    return getattr(_ASCEND_CONFIG, "enable_gdn_recover", False) is True
 
 
 def get_ascend_config():

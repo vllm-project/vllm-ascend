@@ -1003,6 +1003,26 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens_event = MagicMock()
         return runner
 
+    def test_recover_commit_precedes_accepted_token_publication(self):
+        for async_scheduling in (False, True):
+            with self.subTest(async_scheduling=async_scheduling):
+                runner = self._build_runner()
+                runner.use_async_scheduling = async_scheduling
+                runner.cache_config.mamba_cache_mode = "none"
+                runner.gdn_recover_context = MagicMock()
+                order = []
+                runner.gdn_recover_context.commit.side_effect = lambda _, order=order: order.append("commit")
+                runner.num_accepted_tokens_event.record.side_effect = lambda order=order: order.append("publish")
+                sampled = torch.tensor([[10, -1, -1], [11, 12, -1]])
+                runner._update_states_after_model_execute(sampled, SimpleNamespace())
+                runner.gdn_recover_context.commit.assert_called_once_with(sampled)
+                self.assertEqual(order, ["commit", "publish"])
+                torch.testing.assert_close(runner.num_accepted_tokens.gpu[:2], torch.tensor([1, 2], dtype=torch.int32))
+                counts = (
+                    runner.num_accepted_tokens.np if async_scheduling else runner.input_batch.num_accepted_tokens_cpu
+                )
+                np.testing.assert_array_equal(counts[:2], [1, 2])
+
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
         with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):

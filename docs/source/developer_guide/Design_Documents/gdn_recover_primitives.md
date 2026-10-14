@@ -1,9 +1,10 @@
-# GDN checkpoint/replay primitives on Ascend
+# GDN checkpoint/replay on Ascend
 
 `vllm_ascend.ops.triton.mamba.gdn_recover` provides NPU building blocks for
-speculative Gated DeltaNet verification. These primitives do not select a
-backend, change cache allocation, or enable RecoverSSM in the inference engine.
-Scheduler, model-runner and cache-policy integration is a separate change.
+speculative Gated DeltaNet verification. The opt-in framework path integrates
+these kernels with GDN cache allocation, attention metadata and post-sampler
+state commit. See the [feature guide](../../user_guide/feature_guide/gdn_recover.md)
+for supported configurations and the launch option.
 
 The algorithm follows the existing
 [GDN RecoverSSM proposal](https://github.com/vllm-project/vllm/pull/58863)
@@ -87,7 +88,8 @@ caching, TP/PP or cache-transfer support.
 
 ```bash
 pytest -q tests/ut/ops/test_gdn_recover_contract.py
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_recover.py
+pytest -q tests/e2e/pull_request/one_card/triton/test_gdn_recover.py
+pytest -q tests/e2e/pull_request/one_card/triton/test_gdn_recover_batch.py
 ```
 
 The NPU tests use a direct CPU recurrence oracle independent of replay records.
@@ -109,5 +111,6 @@ For one FP32 checkpoint and a window of records, SSM plus record bytes are:
 For 48 value heads, K=V=128 and window=4 this is approximately 3.188MiB,
 versus 12MiB for four full FP32 snapshots. Conv history, saved history, page
 padding, attention caches and graph workspace are additional costs. Adding
-these primitives alone does not reduce the inference engine's allocated pool
-or prove a particular throughput/concurrency gain.
+records replaces per-draft SSM reservations in the integrated path. This
+reduces state blocks charged per request; the allocator may retain the same
+physical pool. Throughput and latency depend on load and require measurement.

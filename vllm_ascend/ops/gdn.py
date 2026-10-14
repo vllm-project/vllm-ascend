@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from dataclasses import replace
 from functools import lru_cache, wraps
 
 import torch
@@ -29,14 +30,16 @@ from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.ascend_config import is_gdn_recover_enabled
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -49,6 +52,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.ops.triton.mamba.gdn_recover import gdn_recover_verify, gdn_save_conv_history
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -274,8 +278,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+    ) -> tuple[tuple[int, ...], ...]:
+        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
@@ -284,6 +288,35 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
+        if not is_gdn_recover_enabled():
+            return shapes
+        conv, state = shapes
+        heads, value_dim, key_dim = state
+        history = self.conv_kernel_size - 1
+        if max(value_dim, key_dim) > 256 or not 1 <= history <= 16:
+            raise ValueError("Unsupported GDN geometry for checkpoint/replay")
+        return (*shapes, (heads, self.num_spec + 1, value_dim + key_dim + 1), (history, conv[-1]))
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        dtypes = MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            self.model_config.dtype, self.cache_config.mamba_cache_dtype, self.cache_config.mamba_ssm_cache_dtype
+        )
+        if not is_gdn_recover_enabled():
+            return dtypes
+        if dtypes[1] != torch.float32:
+            raise ValueError("GDN checkpoint/replay requires FP32 SSM state")
+        return (*dtypes, torch.float32, dtypes[0])
+
+    def get_kv_cache_spec(self, vllm_config) -> KVCacheSpec | None:
+        spec = GatedDeltaNetAttention.get_kv_cache_spec(self, vllm_config)
+        if spec is None or not is_gdn_recover_enabled():
+            return spec
+        # Keep the allocator's page when records fit. If they do not, account
+        # for them in the physical page instead of silently overrunning padding.
+        payload = spec.state_content_size_bytes
+        alignment = 32
+        padded = max(spec.page_size_padded or 0, (payload + alignment - 1) // alignment * alignment)
+        return replace(spec, num_speculative_blocks=0, page_size_padded=padded)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         return
@@ -411,6 +444,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
         ssm_state = self_kv_cache[1]
+        recover = is_gdn_recover_enabled()
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -434,6 +468,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
+            if recover:
+                gdn_save_conv_history(
+                    self_kv_cache[0],
+                    self_kv_cache[3],
+                    attn_metadata.recover_state_indices,
+                    attn_metadata.recover_query_offsets,
+                )
             output_spec = torch.empty_like(mixed_qkv_spec)
             output_spec = causal_conv1d_update(
                 mixed_qkv_spec,
@@ -561,18 +602,35 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            if recover:
+                core_attn_out_spec = gdn_recover_verify(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    g_spec.squeeze(0),
+                    beta_spec.squeeze(0),
+                    ssm_state,
+                    self_kv_cache[2],
+                    attn_metadata.recover_state_indices,
+                    attn_metadata.recover_query_offsets,
+                ).unsqueeze(0)
+                context = getattr(self, "_gdn_recover_context", None)
+                if context is None:
+                    raise RuntimeError("GDN recovery cache is not owned by the model runner")
+                context.enqueue(self.prefix, self_kv_cache, attn_metadata)
+            else:
+                core_attn_out_spec = recurrent_gated_delta_rule(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=spec_state_indices_tensor.flatten(),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
