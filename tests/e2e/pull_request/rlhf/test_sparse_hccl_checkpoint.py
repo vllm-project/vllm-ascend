@@ -188,7 +188,11 @@ def test_sparse_checkpoint_matches_native_dense(tmp_path, dp_size):
     port = free_port()
     url = f"http://127.0.0.1:{port}"
     environment = os.environ.copy()
-    environment["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(1, workers + 1))
+    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    device_ids = visible_devices.split(",") if visible_devices else [str(i) for i in range(workers + 1)]
+    if len(device_ids) < workers + 1:
+        pytest.skip(f"requires {workers + 1} selected NPUs (including a distinct trainer)")
+    environment["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(device_ids[1 : workers + 1])
     environment["VLLM_SERVER_DEV_MODE"] = "1"
     environment["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     args = [

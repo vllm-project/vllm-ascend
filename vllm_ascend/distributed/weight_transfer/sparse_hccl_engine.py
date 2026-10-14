@@ -22,12 +22,14 @@ if TYPE_CHECKING:
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    TrainerInitInfo,
-    TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
     WeightTransferEngine,
-    WeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    SparseNCCLTrainerInitInfo,
+    SparseNCCLTrainerWeightTransferEngine,
+    SparseNCCLWeightTransferUpdateInfo,
 )
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     CheckpointWeightPatch,
@@ -69,7 +71,7 @@ def checkpoint_loader_views(model: torch.nn.Module) -> ExitStack:
 
 
 @dataclass
-class SparseHCCLTrainerInitInfo(TrainerInitInfo):
+class SparseHCCLTrainerInitInfo(SparseNCCLTrainerInitInfo):
     """Trainer-side init info for the sparse HCCL weight transfer backend.
 
     Same rendezvous shape as the dense HCCL backend (the sender opens its
@@ -78,20 +80,10 @@ class SparseHCCLTrainerInitInfo(TrainerInitInfo):
 
     backend: ClassVar[str] = "sparse_hccl"
 
-    master_address: str
-    master_port: int
-    world_size: int
-
 
 @dataclass
-class SparseHCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
+class SparseHCCLWeightTransferUpdateInfo(SparseNCCLWeightTransferUpdateInfo):
     """Update info for the sparse HCCL weight transfer backend."""
-
-    names: list[str]
-    dtype_names: list[str]
-    shapes: list[list[int]]
-    num_updates_list: list[int]
-    """Number of sparse entries to receive for each parameter in ``names``."""
 
     def __post_init__(self) -> None:
         num_params = len(self.names)
@@ -228,7 +220,7 @@ class SparseHCCLWeightTransferEngine(
             self.model_update_group = None
 
 
-class SparseHCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[SparseHCCLTrainerInitInfo]):
+class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngine):
     """Trainer-side sparse HCCL weight transfer engine.
 
     Broadcasts flat-index (indices, values) patches from HCCL rank 0 while the
@@ -246,24 +238,7 @@ class SparseHCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[SparseHC
     """
 
     init_info_cls = SparseHCCLTrainerInitInfo
-
-    def __init__(
-        self,
-        *,
-        client: VLLMWeightSyncClient,
-        source: WeightSource | None = None,
-        is_sender: bool = True,
-    ) -> None:
-        # Sparse is a delta backend: it takes per-round patches via
-        # send_weights, so a `source` would silently never be sent. The
-        # parameter exists only to match the base/factory signature.
-        if source is not None:
-            raise ValueError(
-                "Sparse HCCL weight transfer takes no WeightSource; pass each "
-                "round's patches to send_weights(patches) instead."
-            )
-        super().__init__(client=client, source=source, is_sender=is_sender)
-        self.model_update_group: PyHcclCommunicator | None = None
+    model_update_group: "PyHcclCommunicator | None"
 
     @classmethod
     def trainer_init(
@@ -304,34 +279,11 @@ class SparseHCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[SparseHC
 
         return engine
 
-    def send_weights(self, patches: Iterable[SparseWeightPatch] | None = None) -> None:
-        """Broadcast one sparse update through a one-shot lifecycle."""
-        patches = self._prepare_patches(patches)
-        if not patches:
-            return
-
-        self.client.start_weight_update()
-        self._broadcast_chunk(patches)
-        self.client.finish_weight_update()
-
-    def send_weight_chunk(self, patches: Iterable[SparseWeightPatch] | None = None) -> None:
-        """Broadcast one chunk inside a caller-owned weight update lifecycle."""
-        patches = self._prepare_patches(patches)
-        if not patches:
-            return
-        self._broadcast_chunk(patches)
-
     def _prepare_patches(self, patches: Iterable[SparseWeightPatch] | None) -> list[SparseWeightPatch]:
-        if not self.is_sender:
-            return []
-
-        prepared = list(patches) if patches is not None else []
+        prepared = super()._prepare_patches(patches)
         if not prepared:
             return []
-        if self.model_update_group is None:
-            raise RuntimeError("trainer_init() must be called before sending weights.")
-        for patch in prepared:
-            self._validate_patch(patch)
+        assert self.model_update_group is not None
         device = self.model_update_group.device
         # Normalize views and CPU payloads before workers enter collectives.
         with torch.npu.device(device):

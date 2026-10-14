@@ -28,6 +28,27 @@ def make_patch(**kwargs):
     return SparseWeightPatch(**(fields | kwargs))
 
 
+def test_sparse_public_types_and_lifecycle_are_reused():
+    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+        SparseNCCLTrainerInitInfo,
+        SparseNCCLTrainerWeightTransferEngine,
+        SparseNCCLWeightTransferUpdateInfo,
+    )
+    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+        SparseWeightPatch as CommonSparseWeightPatch,
+    )
+
+    from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import SparseHCCLTrainerInitInfo
+
+    assert SparseWeightPatch is CommonSparseWeightPatch
+    assert issubclass(SparseHCCLTrainerInitInfo, SparseNCCLTrainerInitInfo)
+    assert issubclass(SparseHCCLWeightTransferUpdateInfo, SparseNCCLWeightTransferUpdateInfo)
+    for name in ("__init__", "send_weights", "send_weight_chunk"):
+        assert getattr(SparseHCCLTrainerWeightTransferEngine, name) is getattr(
+            SparseNCCLTrainerWeightTransferEngine, name
+        )
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

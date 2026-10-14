@@ -3,25 +3,11 @@
 """Checkpoint-coordinate sparse patches for the HCCL transport."""
 
 import math
-from dataclasses import dataclass
 
 import torch
+from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch as SparseWeightPatch
 
 SPARSE_HCCL_VALUE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
-
-
-@dataclass
-class SparseWeightPatch:
-    """Replacement values at unique flat indices in a full checkpoint tensor.
-
-    Names and shapes use checkpoint coordinates, not runtime TP/EP shards.
-    NaN is reserved by the native patch loader for unchanged elements.
-    """
-
-    name: str
-    indices: torch.Tensor
-    values: torch.Tensor
-    full_shape: tuple[int, ...]
 
 
 def validate_sparse_patch(patch: SparseWeightPatch) -> None:
