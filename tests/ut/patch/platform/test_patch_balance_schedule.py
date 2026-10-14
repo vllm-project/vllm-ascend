@@ -475,8 +475,8 @@ def test_balance_deltas_present_in_schedule():
     assert "max(t.item() for t in self.balance_queue)" in src
     assert "self.max_num_running_reqs" in src
 
-    # delta 3: `if request_queue is None: break` replaces upstream's assert.
-    assert "if request_queue is None:" in src
+    # The shared queue path must stop before peeking an empty request queue.
+    assert "if not request_queue:" in src
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +820,29 @@ def test_balance_schedule_waiting_and_running_paths():
     out2 = scheduler.schedule()
     assert out2.total_num_scheduled_tokens >= 0
     scheduler.schedule(throttle_prefills=True)
+
+
+@pytest.mark.parametrize("holds_kv_blocks", [False, True])
+def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
+    scheduler = _make_balance_scheduler()
+    empty = scheduler.schedule()
+    assert empty.total_num_scheduled_tokens == 0
+    assert not empty.num_scheduled_tokens
+
+    request = _create_requests(1, num_tokens=8)[0]
+    request.num_computed_tokens = 4 if holds_kv_blocks else 0
+    scheduler.add_request(request)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
+
+    output = scheduler.schedule()
+
+    scheduler._handle_blocked_waiting_request.assert_called_once_with(request)
+    assert output.total_num_scheduled_tokens == 0
+    assert not output.num_scheduled_tokens
+    assert not scheduler.running
+    assert list(scheduler.kv_holding_waiting) == ([request] if holds_kv_blocks else [])
+    assert list(scheduler.waiting) == ([] if holds_kv_blocks else [request])
+    assert request in scheduler.deferred_waiting
 
 
 def test_balance_schedule_pause_freeze_and_v2():

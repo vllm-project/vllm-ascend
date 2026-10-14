@@ -14,9 +14,9 @@ The copied ``schedule()`` retains the existing scheduling behavior with
 version-specific upstream compatibility changes. The balance deltas are:
 (1) the disabled-path early return that delegates to ``super()``,
 (2) the ``balance_flag`` break inside the WAITING loop
-(``any-rank-at-cap => global freeze``), and (3) ``if request_queue is None:
-break`` in place of upstream's ``assert request_queue is not None`` (so a
-drained-rank schedule does not assert when balance defers admission). Both
+(``any-rank-at-cap => global freeze``). The shared queue path uses
+``if not request_queue: break`` so drained ranks stop before peeking an
+empty waiting queue, including when every request is deferred. Both
 supported vLLM refs expose ``schedule(throttle_prefills=False)``, so the
 disabled fast path forwards that argument directly.
 
