@@ -168,6 +168,23 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         return output
 
+    def apply_into(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        quantized_x, pertoken_scale = self._quantize_input(layer, x)
+        torch.ops._C_ascend.npu_quant_matmul_out(
+            quantized_x,
+            layer.weight,
+            layer.weight_scale.view(torch.float8_e8m0fnu),
+            pertoken_scale.view(torch.float8_e8m0fnu),
+            None,
+            (1 << 32) | (1 << 16) | self.group_size,
+            output,
+        )
+
     def apply_single_group_gmm(
         self,
         layer: torch.nn.Module,

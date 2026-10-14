@@ -1584,6 +1584,42 @@ at::Tensor npu_hc_post_npu(
     return out;
 }
 
+// MXFP8 quantized matmul (aclnnQuantMatmulV5) that writes the GEMM result
+// directly into a caller-provided buffer. This avoids a full-tensor copy after
+// the A5 DeepSeek V4.1 o_proj GEMM when the graph-stable output buffer is used.
+void npu_quant_matmul_out_npu(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& x2_scale,
+    c10::optional<at::Tensor> x1_scale,
+    c10::optional<at::Tensor> bias,
+    int64_t group_size,
+    at::Tensor& out)
+{
+    TORCH_CHECK(
+        x1.dim() == 2 && x2.dim() == 2,
+        "npu_quant_matmul_out only supports 2D x1/x2, got ",
+        x1.dim(),
+        "/",
+        x2.dim(),
+        ".");
+    TORCH_CHECK(
+        x1.is_contiguous() && x2.is_contiguous(),
+        "npu_quant_matmul_out requires contiguous x1/x2.");
+    TORCH_CHECK(
+        out.dim() == 2 && out.is_contiguous() && out.size(0) == x1.size(0) && out.size(1) == x2.size(1),
+        "out must be a contiguous [x1.rows, x2.cols] tensor.");
+    c10::optional<at::Tensor> none;
+    bool transpose = false;
+    if (IsOpInputBaseFormat(x2)) {
+        EXEC_NPU_CMD(aclnnQuantMatmulV5, x1, x2, x1_scale, x2_scale,
+                     none, none, none, none, bias, transpose, transpose, group_size, out);
+    } else {
+        EXEC_NPU_CMD(aclnnQuantMatmulWeightNz, x1, x2, x1_scale, x2_scale,
+                     none, none, none, none, bias, transpose, transpose, group_size, out);
+    }
+}
+
 constexpr int64_t HC_PRE_HC_LIMIT = 4;
 constexpr int64_t HC_PRE_MIX_HC_LIMIT = 24;
 
@@ -3434,6 +3470,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor out)"
         );
     ops.impl("npu_hc_post", torch::kPrivateUse1, &vllm_ascend::npu_hc_post_npu);
+
+    ops.def(
+        "npu_quant_matmul_out("
+            "Tensor x1, "
+            "Tensor x2, "
+            "Tensor x2_scale, "
+            "Tensor? x1_scale, "
+            "Tensor? bias, "
+            "int group_size, "
+            "Tensor(a!) out"
+        ") -> ()"
+        );
+    ops.impl("npu_quant_matmul_out", torch::kPrivateUse1, &vllm_ascend::npu_quant_matmul_out_npu);
 
     ops.def(
         "npu_hc_pre_v2("
