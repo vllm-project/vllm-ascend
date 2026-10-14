@@ -128,7 +128,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
+                    attn_metadata.block_tables[num_decodes:, :],
                     attn_metadata.query_start_loc[num_decodes:],
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
