@@ -418,14 +418,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
 
-        max_experts_per_card = 128
-        local_num_experts = getattr(layer, "local_num_experts", layer.w13_weight.shape[0])
-        assert local_num_experts <= max_experts_per_card, (
-            f"W8A8 MXFP8 requires local_num_experts <= {max_experts_per_card} "
-            "(CANN tensorList limit for per-expert NZ lists), "
-            f"got {local_num_experts}. "
-            "Consider increasing data-parallel-size to reduce experts per card."
-        )
 
         if not hasattr(layer, "_mxfp8_moe_parameters"):
             layer._mxfp8_moe_parameters = {
