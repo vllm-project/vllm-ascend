@@ -305,12 +305,16 @@ class cmake_build_ext(build_ext):
 
         try:
             pip_show = subprocess.check_output([sys.executable, "-m", "pip", "show", "torch-npu"], text=True)
-            location = next(
-                line.split(":", 1)[1].strip() for line in pip_show.splitlines() if line.startswith("Location:")
-            )
-            torch_npu_path = os.path.join(location, "torch_npu")
-        except (subprocess.CalledProcessError, StopIteration) as e:
-            raise RuntimeError(f"Failed to locate torch-npu installation path: {e}")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to run 'pip show torch-npu': {e}")
+
+        torch_npu_path = None
+        for line in pip_show.splitlines():
+            if line.startswith("Location:"):
+                torch_npu_path = os.path.join(line.split(":", 1)[1].strip(), "torch_npu")
+                break
+        if torch_npu_path is None:
+            raise RuntimeError("'Location:' not found in 'pip show torch-npu' output")
 
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
