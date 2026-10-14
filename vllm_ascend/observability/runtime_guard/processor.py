@@ -274,6 +274,12 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """
         if not should_run_wave_sync_on_rank():
             return
+        cfg = self.runtime_config
+        # Default-off: no wave consumers — skip advance / end-of-wave shells.
+        if cfg.is_static_idle():
+            if self._kv_dump_jobs:
+                self._drop_pending_dump_jobs()
+            return
         # Rank introspection for debug logs only: skip the getattrs and the
         # get_pp_group() try/except when DEBUG is off (guard-all-off zero cost).
         debug_on = logger.isEnabledFor(logging.DEBUG)
@@ -295,11 +301,11 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._scheduler_output_for_step = scheduler_output
         try:
             self.wave_tracker.advance(allow_manual_dump=allow_manual_dump)
-            cfg = self.runtime_config
             idle = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
             if idle and not cfg.hot_reload_enabled:
-                # Static idle: no config bus. Claim leftover auto jobs only when
-                # dump is active (shared gate → all ranks take the same branch).
+                # Dump-only (no detectors, no hot-reload): no config bus. Claim
+                # leftover auto jobs only when dump is active (shared gate →
+                # all ranks take the same branch).
                 if cfg.dump_enabled():
                     self._claim_dump_jobs_to_deferred_via_tp()
                 elif self._kv_dump_jobs:
@@ -398,6 +404,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """True when sample-phase runtime_guard hooks must run (else pure ``sample_fn``)."""
         return bool(self.runtime_config.needs_sample_phase_hooks())
 
+    def is_static_idle(self) -> bool:
+        """True when default-off (no hot-reload / detectors / dump) — skip hot shells."""
+        return bool(self.runtime_config.is_static_idle())
+
     def _soft_fail(self, hook: str, fn: Callable[[], Any]) -> Any:
         # Guard hooks are observational: any exception must stay inside the
         # guard and never reach the engine loop / async copy thread.
@@ -480,11 +490,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """
         # Idle fast-path: detectors all off →
         # skip soft-fail wrappers and observational hooks entirely.
-        # Still flush: TP>1 drain collectives must stay lockstep every sample.
+        # Dump-only / hot-reload-only still flush end-of-wave (lockstep).
+        # Static idle (default-off) skips end-of-wave too — no consumers.
         if not self.needs_sample_phase_hooks():
             result = sample_fn()
-            # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
-            self.end_of_wave_sync(allow_manual_dump=True)
+            if not self.is_static_idle():
+                # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
+                self.end_of_wave_sync(allow_manual_dump=True)
             return result
 
         # Runner's sample work (sample + draft + bookkeeping + output + profiling + eplb)

@@ -2235,6 +2235,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
+    p.runtime_config.is_static_idle.return_value = True
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False
@@ -2247,6 +2248,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
+    p.wave_tracker.advance.assert_not_called()
 
 
 def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):

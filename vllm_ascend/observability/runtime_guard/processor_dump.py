@@ -141,6 +141,8 @@ class RuntimeGuardDumpMixin:
         """
         if not should_run_wave_sync_on_rank():
             return
+        if self.runtime_config.is_static_idle():
+            return
         try:
             self._drain_merged_bus(warn_if_pending=True)
         except Exception as exc:

@@ -808,6 +808,23 @@ class RuntimeConfig:
         """
         return bool(self._hot_path_gates_cached()["needs_sample_phase_hooks"])
 
+    def is_static_idle(self) -> bool:
+        """True when default-off: no hot-reload, no detectors, no dump/manual.
+
+        Hot-path shells (wave advance, sample wrap, end-of-wave drain) may
+        skip entirely. Enabling any of those axes requires restart when
+        hot-reload is off, or a config change when hot-reload is on (then
+        this returns False and the full shells run).
+        """
+        if self.hot_reload_enabled:
+            return False
+        gates = self._hot_path_gates_cached()
+        return (
+            not gates["needs_sample_phase_hooks"]
+            and not gates["dump_enabled"]
+            and int(gates["manual_trigger_count"]) <= 0
+        )
+
     # Detector section order comes from ``detector_catalog``.
     DETECTOR_SECTIONS = _CATALOG_DETECTOR_SECTIONS
 
