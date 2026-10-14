@@ -896,13 +896,32 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
 
 @pytest.mark.parametrize("sfa_c8", [False, True])
 @pytest.mark.parametrize("li_c8", [False, True])
-@pytest.mark.parametrize("preprocess_type", [PreprocessType.NATIVE, PreprocessType.MLAPO, PreprocessType.PROLOG_V3])
+@pytest.mark.parametrize(
+    "preprocess_type,input_is_sequence_parallel,nope",
+    [
+        (PreprocessType.NATIVE, False, False),
+        (PreprocessType.NATIVE, True, False),
+        (PreprocessType.NATIVE, True, True),
+        (PreprocessType.MLAPO, False, False),
+        (PreprocessType.PROLOG_V3, False, False),
+    ],
+)
 @pytest.mark.parametrize(
     "has_indexer,is_mtp,skip_topk,expect_indexer",
     [(True, False, True, False), (True, True, True, True), (True, False, False, True), (False, False, True, False)],
 )
+@pytest.mark.parametrize("gated", [False, True])
 def test_dsa_cp_indexer_cache_follows_runtime_ownership(
-    sfa_c8, li_c8, preprocess_type, has_indexer, is_mtp, skip_topk, expect_indexer
+    sfa_c8,
+    li_c8,
+    preprocess_type,
+    input_is_sequence_parallel,
+    nope,
+    has_indexer,
+    is_mtp,
+    skip_topk,
+    expect_indexer,
+    gated,
 ):
     # Exercise the actual SFA forward, including cache composition and metadata
     # lookup. Only projections/kernels are mocked; static layers have no cache
@@ -910,7 +929,6 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.has_indexer = has_indexer
     impl.layerwise_kv_cache_hook = None
-    impl.g_proj = None
     impl._is_mtp_layer = is_mtp
     impl.skip_topk = skip_topk
     impl.use_index_cache = True
@@ -920,12 +938,13 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl.preprocess_type = preprocess_type
     impl.layer_name = "model.layers.80.self_attn.attn" if is_mtp else "model.layers.2.self_attn.attn"
     impl.q_lora_rank = 2
-    impl.qk_rope_head_dim = 2
+    impl.qk_rope_head_dim = 0 if nope else 2
     impl.kv_lora_rank = 4
     hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    impl.g_proj = MagicMock(side_effect=lambda x: (torch.zeros_like(x),)) if gated else None
     shared_topk = torch.ones(2, 1, dtype=torch.int32)
     computed_topk = torch.zeros_like(shared_topk)
-    main_cache = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
+    main_cache = tuple(torch.empty(1) for _ in range(1 if sfa_c8 or nope else 2))
     indexer_cache = tuple(torch.empty(1) for _ in range(2 if li_c8 else 1))
     indexer = MagicMock(return_value=computed_topk)
     indexer.k_cache = SimpleNamespace(prefix="indexer.k_cache", kv_cache=indexer_cache if expect_indexer else None)
@@ -934,7 +953,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     metadata = SimpleNamespace(
         cos=hidden_states,
         sin=hidden_states,
-        num_input_tokens=2,
+        num_input_tokens=4 if input_is_sequence_parallel else 2,
         num_actual_tokens=2,
         num_decode_tokens=2,
         attn_state=AscendAttentionState.DecodeOnly,
@@ -958,7 +977,8 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=slots)
     impl._get_parallel_forward_context = MagicMock(return_value=context)
     impl._prepare_native_hidden_states = MagicMock(return_value=hidden_states)
-    impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(2, 8),))
+    impl._prepare_sequence_parallel_hidden_states = MagicMock(return_value=hidden_states)
+    impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(2, 6 if nope else 8),))
     impl.q_a_layernorm = MagicMock(side_effect=lambda x: x)
     impl.exec_kv = MagicMock(return_value=(hidden_states, hidden_states))
     impl._prepare_kv_for_parallel = MagicMock(return_value=(None, []))
@@ -972,8 +992,9 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl._get_indexcache_topk_indices = MagicMock(return_value=shared_topk)
     impl._update_indexcache_topk_indices = MagicMock()
     impl._execute_sparse_flash_attention_process = MagicMock(return_value=hidden_states)
-    impl._v_up_proj = MagicMock(return_value=hidden_states)
+    impl._v_up_proj = MagicMock(return_value=hidden_states.clone())
     impl._finalize_o_proj = MagicMock(return_value=hidden_states)
+    impl._finalize_sequence_parallel_o_proj = MagicMock(return_value=hidden_states)
     with (
         patch("vllm_ascend.attention.sfa_v1.get_forward_context", return_value=forward_context),
         patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
@@ -981,7 +1002,15 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         patch("vllm_ascend.attention.sfa_v1.attention_transfer_window"),
         patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),
     ):
-        impl.forward(impl.layer_name, hidden_states, main_cache, metadata, output=torch.empty_like(hidden_states))
+        output = torch.empty_like(hidden_states)
+        impl.forward(
+            impl.layer_name,
+            hidden_states,
+            main_cache,
+            metadata,
+            output=output,
+            input_is_sequence_parallel=input_is_sequence_parallel,
+        )
     if expect_indexer:
         indexer.assert_called_once()
         assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
@@ -995,8 +1024,22 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     else:
         indexer.assert_not_called()
     attention_args = impl._execute_sparse_flash_attention_process.call_args.args
-    assert len(attention_args[2]) == len(main_cache) + (len(indexer_cache) if expect_indexer else 0)
+    assert len(attention_args[2]) == len(main_cache) + (len(indexer_cache) if expect_indexer and not nope else 0)
     assert attention_args[3] is (shared_topk if skip_topk else computed_topk)
+    if input_is_sequence_parallel:
+        impl._finalize_o_proj.assert_not_called()
+        finalize_args = impl._finalize_sequence_parallel_o_proj.call_args.args
+        assert finalize_args[1] is output
+        assert finalize_args[3] is metadata
+        assert finalize_args[4] == 1.0
+        assert impl._get_parallel_forward_context.call_args.args[1] == metadata.num_input_tokens
+        torch.testing.assert_close(impl._prepare_sequence_parallel_hidden_states.call_args.args[0], hidden_states)
+    else:
+        impl._finalize_sequence_parallel_o_proj.assert_not_called()
+        assert impl._finalize_o_proj.call_args.args[1].data_ptr() == output.data_ptr()
+    if gated:
+        impl.g_proj.assert_called_once()
+        torch.testing.assert_close(impl.g_proj.call_args.args[0], hidden_states)
     notify.assert_called_once_with(impl.layer_name)
 
 

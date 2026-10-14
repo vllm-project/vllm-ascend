@@ -616,6 +616,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
 class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA implementation for DSA-CP token sharding in the TP group."""
 
+    # Both boundaries retain the caller's contiguous TP token shard; this
+    # backend owns any head exchange and projection reduction in between.
+    supports_sequence_parallel_input: bool = True
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
     o_proj_weight_switch_pool_key = "sfa_o_proj"
 
@@ -655,6 +658,32 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if actual_tokens < context.num_tokens_pad:
             hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
         return hidden_states[context.local_start : context.local_end_with_pad]
+
+    def _prepare_sequence_parallel_hidden_states(self, hidden_states, attn_metadata):
+        context = attn_metadata.dsa_cp_context
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
+        tp_group = get_tp_group()
+        local_tokens = hidden_states.shape[0]
+        expected_start = tp_group.rank_in_group * local_tokens
+        if (
+            context.num_tokens != attn_metadata.num_input_tokens
+            or context.num_tokens_pad != local_tokens * self.tp_size
+            or context.local_start != expected_start
+            or context.local_end_with_pad != expected_start + local_tokens
+        ):
+            raise RuntimeError(
+                "SFA DSA-CP input does not match its sequence-parallel shard: "
+                f"rank={tp_group.rank_in_group}, local_tokens={local_tokens}, "
+                f"metadata_range=[{context.local_start}, {context.local_end_with_pad}), "
+                f"num_tokens_pad={context.num_tokens_pad}."
+            )
+        # Match gather -> trim -> pad; never clear padding in the residual's
+        # shared storage. Graph/DP padding inside num_input_tokens is retained.
+        valid_tokens = max(0, min(local_tokens, context.num_tokens - context.local_start))
+        if valid_tokens < local_tokens:
+            hidden_states = hidden_states.clone()
+            hidden_states[valid_tokens:].zero_()
+        return hidden_states
 
     def _get_parallel_forward_context(
         self,
@@ -872,6 +901,43 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 f"{tuple(output.shape)}."
             )
         output[...] = projected_output[: output.shape[0]]
+        return output
+
+    def _finalize_sequence_parallel_o_proj(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        gather_full_o_proj: bool,
+        attn_metadata: M,
+        output_scale: float,
+    ) -> torch.Tensor:
+        if gather_full_o_proj:
+            # Full heads and full weights already produce complete local tokens.
+            with self._use_full_o_proj_weights():
+                output.copy_(self._apply_o_proj_full_weight(attn_output))
+            if output_scale != 1.0:
+                output.mul_(output_scale)
+        else:
+            # Convert [local tokens, all heads] to [all tokens, local heads].
+            # The row-parallel projection is unreduced; scale its partial sums
+            # before the single RS restores the caller's local token shard.
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+            sharded_output = torch.empty_like(send)
+            tp_group = get_tp_group()
+            torch.distributed.all_to_all_single(sharded_output, send, group=tp_group.device_group)
+            projected_output = self.o_proj(sharded_output)[0]
+            if output_scale != 1.0:
+                projected_output.mul_(output_scale)
+            torch.distributed.reduce_scatter_tensor(output, projected_output.contiguous(), group=tp_group.device_group)
+
+        context = attn_metadata.dsa_cp_context
+        valid_tokens = max(0, min(output.shape[0], context.num_tokens - context.local_start))
+        if valid_tokens < output.shape[0]:
+            output[valid_tokens:].zero_()
         return output
 
 
@@ -1328,6 +1394,9 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
+    # DCP restores query/head axes separately and does not expose the same
+    # contiguous TP token layout at both model-facing boundaries.
+    supports_sequence_parallel_input: bool = False
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from torch import nn
 from vllm.config import CacheConfig, CompilationConfig, VllmConfig
@@ -8,11 +9,12 @@ from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
 
 from tests.ut.base import TestBase
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl, AscendSFADSADCPImpl
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
 )
 from vllm_ascend.attention.sfa_v1 import PreprocessType
-from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
+from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper, mla_forward
 
 
 class TestAscendSFAIndexerBackend(TestBase):
@@ -584,3 +586,142 @@ class TestAscendMultiHeadLatentAttention(TestBase):
 
             self.assertTrue(attn.skip_topk)
             self.assertEqual(mock_mla_attn_cls.call_args.kwargs.get("skip_topk"), True)
+
+
+class _DerivedDSACPImpl(AscendSFADSACPImpl):
+    pass
+
+
+@pytest.mark.parametrize(
+    "impl_cls,expected", [(AscendSFADSACPImpl, True), (_DerivedDSACPImpl, True), (AscendSFADSADCPImpl, False)]
+)
+def test_sp_input_capability_follows_backend_layout_contract(impl_cls, expected):
+    impl = impl_cls.__new__(impl_cls)
+    impl.o_proj = SimpleNamespace(custom_op=None, reduce_results=False)
+    wrapper = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+    nn.Module.__init__(wrapper)
+    wrapper.tp_size = 2
+    wrapper.output_token_shard_size = 1
+    wrapper.qk_rope_head_dim = 2
+    wrapper.mla_attn = SimpleNamespace(impl=impl)
+    assert wrapper.supports_sequence_parallel_input is expected
+
+
+@pytest.mark.parametrize("backend_supports", [False, True])
+@pytest.mark.parametrize("output_token_shard_size", [1, 2])
+@pytest.mark.parametrize("custom_projection", [False, True])
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_sp_interface_requires_same_token_layout(
+    backend_supports, output_token_shard_size, custom_projection, reduce_results
+):
+    wrapper = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+    nn.Module.__init__(wrapper)
+    wrapper.output_token_shard_size = output_token_shard_size
+    wrapper.mla_attn = SimpleNamespace(
+        impl=SimpleNamespace(
+            supports_sequence_parallel_input=backend_supports,
+            o_proj=SimpleNamespace(custom_op=object() if custom_projection else None, reduce_results=reduce_results),
+        )
+    )
+    assert wrapper.supports_sequence_parallel_input is (
+        backend_supports and output_token_shard_size == 1 and not custom_projection and not reduce_results
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_sp_wrapper_preserves_local_shape_and_dtype(dtype):
+    wrapper = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+    nn.Module.__init__(wrapper)
+    wrapper.hidden_size = 3
+    wrapper.prefix = "layer"
+    hidden = torch.ones(2, 3, dtype=dtype)
+    with patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward") as forward:
+        output = wrapper.forward_sequence_parallel(torch.arange(4), hidden, output_scale=0.5)
+    assert output.shape == hidden.shape
+    assert output.dtype == hidden.dtype
+    forward.assert_called_once_with(hidden, output, "layer", True, 4, 0.5)
+
+
+@pytest.mark.parametrize("num_decode_tokens", [0, 4])
+@pytest.mark.parametrize("output_scale", [0.5, 1.0])
+def test_mla_sp_input_keeps_prefill_and_mixed_local(num_decode_tokens, output_scale):
+    hidden = torch.ones(4, 3, dtype=torch.bfloat16)
+    output = torch.empty_like(hidden)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_input_tokens=14,
+        dsa_cp_context=SimpleNamespace(num_tokens=14, num_tokens_pad=16),
+    )
+    impl = SimpleNamespace(forward=MagicMock())
+    impl.forward.side_effect = lambda _layer, x, _cache, _meta, out, **kw: out.copy_((x + 1) * kw["output_scale"])
+    wrapper = SimpleNamespace(tp_size=4, mla_attn=SimpleNamespace(impl=impl, layer_name="attn", kv_cache=()))
+    context = SimpleNamespace(no_compile_layers={"layer": wrapper}, attn_metadata={"attn": metadata})
+    with (
+        patch("vllm_ascend.ops.mla.get_forward_context", return_value=context),
+        patch("vllm.distributed.tensor_model_parallel_all_gather") as gather,
+        patch("torch.distributed.reduce_scatter_tensor") as scatter,
+    ):
+        mla_forward(hidden, output, "layer", True, 14, output_scale)
+    torch.testing.assert_close(output, (hidden + 1) * output_scale)
+    assert impl.forward.call_args.kwargs["input_is_sequence_parallel"] is True
+    gather.assert_not_called()
+    scatter.assert_not_called()
+
+
+def test_mla_sp_rejects_inconsistent_model_metadata_without_communication():
+    hidden = torch.ones(2, 3, dtype=torch.bfloat16)
+    output = torch.empty_like(hidden)
+    metadata = SimpleNamespace(num_input_tokens=4, dsa_cp_context=SimpleNamespace(num_tokens=4, num_tokens_pad=4))
+    impl = SimpleNamespace(forward=MagicMock())
+    wrapper = SimpleNamespace(
+        tp_size=2, hidden_size=3, mla_attn=SimpleNamespace(impl=impl, layer_name="attn", kv_cache=())
+    )
+    context = SimpleNamespace(no_compile_layers={"layer": wrapper}, attn_metadata={"attn": metadata})
+    with (
+        patch("vllm_ascend.ops.mla.get_forward_context", return_value=context),
+        patch("vllm.distributed.tensor_model_parallel_all_gather") as gather,
+        patch("torch.distributed.reduce_scatter_tensor") as scatter,
+        pytest.raises(RuntimeError, match="model/attention token count mismatch"),
+    ):
+        mla_forward(hidden, output, "layer", True, 3)
+    impl.forward.assert_not_called()
+    gather.assert_not_called()
+    scatter.assert_not_called()
+
+
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_mla_default_dispatch_preserves_existing_backend_interface(has_metadata):
+    hidden = torch.ones(2, 3)
+    output = torch.empty_like(hidden)
+    metadata = object() if has_metadata else None
+    impl = SimpleNamespace(forward=MagicMock())
+    wrapper = SimpleNamespace(mla_attn=SimpleNamespace(impl=impl, layer_name="attn", kv_cache=()))
+    context = SimpleNamespace(no_compile_layers={"layer": wrapper}, attn_metadata={"attn": metadata})
+    with patch("vllm_ascend.ops.mla.get_forward_context", return_value=context):
+        mla_forward(hidden, output, "layer")
+    impl.forward.assert_called_once_with("attn", hidden, (), metadata, output)
+
+
+@pytest.mark.parametrize("profiling", [False, True])
+@pytest.mark.parametrize("turboquant", [False, True])
+def test_mla_sp_no_metadata_keeps_zero_output_local(profiling, turboquant):
+    hidden = torch.ones(2, 3, dtype=torch.bfloat16)
+    output = torch.empty_like(hidden)
+    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.enable_sparse_sfa_turboquant = turboquant
+    impl.turboquant = SimpleNamespace(_initialize=MagicMock()) if turboquant else None
+    wrapper = SimpleNamespace(
+        tp_size=2, hidden_size=3, mla_attn=SimpleNamespace(impl=impl, layer_name="attn", kv_cache=())
+    )
+    context = SimpleNamespace(no_compile_layers={"layer": wrapper}, attn_metadata=None, in_profile_run=profiling)
+    with (
+        patch("vllm_ascend.ops.mla.get_forward_context", return_value=context),
+        patch("vllm.distributed.tensor_model_parallel_all_gather") as gather,
+        patch("torch.distributed.reduce_scatter_tensor", side_effect=lambda out, x, **kw: out.copy_(x[:2])) as scatter,
+    ):
+        mla_forward(hidden, output, "layer", True, 3)
+    torch.testing.assert_close(output, torch.zeros_like(hidden))
+    gather.assert_not_called()
+    scatter.assert_not_called()
+    if turboquant:
+        impl.turboquant._initialize.assert_called_once_with(hidden.device)
