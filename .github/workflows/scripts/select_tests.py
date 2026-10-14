@@ -54,6 +54,7 @@ See ``test_config.yaml`` for details.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sys
@@ -185,6 +186,33 @@ def _pytest_node_file_path(path: str) -> str:
     return path.split("::", 1)[0]
 
 
+def _skip_missing_nodeid(target: str) -> bool:
+    """Skip ``file.py::test_name`` when that function is absent from this branch.
+
+    Extra recommended tests use only this form, including class methods with
+    the class segment removed. File targets pass through. Unreadable or
+    unparseable files are kept so pytest still reports the failure.
+    """
+    if "::" not in target:
+        return False
+    file_path, test_name = target.split("::", 1)
+    try:
+        source = Path(file_path).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=file_path)
+    except (OSError, UnicodeError, SyntaxError):
+        return False
+    exists = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == test_name for node in ast.walk(tree)
+    )
+    if exists:
+        return False
+    print(
+        f"Warning: Test case does not exist: {target}",
+        file=sys.stderr,
+    )
+    return True
+
+
 def _load_runners() -> dict[str, RunnerInfo]:
     with open(_RUNNER_LABEL_PATH) as f:
         raw = json.load(f)
@@ -308,7 +336,11 @@ def _route_explicit_test_target(
     target: str,
     groups: dict[PartitionKey, list[str]],
 ) -> None:
-    """Route a single explicit UT/E2E target to the appropriate runner group."""
+    """Route a single explicit UT/E2E target to the appropriate runner group.
+
+    Files and nodeids that are absent from the current tree are skipped.
+    The shared extra-test list is not modified.
+    """
     if _SKIP_CPU_UT and (target == CPU_UT_BATCH_ALIAS or _is_ut_path(_pytest_node_file_path(target))):
         print(
             f"Warning: Skipping CPU UT target (--skip-cpu-ut is set): {target}",
@@ -335,6 +367,9 @@ def _route_explicit_test_target(
             f"Warning: Path does not exist: {target}",
             file=sys.stderr,
         )
+        return
+
+    if _skip_missing_nodeid(target):
         return
 
     if _is_ut_path(file_path):
