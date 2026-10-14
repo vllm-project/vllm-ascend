@@ -60,11 +60,11 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 **Common test case names (A2):**
 
-`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`
+`qwen3-vl-32b-instruct-w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`
 
 **Common test case names (A3):**
 
-`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ...
+`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, ...
 
 **Examples:**
 
@@ -79,10 +79,10 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly all --branch my-feature-branch
 
 # Run multiple test cases (comma-separated)
-/nightly test_custom_op,multi-node-deepseek-v3.2-W8A8-EP
+/nightly qwen3-32b-int8,multi-node-deepseek-v3.2-W8A8-EP
 
 # Run multiple test cases (space-separated, also works)
-/nightly test_custom_op accuracy-group
+/nightly qwen3-32b-int8 accuracy-group
 
 # Run accuracy group tests (branch defaults to main)
 /nightly accuracy-group
@@ -91,7 +91,7 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly all --aop_enabled
 
 # Run specific test with AOP on a release branch
-/nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
+/nightly qwen3-32b-int8 --branch releases/v0.24.0 --aop_enabled
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
