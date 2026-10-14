@@ -16,8 +16,9 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
 from vllm_ascend.models.glm5next.cache_config import (
+    _align_glm5_next_cache_specs,
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -198,3 +199,47 @@ def test_misaligned_logical_block_is_rejected():
     )
     with pytest.raises(ValueError, match="divisible"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+
+
+@pytest.mark.parametrize("logical_block_size,expected_page_bytes", [(1152, 46080), (64, 9216)])
+def test_tail_rows_and_split_fp32_scale_pages_are_aligned(logical_block_size, expected_page_bytes):
+    specs = make_specs(pool=4)
+    specs["model.layers.3.indexer.k_cache"] = AscendMLAAttentionSpec(
+        block_size=logical_block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        model_version="glm5_next",
+        tokens_per_state=4,
+    )
+    specs["model.layers.3.indexer.tail_cache"] = AscendIndexerKPoolTailSpec(
+        block_size=9,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+    )
+    indexer = specs["model.layers.3.indexer.k_cache"]
+    tail = specs["model.layers.3.indexer.tail_cache"]
+    _align_glm5_next_cache_specs(specs)
+    assert indexer.page_size_bytes == tail.page_size_bytes == expected_page_bytes
+    assert tail.page_size_bytes % (2 * 128 * 4) == 0
+    kernel_pages = max(1, logical_block_size // 128)
+    assert indexer.page_size_bytes // kernel_pages % 4 == 0
+    # Alignment must not grow again when the allocator rebuilds its groups.
+    _align_glm5_next_cache_specs(specs)
+    assert indexer.page_size_bytes == expected_page_bytes
+
+
+def test_generic_indexer_spec_without_scale_fields_keeps_whole_tail_rows():
+    specs = make_specs(pool=4)
+    assert not hasattr(specs["model.layers.3.indexer.k_cache"], "scale_dim")
+    _align_glm5_next_cache_specs(specs)
+    indexer = specs["model.layers.3.indexer.k_cache"]
+    tail = specs["model.layers.3.indexer.tail_cache"]
+    assert indexer.page_size_bytes == tail.page_size_bytes == 32768
