@@ -20,10 +20,13 @@ import psutil
 import torch
 import torch_npu
 from vllm.logger import logger
+from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.warmup import warmup_kernels
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
@@ -32,6 +35,24 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
+    def _warmup_v2_model_runner(self) -> None:
+        """Exercise scheduler paths with sampling features supported by 310P."""
+
+        def execute_model(scheduler_output: SchedulerOutput):
+            for request in scheduler_output.scheduled_new_reqs:
+                if request.sampling_params is not None:
+                    # Keep random top-k/top-p sampling; unsupported processors,
+                    # penalties and logprobs retain SamplingParams defaults.
+                    request.sampling_params = SamplingParams(temperature=0.9, top_k=50, top_p=0.9)
+            return self.execute_model(scheduler_output)
+
+        def sample_tokens(_grammar_output):
+            # 310P MRV2 does not support structured output, including the
+            # all-allowed grammar bitmask constructed by upstream warmup.
+            return self.sample_tokens(None)
+
+        warmup_kernels(self.model_runner, execute_model, sample_tokens)
+
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)

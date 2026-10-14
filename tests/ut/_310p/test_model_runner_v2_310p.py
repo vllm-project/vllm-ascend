@@ -4,7 +4,7 @@
 import sys
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -999,6 +999,62 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
 
         model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())
         torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
+
+
+@pytest.mark.parametrize("grammar_output", [None, object()], ids=["no_grammar", "warmup_bitmask"])
+def test_worker_v2_warmup_uses_supported_sampling_features(grammar_output) -> None:
+    """The upstream warmup must reach the real 310P sampler without unsupported features."""
+    with patch.dict(
+        sys.modules,
+        {
+            "torch_npu.op_plugin": MagicMock(),
+            "torch_npu.op_plugin.atb": MagicMock(),
+            "torch_npu.op_plugin.atb._atb_ops": MagicMock(),
+            "torch_npu.profiler": MagicMock(),
+        },
+    ):
+        from vllm_ascend._310p import worker_310p as worker_module
+
+    worker = object.__new__(worker_module.NPUWorker310)
+    worker.model_runner = MagicMock()
+    worker.execute_model = MagicMock()
+    worker.sample_tokens = MagicMock()
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=64)
+    original_params = SamplingParams.for_sampler_warmup()
+    with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
+        _add_request(sampler, 0, 1, original_params)
+
+    request = SimpleNamespace(sampling_params=original_params)
+    pooling_params = object()
+    pooling_request = SimpleNamespace(sampling_params=None, pooling_params=pooling_params)
+    prefill = SimpleNamespace(scheduled_new_reqs=[request, pooling_request])
+    decode = SimpleNamespace(scheduled_new_reqs=[])
+
+    def warmup(runner, execute_model, sample_tokens):
+        assert runner is worker.model_runner
+        execute_model(prefill)
+        # Check acceptance against the actual 310P sampler, including its CPU state writes.
+        _add_request(sampler, 0, 1, request.sampling_params)
+        execute_model(decode)
+        sample_tokens(grammar_output)
+
+    with patch.object(worker_module, "warmup_kernels", side_effect=warmup) as mock_warmup:
+        worker._warmup_v2_model_runner()
+
+    mock_warmup.assert_called_once()
+    assert worker.execute_model.call_args_list == [call(prefill), call(decode)]
+    worker.sample_tokens.assert_called_once_with(None)
+    assert request.sampling_params is not original_params
+    assert original_params.min_p == 0.1
+    assert original_params.prompt_logprobs == 1
+    assert request.sampling_params.temperature == 0.9
+    assert request.sampling_params.top_k == 50
+    assert request.sampling_params.top_p == 0.9
+    assert pooling_request.sampling_params is None
+    assert pooling_request.pooling_params is pooling_params
+    assert sampler.temperature_cpu[0].item() == pytest.approx(0.9)
+    assert sampler.top_k_cpu[0].item() == 50
+    assert sampler.top_p_cpu[0].item() == pytest.approx(0.9)
 
 
 def test_worker_selects_v2_runner_on_310p() -> None:

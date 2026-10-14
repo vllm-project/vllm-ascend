@@ -1803,6 +1803,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.use_v2_model_runner = True
+            worker.model_runner.scheduler_config = SimpleNamespace(max_num_seqs=32)
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
             worker.model_config.enforce_eager = False  # Enable graph capture
@@ -1862,6 +1863,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.use_v2_model_runner = True
             worker.model_runner = MagicMock()
+            worker.model_runner.scheduler_config = SimpleNamespace(max_num_seqs=32)
             worker.model_config = SimpleNamespace(enforce_eager=True, seed=1234)
             worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1024)
             worker.vllm_config = MagicMock()
@@ -1880,6 +1882,64 @@ class TestNPUWorker(TestBase):
                 ],
             )
             worker.model_runner.capture_model.assert_not_called()
+
+    def test_compile_or_warm_up_model_v2_limits_scheduler_warmup_batch(self):
+        """Bound speculative warmup memory and restore the serving config on failure."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        for max_num_seqs in (1, 2, 32):
+            for warmup_fails in (False, True):
+                with (
+                    self.subTest(max_num_seqs=max_num_seqs, warmup_fails=warmup_fails),
+                    patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+                    patch.object(kw_module, "kernel_warmup"),
+                    patch("vllm_ascend.worker.worker.warmup_kernels") as mock_v2_warmup,
+                    patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+                    patch("vllm_ascend.worker.worker.get_current_hardware_profile") as mock_get_hardware_profile,
+                    patch("vllm_ascend.worker.worker.set_random_seed"),
+                ):
+                    mock_get_ascend_config.return_value.enable_cpu_binding = False
+                    mock_get_hardware_profile.return_value.supports.return_value = False
+                    worker = NPUWorker()
+                    worker.use_v2_model_runner = True
+                    worker.model_runner = MagicMock()
+                    scheduler_config = SimpleNamespace(max_num_seqs=max_num_seqs, max_num_batched_tokens=2048)
+                    worker.model_runner.scheduler_config = scheduler_config
+                    worker.model_runner.max_num_reqs = max_num_seqs
+                    worker.model_config = SimpleNamespace(enforce_eager=True, seed=1234)
+                    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1024)
+                    worker.vllm_config = MagicMock()
+                    worker.vllm_config.scheduler_config = scheduler_config
+                    worker.vllm_config.compilation_config.compile_sizes = []
+
+                    def warmup(
+                        runner,
+                        execute_model,
+                        sample_tokens,
+                        *,
+                        scheduler_config=scheduler_config,
+                        max_num_seqs=max_num_seqs,
+                        warmup_fails=warmup_fails,
+                    ):
+                        self.assertIsNot(runner.scheduler_config, scheduler_config)
+                        self.assertEqual(runner.scheduler_config.max_num_seqs, min(max_num_seqs, 2))
+                        self.assertEqual(runner.scheduler_config.max_num_batched_tokens, 2048)
+                        self.assertEqual(runner.max_num_reqs, max_num_seqs)
+                        self.assertEqual(scheduler_config.max_num_seqs, max_num_seqs)
+                        if warmup_fails:
+                            raise RuntimeError("warmup failed")
+
+                    mock_v2_warmup.side_effect = warmup
+                    if warmup_fails:
+                        with self.assertRaisesRegex(RuntimeError, "warmup failed"):
+                            worker.compile_or_warm_up_model()
+                    else:
+                        worker.compile_or_warm_up_model()
+
+                    mock_v2_warmup.assert_called_once()
+                    self.assertIs(worker.model_runner.scheduler_config, scheduler_config)
+                    self.assertIs(worker.vllm_config.scheduler_config, scheduler_config)
+                    self.assertEqual(scheduler_config.max_num_seqs, max_num_seqs)
 
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
         """The persisted budget must include the measured NPU graph memory."""
