@@ -2,15 +2,13 @@
 
 !!! note
 
-    GLM-5 model has been discontinued since vLLM Ascend v0.30.0 and will no longer receive support or fixes in subsequent versions. For deployment, please refer to the [historical version documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.html).
-
-## 1 Introduction
-
-!!! note
-
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
     
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
+## 1 Introduction
+
+GLM-5 model has been discontinued since vLLM Ascend v0.30.0 and will no longer receive support or fixes in subsequent versions. For deployment, please refer to the [historical version documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.html).
 
 [GLM-5.1](https://huggingface.co/zai-org/GLM-5.1) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
