@@ -211,7 +211,7 @@ def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
     def execute_dummy(*args, **kwargs):
         assert buffers.profile_cpp
         assert runner.speculator is None
-        assert runner.max_num_reqs == original_max_num_reqs
+        assert runner.max_num_reqs == 1
         raise RuntimeError("test")
 
     with (
@@ -222,6 +222,7 @@ def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
 
     assert not buffers.profile_cpp
     assert runner.speculator is speculator
+    assert runner.max_num_reqs == original_max_num_reqs
 
 
 def test_disabled_cpp_dummy_context_is_noop(runner):
@@ -230,13 +231,16 @@ def test_disabled_cpp_dummy_context_is_noop(runner):
             raise AssertionError(f"unexpected input buffer access: {name}")
 
     speculator = object()
+    original_max_num_reqs = runner.max_num_reqs
     runner.input_buffers = RejectCppStateAccess()
     runner.speculator = speculator
 
     with runner._cpp_profile_dummy(False):
         assert runner.speculator is speculator
+        assert runner.max_num_reqs == original_max_num_reqs
 
     assert runner.speculator is speculator
+    assert runner.max_num_reqs == original_max_num_reqs
 
 
 @pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
