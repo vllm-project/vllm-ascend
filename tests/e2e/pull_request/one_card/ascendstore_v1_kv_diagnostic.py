@@ -70,7 +70,7 @@ class AscendStoreKVByteDiagnosticWorkerExtension(AscendStoreDiagnosticWorkerExte
         self._kv_byte_audit.layout.update(
             {
                 "device": torch.npu.get_device_name(),
-                "torch_version": torch.__version__,
+                "torch_version": str(torch.__version__),
                 "model_config_sha256": sha256(config.model_config.hf_text_config.to_json_string().encode()).hexdigest(),
                 "model_revision": config.model_config.revision,
             }
