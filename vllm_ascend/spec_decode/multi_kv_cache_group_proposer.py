@@ -5,7 +5,7 @@ from dataclasses import fields, is_dataclass, replace
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
@@ -14,7 +14,9 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import enable_dsa_cp, lmhead_tp_enable, should_skip_allreduce_across_dp_group
 
 _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES = {"glm5_next_mtp"}
 _MULTI_KV_CACHE_GROUP_MTP_ARCHITECTURES = {"Glm5NextMTPModel"}
@@ -48,6 +50,84 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
     """
 
     _glm_draft_graph_supported = True
+
+    def _get_in_graph_draft_token_capacity(self, num_input_tokens, runtime_mode, uniform_decode=True):
+        # The initial implementation targets the A5 TP1 D-side topology in
+        # the profile. SP/CP, offload and uniform-MC2 need different contracts.
+        if (
+            runtime_mode != CUDAGraphMode.FULL
+            or not uniform_decode
+            or not getattr(self, "_uses_multi_group_kv_cache", False)
+            or not getattr(self, "use_cuda_graph", False)
+            or self.vllm_config.parallel_config.tensor_parallel_size != 1
+            or getattr(self.vllm_config.parallel_config, "prefill_context_parallel_size", 1) != 1
+            or getattr(self.vllm_config.parallel_config, "use_sequence_parallel_moe", False)
+            or self.dcp_size != 1
+            or self.parallel_drafting
+            or self.use_compress
+            or self.uses_mrope
+            or not self._get_primary_draft_attn_group().get_metadata_builder().nope
+            or enable_dsa_cp()
+            or lmhead_tp_enable()
+            or getattr(self.runner, "sparse_kv_offload_enabled", False)
+            or get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED
+            or not should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model=True)
+        ):
+            return None
+        return min(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            max(num_input_tokens // (self.num_speculative_tokens + 1), 1),
+        )
+
+    def _build_in_graph_draft_metadata(self, draft_index, num_tokens, positions, exceeds_max_model_len):
+        """Record later-step metadata updates in the same graph as the model.
+
+        Only CPU descriptor fields are prepared in Python. Tensor work stays
+        on device, including the active-request count and rejection-adjusted
+        positions. Runtime replay does not rebuild these four metadata stacks.
+        """
+        common = copy.copy(self._mtp_graph_common_metadata)
+        primary = self._get_primary_draft_attn_group()
+        # Read the runner's persistent physical table, not a per-iteration
+        # clone whose capture-time address would become stale.
+        common.block_table_tensor = self.runner.input_batch.block_table[primary.kv_cache_group_id].get_device_tensor()[
+            :num_tokens
+        ]
+        common.num_reqs = common.num_input_tokens = common.num_actual_tokens = num_tokens
+        common.num_actual_tokens_tensor = self._mtp_num_actual_reqs
+        # Metadata kernels are now captured too. Their CPU tiling bound must
+        # remain valid when replay lengths grow beyond the dummy capture batch.
+        common.max_seq_len = self.max_model_len
+        common.max_query_len = common.decode_token_per_req = 1
+        common.attn_state = AscendAttentionState.SpecDecoding
+        common.graph_pad_size = -1
+        common.copy_sfa_draft_index = draft_index
+        common.copy_sfa_restore_tails = False
+        common.seq_lens_cpu = common._seq_lens_cpu = None
+        common.num_computed_tokens_cpu = common._num_computed_tokens_cpu = None
+        common.positions = positions
+        active = self.arange[:num_tokens] < self._mtp_num_actual_reqs
+        lengths = self.seq_lens_group[draft_index][:num_tokens]
+        lengths.copy_(torch.where(active, positions + 1, 0))
+        common.seq_lens = lengths
+        query = self.query_start_loc_group[draft_index][: num_tokens + 1]
+        query.copy_(torch.minimum(self.arange[: num_tokens + 1], self._mtp_num_actual_reqs))
+        common.query_start_loc = query
+        # Host query lengths describe the graph capacity; device boundaries
+        # above carry the real request count, including an empty DP rank.
+        common.query_start_loc_cpu = torch.from_numpy(self.token_arange_np[: num_tokens + 1])
+        blocks = common.block_table_tensor.gather(1, (positions // self.block_size).long().view(-1, 1)).view(-1)
+        slots = blocks * self.block_size + positions % self.block_size
+        valid = active if exceeds_max_model_len is None else active & ~exceeds_max_model_len
+        common.slot_mapping = self.slot_mapping_group[draft_index][:num_tokens]
+        common.slot_mapping.copy_(torch.where(valid, slots, PADDING_SLOT_ID))
+        per_layer_metadata = {}
+        for group in self.draft_attn_groups:
+            group_common = self._common_attn_metadata_for_draft_group(common, group, num_tokens, draft_index)
+            metadata = group.get_metadata_builder().build_for_drafting(group_common, draft_index)
+            for layer_name in group.layer_names:
+                per_layer_metadata[layer_name] = metadata
+        return per_layer_metadata
 
     def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
         """Helper: map each draft attention layer to its physical group id.
@@ -142,6 +222,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         # capture already exists before capture (replay reads capture-time
         # addresses).
         slot_mapping_lens = self.slot_mapping_group[0].shape[0]
+        self._mtp_num_actual_reqs = torch.zeros((), dtype=torch.int32, device=self.device)
         self._multi_group_slot_mapping_buffers: dict[tuple[int, int], torch.Tensor] = {}
         capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes or []
         table_rows = max([self.runner.max_num_reqs, *capture_sizes])
@@ -214,7 +295,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             block_table_tensor = block_table.get_device_tensor()[:num_reqs]
             if not block_table.is_circular_group:
                 block_table.compute_slot_mapping(
-                    num_reqs,
+                    min(num_reqs, block_table_tensor.shape[0]),
                     common_attn_metadata.query_start_loc,
                     common_attn_metadata.positions[:num_actual_tokens],
                 )

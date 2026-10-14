@@ -4363,7 +4363,10 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
             patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
             patch.object(llm_base_proposer, "get_tp_group", return_value=group),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace()),
-            patch("vllm.forward_context._forward_context", SimpleNamespace(moe_layer_index=0)),
+            patch(
+                "vllm.forward_context._forward_context",
+                SimpleNamespace(moe_layer_index=0, cudagraph_runtime_mode=CUDAGraphMode.NONE),
+            ),
         ):
             result = proposer._run_merged_draft(
                 num_input_tokens=8,

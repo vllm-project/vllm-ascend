@@ -84,7 +84,10 @@ def _remove_spec_graph_padding_queries(
     query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
     return common_attn_metadata.replace(
         query_start_loc_cpu=query_start_loc_cpu,
-        query_start_loc=query_start_loc_cpu.to(common_attn_metadata.query_start_loc.device),
+        # Clamp the existing device boundaries instead of synchronously
+        # uploading a CPU clone. Padded ranks otherwise drain the preceding
+        # draft graph here while peers advance to the next EP collective.
+        query_start_loc=common_attn_metadata.query_start_loc.clamp(max=int(query_start_loc_cpu[first_inactive])),
         num_actual_tokens=int(query_start_loc_cpu[-1]),
     )
 
