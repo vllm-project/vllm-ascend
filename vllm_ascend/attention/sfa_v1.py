@@ -987,7 +987,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
         # loadable (#15463).
-        if not self.rl_weight_update_enabled and not self.dcp_q_replicate_enabled:
+        if not self.rl_weight_update_enabled:
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 

@@ -1700,46 +1700,6 @@ class TestSFADCPQReplication(unittest.TestCase):
         impl.dcp_group = SimpleNamespace(unique_name="sparse-dcp-q-replicate-test")
         return impl
 
-    def test_sparse_weights_reload_from_local_source(self):
-        for active in [False, True]:
-            with self.subTest(active=active):
-                self._check_sparse_weights_reload_from_local_source(active)
-
-    def _check_sparse_weights_reload_from_local_source(self, active):
-        impl = self._make_sparse_impl(active)
-        impl.layer_name = "model.layers.0.self_attn.attn"
-        impl.vllm_config = SimpleNamespace(
-            compilation_config=SimpleNamespace(static_forward_context={impl.layer_name: torch.nn.Module()})
-        )
-        impl._remap_order = torch.arange(4, dtype=torch.float32)
-        impl._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32)
-        source = torch.arange(24, dtype=torch.float32).view(12, 2)
-        impl.kv_b_proj = SimpleNamespace(weight=source.clone(), quant_method=None)
-        remote = torch.randn(2, 3, 2)
-        gather = Mock(side_effect=lambda x, dim: torch.cat((x, remote), dim))
-        with (
-            patch.object(sfa_v1, "get_dcp_group", return_value=SimpleNamespace(all_gather=gather)),
-            patch.object(sfa_v1.torch_npu, "npu_format_cast", side_effect=lambda x, _: x),
-            patch.object(sfa_v1, "maybe_trans_nz", side_effect=lambda x: x),
-            patch.object(sfa_v1, "dispose_layer") as dispose,
-        ):
-            captured_group_weight = None
-            for offset in (0, 0, 200):
-                impl.kv_b_proj.weight.copy_(source + offset)
-                impl.process_weights_after_loading(torch.float32)
-                local = (source + offset).view(2, 6, 2)
-                torch.testing.assert_close(impl.W_UV, local[:, 3:].transpose(1, 2))
-                torch.testing.assert_close(impl.W_UK_T, local[:, :3])
-                if active:
-                    if captured_group_weight is None:
-                        captured_group_weight = impl.W_UK_T_dcp_group
-                    self.assertEqual(captured_group_weight.data_ptr(), impl.W_UK_T_dcp_group.data_ptr())
-                    torch.testing.assert_close(impl.W_UK_T_dcp_group, torch.cat((local[:, :3], remote)))
-            self.assertEqual(dispose.call_count, 0 if active else 3)
-        self.assertEqual(gather.call_count, 3 if active else 0)
-        self.assertEqual(impl.indexer.process_weights_after_loading.call_count, 3)
-        impl.q_proj.prepare_weights_for_processing.assert_not_called()
-
     def test_sparse_projection_preserves_tokens_and_uses_group_uk(self):
         for tokens, dtype in product([0, 1, 4], [torch.float64, torch.bfloat16]):
             with self.subTest(tokens=tokens, dtype=dtype):
