@@ -21,8 +21,6 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
 from tests.e2e.conftest import VllmRunner
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 NUM_LAYERS = 9
 OUTPUT_TOKENS = 8
 LOADER = "glm53flash_functional_dummy"
@@ -116,7 +114,7 @@ class FlashWorker:
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager):
     for name, value in {
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "400",

@@ -10,10 +10,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kvpp import MODEL, PROMPTS, complete, output_texts, server_args
 from tests.e2e.conftest import RemotePDServer, wait_until_npu_memory_free
 
-pytestmark = [
-    pytest.mark.e2e_model(MODEL),
-    pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
-]
+pytestmark = pytest.mark.e2e_model(MODEL)
 
 
 @pytest.mark.e2e_coverage(
@@ -46,7 +43,7 @@ def test_kvpp_pd_disaggregation():
             (d_port, False, "kv_consumer", 26970),
         )
     ]
-    with RemotePDServer(servers, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0", "VLLM_SERVER_DEV_MODE": "1"}):
+    with RemotePDServer(servers, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"}):
         expected = [output_texts(complete(p_url, prompt)) for prompt in PROMPTS]
         requests.post(p_url + "/reset_prefix_cache", timeout=30).raise_for_status()
 

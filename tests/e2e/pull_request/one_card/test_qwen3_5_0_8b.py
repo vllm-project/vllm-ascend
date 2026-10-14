@@ -17,7 +17,6 @@
 #
 
 import huggingface_hub
-import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
@@ -76,16 +75,14 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
             assert output_str, "Generated output should not be empty."
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @wait_until_npu_memory_free()
 def test_hybrid_prefix_match_unit_cached_output_consistency(monkeypatch):
     """Verify fine-grained hybrid prefix hits preserve generated tokens."""
-    # V2 hybrid KV-cache block copying does not yet support list-backed caches.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True, raising=False)
     monkeypatch.setattr(
         "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
-        False,
+        True,
         raising=False,
     )
     model_path = hf_snapshot_download(

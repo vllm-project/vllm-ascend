@@ -242,7 +242,6 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
@@ -255,9 +254,7 @@ def test_hang(monkeypatch):
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
-    # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
-    # defaults to MRv2; keep this regression on V1.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -358,7 +355,6 @@ def test_hang(monkeypatch):
         print(f"Output tokens: {output_tokens}")
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
 @pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
 @pytest.mark.parametrize("max_tokens", [1024])
@@ -391,7 +387,7 @@ def test_qwen36_35b_dspark_spec_decoding(
     compilation_config: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     num_speculative_tokens = 7
     # Baseline calibrated from repeated 40-prompt CI runs.
     _run_speculative_decoding(

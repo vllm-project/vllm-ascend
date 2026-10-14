@@ -24,8 +24,6 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
@@ -46,10 +44,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         compilation_config,
     ]
     env_dict = {
-        # Qwen3MoeForCausalLM now defaults to MRv2, which rejects V1 dynamic
-        # EPLB fields. Both servers must stay on V1 so the output comparison
-        # is not mixed across runners.
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "HCCL_BUFFSIZE": "1024",
     }
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
@@ -59,17 +54,22 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         )
         gt_choices: list[openai.types.CompletionChoice] = batch.choices
 
-    env_dict.update({"DYNAMIC_EPLB": "true"})
-    additional_config = {
-        "eplb_config": {
-            "dynamic_eplb": True,
-            "expert_heat_collection_interval": 100,
-            "algorithm_execution_interval": 20,
-            "num_redundant_experts": 2,
-            "eplb_policy_type": 2,
-        }
-    }
-    server_args.extend(["--additional-config", json.dumps(additional_config)])
+    server_args.extend(
+        [
+            "--enable-eplb",
+            "--eplb-config",
+            json.dumps(
+                {
+                    "window_size": 128,
+                    "step_interval": 256,
+                    "num_redundant_experts": 2,
+                    "use_async": True,
+                }
+            ),
+            "--additional-config",
+            json.dumps({"eplb_config": {"load_collection_phase": "all"}}),
+        ]
+    )
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
