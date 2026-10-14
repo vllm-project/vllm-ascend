@@ -145,6 +145,8 @@ def compute_topk_logprobs(
     if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
+    sampled_token_ids = sampled_token_ids.contiguous()
+    logprob_token_ids = logprob_token_ids.contiguous()
     logprobs = logits.new_empty((batch_size, logprob_token_ids.shape[1]), dtype=torch.float32)
     token_ranks = torch.empty(
         batch_size,
