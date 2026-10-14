@@ -32,7 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import _should_trans_nz, FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
+from vllm_ascend.utils import FP8_METHOD, _should_trans_nz, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
 
 from ..base import (
     AscendLinearScheme,
@@ -188,9 +188,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             # NZ weights were format-cast from [1, K, N] and already carry
             # the leading group dimension required by WeightNz.
             if weight_scale.dim() != 4 or weight_scale.shape[0] != 1:
-                raise RuntimeError(
-                    "Kimi MXFP8 single-group NZ weight requires a matching [1, K/64, N, 2] scale"
-                )
+                raise RuntimeError("Kimi MXFP8 single-group NZ weight requires a matching [1, K/64, N, 2] scale")
         else:
             raise RuntimeError(f"Unsupported Kimi MXFP8 single-group weight rank: {weight.dim()}")
         group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
@@ -334,14 +332,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             # The singleton expert dimension is a storage/layout dimension,
             # not part of the checkpoint tensor. Convert the internal NZ
             # storage back to ND before taking a transposed checkpoint view.
-            restored_weight = torch_npu.npu_format_cast(
-                layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn
-            )
+            restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
             target_weight = restored_weight.squeeze(0).transpose(0, 1).contiguous()
             layer.weight.data = target_weight
-            target_scale = (
-                layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()
-            )
+            target_scale = layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()
             layer.weight_scale.data = target_scale
             if hasattr(layer, "_mxfp8_weight_buf"):
                 del layer._mxfp8_weight_buf
