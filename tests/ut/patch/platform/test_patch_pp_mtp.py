@@ -9,6 +9,7 @@ from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
+from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
@@ -316,15 +317,14 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
 ):
     request = SimpleNamespace(
         spec_token_ids=[],
+        use_structured_output=False,
         structured_output_request=None,
         is_finished=lambda: False,
     )
     scheduler = SimpleNamespace(
         scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
         requests={"req-0": request},
-        structured_output_manager=SimpleNamespace(
-            should_advance=lambda _request: False,
-        ),
+        structured_output_manager=StructuredOutputManager.__new__(StructuredOutputManager),
     )
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
     model_runner_output = SimpleNamespace(
@@ -386,15 +386,18 @@ def test_pp_mtp_spec_token_id_edge_cases():
     advancing = SimpleNamespace(
         spec_token_ids=[],
         is_finished=lambda: False,
-        structured_output_request=SimpleNamespace(grammar=grammar),
+        use_structured_output=True,
+        structured_output_request=SimpleNamespace(grammar=grammar, reasoning_ended=True),
     )
     empty_sampled = SimpleNamespace(
         spec_token_ids=["keep"],
         is_finished=lambda: False,
     )
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
     scheduler = SimpleNamespace(
         requests={"fin": finished, "adv": advancing, "empty": empty_sampled},
-        structured_output_manager=SimpleNamespace(should_advance=lambda req: req is advancing),
+        structured_output_manager=manager,
     )
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"missing": 1, "fin": 1, "no-index": 1, "empty": 1, "adv": 1},
@@ -409,6 +412,38 @@ def test_pp_mtp_spec_token_id_edge_cases():
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
     assert advancing.spec_token_ids == [401]
+
+
+def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
+    def validate_grammar(_tokens):
+        pytest.fail("Grammar must not constrain tokens before reasoning ends")
+
+    request = SimpleNamespace(
+        spec_token_ids=[],
+        is_finished=lambda: False,
+        use_structured_output=True,
+        all_token_ids=[200],
+        structured_output_request=SimpleNamespace(
+            grammar=SimpleNamespace(validate_tokens=validate_grammar),
+            reasoning_ended=False,
+        ),
+    )
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
+    monkeypatch.setattr(
+        manager,
+        "_get_reasoner",
+        lambda _request: SimpleNamespace(is_reasoning_end_streaming=lambda _ids, _tokens: False),
+    )
+    scheduler = SimpleNamespace(requests={"req-0": request}, structured_output_manager=manager)
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
+    model_runner_output = SimpleNamespace(
+        req_id_to_index={"req-0": 0}, sampled_token_ids=[[200]], spec_token_ids=[[301, 302]]
+    )
+
+    _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
+
+    assert request.spec_token_ids == [301, 302]
 
 
 def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
