@@ -15,7 +15,13 @@ MAX_TOKENS = 64
 pytestmark = pytest.mark.e2e_model(MODEL)
 
 
-@pytest.mark.parametrize("model_runner_v2", ["0", "1"], ids=["v1", "v2"])
+@pytest.mark.parametrize(
+    "model_runner_v2",
+    [
+        pytest.param("0", id="v1", marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")),
+        pytest.param("1", id="v2"),
+    ],
+)
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,dspark,chunked_prefill,prefix_caching",

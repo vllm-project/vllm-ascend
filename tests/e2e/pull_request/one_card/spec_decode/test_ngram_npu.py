@@ -10,6 +10,8 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import calculate_acceptance_per_pos
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 def test_ngram_npu_async_acceptance(
