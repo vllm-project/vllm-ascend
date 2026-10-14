@@ -318,12 +318,19 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_A3_CAPABILITIES
-            | {
-                HardwareCapability.CANN_MEGAMOE,
-                HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
-                HardwareCapability.NPU_TOP_K_TOP_P,
-            },
+            # FLA_GDN_PREFILL is excluded on A3: the Phase6 kernel added in
+            # #16420 regresses GDN prefill performance there, so gdn.py keeps
+            # the fused CANN chunk / Triton fallback. A2 (same Phase6 kernel)
+            # and A5 (arch35 kernel) are unaffected.
+            capabilities=(
+                _A3_CAPABILITIES
+                | {
+                    HardwareCapability.CANN_MEGAMOE,
+                    HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                    HardwareCapability.NPU_TOP_K_TOP_P,
+                }
+            )
+            - {HardwareCapability.FLA_GDN_PREFILL},
         ),
         AscendDeviceType._310P: HardwareProfile(
             _device_type=AscendDeviceType._310P,
