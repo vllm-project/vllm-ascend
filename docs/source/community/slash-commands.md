@@ -72,7 +72,7 @@ inside that node's archive. The JSON must not contain spaces. Each selected
 node produces a `nodeN.tar.gz` file in the workflow run's **Artifacts** section.
 Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missing
 paths are reported in the workflow log. System and credential directories
-cannot be selected. The previous `--download` spelling remains supported.
+cannot be selected.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 

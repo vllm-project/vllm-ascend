@@ -290,7 +290,7 @@ jobs:
               PENDING_OPTION=""
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
-            elif [ "$WORD" = "--log-path" ] || [ "$WORD" = "--download" ]; then
+            elif [ "$WORD" = "--log-path" ]; then
               NEXT_IS_DOWNLOAD=1
             elif [ "$WORD" = "--aop_enabled" ]; then
               if [ -z "$TEST_CASES" ]; then
