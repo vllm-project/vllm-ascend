@@ -884,7 +884,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
     impl.wq_b.quant_method = MagicMock()
     impl.wkv.return_value = torch.ones((1, 2))
     impl.kv_norm.side_effect = lambda value: value
-    impl._maybe_all_gather_o_proj_full_weight = MagicMock()
+    impl._all_gather_o_proj_weight_switches = MagicMock()
     impl.compressor_wkv = SimpleNamespace(weight=torch.empty(0))
     impl.compressor_wgate = SimpleNamespace(weight=torch.empty(0))
     impl.compressor_ape = torch.empty(0)
@@ -2441,7 +2441,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     impl = _make_impl(AscendDSAPCPImpl)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
     impl._pcp_decode_sharded = decode_sharded
-    impl.pcp_o_proj_weight_switch_config = MagicMock()
+    impl._weight_switch_config = MagicMock()
     events = []
     weight_switches = []
     for _ in range(2):
@@ -2461,7 +2461,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         method.all_gather_weight.side_effect = gather
         method.wait_weight_all_gather.side_effect = wait
         weight_switches.append((MagicMock(), method, state))
-    impl._pcp_o_proj_weight_switches = tuple(weight_switches)
+    impl._weight_switch_states = tuple(weight_switches)
     impl.compress_ratio = 4
     impl.compressor = SimpleNamespace(
         state_cache=SimpleNamespace(prefix="compressor.state_cache"),
@@ -2642,10 +2642,10 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
     )
     attn_metadata = {"swa_cache": metadata}
     impl.enable_pcp_o_proj_weight_sharding = True
-    impl._pcp_o_proj_use_full_weight = True
+    impl._set_o_proj_use_full_weight(True)
     impl._pcp_decode_sharded = False
-    impl._pcp_o_proj_weight_switches = None
-    impl._get_pcp_o_proj_weight_switches = MagicMock(return_value=())
+    impl._weight_switch_states = None
+    impl._prepare_o_proj_weight_switches = MagicMock(return_value=())
 
     with (
         patch.object(
@@ -2656,7 +2656,7 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         ) as prepare_standard_caches,
         impl._o_proj_batch(needs_global_metadata=False, has_prefill=False),
     ):
-        assert not impl._pcp_o_proj_use_full_weight
+        assert not impl._o_proj_uses_full_weight()
         assert not impl._prepare_caches_before_attention(
             "layer",
             torch.empty((4, 4)),
@@ -2665,19 +2665,19 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         )
 
     prepare_standard_caches.assert_called_once()
-    impl._get_pcp_o_proj_weight_switches.assert_called_once()
+    impl._prepare_o_proj_weight_switches.assert_called_once()
 
 
 @pytest.mark.parametrize("global_prefill", [False, True])
 def test_disabled_pcp_o_projection_context_needs_no_shard_state(global_prefill):
     impl = _make_impl(AscendDSAPCPImpl)
-    assert not hasattr(impl, "_pcp_o_proj_weight_switches")
+    assert impl._weight_switch_states is None
     assert not hasattr(impl, "_pcp_decode_sharded")
     with (
         pytest.raises(RuntimeError, match="injected failure"),
         impl._o_proj_batch(needs_global_metadata=True, has_prefill=global_prefill),
     ):
-        assert not impl._pcp_o_proj_use_full_weight
+        assert not impl._o_proj_uses_full_weight()
         assert not impl._pcp_o_proj_use_activation_exchange
         raise RuntimeError("injected failure")
 

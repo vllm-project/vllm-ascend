@@ -58,7 +58,6 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
     WeightSwitchConfig,
     WeightSwitchMixin,
 )
@@ -85,12 +84,13 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
         if not self.enable_pcp_o_proj_weight_sharding:
             return
-        pcp_size = self.o_proj_weight_switch_config.world_size
+        weight_switch_config = self._get_o_proj_weight_switch_config()
+        pcp_size = weight_switch_config.world_size
         try:
             input_width = getattr(self.o_proj, "input_size_per_partition", None)
             if not isinstance(input_width, int) or input_width <= 0 or input_width % pcp_size != 0:
                 raise ValueError(f"input_size_per_partition={input_width!r} cannot be split across pcp_size={pcp_size}")
-            linear_method = self._get_o_proj_weight_switch_method()
+            self._prepare_o_proj_weight_load_shards()
         except (RuntimeError, ValueError) as exc:
             logger.warning_once(
                 "SFA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
@@ -98,15 +98,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             )
             self.enable_pcp_o_proj_weight_sharding = False
             return
-        self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
-            get_tp_group(),
-            get_pcp_group(),
-        )
-        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
-            self.o_proj,
-            self.o_proj_weight_switch_config,
-            self.o_proj_weight_load_partition,
-        )
         if self.is_pcp_decode_sharded:
             compilation_config = self.vllm_config.compilation_config
             decode_query_len = 1 + self.vllm_config.num_speculative_tokens
@@ -117,7 +108,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 max(compilation_config.cudagraph_capture_sizes or [0]),
             )
             capacity = self._pcp_o_proj_token_capacity
-            input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+            input_size = self._get_o_proj_weight_load_state("o_proj").input_size_per_partition_before
             output_size = self.o_proj.output_size_per_partition
             dtype = self.vllm_config.model_config.dtype
             device = self.o_proj.weight.device
@@ -140,7 +131,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
         if self.enable_pcp_o_proj_weight_sharding:
-            self._enable_o_proj_full_weight_switch()
+            self._enable_o_proj_weight_switch()
         return result
 
     def _get_parallel_forward_context(
@@ -156,21 +147,25 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         )
         # Single-token PCP prefill shards can have DecodeOnly state.
         # Keep O-projection collectives consistent across the PCP group.
-        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and (
-            attn_metadata.pcp_has_global_prefill
-            or attn_metadata.attn_state
-            not in {
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding,
-            }
+        self._set_o_proj_use_full_weight(
+            self._weight_switch_enabled
+            and (
+                attn_metadata.pcp_has_global_prefill
+                or attn_metadata.attn_state
+                not in {
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding,
+                }
+            )
         )
-        if context.gather_full_o_proj:
-            self._all_gather_o_proj_full_weight()
+        if self._o_proj_uses_full_weight():
+            self._all_gather_o_proj_weight_switches()
         return context
 
     def _gather_o_proj_decode_tokens(self, attn_output: torch.Tensor) -> torch.Tensor:
         """Exchange rank-local decode rows using graph-stable buffers."""
-        group = self.o_proj_weight_switch_config.group
+        weight_switch_config = self._get_o_proj_weight_switch_config()
+        group = weight_switch_config.group
         num_tokens = attn_output.shape[0]
         if num_tokens > self._pcp_o_proj_token_capacity:
             raise ValueError("PCP O-proj decode rows exceed the configured token/graph capacity.")
@@ -186,25 +181,28 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self,
         attn_output: torch.Tensor,
         output: torch.Tensor,
-        gather_full_o_proj: bool,
     ) -> torch.Tensor:
-        if not self._o_proj_weight_switch_enabled:
-            return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
-        if gather_full_o_proj:
-            with self._use_full_o_proj_weights():
-                return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
+        if not self._weight_switch_enabled:
+            return super()._finalize_o_proj(attn_output, output)
+        if self._o_proj_uses_full_weight():
+            with self._use_full_o_proj_weight_switches():
+                return super()._finalize_o_proj(attn_output, output)
 
         # Feature-sharded weights must project the same token rows on every
         # PCP rank. Sharded decode exchanges rows first and scatters the summed
         # projection back to each owner; replicated decode only needs a sum.
         linear_method = self._get_o_proj_weight_switch_method()
-        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
+        switches = self._weight_switch_states
+        if switches is None:
+            raise RuntimeError("SFA PCP O-proj weight switching has not been prepared.")
+        weight_part = switches[0][2].gather_parts.get("weight")
         if weight_part is None:
             raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
+        weight_switch_config = self._get_o_proj_weight_switch_config()
         # This is the logical TP-local O-proj input width. It remains valid
         # even when a quantization method stores the weight in a packed layout
         # whose gathered storage dimension differs from the activation dimension.
-        full_input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+        full_input_size = self._get_o_proj_weight_load_state("o_proj").input_size_per_partition_before
         if attn_output.shape[-1] != full_input_size:
             raise RuntimeError(
                 "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
@@ -215,18 +213,18 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             attn_output = self._gather_o_proj_decode_tokens(attn_output)
         local_input = WeightSwitchMixin.split_tensor_for_parallel(
             attn_output,
-            self.o_proj_weight_switch_config.world_size,
-            self.o_proj_weight_switch_config.rank,
+            weight_switch_config.world_size,
+            weight_switch_config.rank,
             dim=-1,
         )
         if isinstance(linear_method, AscendLinearScheme):
             # W8A8's quant_bias belongs to the complete O projection. Add it
             # on only one rank before reducing the TP and PCP weight shards.
-            bias_rank = 0 if get_tp_group().rank_in_group == 0 and self.o_proj_weight_switch_config.rank == 0 else 1
+            bias_rank = 0 if get_tp_group().rank_in_group == 0 and weight_switch_config.rank == 0 else 1
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None, tp_rank=bias_rank)
         else:
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
-        group = self.o_proj_weight_switch_config.group
+        group = weight_switch_config.group
         if self.is_pcp_decode_sharded:
             scatter_input = self._pcp_o_proj_rs_in_buf[: group.world_size * num_local_tokens]
             scatter_input.copy_(partial_output)
@@ -632,7 +630,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
         if self.enable_dsa_cp_full_o_proj:
-            self._enable_o_proj_full_weight_switch()
+            self._enable_o_proj_weight_switch()
         return result
 
     def _get_fused_type_unsupported_reasons(self, pp_type):
@@ -668,7 +666,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     ) -> SFAForwardContext:
         context = getattr(attn_metadata, "dsa_cp_context", None)
         assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
-        gather_full_o_proj = (
+        self._set_o_proj_use_full_weight(
             self.tp_size > 1
             and self.enable_dsa_cp_full_o_proj
             and attn_metadata.attn_state
@@ -682,7 +680,6 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             actual_seq_lengths_key=context.actual_seq_lengths_key,
             kv_slot_mapping=context.slot_mapping_cp,
             topk_num_tokens=context.local_end_with_pad - context.local_start,
-            gather_full_o_proj=gather_full_o_proj,
         )
 
     def exec_kv(
@@ -723,10 +720,9 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         k_pe,
         k_nope,
         knope_scale,
-        full_gather_o_proj_enabled,
     ):
         assert k_nope is not None
-        async_op = full_gather_o_proj_enabled
+        async_op = self._o_proj_uses_full_weight()
         handles: list[torch.distributed.Work] = []
         if self.qk_rope_head_dim == 0 and not self.uses_packed_sfa_main_cache:
             parts = [k_nope]
@@ -758,12 +754,11 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         kv_cache,
         slot_mapping_sfa,
         attn_metadata,
-        full_gather_o_proj_enabled,
     ):
         for handle in kv_ag_handles:
             handle.wait()
-        if full_gather_o_proj_enabled:
-            self._all_gather_o_proj_full_weight()
+        if self._o_proj_uses_full_weight():
+            self._all_gather_o_proj_weight_switches()
 
         if kv_cache is not None:
             assert fused_kv_no_split is not None
@@ -829,16 +824,14 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self,
         attn_output,
         output,
-        gather_full_o_proj,
     ):
         if not self.enable_dsa_cp_full_o_proj:
             return super()._finalize_o_proj(
                 attn_output,
                 output,
-                gather_full_o_proj,
             )
-        if gather_full_o_proj:
-            with self._use_full_o_proj_weights():
+        if self._o_proj_uses_full_weight():
+            with self._use_full_o_proj_weight_switches():
                 local_output = self._apply_o_proj_full_weight(attn_output)
                 tp_group = get_tp_group()
                 if not self.o_proj.reduce_results:
@@ -1705,7 +1698,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
-        full_gather_o_proj_enabled: bool,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1719,7 +1711,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             kv_cache,
             slot_mapping_sfa,
             attn_metadata,
-            full_gather_o_proj_enabled,
         )
         # Prefill DCP gathers referenced blocks after the current layer writes
         # its SFA KV cache and before indexer/top-k work begins.

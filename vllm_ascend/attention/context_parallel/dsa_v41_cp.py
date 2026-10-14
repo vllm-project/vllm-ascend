@@ -468,7 +468,8 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # Empty query ranks also join hidden and weight collectives.
         global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
         projector = attn.dsa_attn.dsa_attn.impl
-        projector._maybe_all_gather_pcp_o_proj_weights()
+        if projector._o_proj_uses_full_weight():
+            projector._all_gather_o_proj_weight_switches()
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
         return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
 
