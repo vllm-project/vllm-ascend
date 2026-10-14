@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.30.0rc2 - 2026.10.13
+
+There is no code change in this release. It's just contains a quick fix for Dockerfile to make the official Docker image build as expected. If you're using v0.30.0rc1 official docker image, please upgrade to v0.30.0rc2 instead. Otherwise, Please just ignore this release.
+
+### Highlights
+
+- Upgrade CANN to 9.2.0_20260930220649 in Dockerfile to make sure the official Docker image build as expected.
+
 ## v0.30.0rc1 - 2026.10.11
 
 This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. For the complete performance, accuracy, reliability, and known-issue report, see the [v0.30.0rc1 test conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/tests/vllm_ascend_v0.30.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/) to get started.
