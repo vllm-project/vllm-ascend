@@ -378,6 +378,18 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
+
+
 @dataclass
 class DSACPContext:
     num_tokens: int
@@ -1421,7 +1433,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
-        kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
+        kv = _index_select_kv_blocks(kv_cache[0], valid_block_ids)
         split_sizes: tuple[int, ...]
         if self.uses_packed_sfa_main_cache:
             # Packed SFA formats store nope, rope, and quantization data in one
@@ -1432,7 +1444,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         else:
             if len(kv_cache) < 2:
                 raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
-            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            key_rope = _index_select_kv_blocks(kv_cache[1], valid_block_ids)
             if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
                 raise RuntimeError(
                     "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
@@ -1452,7 +1464,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dim: int,
         split_sizes: tuple[int, ...],
     ) -> DCPGatherContext:
-        gathered, handle, restore_perm = self._all_gather_dim_async(x, dim)
+        # HCCL does not transport FP8 directly; gather the packed cache as bytes.
+        transport = as_byte_view(x)
+        gathered, handle, restore_perm = self._all_gather_dim_async(transport, dim)
+        if transport.dtype != x.dtype:
+            gathered = gathered.view(x.dtype)
         return DCPGatherContext(
             gathered=gathered,
             handle=handle,

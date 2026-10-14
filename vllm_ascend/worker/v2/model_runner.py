@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -86,10 +87,14 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.observability.runtime_guard.hooks import (
+    runtime_guard_sample_tokens,
+    runtime_guard_step,
+)
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -108,16 +113,12 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_transport import (
-    bypass_upstream_spec_pp_guard,
-    resolve_spec_pp_support,
-    restore_pp_after_upstream_init,
-    use_legacy_spec_pp,
-)
+from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
+    communicator_switch,
     prepare_v41_dummy_ring_state,
     prepare_v41_source_rope,
     torch_cuda_wrapper,
@@ -148,16 +149,9 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
 
-        # Only release versions need PP hidden during upstream initialization.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
-            with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
-                super().__init__(vllm_config, device)
-            if pp_disabled:
-                restore_pp_after_upstream_init(self, vllm_config)
-        # Native PP owns token broadcast/writeback; only releases use our packing.
-        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
-        self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
+            super().__init__(vllm_config, device)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -228,13 +222,6 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp:
-            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_upstream_spec_pp_protocol,
-            )
-
-            assert self.pp_handler is not None
-            install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -264,6 +251,27 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+        # msprobe dump (same as v1 NPUModelRunner; not via DFX).
+        dump_cfg = self.ascend_config.dump_config_path
+        self.debugger = None
+        if dump_cfg is not None:
+            self._debugger_started = False
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                from msprobe.pytorch import PrecisionDebugger
+
+                self.debugger = PrecisionDebugger(dump_cfg)
+            else:
+                try:
+                    from msprobe.pytorch import AclGraphDumper
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Failed to import AclGraphDumper from msprobe. "
+                        "Please install/rebuild msprobe with aclgraph_dump enabled."
+                    ) from exc
+
+                self.debugger = AclGraphDumper(dump_cfg)
+        self.runtime_guard = RuntimeGuardProcessor.bind(self)
+
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
@@ -272,6 +280,11 @@ class NPUModelRunner(GPUModelRunner):
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
         self.pd_dspark_aux_layer_ids = aux_layers
+        # In cudagraph modes the dumper must be started before graph capture so
+        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
+        # the dumper at the end of load_model).
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self._start_dump_data()
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -317,6 +330,7 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
+    @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         if (
             lmhead_tp_enable()
@@ -344,9 +358,19 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
-        if self.use_spec_pp and self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            self.pp_handler.broadcast_drafts()
+        # Close the per-step msprobe dump cycle on the normal last-PP-rank
+        # path (v1 parity: v1 finalizes at the end of sample_tokens).
+        self._finalize_dump_data()
+        return output
+
+    def pool(self):
+        output = super().pool()
+        # Pooling models never go through sample_tokens() in the v2
+        # architecture: the worker calls pool() directly, and the engine skips
+        # sampling whenever execute_model()/pool() returns a non-None output.
+        # Close the dump cycle here, mirroring v1 which finalizes after
+        # _pool() on the pooling path.
+        self._finalize_dump_data()
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -493,6 +517,28 @@ class NPUModelRunner(GPUModelRunner):
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
 
     @torch.inference_mode()
+    def capture_model(self, *, profile_only: bool = False) -> int:
+        """Capture decoder and multimodal encoder graphs on Ascend."""
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            encoder_runner = getattr(self.model_state, "encoder_runner", None)
+            encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)
+            if encoder_manager is not None and self.update_stream is not None:
+                encoder_manager.update_stream = self.update_stream
+
+        # EncoderRunner uses vLLM's generic graph_capture(), whose communicator
+        # type check expects the CUDA symbol. Temporarily bind that symbol to
+        # NPUCommunicator, as is already done for decoder ACL graph capture.
+        with torch_cuda_wrapper(), communicator_switch():
+            if "profile_only" not in inspect.signature(GPUModelRunner.capture_model).parameters:
+                if profile_only:
+                    raise NotImplementedError("Graph memory profiling is unavailable in this vLLM version.")
+                return super().capture_model()
+            return super().capture_model(profile_only=profile_only)
+
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
+    @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -516,6 +562,13 @@ class NPUModelRunner(GPUModelRunner):
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+
+        dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
+        # Eager PrecisionDebugger is started only for real scheduler steps.
+        # Graph dumping is already active from load_model(), so dummy forwards
+        # only need to flush the graph dumper below without writing a step.
+        if dump_forward and not dummy_run:
+            self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
         dp_coordination_context = (
@@ -555,6 +608,14 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
+
+        if dump_forward:
+            if dummy_run:
+                self._finalize_dump_data(dump=False)
+            elif isinstance(output, IntermediateTensors) and self.is_pooling_model:
+                # Non-last pooling ranks do not reach pool(). Decoding ranks
+                # finalize after sample_tokens(), including non-last PP ranks.
+                self._finalize_dump_data()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -638,7 +699,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+        kv_cfg = self.vllm_config.kv_transfer_config
+        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
+        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
+        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
+        # This PD-only reclassification is a temporary workaround. Replace it with
+        # a dedicated graph-eligibility check once the upstream semantics are aligned.
+        if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)
@@ -1093,7 +1161,7 @@ class NPUModelRunner(GPUModelRunner):
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
         ):
-            return super()._dummy_run(
+            output = super()._dummy_run(
                 num_tokens,
                 *args,
                 skip_attn=skip_attn,
@@ -1103,6 +1171,12 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
+        # Flush the dump window opened across dummy forwards without writing
+        # data, so capture/profiling forwards do not leak into the first real
+        # step (v1 parity: v1 finalizes with dump=False at the end of
+        # _dummy_run).
+        self._finalize_dump_data(dump=False)
+        return output
 
     def postprocess_sampled(
         self,
@@ -1244,6 +1318,21 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs_padded = num_reqs_padded + 1
 
         return query_start_loc_np, num_reqs_padded
+
+    def _start_dump_data(self, **kwargs) -> None:
+        if self.debugger is None or self._debugger_started:
+            return
+        self.debugger.start(self.model, **kwargs)
+        self._debugger_started = True
+
+    def _finalize_dump_data(self, **kwargs) -> None:
+        if self.debugger is None or not self._debugger_started:
+            return
+        if hasattr(self.debugger, "stop"):
+            self.debugger.stop()
+            self._debugger_started = False
+
+        self.debugger.step(**kwargs)
 
     def _pad_adaptive_query_start_loc_for_fia(
         self,

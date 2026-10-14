@@ -525,7 +525,7 @@ class AscendConfig:
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
-                "topk_buffer_size": 4096,
+                "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 128,
                 "keep_device_kv_cache": false
             }
@@ -589,6 +589,10 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    runtime_config_path: str | None = None
+    runtime_config_hot_reload: bool = False
+    # Runtime object constructed in init_ascend_config (not from additional_config dict).
+    runtime_config: Any = None
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -1661,27 +1665,22 @@ class SparseKVOffloadConfig:
     """
 
     enabled: bool = False
-    topk_buffer_size: int = 4096
+    # -1 resolves to (1 + num_speculative_tokens) * 2048.
+    topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
-    # Generalized Q1/MTP LIM + copy-SFA. The C8 operator is built separately
-    # but is not selected by this serving path.
-    fused_op_type: str = "none"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
-        return self.fused_op_type == "fused_copy_sfa"
+        """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
+        return self.enabled and not self.use_fused_overlap
 
     @model_validator(mode="after")
     def _validate_values(self):
-        if self.fused_op_type not in ("none", "fused_copy_sfa"):
-            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
-        if self.use_fused_copy_sfa and self.use_fused_overlap:
-            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
-        if self.topk_buffer_size <= 0:
-            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size != -1 and self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         return self
@@ -1693,6 +1692,10 @@ class SparseKVOffloadConfig:
                 f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
             )
         config = cls(**user_config)  # type: ignore[call-arg]
+        if config.topk_buffer_size == -1:
+            speculative = getattr(vllm_config, "speculative_config", None)
+            num_speculative_tokens = speculative.num_speculative_tokens if speculative is not None else 0
+            config.topk_buffer_size = (1 + num_speculative_tokens) * 2048
         config._validate_preconditions(vllm_config)
         return config
 
@@ -1811,6 +1814,15 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
+    from vllm_ascend.observability.runtime_config import (
+        ADDITIONAL_CONFIG_STRIP_KEYS as _RUNTIME_CONFIG_STRIP_KEYS,
+    )
+    from vllm_ascend.observability.runtime_config import (
+        build_runtime_config_from_additional,
+    )
+
+    runtime_boot = build_runtime_config_from_additional(additional_config)
+
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
@@ -1837,6 +1849,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # replaced with the validated dump_config_path field below.
         "dump_config",
         "dump_config_path",
+        *_RUNTIME_CONFIG_STRIP_KEYS,
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # enable_sparse_li_c4 is selected by attention_config.indexer_kv_dtype
         # and the model's sparse-attention support,not additional config.
@@ -1878,6 +1891,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         sparse_kv_offload_config=sparse_kv,
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
+        runtime_config_path=runtime_boot.path,
+        runtime_config_hot_reload=runtime_boot.hot_reload,
+        runtime_config=runtime_boot.runtime_config,
         **kwargs,
     )
     # Business validation (Plan B): pydantic did type/range/enum checks during

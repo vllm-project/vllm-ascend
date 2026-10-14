@@ -976,6 +976,7 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
             "pcp_context": kwargs.get("pcp_context"),
             "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
             "formatted_slot_mapping": kwargs.get("formatted_slot_mapping"),
+            "full_graph_mode": kwargs.get("full_graph_mode"),
         }
         assert "block_size" not in kwargs
         self.calls.append(call)
@@ -1616,6 +1617,30 @@ def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, ful
     )
     assert builder.extra_kwargs is not None
     assert builder.extra_kwargs["full_graph_mode"] is (capture or full_graph)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),) * 2,
+        kv_cache_config=kv_cache_config,
+        for_cudagraph_capture=capture,
+        full_graph_mode=full_graph,
+    )
+    assert len(calls) == 2
+    for call in calls:
+        assert call["full_graph_mode"] is (capture or full_graph)
 
 
 @pytest.mark.parametrize("cache_only_backend", [False, True])

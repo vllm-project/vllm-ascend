@@ -1410,34 +1410,6 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     return {y, scale};
 }
 
-at::Tensor npu_lightning_indexer_quant_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table, int64_t query_quant_mode, int64_t key_quant_mode,
-    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
-{
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-
-    const int DIM_0 = 0;
-    const int DIM_1 = 1;
-    const int DIM_2 = 2;
-
-    c10::SymDimVector output_size;
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
-    if (query_layout_str == "BSND") {
-        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
-    } else {
-        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
-    }
-    at::Tensor lightning_indexer_quant_output = at::empty_symint(output_size, query.options().dtype(at::kInt));
-
-    return lightning_indexer_quant_output;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
     const at::Tensor &q2k,
     const at::Tensor &cu_seqlens,
@@ -1927,8 +1899,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
-    // Lightning indexer quant
-    ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // chunk_gated_delta_rule_fwd_h_vllm
     ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
