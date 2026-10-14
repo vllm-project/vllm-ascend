@@ -119,7 +119,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    False,
+                    num_decode_tokens > num_decodes,  # Speculative tokens must not attend to future tokens.
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
@@ -128,8 +128,8 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
-                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.block_tables[num_decodes:, :],
+                    attn_metadata.query_start_loc[num_decodes:] - num_decode_tokens,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),
