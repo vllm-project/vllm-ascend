@@ -261,7 +261,7 @@ class NPUWorker(WorkerBase):
         return parameters
 
     def _save_sleep_parameters(self, model: nn.Module) -> None:
-        patterns = self.model_config.sleep_preserve_parameter_names
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", None)
         if not patterns:
             self._sleep_saved_parameters = {}
             return
