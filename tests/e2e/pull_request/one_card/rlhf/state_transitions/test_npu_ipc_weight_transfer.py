@@ -125,7 +125,7 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         auto_port=False,
     ) as server:
         client = server.get_client()
-        dummy_signature = generation_signature(client, case.model)
+        dummy_signature = generation_signature(client, case.model, image_prompt=case.image_prompt)
 
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
@@ -162,7 +162,7 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
             # That wake leaves nothing asleep, so the engine resumes scheduling on
             # its own and no explicit `/resume` is needed.
             _post(server, "wake_up", params={"tags": ["kv_cache"]})
-            signatures.append(generation_signature(client, case.model))
+            signatures.append(generation_signature(client, case.model, image_prompt=case.image_prompt))
 
     updated_signature, reloaded_signature = signatures
     assert_weight_update_matches_reference(

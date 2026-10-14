@@ -202,7 +202,7 @@ def test_finish_weight_update():
     mock_finalize.assert_called_once_with(engine.model, engine.model_config)
 
 
-def test_receive_packed_weights_loads_model():
+def test_receive_packed_weights_accumulate_until_finish():
     packed_weights = [("model.weight", torch.tensor([1.0, 2.0, 3.0]))]
     update_info = MagicMock(
         tensor_sizes=[12],
@@ -216,6 +216,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_pending = []
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -235,4 +236,8 @@ def test_receive_packed_weights_loads_model():
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
     )
-    engine.model.load_weights.assert_called_once_with(packed_weights)
+    # One update arrives as several /update_weights chunks; the served model
+    # is loaded ONCE per update, from finish_weight_update, with the complete
+    # parameter set (layerwise reload's completion trigger needs a full pass).
+    engine.model.load_weights.assert_not_called()
+    assert engine._packed_pending == packed_weights

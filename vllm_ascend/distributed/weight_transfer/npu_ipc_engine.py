@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU IPC-based weight transfer engine using Ascend IPC for communication."""
 
+import contextlib
 import os
 import socket
 from collections.abc import Callable
@@ -156,18 +157,80 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
+        import logging
+
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
 
+        self._packed_pending: list[tuple[str, torch.Tensor]] = []
         initialize_layerwise_reload(self.model)
 
+        # Models expose served-side runtime tensors (e.g. the DeepSeek-V4
+        # hash-router ``tid2eid`` table, ``bias_vl``, attention sinks) that no
+        # checkpoint/update supplies.  After a level-2 sleep these hold freshly
+        # woken, uninitialized storage; re-create their constructor values so
+        # the first post-update forward does not read garbage (MoE dispatch
+        # AI Core 507035).  Runs BEFORE the trainer's chunks arrive, so real
+        # values in the update stream still win.
+        reinit = getattr(self.model, "reinitialize_runtime_params", None)
+        if callable(reinit):
+            logging.getLogger(__name__).info("Re-initializing served-side runtime tensors before weight update")
+            reinit()
+
     def finish_weight_update(self) -> None:
+        import gc
+        import os
+
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        pending = getattr(self, "_packed_pending", None)
+        if pending:
+            self._packed_pending = []
+            self.model.load_weights(pending)
+            del pending
+
+        coverage = finalize_layerwise_reload(self.model, self.model_config)
+
+        # Load-balancing / completeness guard: with a level-2 sleep the previous
+        # weights were discarded, so EVERY served parameter must be fully
+        # re-supplied by the trainer.  A module left with zero / partial new
+        # weights would keep freshly-woken (garbage) storage in the uncovered
+        # regions.  Zero-filling covers the padding half of that problem, but a
+        # *missing* parameter class (e.g. a vision tower the trainer does not
+        # know about) is a configuration error that must fail loudly instead of
+        # corrupting runtime kernels.  Opt-in via VLLM_IPC_STRICT_UPDATE=1.
+        if os.environ.get("VLLM_IPC_STRICT_UPDATE"):
+            incomplete = [*coverage["unloaded"], *coverage["partial"]]
+            if incomplete:
+                raise RuntimeError(
+                    f"Weight update incomplete: {len(incomplete)} module(s) were not fully "
+                    f"covered by the incoming weights: {incomplete}"
+                )
+
+        # Re-run module-level runtime-parameter hooks.  Modules that serve
+        # runtime-derived buffers absent from the checkpoint (e.g. the rotary
+        # cos/sin position cache) implement ``reinitialize_runtime_params`` to
+        # re-register their constructor values via ``register_buffer`` (mirror
+        # of their ``__init__``); after a level-2 sleep the layerwise finalize
+        # above would otherwise leave (or zero-fill) freshly-woken storage and
+        # destroy positional encoding for every layer.
+        for module in self.model.modules():
+            reinit = getattr(module, "reinitialize_runtime_params", None)
+            if callable(reinit):
+                reinit()
+
+        # The packed consumer clones every chunk into independent storage and
+        # layerwise reload keeps buffered weight tensors alive until a layer is
+        # processed (or, for delayed layers, until finalize).  None of that is
+        # reclaimed unless we explicitly return the allocator cache blocks, so
+        # the subsequent ``wake_up(tags=['kv_cache'])`` fails to find physical
+        # memory for the KV-cache allocations (aclrtMallocPhysical OOM 207001).
+        gc.collect()
+        with contextlib.suppress(Exception):  # pluggable allocator may reject it
+            torch.npu.empty_cache()
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -225,6 +288,23 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
+        # One update arrives as several packed chunks, each a separate
+        # /update_weights call.  The served model is loaded ONCE per update,
+        # with the complete parameter set, exactly like the unpacked transport
+        # does.  vLLM's layerwise reload drives its per-layer completion off
+        # ``load_numel`` vs ``load_numel_total``, which is only well defined for
+        # a complete pass; feeding it a partial parameter set (one chunk)
+        # advances that bookkeeping differently and the lane then serves
+        # weights that never match a normal startup load of the same payload
+        # (measured: text logprob deltas of 0.41/0.59 with per-chunk loading,
+        # bit-exact once the chunks are accumulated).  The accumulated chunks
+        # are flushed in ``finish_weight_update`` before the layerwise finalize.
+        if self.packed:
+            pending = getattr(self, "_packed_pending", None)
+            if pending is None:
+                pending = self._packed_pending = []
+            pending.extend(weights)
+            return
         self.model.load_weights(weights)
 
     def shutdown(self) -> None:

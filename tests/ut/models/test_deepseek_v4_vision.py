@@ -28,7 +28,7 @@ def vision_wrapper():
     model = AscendDeepseekV4ForConditionalGeneration.__new__(AscendDeepseekV4ForConditionalGeneration)
     nn.Module.__init__(model)
     hidden = 8
-    model._sentinel_table = None
+    model.register_buffer("_sentinel_table", None, persistent=False)
     for i, name in enumerate(("image_start", "image_pad", "image_newline", "image_end")):
         setattr(model, name, nn.Parameter(torch.full((hidden,), float(i + 1), dtype=torch.float32)))
 
@@ -80,8 +80,7 @@ def test_sentinel_table_rebuilt_on_device_change(vision_wrapper):
     vision_wrapper.embed_input_ids(ids)
     assert vision_wrapper._sentinel_table.device.type == "cpu"
 
-    # The table is a plain attribute and does not follow nn.Module.to();
-    # a device move after the first forward must invalidate the cache.
+    # An explicitly requested device change must rebuild the cache.
     meta_table = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("meta"))
     assert meta_table.device.type == "meta"
     assert vision_wrapper._sentinel_table is meta_table
@@ -100,3 +99,47 @@ def test_embed_input_ids_without_image_params_is_passthrough(vision_wrapper):
     base = vision_wrapper.language_model.embed_input_ids.return_value
     assert torch.equal(out, base)
     assert vision_wrapper._sentinel_table is None
+
+
+def test_reinit_invalidates_sentinel_cache(vision_wrapper):
+    """A weight update drops the cached table so the next forward rebuilds it
+    from the reloaded ``image_*`` parameters (layerwise reload re-materialises
+    those parameters into new storage)."""
+    model = vision_wrapper
+    table = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+    assert "_sentinel_table" in dict(model.named_buffers())
+    assert "_sentinel_table" not in model.state_dict()
+
+    with torch.no_grad():
+        for i, name in enumerate(("image_start", "image_pad", "image_newline", "image_end")):
+            getattr(model, name).fill_(10 + i)
+
+    model.reinitialize_runtime_params()
+
+    assert model._sentinel_table is None
+    refreshed = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+    assert refreshed is not table
+    expected = torch.stack(
+        [model.image_start, model.image_pad, model.image_pad, model.image_newline, model.image_end]
+    ).to(torch.bfloat16)
+    assert torch.equal(refreshed, expected)
+    model.language_model.reinitialize_runtime_params.assert_called()
+
+
+def test_reinit_invalidates_sentinel_cache_on_every_update(vision_wrapper):
+    """Two updates in a row must never leave a stale table behind."""
+    model = vision_wrapper
+    for update in range(2):
+        table = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+        with torch.no_grad():
+            for i, name in enumerate(("image_start", "image_pad", "image_newline", "image_end")):
+                getattr(model, name).fill_(10 * (update + 1) + i)
+        model.reinitialize_runtime_params()
+        assert model._sentinel_table is None
+        refreshed = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+        expected = torch.stack(
+            [model.image_start, model.image_pad, model.image_pad, model.image_newline, model.image_end]
+        ).to(torch.bfloat16)
+        assert torch.equal(refreshed, expected)
+        assert refreshed is not table
+    model.language_model.reinitialize_runtime_params.assert_called()

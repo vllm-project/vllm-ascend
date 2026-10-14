@@ -12,13 +12,16 @@ transfer that consistently drops, renames or reshapes parameters would still
 pass. See ``assert_weight_update_matches_reference``.
 """
 
+import base64
 import contextlib
 import hashlib
 import json
 import math
 import shutil
+import struct
 import tempfile
 import time
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +45,21 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], torch.dtype]]] | None = None
+    """Checkpoint-facing parameters the meta model cannot enumerate.
+
+    The served architecture is not always the HF architecture: DeepSeek-V4's
+    vision tower lives in the multimodal wrapper only, so its tensors have to be
+    derived from the config instead of read off a meta model. The builder returns
+    what ``load_weights`` consumes, so a case that sets it must not also set
+    ``checkpoint_model_prefix``.
+    """
+    image_prompt: bool = False
+    """Add one image request to every signature of this case.
+
+    The vision tower only runs when an image is in the batch, so without it a
+    dropped, renamed or reshaped vision tensor stays invisible to the oracle.
+    """
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -146,6 +164,56 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
+def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
+    """Checkpoint-facing parameter set of the DeepSeek-V4 vision tower.
+
+    ``transformers``' ``DeepseekV4ForCausalLM`` builds the text backbone only,
+    while vLLM and vLLM-Ascend serve the multimodal wrapper
+    (``DeepseekV4ForConditionalGeneration`` /
+    ``AscendDeepseekV4ForConditionalGeneration``) whose ``vision`` ViT, ``aligner``
+    and four ``image_*`` vectors are not part of any HF meta model. The names are
+    the ones the published checkpoint ships and the wrapper resolves
+    (``vision.*`` / ``aligner.*`` / ``image_*``, see ``_vision_parameter_name``),
+    and every shape was verified against the real safetensors header of
+    ``deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`` (``vision_n_layers=32`` -> 267
+    tensors, e.g. ``vision.blocks.0.mlp.w1.weight`` == [5632, 1024] and
+    ``aligner.w1.weight`` == [4096, 9216]).
+    """
+    dim = int(config.vision_dim)
+    inter = int(config.vision_inter_dim)
+    patch = int(config.vision_patch_size)
+    ratio = int(config.vision_downsample_ratio)
+    hidden = int(config.hidden_size)
+    params: list[tuple[str, tuple[int, ...], torch.dtype]] = [
+        ("vision.patch_embed.proj.weight", (dim, 3 * patch * patch), torch.bfloat16),
+        ("vision.patch_embed.proj.bias", (dim,), torch.bfloat16),
+        ("vision.norm.weight", (dim,), torch.bfloat16),
+    ]
+    for layer in range(int(config.vision_n_layers)):
+        prefix = f"vision.blocks.{layer}"
+        params += [
+            (f"{prefix}.norm1.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.weight", (3 * dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.bias", (3 * dim,), torch.bfloat16),
+            (f"{prefix}.attn.wo.weight", (dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wo.bias", (dim,), torch.bfloat16),
+            (f"{prefix}.norm2.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.mlp.w1.weight", (2 * inter, dim), torch.bfloat16),
+            (f"{prefix}.mlp.w2.weight", (dim, inter), torch.bfloat16),
+        ]
+    params += [
+        ("aligner.w1.weight", (hidden, dim * ratio * ratio), torch.bfloat16),
+        ("aligner.w1.bias", (hidden,), torch.bfloat16),
+        ("aligner.w2.weight", (hidden, hidden), torch.bfloat16),
+        ("aligner.w2.bias", (hidden,), torch.bfloat16),
+    ]
+    # The wrapper allocates these four vectors in float32, but the checkpoint -
+    # and therefore the payload - ships them in BF16, and ``default_weight_loader``
+    # casts on copy, so the payload stays faithful to the checkpoint.
+    params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
+    return params
+
+
 MODEL_CASES = (
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
@@ -187,6 +255,34 @@ MODEL_CASES = (
             "the attention-sink fix that lives in #16355, and the two-card HCCL "
             "lane has an open problem with the model as well"
         ),
+    ),
+    WeightUpdateModelCase(
+        id="deepseek-v4-flash-vision-exp-moe-layout",
+        model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            # >0 routes the config to the multimodal wrapper (see
+            # DeepseekV4ModelArchConfigConvertor); the tower itself is reduced to
+            # fit the single-chip IPC budget next to the text backbone.
+            "vision_n_layers": 2,
+            # The published checkpoint is FP8, while this suite compares a BF16
+            # payload against a BF16 startup load. Both lanes share this override,
+            # so quantization is off on both sides of the oracle.
+            "quantization_config": None,
+        },
+        # Same checkpoint-facing text layout as the text-only DeepSeek case above;
+        # the vision tower is the part no meta model can enumerate.
+        checkpoint_name_map=deepseek_v4_checkpoint_name,
+        expert_intermediate_size=2048,
+        extra_param_builder=deepseek_v4_vision_params,
+        extra_server_args=(
+            "--tokenizer-mode",
+            "deepseek_v4",
+            "--limit-mm-per-prompt",
+            '{"image": 1}',
+        ),
+        image_prompt=True,
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
@@ -355,6 +451,16 @@ class FixedRandomWeightSource(WeightSource):
             for name, buffer in meta_model.named_buffers()
             if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
         ]
+        if case.extra_param_builder is not None:
+            # Tensors the meta model cannot produce (see the field's docstring).
+            # The duplicate-name assertion below is what pins the two builders
+            # against each other: if a future transformers revision starts
+            # building the tower itself, this fails loudly instead of sending
+            # every vision tensor twice.
+            assert case.checkpoint_model_prefix is None, (
+                f"{case.id}: extra_param_builder already returns checkpoint-facing names"
+            )
+            parameters += case.extra_param_builder(meta_config)
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
@@ -649,7 +755,7 @@ def reference_signature(
             auto_port=False,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model)
+        signature = generation_signature(server.get_client(), case.model, image_prompt=case.image_prompt)
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
@@ -660,9 +766,46 @@ PROMPTS = [
     "Explain why the sky is blue in one sentence:",
 ]
 
+IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
 
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison."""
+
+def _quadrant_png_data_url(size: int = 384) -> str:
+    """A deterministic four-colour PNG, built without an image library.
+
+    ``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
+    processor does not have to resize the input; a hard-coded blob would be
+    opaque to review, while this is four bytes of code per pixel and compresses
+    to a few KB.
+    """
+    rows = bytearray()
+    half = size // 2
+    for y in range(size):
+        rows.append(0)  # PNG filter type 0 (None) for this scanline
+        top = y < half
+        for x in range(size):
+            rows += bytes((0 if x < half else 255, 0 if top else 255, 128))
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+IMAGE_DATA_URL = _quadrant_png_data_url()
+
+
+def generation_signature(client, model: str, *, image_prompt: bool = False) -> list[tuple[str, tuple[float, ...]]]:
+    """Capture deterministic text and logprobs for exact reload comparison.
+
+    ``image_prompt`` appends one chat request carrying an image for multimodal
+    cases: the vision tower only runs when an image is in the batch, so without
+    it a dropped, renamed or reshaped vision tensor would not move the signature
+    and the case would prove nothing about the tower.
+    """
     signature = []
     for prompt in PROMPTS:
         response = client.completions.create(
@@ -677,6 +820,27 @@ def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
         signature.append((choice.text, token_logprobs))
+    if image_prompt:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": IMAGE_PROMPT},
+                        {"type": "image_url", "image_url": {"url": IMAGE_DATA_URL}},
+                    ],
+                }
+            ],
+            max_tokens=8,
+            temperature=0,
+            seed=0,
+            logprobs=True,
+        )
+        choice = response.choices[0]
+        token_logprobs = tuple(item.logprob for item in (choice.logprobs.content or ()))
+        assert token_logprobs, f"{model}: image generation returned no token logprobs"
+        signature.append((choice.message.content or "", token_logprobs))
     return signature
 
 

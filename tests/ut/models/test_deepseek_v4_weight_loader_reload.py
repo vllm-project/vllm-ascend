@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.model_loader.reload import meta as reload_meta
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -158,6 +159,19 @@ def test_attention_sink_dsa_cp_loading(sink_path, with_weight_loader):
     _check_load(case, tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
 
 
+# vllm_ascend deliberately keeps Ascend-only runtime tensors out of the
+# layerwise reload plan (patch.platform.patch_layerwise_skip_tensors), and
+# ``attn_sink`` is one of them: it is a single nn.Parameter registered on two
+# modules, so the plan would count it twice and one of the two modules could
+# never reach its completion trigger.  This test asserts the stock wrapper is
+# installed for that parameter, which does not hold while the patch is active.
+_ATTN_SINK_IS_SKIPPED = "attn_sink" in getattr(reload_meta, "SKIP_LOAD_TENSORS", ())
+
+
+@pytest.mark.skipif(
+    _ATTN_SINK_IS_SKIPPED,
+    reason="vllm_ascend excludes attn_sink from the layerwise reload plan",
+)
 @pytest.mark.parametrize("dsa_cp", [False, True], ids=["tp", "dsa_cp"])
 def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
     """The real upstream wrapper must replay two updates into original storage."""
