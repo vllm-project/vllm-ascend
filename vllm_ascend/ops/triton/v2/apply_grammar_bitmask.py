@@ -27,13 +27,13 @@ from vllm_ascend.ops.triton.triton_utils import (
 @triton.jit
 def _apply_grammar_bitmask_kernel_impl(
     logits_ptr,
-    logits_stride,
+    logits_stride: tl.constexpr,
     logits_indices_ptr,
     cu_num_logits_ptr,
     bitmask_ptr,
-    bitmask_stride,
-    vocab_size,
-    total_tasks,
+    bitmask_stride: tl.constexpr,
+    vocab_size: tl.constexpr,
+    total_tasks: tl.constexpr,
     NUM_PROGRAMS: tl.constexpr,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
@@ -64,21 +64,30 @@ def _apply_grammar_bitmask_kernel_impl(
         logits_idx += position_idx
         position_is_active = position_idx < num_req_logits
 
-        bitmask_offset = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
-        packed_bitmask = tl.load(
-            bitmask_ptr + bitmask_idx * bitmask_stride + bitmask_offset,
-            mask=bitmask_offset < bitmask_stride,
-            other=0,
-        )
-        blocked = (packed_bitmask[:, None] & bit_mask[None, :]) == 0
-        blocked = blocked.reshape(BLOCK_SIZE)
-
-        block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        if position_is_active:
+            bitmask_offset = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
+            valid_words = bitmask_offset < tl.cdiv(vocab_size, 32)
+            packed_bitmask = tl.load(
+                bitmask_ptr + bitmask_idx * bitmask_stride + bitmask_offset,
+                mask=valid_words,
+                other=0,
+            )
+            # Exclude padding words from the uniform-mask decisions.
+            any_blocked = tl.sum((valid_words & (packed_bitmask != -1)).to(tl.int32), 0) > 0
+            if any_blocked:
+                block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                ptrs = logits_ptr + logits_idx * logits_stride + block_offset
+                valid = block_offset < vocab_size
+                any_allowed = tl.sum((valid_words & (packed_bitmask != 0)).to(tl.int32), 0) > 0
+                if any_allowed:
+                    blocked = ((packed_bitmask[:, None] & bit_mask[None, :]) == 0).reshape(BLOCK_SIZE)
+                    values = tl.load(ptrs, mask=valid, other=0)
+                    negative_inf = tl.full((BLOCK_SIZE,), -float("inf"), values.dtype)
+                    # Contiguous writes avoid the per-element masked scatter
+                    # generated for a random bit predicate on Ascend A2.
+                    tl.store(ptrs, tl.where(blocked, negative_inf, values), mask=valid)
+                else:
+                    tl.store(ptrs, -float("inf"), mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
@@ -102,6 +111,8 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            if total_tasks == 0:
+                return None
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.
