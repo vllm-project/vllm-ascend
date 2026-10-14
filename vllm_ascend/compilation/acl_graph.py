@@ -64,9 +64,12 @@ def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
 def _is_mte_address_capture_error(exc: RuntimeError) -> bool:
     message = str(exc)
     lowered_message = message.lower()
+    # 507015 is CANN-specific to the MTE DDR out-of-range condition, so the
+    # error code alone is sufficient; the textual markers cover HDK builds
+    # that surface the message without the code.
     has_error_code = _MTE_ADDRESS_ERROR_CODE in message
     has_mte_marker = any(marker in lowered_message for marker in _MTE_ADDRESS_ERROR_MARKERS)
-    return has_mte_marker or (has_error_code and "out of range" in lowered_message)
+    return has_mte_marker or has_error_code
 
 
 @dataclasses.dataclass
