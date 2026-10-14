@@ -17,6 +17,7 @@
 #
 
 import huggingface_hub
+import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
@@ -75,6 +76,7 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
             assert output_str, "Generated output should not be empty."
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @wait_until_npu_memory_free()
 def test_hybrid_prefix_match_unit_cached_output_consistency(monkeypatch):
     """Verify fine-grained hybrid prefix hits preserve generated tokens."""

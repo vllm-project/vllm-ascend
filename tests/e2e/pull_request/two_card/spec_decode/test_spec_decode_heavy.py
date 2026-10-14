@@ -159,6 +159,7 @@ def test_qwen3_vwn_eagle3_tp2():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 def test_eagle3_sliding_window():
     # draft_window_size is on the V2 blacklist, so this case stays on V1
     # without an explicit runner env pin.
@@ -241,6 +242,7 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
@@ -356,6 +358,7 @@ def test_hang(monkeypatch):
         print(f"Output tokens: {output_tokens}")
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
 @pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
 @pytest.mark.parametrize("max_tokens", [1024])

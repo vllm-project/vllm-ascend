@@ -10,7 +10,10 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kvpp import MODEL, PROMPTS, complete, output_texts, server_args
 from tests.e2e.conftest import RemotePDServer, wait_until_npu_memory_free
 
-pytestmark = pytest.mark.e2e_model(MODEL)
+pytestmark = [
+    pytest.mark.e2e_model(MODEL),
+    pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
+]
 
 
 @pytest.mark.e2e_coverage(

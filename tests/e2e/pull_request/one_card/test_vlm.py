@@ -120,6 +120,7 @@ def test_multimodal_audio():
         assert len(outputs) > 0, "Generated outputs should not be empty."
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("model", WHISPER_MODELS)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_whisper(model) -> None:
