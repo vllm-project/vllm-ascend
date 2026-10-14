@@ -162,7 +162,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "A3 series(BF16)"
 
     ```bash
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -196,7 +196,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "A3 series(W8A8)"
 
     ```bash
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -236,7 +236,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "950DT products"
 
     ```bash
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -283,7 +283,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -319,7 +320,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -358,7 +360,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -395,7 +398,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
@@ -573,9 +577,10 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -639,7 +644,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -677,8 +682,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"num_redundant_experts":0}}' \
-        --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -770,8 +775,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -834,8 +840,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -1099,9 +1106,10 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1185,8 +1193,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1273,8 +1282,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
@@ -1360,8 +1370,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUUNER=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
