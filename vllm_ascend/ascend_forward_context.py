@@ -468,19 +468,17 @@ class _ExtraForwardContextProxy:
 
     @staticmethod
     def _use_v2_additional_kwargs() -> bool:
-        # Follow the Ascend-patched VllmConfig.use_v2_model_runner property so
-        # unset env on 310P (default MRV2) still uses additional_kwargs.
-        try:
-            from vllm.config import get_current_vllm_config
+        # Mirror Ascend-patched VllmConfig.use_v2_model_runner without reading
+        # get_current_vllm_config(): UT MagicMock configs are truthy and would
+        # incorrectly force the V2 additional_kwargs path, and some forward
+        # paths never pin the current config. Explicit env wins; unset defaults
+        # to MRV2 on 310P (MRV1 elsewhere).
+        use_v2 = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+        if use_v2 is not None:
+            return bool(use_v2)
+        from vllm_ascend.device.device_config import is_310p
 
-            return bool(get_current_vllm_config().use_v2_model_runner)
-        except Exception:
-            use_v2 = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-            if use_v2 is not None:
-                return bool(use_v2)
-            from vllm_ascend.device.device_config import is_310p
-
-            return is_310p()
+        return is_310p()
 
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)

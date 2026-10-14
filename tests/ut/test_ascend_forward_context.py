@@ -99,6 +99,50 @@ def _patch_select_moe_comm_method_deps(
     )
 
 
+def test_use_v2_additional_kwargs_follows_env_and_310p_default(monkeypatch):
+    """_EXTRA_CTX must not consult get_current_vllm_config (MagicMock is truthy)."""
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(
+        "vllm_ascend.device.device_config.is_310p",
+        lambda: True,
+    )
+    assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is True
+
+    monkeypatch.setattr(
+        "vllm_ascend.device.device_config.is_310p",
+        lambda: False,
+    )
+    assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is False
+
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
+    monkeypatch.setattr(
+        "vllm_ascend.device.device_config.is_310p",
+        lambda: True,
+    )
+    assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is False
+
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(
+        "vllm_ascend.device.device_config.is_310p",
+        lambda: False,
+    )
+    assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is True
+
+
+def test_use_v2_additional_kwargs_ignores_truthy_mock_current_config(monkeypatch):
+    """Regression: bool(MagicMock().use_v2_model_runner) is True."""
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(
+        "vllm_ascend.device.device_config.is_310p",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.config.get_current_vllm_config",
+        MagicMock(return_value=MagicMock(use_v2_model_runner=MagicMock())),
+    )
+    assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is False
+
+
 def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     from vllm.forward_context import ForwardContext, override_forward_context
 
