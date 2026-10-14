@@ -345,12 +345,10 @@ jobs:
             --map-file test_case_map.json
 
       # Extra tests are for uncovered code changes. Merge the repo-local
-      # extra_recommended_tests.yaml first, then the shared OBS list. Skip
-      # the merge when the PR has no src paths (docs-only and other non-src
-      # diffs). Do not skip this job: ready-precise requires recommend-tests
-      # to succeed.
+      # extra_recommended_tests.yaml first, then the shared OBS list.
+      # Verification: do not skip this step when the PR has no src paths.
+      # Do not skip this job: ready-precise requires recommend-tests to succeed.
       - name: Merge extra tests from YAML
-        if: ${{ needs.pre-commit.outputs.src == 'true' }}
         run: |
           set -euo pipefail
           if ! python3 -c "import yaml" >/dev/null 2>&1; then
