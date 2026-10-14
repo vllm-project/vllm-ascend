@@ -1624,7 +1624,6 @@ class TestAscendMLAImpl(TestBase):
         speculative_config = MagicMock()
         model_config = MagicMock()
         parallel_config = MagicMock()
-        parallel_config.pipeline_parallel_size = 1
         parallel_config.prefill_context_parallel_size = 1
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
