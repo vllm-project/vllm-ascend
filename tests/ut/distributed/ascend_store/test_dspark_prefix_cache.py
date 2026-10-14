@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import (
+    _SSD_HIT_GVA,
     DSparkPrefixCache,
     DSparkPrefixKeys,
 )
@@ -57,7 +58,7 @@ class _ByteBackend:
         addresses = []
         for key, size in zip(keys, sizes, strict=True):
             if key in self.buffers:
-                addresses.append(-1)
+                addresses.append(0)
                 continue
             self.buffers[key] = np.zeros(size, dtype=np.uint8)
             self.leases.add(key)
@@ -196,6 +197,53 @@ def test_readable_prefix_evicted_after_probe_does_not_fail_save_or_reallocate():
     assert backend.calls == []  # No metadata query, new allocation or copy.
     assert not backend.buffers
     assert not backend.readable
+    assert not backend.leases
+
+
+@pytest.mark.parametrize("gva", [0, _SSD_HIT_GVA])
+def test_allocation_failure_and_ssd_hit_never_copy_or_publish(gva):
+    cache, backend, _, request = _cache_case()
+    backend.batch_alloc = Mock(return_value=[gva])
+    backend.exists = Mock(return_value=[0])
+    cache.copy_fn = Mock(return_value=0)
+
+    if gva == 0:
+        with pytest.raises(RuntimeError, match="allocation failed"):
+            cache.save(request, 4, {0: (0,), 1: (0,)})
+        backend.exists.assert_called_once()
+    else:
+        assert cache.save(request, 4, {0: (0,), 1: (0,)}) is None
+        backend.exists.assert_not_called()
+
+    cache.copy_fn.assert_not_called()
+    assert not backend.calls
+    assert not backend.leases
+
+
+@pytest.mark.parametrize("ssd_index", [0, 1])
+def test_mixed_ssd_hit_only_copies_and_publishes_owned_memory(ssd_index):
+    cache, backend, _, request = _cache_case()
+    allocate = backend.batch_alloc
+    memory_index = 1 - ssd_index
+    keys = [cache.keys.make_key(f"h{index}", 2) for index in range(2)]
+
+    def allocate_mixed(requested, sizes, ttl):
+        assert requested == keys
+        gvas = [_SSD_HIT_GVA] * len(requested)
+        gvas[memory_index] = allocate([requested[memory_index]], [sizes[memory_index]], ttl)[0]
+        return gvas
+
+    backend.batch_alloc = allocate_mixed
+    backend.exists = Mock(side_effect=AssertionError("SSD hits need no existence query"))
+    assert cache.save(request, 8, {0: (0, 1), 1: (0, 1)}) is None
+    assert backend.readable == {keys[memory_index]}
+    assert set(backend.buffers) == {keys[memory_index]}
+    assert backend.calls == [
+        ("alloc", (keys[memory_index],)),
+        ("copy", 0),
+        ("finish", (0,)),
+        ("release", (keys[memory_index],)),
+    ]
     assert not backend.leases
 
 

@@ -51,6 +51,7 @@ jobs:
       bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       command: ${{ steps.resolve.outputs.command }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
+      download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
     steps:
       - name: Install system dependencies
@@ -68,6 +69,7 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           sparse-checkout: |
             .github/workflows/scripts/resolve_nightly_tests.py
+            .github/workflows/scripts/collect_download.py
             .github/workflows/configs/nightly_config.yaml
             .github/workflows/configs/weekly_config.yaml
           sparse-checkout-cone-mode: false
@@ -225,6 +227,8 @@ jobs:
           AOP_ENABLED="false"
           IS_A3_560T="false"
           NEXT_IS_BRANCH=0
+          NEXT_IS_DOWNLOAD=0
+          DOWNLOAD_PATH=""
           NEXT_IS_GOOD_COMMIT=0
           NEXT_IS_BAD_COMMIT=0
           NEXT_IS_FAIL_CONFIRM_RETRIES=0
@@ -261,6 +265,9 @@ jobs:
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
               BRANCH="$WORD"
               NEXT_IS_BRANCH=0
+            elif [ "$NEXT_IS_DOWNLOAD" = "1" ]; then
+              DOWNLOAD_PATH="$WORD"
+              NEXT_IS_DOWNLOAD=0
             elif [ "$NEXT_IS_GOOD_COMMIT" = "1" ]; then
               BISECT_GOOD_COMMIT="$WORD"
               NEXT_IS_GOOD_COMMIT=0
@@ -283,6 +290,8 @@ jobs:
               PENDING_OPTION=""
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
+            elif [ "$WORD" = "--log-path" ]; then
+              NEXT_IS_DOWNLOAD=1
             elif [ "$WORD" = "--aop_enabled" ]; then
               if [ -z "$TEST_CASES" ]; then
                 echo "ERROR: --aop_enabled must appear after at least one test case"
@@ -328,6 +337,13 @@ jobs:
             echo "ERROR: $PENDING_OPTION requires a value"
             exit 1
           fi
+          if [ "$NEXT_IS_DOWNLOAD" = "1" ]; then
+            echo "ERROR: --log-path requires a value"
+            exit 1
+          fi
+          if [ -n "$DOWNLOAD_PATH" ]; then
+            python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" --list >/dev/null
+          fi
 
           if [ -n "$BISECT_GOOD_COMMIT" ] &&
              ! [[ "$BISECT_GOOD_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -371,10 +387,10 @@ jobs:
             "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" \
             "$BISECT_FORCE_INITIAL_BUILD"
-
           {
             echo "test_cases=$TEST_CASES"
             echo "branch=$BRANCH"
+            echo "download_path=$DOWNLOAD_PATH"
             echo "aop_enabled=$AOP_ENABLED"
             echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
             echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
@@ -452,6 +468,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a2.yaml \
@@ -463,6 +480,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f download_path="$DOWNLOAD_PATH" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
@@ -494,6 +512,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a3.yaml \
@@ -505,6 +524,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f download_path="$DOWNLOAD_PATH" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
@@ -536,6 +556,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a3_560t.yaml \
@@ -547,6 +568,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f download_path="$DOWNLOAD_PATH" \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
@@ -577,6 +599,8 @@ jobs:
         id: dispatch_a5
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_a5.yaml \
@@ -587,7 +611,9 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f download_path="$DOWNLOAD_PATH" \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A5_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a5.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -617,6 +643,7 @@ jobs:
         id: dispatch_310p
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           gh workflow run schedule_nightly_test_310p.yaml \
@@ -625,6 +652,7 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
+            -f download_path="$DOWNLOAD_PATH" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'

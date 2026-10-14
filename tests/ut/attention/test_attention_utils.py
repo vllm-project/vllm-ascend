@@ -20,10 +20,12 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
+from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     filter_chunked_req_indices,
+    get_flashmla_ops,
     get_or_register_attention_buffer,
 )
 
@@ -31,6 +33,62 @@ NUM_REQS = 2
 # Distinct values so the selected source (CPU mirror vs NPU tensor) is identifiable.
 CPU_SEQ_LENS = torch.tensor([10, 20, 30], dtype=torch.int32)
 NPU_SEQ_LENS = torch.tensor([99, 99, 99], dtype=torch.int32)
+
+
+def test_get_flashmla_ops_returns_none_without_cann_module(monkeypatch):
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: False)
+
+    assert get_flashmla_ops() is None
+
+
+def test_get_flashmla_ops_returns_none_when_ops_submodule_is_missing(monkeypatch):
+    error = ModuleNotFoundError(
+        "No module named 'cann_ops_transformer.ops'",
+        name="cann_ops_transformer.ops",
+    )
+    import_module = MagicMock(side_effect=error)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() is None
+    import_module.assert_called_once_with("cann_ops_transformer.ops")
+
+
+def test_get_flashmla_ops_requires_both_callable_apis(monkeypatch):
+    ops = SimpleNamespace(
+        flash_mla_with_kvcache=MagicMock(),
+        flash_mla_with_kvcache_metadata=None,
+    )
+    import_module = MagicMock(return_value=ops)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() is None
+
+
+def test_get_flashmla_ops_returns_both_callable_apis(monkeypatch):
+    attention_op = MagicMock()
+    metadata_op = MagicMock()
+    ops = SimpleNamespace(
+        flash_mla_with_kvcache=attention_op,
+        flash_mla_with_kvcache_metadata=metadata_op,
+    )
+    import_module = MagicMock(return_value=ops)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() == (attention_op, metadata_op)
+    import_module.assert_called_once_with("cann_ops_transformer.ops")
+
+
+def test_get_flashmla_ops_propagates_internal_import_failure(monkeypatch):
+    error = ModuleNotFoundError("No module named 'internal_dependency'", name="internal_dependency")
+    import_module = MagicMock(side_effect=error)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    with pytest.raises(ModuleNotFoundError, match="internal_dependency"):
+        get_flashmla_ops()
 
 
 def _common_attn_metadata() -> AscendCommonAttentionMetadata:
