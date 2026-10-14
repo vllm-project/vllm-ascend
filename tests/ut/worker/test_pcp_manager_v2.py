@@ -1246,6 +1246,47 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager._block_tables.gather_block_tables.assert_not_called()
 
 
+def test_cpp_dummy_is_partitioned_instead_of_staged():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"))
+    dummy = _make_global_pcp_batch()
+    dummy.is_dummy = True
+    dummy.is_cpp_profile = True
+    local_batch = _make_local_pcp_batch()
+
+    with (
+        patch.object(PCPManager, "prepare_inputs_to_capture") as stage,
+        patch.object(manager, "partition_batch", return_value=local_batch) as partition,
+    ):
+        result = manager.prepare_inputs_to_capture(dummy)
+
+    assert result is local_batch
+    stage.assert_not_called()
+    if vllm_version_is("0.30.0"):
+        partition.assert_called_once_with(dummy)
+    else:
+        partition.assert_called_once()
+        args = partition.call_args.args
+        assert args[0] is dummy
+        assert args[1].cg_mode == CUDAGraphMode.NONE
+        assert args[1].num_tokens == dummy.num_tokens
+
+
+def test_capture_input_without_cpp_marker_uses_staging_path():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"))
+    legacy_batch = SimpleNamespace()
+    staged_batch = _make_local_pcp_batch()
+
+    with (
+        patch.object(PCPManager, "prepare_inputs_to_capture", return_value=staged_batch) as stage,
+        patch.object(manager, "partition_batch") as partition,
+    ):
+        result = manager.prepare_inputs_to_capture(legacy_batch)
+
+    assert result is staged_batch
+    stage.assert_called_once_with(legacy_batch)
+    partition.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "counts,prefilling,expected",
     [
