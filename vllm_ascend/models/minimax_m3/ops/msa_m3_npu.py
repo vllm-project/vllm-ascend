@@ -160,6 +160,7 @@ def _run_generic_block_sparse_attention(
     block_size: int,
     max_query_len: int = -1,
     dequant_scale: torch.Tensor | None = None,
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Run MiniMax-M3 sparse attention through CANN Ops GBSA."""
     del dequant_scale
@@ -186,22 +187,39 @@ def _run_generic_block_sparse_attention(
         generic_block_sparse_attention_metadata,
     )
 
-    gbsa_metadata = generic_block_sparse_attention_metadata(
-        topk_idx,
-        select_num_idx,
-        q.shape[1],
-        num_kv_heads,
-        q.shape[2],
-        block_shape,
-        cu_seqlens_q=cu_seqlens_q,
-        seqused_kv=seq_lens,
-        max_seqlen_q=max_query_len,
-        layout_q="TND",
-        layout_kv="PA_BBND",
-        mask_mode=_GBSA_MASK_MODE_CAUSAL,
-        quant_mode=quant_mode,
-        softmax_precision=_GBSA_SOFTMAX_PRECISION,
+    # Opt-in only from the A3 model's uniform-decode metadata builder. Direct
+    # callers and prefill must not assume that layer-dependent counts match.
+    # The cache belongs to one decode metadata object, so its sequence/prefix
+    # tensors are shared by all entries. Include all other scheduling inputs.
+    reuse_metadata = (
+        gbsa_metadata_cache is not None
+        and q.dtype == torch.bfloat16
+        and key.dtype == torch.bfloat16
+        and block_size == _MSA_INDEX_BLOCK_SIZE
+        and max_query_len in (1, 4)
     )
+    cache = gbsa_metadata_cache if reuse_metadata else None
+    cache_key = (tuple(q.shape), tuple(topk_idx.shape), tuple(select_num_idx.shape), num_kv_heads, max_query_len)
+    gbsa_metadata = cache.get(cache_key) if cache is not None else None
+    if gbsa_metadata is None:
+        gbsa_metadata = generic_block_sparse_attention_metadata(
+            topk_idx,
+            select_num_idx,
+            q.shape[1],
+            num_kv_heads,
+            q.shape[2],
+            block_shape,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_kv=seq_lens,
+            max_seqlen_q=max_query_len,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            mask_mode=_GBSA_MASK_MODE_CAUSAL,
+            quant_mode=quant_mode,
+            softmax_precision=_GBSA_SOFTMAX_PRECISION,
+        )
+        if cache is not None:
+            cache[cache_key] = gbsa_metadata
     out, _ = generic_block_sparse_attention(
         q,
         key,
@@ -540,6 +558,7 @@ def minimax_m3_sparse_attn_decode(
     select_num_idx: torch.Tensor | None = None,
     dequant_scale: torch.Tensor | None = None,
     cu_seqlens_q: torch.Tensor | None = None,
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
 ) -> None:
     """Run sparse decode through CANN Ops generic block sparse attention."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
@@ -571,5 +590,6 @@ def minimax_m3_sparse_attn_decode(
         block_size=block_size,
         max_query_len=decode_query_len,
         dequant_scale=dequant_scale,
+        gbsa_metadata_cache=gbsa_metadata_cache,
     )
     output.copy_(out)
