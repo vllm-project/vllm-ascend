@@ -1025,18 +1025,20 @@ class NPUModelRunner(GPUModelRunner):
     @contextmanager
     def _cpp_profile_dummy(self, enabled: bool):
         """Scope the target-only prefill semantics used by CPP profiling."""
+        if not enabled:
+            yield
+            return
+
         previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
         previous_speculator = self.speculator
-        if enabled:
-            self.input_buffers.profile_cpp = True
-            # CPP profiles the target prefill. This also matches MRV1, where the
-            # drafter dummy run is explicitly skipped for profile_cpp.
-            self.speculator = None
+        self.input_buffers.profile_cpp = True
+        # CPP profiles the target prefill. This also matches MRV1, where the
+        # drafter dummy run is explicitly skipped for profile_cpp.
+        self.speculator = None
         try:
             yield
         finally:
-            if enabled:
-                self.input_buffers.profile_cpp = previous_profile_cpp
+            self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
 
     @step_eplb_after(is_dummy=True)
@@ -1068,6 +1070,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
+            # Disable the CPP drafter before entering contexts that inspect it.
+            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             # TODO: Remove this context and its use after the next main2main
@@ -1075,7 +1079,6 @@ class NPUModelRunner(GPUModelRunner):
             self._cap_parallel_draft_dummy_reqs(uniform_decode),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
-            self._cpp_profile_dummy(profile_cpp),
         ):
             return super()._dummy_run(
                 num_tokens,
