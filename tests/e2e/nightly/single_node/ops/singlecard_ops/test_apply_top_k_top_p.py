@@ -116,7 +116,6 @@ def test_scalar_and_none_variants():
 class _StubAscendConfig:
     """Minimal AscendConfig stand-in for unit tests (no engine required)."""
 
-    enable_reduce_sample = False
     enable_async_exponential = False
     enable_triton_apply_topk_topp = True
 
