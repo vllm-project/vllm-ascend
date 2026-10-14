@@ -19,7 +19,7 @@ def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeyp
     monkeypatch.setattr(flashmla, "import_module", missing_package)
     assert flashmla.get_flashmla_ops() is None
 
-    monkeypatch.setattr(flashmla, "import_module", lambda _name: SimpleNamespace(flash_mla_with_kvcache=lambda: None))
+    monkeypatch.setattr(flashmla, "import_module", lambda _name: SimpleNamespace(flash_mla=lambda: None))
     assert flashmla.get_flashmla_ops() is None
 
     def attention_op():
@@ -32,8 +32,8 @@ def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeyp
         flashmla,
         "import_module",
         lambda _name: SimpleNamespace(
-            flash_mla_with_kvcache=attention_op,
-            flash_mla_with_kvcache_metadata=metadata_op,
+            flash_mla=attention_op,
+            flash_mla_metadata=metadata_op,
         ),
     )
     assert flashmla.get_flashmla_ops() == (attention_op, metadata_op)
