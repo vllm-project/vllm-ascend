@@ -557,11 +557,16 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     return_value=(4, 4),
 )
 @patch(
+    "vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config",
+    return_value={},
+)
+@patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     _mock_config,
+    _mock_layers,
     _mock_cache_dims,
 ):
     spec = AscendMLAAttentionSpec(
@@ -618,8 +623,11 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     num_kernel_blocks = num_blocks * spec.block_size // 4
     assert key_cache.shape == (num_kernel_blocks, 4, 1, 4)
     assert value_cache.shape == key_cache.shape
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
+    # A bare MLA raw cache represents a hybrid shared pool. Each manager
+    # page holds interleaved kernel slots of [K | V | padding].
+    assert key_cache.stride() == (32, 4, 4, 1)
+    assert value_cache.stride() == (32, 4, 4, 1)
+    assert value_cache.storage_offset() - key_cache.storage_offset() == 16
     assert backend.get_kv_cache_shape.call_args.args[0] == num_kernel_blocks
 
 
