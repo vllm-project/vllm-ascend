@@ -31,8 +31,6 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 
 Both MXFP4 checkpoints contain a `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing quantized weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
 
-The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the 950PR&950DT Products quantized commands use TP4DP2 across all 8 NPUs. Adjust the parallel configuration according to the model size and available devices.
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
