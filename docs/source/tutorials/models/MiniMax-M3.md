@@ -586,8 +586,9 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
 | 5.3 950DT, three nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
 | 5.3 950DT, three nodes | First D | 4 | 4 | 1 | 2 | 0 | 31060 |
 | 5.3 950DT, three nodes | Second D | 4 | 4 | 1 | 2 | 2 | 31062 |
-| 5.4 A3, two nodes | P | 1 | 4 | 4 | 1 | 0 | 31050 |
-| 5.4 A3, two nodes | D | 4 | 4 | 1 | 4 | 0 | 31060 |
+| 5.4 A3, three nodes | P | 1 | 4 | 4 | 1 | 0 | 31050 |
+| 5.4 A3, three nodes | First D | 8 | 4 | 1 | 4 | 0 | 31260 |
+| 5.4 A3, three nodes | Second D | 8 | 4 | 1 | 4 | 4 | 31260 |
 | 5.4 950DT, two nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
 | 5.4 950DT, two nodes | D | 2 | 4 | 1 | 2 | 0 | 31060 |
 
@@ -1129,7 +1130,7 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
         --vllm-start-port "$SERVICE_PORT"
     ```
 
-    The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four Decode DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) and `engine_id` (`"1"`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four Decode ranks:
+    The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) and `engine_id` (`"1"`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four DP ranks:
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
@@ -1199,7 +1200,7 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section builds on [Section 5.3](#53-prefill-decode-disaggregation). Reuse the same topology, `launch_online_dp.py`, proxy mapping, and MiniMax `vllm serve` flags. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
+This section builds on [Section 5.3](#53-prefill-decode-disaggregation). The A3 example uses the same three-node topology, `launch_online_dp.py`, proxy mapping, and MiniMax `vllm serve` settings as Section 5.3 (one P plus two D nodes). The 950DT pool example retains its two-node topology. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
 
 - `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time (same role as Section 5.3).
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
@@ -1213,7 +1214,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | ---- | --------------- | ------------------------ |
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
 | Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
-| `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
+| `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `32GB`; 950DT keeps P=`128GB`, D=`0` |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
@@ -1230,17 +1231,17 @@ Mount the host HCCN config into every container that participates in pooling:
 
 On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3 for Ascend direct KV transfer.
 
-Place `mooncake.json` next to `run_dp_template.sh` on each node. Prefill contributes pool memory; Decode does not. Replace `xxxx` with the Prefill node IP that runs Mooncake Master. A non-zero `global_segment_size` must be aligned to `1GB`.
+Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. A3 uses the identical `32GB` configuration on P and both D nodes, so workers on all three nodes contribute pool capacity. `global_segment_size` is allocated per worker rank; `32GB` is not the aggregate capacity of one node. A non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is set, it overrides the JSON value; unset it or set it to `32GB` for this A3 example.
 
-A3 Prefill `mooncake.json`:
+A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` with the actual Master IP):
 
 ```json
 {
   "metadata_server": "P2PHANDSHAKE",
   "protocol": "ascend",
   "device_name": "",
-  "master_server_address": "xxxx:50088",
-  "global_segment_size": "64GB",
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "32GB",
   "preferred_segment": true,
   "prefer_alloc_in_same_node": true,
   "enable_ssd_offload": false,
@@ -1264,7 +1265,7 @@ A3 Prefill `mooncake.json`:
 }
 ```
 
-Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donated segment):
+950DT Decode `mooncake.json` (same Master and `tenant_id`, no donated segment; A3 D uses the `32GB` JSON above):
 
 ```json
 {
@@ -1307,12 +1308,16 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "A3 series(W8A8)"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+
+    One Prefill node uses `DP1 × TP4 × PP4`; two Decode nodes form a global `DP8 × TP4 × PP1` group, with four local ranks per node. Copy the same Decode template to both D nodes and use the node-specific launch blocks below. Service settings match Section 5.3; `MultiConnector` adds the KV pool. The `--language-model-only` option remains in the existing optional guidance rather than the launch commands.
 
     1. Prefill node
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+
+    export VLLM_SERVER_DEV_MODE=1
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
@@ -1329,7 +1334,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export DP_RPC_PORT=${DP_RPC_PORT:-6884}
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
-    
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
@@ -1341,10 +1346,12 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
 
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, A3 HCCS)
+    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export MOONCAKE_CONFIG_PATH=./mooncake.json
+
+    # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
@@ -1373,6 +1380,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.92 \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
@@ -1391,7 +1399,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_connector_extra_config":{
                             "use_ascend_direct":true,
                             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
-                            "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                            "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
                         }
                     },
                     {
@@ -1410,7 +1418,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     2. Decode node
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+
+    export VLLM_SERVER_DEV_MODE=1
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
@@ -1419,15 +1429,15 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
-    export DP_SIZE=${DP_SIZE:-4}
+    export DP_SIZE=${DP_SIZE:-8}
     export TP_SIZE=${TP_SIZE:-4}
     export PP_SIZE=${PP_SIZE:-1}
     export DP_RANK=${DP_RANK:-0}
     export DP_ADDRESS="${DP_ADDRESS:-<DECODE_COORDINATOR_IP>}"
-    export DP_RPC_PORT=${DP_RPC_PORT:-5964}
-    export SERVICE_PORT=${SERVICE_PORT:-31060}
+    export DP_RPC_PORT=${DP_RPC_PORT:-31422}
+    export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
-    
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
@@ -1438,10 +1448,12 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
 
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, A3 HCCS)
+    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export MOONCAKE_CONFIG_PATH=./mooncake.json
+
+    # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
@@ -1456,6 +1468,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --tensor-parallel-size "$TP_SIZE" \
         --pipeline-parallel-size "$PP_SIZE" \
         --enable-expert-parallel \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
@@ -1467,7 +1481,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-seqs 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
         --speculative-config "{\"method\":\"eagle3\",\"model\":\"${EAGLE3_WEIGHT_PATH}\",\"num_speculative_tokens\":3}" \
         --kv-transfer-config \
         '{
@@ -1484,7 +1499,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_connector_extra_config":{
                             "use_ascend_direct":true,
                             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
-                            "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                            "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
                         }
                     },
                     {
@@ -1500,7 +1515,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         }'
     ```
 
-    Start order on A3: Mooncake Master → Decode → Prefill → Proxy. Use the two-node launch and proxy commands in Section 5.4.4; the three-node A3 commands in Section 5.3 use a different Decode DP size.
+    Start order on A3: Mooncake Master → both Decode nodes → Prefill → Proxy. Use the three-node commands in Section 5.4.4, with the same DP/TP/PP sizes and API ports as Section 5.3 A3. The single P API and all eight D APIs must be healthy before starting the proxy.
 
 === "950DT products"
 
@@ -1703,19 +1718,19 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 #### 5.4.4 Start the Services
 
-Start in this order on every platform:
+Start in this order:
 
 ```text
 Mooncake Master
     ↓
-Decode
+First Decode node → Second Decode node (A3 only)
     ↓
 Prefill
     ↓
 Proxy (:8009)
 ```
 
-1. Start `mooncake_master` on the Prefill node and confirm port `50088` is reachable:
+1. Start `mooncake_master` on the Prefill node or another reachable host, and use its actual IP in every `mooncake.json`. Confirm port `50088` is reachable from all model nodes:
 
     ```bash
     mooncake_master \
@@ -1727,19 +1742,19 @@ Proxy (:8009)
     --client_ttl=120
     ```
 
-2. Start Decode. Use the Section 5.3 launcher with these arguments on the Decode node:
+2. Start the first A3 Decode node (global DP ranks 0–3). Use the pooled Decode template, not the normal-PD template:
 
     ```bash
-    export DECODE_IP="<DECODE_NODE_IP>"
-    export LOCAL_IP="$DECODE_IP"
-    export DP_SIZE=4
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE0_IP"
+    export DP_SIZE=8
     export TP_SIZE=4
     export PP_SIZE=1
     export LOCAL_DP_SIZE=4
     export DP_RANK_START=0
-    export DP_ADDRESS="$DECODE_IP"
-    export DP_RPC_PORT=5964
-    export SERVICE_PORT=31060
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
 
     python launch_online_dp.py \
         --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
@@ -1748,9 +1763,33 @@ Proxy (:8009)
         --vllm-start-port "$SERVICE_PORT"
     ```
 
-    On 950DT, use the Section 5.3 950DT Decode command. Wait until every DP ranks prints `Application startup complete`.
+    Wait for rank 0 to print `Started DP Coordinator process`. Keep this shell running while starting the second node from another shell; initialization needs both D nodes. On 950DT, use the Section 5.3 two-node Decode launch command with the 950DT pooled template, then skip step 3.
 
-3. Start Prefill. On A3, use:
+3. Start the second A3 Decode node (global DP ranks 4–7). `LOCAL_IP` is the second node's IP, but `DP_ADDRESS` remains the first Decode node's IP:
+
+    ```bash
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+    export LOCAL_IP="$DECODE1_IP"
+    export DP_SIZE=8
+    export TP_SIZE=4
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=4
+    export DP_RANK_START=4
+    export DP_ADDRESS="$DECODE0_IP"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
+
+    python launch_online_dp.py \
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
+    ```
+
+    Both Decode nodes expose API ports `31260`–`31263`. Wait for all eight DP ranks to print `Application startup complete`.
+
+4. Start Prefill. On A3, use the pooled P template:
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
@@ -1771,28 +1810,37 @@ Proxy (:8009)
         --vllm-start-port "$SERVICE_PORT"
     ```
 
-    On 950DT, use the Section 5.3 950DT Prefill command. Wait until every Prefill rank prints `Application startup complete`.
+    On 950DT, use the Section 5.3 two-node Prefill command with its pooled template. Wait for every Prefill rank to print `Application startup complete`.
 
-4. Start the proxy. On A3, register the one Prefill and four Decode endpoints:
+5. Start the proxy. The A3 proxy registers one Prefill endpoint and eight Decode endpoints:
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
-    export DECODE_IP="<DECODE_NODE_IP>"
+    export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+    export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     python load_balance_proxy_server_example.py \
-        --port 8009 --host $PREFILL_IP \
-        --prefiller-hosts $PREFILL_IP \
-        --prefiller-ports 31050 \
-        --decoder-hosts $DECODE_IP $DECODE_IP $DECODE_IP $DECODE_IP \
-        --decoder-ports 31060 31061 31062 31063
+    --port 8009 \
+    --host $PREFILL_IP \
+    --prefiller-hosts \
+        $PREFILL_IP \
+    --prefiller-ports \
+        31050 \
+    --decoder-hosts \
+        $DECODE0_IP $DECODE0_IP $DECODE0_IP $DECODE0_IP \
+        $DECODE1_IP $DECODE1_IP $DECODE1_IP $DECODE1_IP \
+    --decoder-ports \
+        31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    On 950DT, use the Section 5.3 950DT proxy command. The service is then accessible at `<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
+    On 950DT, use the Section 5.3 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in Section 7.
 
 #### 5.4.5 Verification
 
-1. Confirm Mooncake Master port `50088` is reachable.
-2. Confirm every Decode engine port is ready, then every Prefill engine port.
+1. Confirm Mooncake Master port `50088` is reachable and every node uses the same Master address and `tenant_id`. For A3, confirm P and both D nodes load `global_segment_size="32GB"` and that worker logs show successful segment registration.
+2. Confirm every Decode engine port is ready, then every Prefill engine port. A3 has nine APIs (one P plus eight D); 950DT has four (two P plus two D).
 3. Send requests only to the proxy on port `8009`.
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
