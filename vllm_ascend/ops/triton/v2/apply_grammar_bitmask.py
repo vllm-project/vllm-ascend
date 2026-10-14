@@ -63,12 +63,12 @@ def _apply_grammar_bitmask_kernel_impl(
                     mask=valid_words & (bitmask_offset < bitmask_stride),
                     other=0,
                 )
-                any_blocked = tl.sum((valid_words & (packed_bitmask != -1)).to(tl.int32), 0) > 0
+                any_blocked = tl.any(valid_words & (packed_bitmask != -1), 0)
                 if any_blocked:
                     block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     ptrs = logits_ptr + logits_idx * logits_stride + block_offset
                     valid = block_offset < vocab_size
-                    any_allowed = tl.sum((valid_words & (packed_bitmask != 0)).to(tl.int32), 0) > 0
+                    any_allowed = tl.any(valid_words & (packed_bitmask != 0), 0)
                     if any_allowed:
                         blocked = ((packed_bitmask[:, None] & bit_mask[None, :]) == 0).reshape(BLOCK_SIZE)
                         values = tl.load(ptrs, mask=valid, other=0)
