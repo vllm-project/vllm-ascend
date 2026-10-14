@@ -117,6 +117,7 @@ def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
     np.testing.assert_array_equal(batch.is_prefilling_np, [True])
     np.testing.assert_array_equal(batch.prefill_len_np, [16])
     np.testing.assert_array_equal(batch.num_computed_tokens_np, [0])
+    np.testing.assert_array_equal(batch.num_computed_prefill_tokens_np, [0])
     assert not batch.is_padding.any()
     torch.testing.assert_close(batch.positions, torch.arange(16, dtype=batch.positions.dtype))
 
