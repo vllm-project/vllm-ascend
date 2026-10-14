@@ -2117,7 +2117,9 @@ def test_a5_contiguous_tail_slots(a5_device, heads, tail, routes, budget):
             torch.npu.synchronize()
             _check_controlled_routes(case, selected_by_route, prefix, budget, state)
             _assert_extended_requests(case, goldens, before)
-    old_pool = _install_controlled_sparse_pool(case, prefix, budget, selected_by_route, set(range(16)))
+    selected_prefix = {token for selected in selected_by_route for token in selected if token < prefix}
+    missing = set(sorted(selected_prefix)[:16])
+    old_pool = _install_controlled_sparse_pool(case, prefix, budget, selected_by_route, missing)
     case[10].fill_(-1)
     for repeat in range(2):
         before = case[12].cpu().clone()
