@@ -164,6 +164,61 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+### LoRA weight synchronization
+
+For RL with a floating-point base model and floating-point LoRA adapters,
+choose how the trainer exports weights to the rollout engine:
+
+| Synchronization mode | Weights sent to rollout | Rollout requirements |
+| --- | --- | --- |
+| Separate adapters | LoRA adapter weights, after the base model is available | LoRA support for the adapter's target modules and the selected hardware, parallelism, and execution mode; see [LoRA Adapters](./lora.md) |
+| Merged weights | Full model weights with the LoRA update merged into the base | Ordinary model inference and full-weight updates for the selected deployment; runtime LoRA support is not required |
+
+#### Merged LoRA weights with verl
+
+In verl versions that provide `actor_rollout_ref.model.lora.merge`, set it
+to `True` to export merged weights. Add the following overrides to an
+otherwise configured verl training job using vLLM rollout:
+
+```text
+actor_rollout_ref.model.lora.rank=32
+actor_rollout_ref.model.lora.alpha=32
+actor_rollout_ref.model.lora.merge=True
+actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
+```
+
+These are verl options, not `vllm serve` arguments. See verl's
+[LoRA configuration](https://github.com/verl-project/verl/blob/main/verl/trainer/config/model/hf_model.yaml).
+For cross-NPU synchronization on Ascend, verl registers its
+[HCCL checkpoint engine](https://github.com/verl-project/verl/blob/main/verl/checkpoint_engine/hccl_checkpoint_engine.py)
+under the name `nccl`. The standalone vLLM-Ascend HTTP weight-transfer
+examples above use `--weight-transfer-config '{"backend": "hccl"}'` instead;
+these names belong to different configuration interfaces.
+
+The trainer merges the adapter into the base weights for export and sends
+ordinary model weights. The rollout engine loads them through its full-weight
+update path. With `merge=True`, verl disables its rollout adapter mode, so
+this workflow does not require `--enable-lora` or a runtime adapter load.
+Training continues with trainable adapters; merging for synchronization does
+not turn the training job into full-parameter fine-tuning.
+
+This path is useful when runtime LoRA does not cover the adapter's target
+modules. The trainer must still support merging and exporting those modules,
+and the rollout engine must support loading and updating the resulting
+weights, including any packed or sharded MoE layout. Ordinary inference
+support alone does not establish weight-update compatibility.
+
+Merged synchronization transfers full weights on each update, increasing
+transfer volume compared with adapter-only updates, and merging can introduce
+floating-point rounding differences. It installs one merged policy at a time;
+per-request adapter selection requires the separate-adapter path.
+
+Follow the pause/update/resume lifecycle for the chosen integration and
+invalidate caches derived from previous weights before the next rollout.
+Validate the complete cycle with a base-weight baseline, merged-weight output
+compared against a reference, and restoration of the base weights. Check the
+actual target modules, TP/EP configuration, and graph mode used by the job.
+
 ### Pause and resume generation
 
 With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.
