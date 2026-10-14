@@ -2384,54 +2384,74 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_alloc.assert_called_once_with([key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
 
-    def test_failed_allocations_are_clamped_to_zero(self):
-        worker = self._make_gva_worker()
-        worker.m_store.batch_alloc.return_value = [-3102, 0]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            save_start_token=0,
-            save_end_token=32,
-            target_token_len=32,
-            num_prompt_tokens=32,
-            block_ids=[7, 8],
-            block_ids_by_group=[[7, 8]],
-            block_hashes=["h0", "h1"],
-            can_save=True,
-            block_ids_np=np.asarray([7, 8], dtype=np.int64),
-            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+    def test_allocation_sentinels_are_filtered_before_int64_conversion(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import MEMCACHE_SSD_HIT_GVA
+
+        cases = (
+            ([-3102, 0], [0, 0], True),
+            ([0, MEMCACHE_SSD_HIT_GVA], [0, 0], True),
+            ([MEMCACHE_SSD_HIT_GVA, MEMCACHE_SSD_HIT_GVA], [0, 0], False),
+            ([202, MEMCACHE_SSD_HIT_GVA], [202, 0], False),
+            ([MEMCACHE_SSD_HIT_GVA, 203], [0, 203], False),
         )
+        for gvas, expected, has_failure in cases:
+            with self.subTest(gvas=gvas):
+                worker = self._make_gva_worker()
+                worker.m_store.batch_alloc.return_value = gvas
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=32,
+                    save_start_token=0,
+                    save_end_token=32,
+                    target_token_len=32,
+                    num_prompt_tokens=32,
+                    block_ids=[7, 8],
+                    block_ids_by_group=[[7, 8]],
+                    block_hashes=["h0", "h1"],
+                    can_save=True,
+                    block_ids_np=np.asarray([7, 8], dtype=np.int64),
+                    block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+                )
 
-        worker._alloc_gvas_for_save([request])
+                with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
+                    worker._alloc_gvas_for_save([request])
 
-        # Failed allocations (negative error codes / zero) surface as 0, the
-        # same "invalid GVA" representation as skipped blocks; only positive
-        # GVAs enter save_keys.
-        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0])
-        self.assertEqual(request.save_keys, [])
+                self.assertEqual(request.block_gvas_by_group_np[0].dtype, np.dtype(np.int64))
+                self.assertEqual(request.block_gvas_by_group_np[0].tolist(), expected)
+                expected_keys = [
+                    worker._make_layerwise_full_key(0, f"h{index}") for index, gva in enumerate(expected) if gva
+                ]
+                self.assertEqual(request.save_keys, expected_keys)
+                self.assertEqual(logger.error.called, has_failure)
 
-    def test_failed_partial_allocation_is_clamped_to_zero(self):
-        worker = self._make_gva_worker()
-        worker.m_store.batch_alloc.return_value = [-3102]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=16,
-            save_start_token=16,
-            save_end_token=16,
-            target_token_len=20,
-            num_prompt_tokens=32,
-            block_ids=[0, 1],
-            block_ids_by_group=[[0, 1]],
-            block_hashes=["h0"],
-            can_save=True,
-            block_ids_np=np.asarray([0, 1], dtype=np.int64),
-            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
-        )
+    def test_partial_allocation_sentinels_are_filtered(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import MEMCACHE_SSD_HIT_GVA
 
-        worker._alloc_gvas_for_save([request])
+        for gva in (-3102, 0, MEMCACHE_SSD_HIT_GVA):
+            with self.subTest(gva=gva):
+                worker = self._make_gva_worker()
+                worker.m_store.batch_alloc.return_value = [gva]
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=16,
+                    save_start_token=16,
+                    save_end_token=16,
+                    target_token_len=20,
+                    num_prompt_tokens=32,
+                    block_ids=[0, 1],
+                    block_ids_by_group=[[0, 1]],
+                    block_hashes=["h0"],
+                    can_save=True,
+                    block_ids_np=np.asarray([0, 1], dtype=np.int64),
+                    block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+                )
 
-        self.assertEqual(request.partial_save_gva_per_group, [0])
-        self.assertEqual(request.save_keys, [])
+                with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
+                    worker._alloc_gvas_for_save([request])
+
+                self.assertEqual(request.partial_save_gva_per_group, [0])
+                self.assertEqual(logger.error.called, gva <= 0)
+                self.assertEqual(request.save_keys, [])
 
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
