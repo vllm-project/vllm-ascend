@@ -106,10 +106,34 @@ _DSA_DCP_DEBUG = os.environ.get("DSA_DCP_DEBUG") == "1"
 _DSA_DCP_DEBUG_BUDGET = {"prefill": 4, "decode": 24, "probe": 12}
 
 
+def _dsa_dcp_debug_on() -> bool:
+    """Whether DCP debug printing is safe right now.
+
+    Returns False while an ACL graph capture is in progress: every debug site
+    reads device values (``.item()`` / ``.tolist()``), which forces a host
+    sync -- at best it errors during capture, at worst it bakes the
+    capture-time values into the graph and corrupts every replay.
+    """
+    if not _DSA_DCP_DEBUG:
+        return False
+    try:
+        if torch.npu.is_current_stream_capturing():
+            return False
+    except (AttributeError, RuntimeError):
+        return True
+    return True
+
+
 def _dsa_dcp_debug(kind: str, msg: str) -> None:
-    if _DSA_DCP_DEBUG and _DSA_DCP_DEBUG_BUDGET.get(kind, 0) > 0:
+    if _dsa_dcp_debug_on() and _DSA_DCP_DEBUG_BUDGET.get(kind, 0) > 0:
         _DSA_DCP_DEBUG_BUDGET[kind] -= 1
         print(f"[dsa-dcp-debug {kind}]{msg}", flush=True)
+
+
+# One-shot KV-usage logging: keyed by (rank, group type, request batch
+# fingerprint) so each request logs its storage split / cache sizes exactly
+# once, on the first compressed (C4/C128) layer that touches it.
+_KV_USAGE_LOGGED_KEYS: set[tuple] = set()
 
 
 def dsa_dcp_group_is_sharded(kv_cache_spec) -> bool:
@@ -917,14 +941,21 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
             compress_ratio=context.compress_ratio,
             storage_block_size=context.storage_block_size,
         )
-        if num_rows > 0:
+        # The f-string below reads device values, so the guard must wrap the
+        # call itself -- gating inside _dsa_dcp_debug is too late (the
+        # arguments, including .item()/.tolist(), are evaluated first).
+        if num_rows > 0 and _dsa_dcp_debug_on():
             _dsa_dcp_debug(
                 "prefill",
                 f" rank={self.dcp_rank} rows={num_rows} reqs={context.num_reqs}"
                 f" local_lens={context.local_cmp_seq_lens[: context.num_reqs].tolist()}"
                 f" global_lens={context.global_cmp_seq_lens[: context.num_reqs].tolist()}"
-                f" valid_row0={int((merged[0] != DSA_DCP_PAD_SLOT).sum())}"
-                f" row0_idx={merged[0, :24].tolist()}",
+                f" valid_last={int((merged[-1] != DSA_DCP_PAD_SLOT).sum())}"
+                f" last_idx={merged[-1, :8].tolist()}"
+                f" raw_last_idx={idx2d[-1, :8].tolist()}"
+                f" raw_last_val={[f'{v:.3f}' for v in val2d[-1, :4].tolist()]}"
+                f" bt_cols={req_metadata.block_table.shape[-1]}"
+                f" bt_rows={req_metadata.block_table.shape[0]}",
             )
         return merged.reshape(out_shape)
 
@@ -1009,7 +1040,14 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
             write_cache=write_cache,
             return_topk_values=True,
         )
-        num_rows = min(local_topk_indices.shape[0], common_metadata.num_actual_tokens)
+        # Keep EVERY row the indexer produced: `cmp_sparse_indices` must have
+        # the same first dimension as the query the attention op sees.  Under
+        # ACL graph capture the batch is padded to the capture size, so
+        # `num_actual_tokens` is smaller than the query row count and clamping
+        # to it would hand the op a short index tensor.  Padded rows fall back
+        # to the last real request and their candidates resolve to -1, which
+        # the op skips.
+        num_rows = local_topk_indices.shape[0]
         return self._merge_indexer_topk(
             local_topk_indices,
             local_topk_values,
@@ -1038,6 +1076,56 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
     def _unpack_kv_caches(self, kv_cache):
         return DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
 
+    def _log_dsa_dcp_kv_usage(
+        self,
+        context: AscendDSADCPContext,
+        compress_kv_cache: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+        indexer_k_cache: torch.Tensor | None = None,
+        indexer_scale_cache: torch.Tensor | None = None,
+    ) -> None:
+        """Log per-request KV storage split + per-attention-type cache bytes.
+
+        Prints once per (rank, group type, request batch):
+
+        * ``req_global_cmp`` / ``req_local_cmp``: the request's total
+          compressed token count vs how many are stored ON THIS card.  For a
+          DCP-sharded group (C4/C128) the per-rank ``req_local_cmp`` values
+          split the request across cards (each card holds only its stripe,
+          and non-owner cards hold 0) -- proof of "each card keeps only its
+          own KV, nothing is replicated".
+        * Per-attention-type cache sizes: the bytes a single card allocates
+          for each cache group.  The sharded groups scale down with dcp_size,
+          so the sum across cards exceeds any one card's share.
+        """
+        g_cmp = context.global_cmp_seq_lens
+        l_cmp = context.local_cmp_seq_lens
+        key = (self.dcp_rank, int(self.compressor_ratio), tuple(int(x) for x in g_cmp.tolist()))
+        if key in _KV_USAGE_LOGGED_KEYS:
+            return
+        _KV_USAGE_LOGGED_KEYS.add(key)
+
+        def _mb(t: torch.Tensor) -> str:
+            nbytes = t.numel() * t.element_size()
+            return f"{nbytes / 1024 / 1024:.1f}MiB {tuple(t.shape)}"
+
+        lines = [
+            f"[dsa-dcp-kv] rank={self.dcp_rank} group_ratio={self.compressor_ratio}",
+            f"  requests: n_req={g_cmp.shape[0]}",
+            f"    req_global_cmp={g_cmp.tolist()}   (request total compressed tokens)",
+            f"    req_local_cmp ={l_cmp.tolist()}   (tokens stored ON THIS card)",
+            f"  per-card cache sizes:",
+            f"    compress_kv_cache = {_mb(compress_kv_cache)}",
+            f"    swa_kv_cache      = {_mb(swa_kv_cache)}",
+            f"    state_cache       = {_mb(state_cache)}",
+        ]
+        if indexer_k_cache is not None:
+            lines.append(f"    indexer_k_cache   = {_mb(indexer_k_cache)}")
+        if indexer_scale_cache is not None:
+            lines.append(f"    indexer_scale     = {_mb(indexer_scale_cache)}")
+        print("\n".join(lines), flush=True)
+
     def _forward_attention_decode_dcp(
         self,
         layer_name,
@@ -1056,17 +1144,20 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
 
         compress_kv_cache, swa_kv_cache, state_cache, _, _, _ = self._unpack_kv_caches(kv_cache)
 
-        if _DSA_DCP_DEBUG and self.compress_ratio == 4:
-            blk = int(swa_req_metadata.block_table[0, 0].item())
-            sm = swa_req_metadata.slot_mapping
-            slot0 = sm[0].flatten()[:2].tolist() if sm.numel() > 0 else []
+        if _dsa_dcp_debug_on() and self.compressor_ratio > 1 and num_tokens == 1:
+            self._log_dsa_dcp_kv_usage(
+                context,
+                compress_kv_cache,
+                swa_kv_cache,
+                state_cache,
+            )
+        if _dsa_dcp_debug_on() and self.compress_ratio == 4 and num_tokens == 1:
+            cid = int(common_metadata.block_table[0, 0].item())
             _dsa_dcp_debug(
                 "probe",
-                f" rank={self.dcp_rank} swa_blk={blk}"
-                f" tok0_absmax={swa_kv_cache[blk, 0].abs().max().item():.4f}"
-                f" swa_slot0={slot0}"
-                f" swa_bt0={swa_req_metadata.block_table[0, :2].tolist()}"
-                f" cmp_bt0={common_metadata.block_table[0, :2].tolist()}",
+                f" rank={self.dcp_rank} c4_blk={cid}"
+                f" row0={[f'{v:.4f}' for v in compress_kv_cache[cid, 0, 0, :4].float().tolist()]}"
+                f" absmax={compress_kv_cache[cid].abs().max().item():.4f}",
             )
 
         q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(
@@ -1105,18 +1196,27 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
                     global_cmp_seq_lens=context.global_cmp_seq_lens,
                     req_indices=req_ids,
                 )
-                _dsa_dcp_debug(
-                    "decode",
-                    f" rank={self.dcp_rank} remap: tokens={num_tokens}"
-                    f" local_lens={context.local_cmp_seq_lens[: context.num_reqs].tolist()}"
-                    f" row0_idx={compress_topk_idxs.reshape(num_tokens, -1)[0, :24].tolist()}",
-                )
+                if _dsa_dcp_debug_on():
+                    _dsa_dcp_debug(
+                        "decode",
+                        f" rank={self.dcp_rank} remap: tokens={num_tokens}"
+                        f" local_lens={context.local_cmp_seq_lens[: context.num_reqs].tolist()}"
+                        f" row0_idx={compress_topk_idxs.reshape(num_tokens, -1)[0, :24].tolist()}",
+                    )
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
 
         # Gather Q on the head dim: [T, H, D] -> [T, H * dcp, D].
+        q_local = q
         q = self._dcp_all_gather(q.contiguous(), dim=1)
+        if _dsa_dcp_debug_on() and self.compress_ratio == 4:
+            h0 = self.dcp_rank * self.n_local_heads
+            _dsa_dcp_debug(
+                "probe",
+                f" rank={self.dcp_rank} head_slice_ok="
+                f"{bool(torch.allclose(q[:, h0 : h0 + self.n_local_heads], q_local, atol=1e-3))}",
+            )
 
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()
@@ -1236,15 +1336,16 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
         den = z - dup * swa_z
         tiny = torch.finfo(torch.float32).tiny
         merged = torch.where(den > 0, num / den.clamp_min(tiny), torch.zeros_like(den))
-        _dsa_dcp_debug(
-            "decode",
-            f" rank={self.dcp_rank} merge: lse[{lse.min().item():.2f},{lse.max().item():.2f}]"
-            f" swa_lse[{swa_lse.min().item():.2f},{swa_lse.max().item():.2f}]"
-            f" den[{den.min().item():.3f},{den.max().item():.3f}]"
-            f" nonpos={int((den <= 0).sum())}"
-            f" out_absmax={out.abs().max().item():.3f}"
-            f" swa_absmax={swa_output.to(torch.float32).abs().max().item():.3f}",
-        )
+        if _dsa_dcp_debug_on():
+            _dsa_dcp_debug(
+                "decode",
+                f" rank={self.dcp_rank} merge: lse[{lse.min().item():.2f},{lse.max().item():.2f}]"
+                f" swa_lse[{swa_lse.min().item():.2f},{swa_lse.max().item():.2f}]"
+                f" den[{den.min().item():.3f},{den.max().item():.3f}]"
+                f" nonpos={int((den <= 0).sum())}"
+                f" out_absmax={out.abs().max().item():.3f}"
+                f" swa_absmax={swa_output.to(torch.float32).abs().max().item():.3f}",
+            )
         h0 = self.dcp_rank * self.n_local_heads
         own = merged[:, h0 : h0 + self.n_local_heads, :]
         return own.to(attn_output.dtype)
@@ -1404,9 +1505,16 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
         gathered_tables = gathered_tables.reshape(self.dcp_size, num_reqs, num_cols)
 
         # Enumerate every (request, global compressed position) pair.
+        # `pos` is expanded to [num_reqs, max_cmp] up front: ownership and the
+        # local position depend only on the position, but every downstream
+        # tensor (src_blocks via req_row, in_range, ws_block, src/dst_token)
+        # is [num_reqs, max_cmp].  Leaving pos at [1, max_cmp] and relying on
+        # implicit broadcasting makes the searchsorted below see boundaries
+        # [1, max_cmp, max_valid] against values [num_reqs, max_cmp, 1], which
+        # only happens to match when num_reqs == 1 (single-request batches).
         max_cmp = int(global_cmp.max().item())
         req_row = torch.arange(num_reqs, dtype=torch.int64, device=device).unsqueeze(1)
-        pos = torch.arange(max_cmp, dtype=torch.int64, device=device).unsqueeze(0)
+        pos = torch.arange(max_cmp, dtype=torch.int64, device=device).unsqueeze(0).expand(num_reqs, -1)
         owner, local_pos = dsa_dcp_global_cmp_to_local(
             pos,
             context.dcp_size,

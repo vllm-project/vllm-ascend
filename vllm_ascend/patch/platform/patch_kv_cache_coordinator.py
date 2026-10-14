@@ -271,7 +271,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
-        if self.dcp_world_size > 1:
+        # Only DCP-sharded groups scale with the world size; replicated
+        # sliding-window groups keep their own block size, so the write-path
+        # cacheability alignment and the read-path hit boundary agree.
+        if dcp_world_size_for_kv_cache_spec(kv_cache_spec, self.dcp_world_size) > 1:
             block_size *= self.dcp_world_size
         return block_size
 

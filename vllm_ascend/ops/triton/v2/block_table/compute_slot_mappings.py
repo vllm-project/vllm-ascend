@@ -25,6 +25,8 @@ def _compute_slot_mappings_kernel(
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
     slot_mapping_enabled=None,
     HAS_SLOT_MAPPING_ENABLED: tl.constexpr = False,
+    group_cp_sizes=None,
+    HAS_GROUP_CP_SIZES: tl.constexpr = False,
 ):
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -63,15 +65,27 @@ def _compute_slot_mappings_kernel(
         valid = offset < end_idx
         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
 
-        if CP_SIZE == 1:
+        if CP_SIZE == 1 and not HAS_GROUP_CP_SIZES:
+            # Fast path: no context parallelism at all.
             local_positions = positions
             is_local = True
         else:
-            virtual_block_size = kv_block_size * CP_SIZE
+            # Per-group CP size: replicated groups (e.g. the DeepSeek-V4
+            # SWA/state sliding-window caches) pass 1 and keep the full
+            # sequence slots; sharded groups keep the interleave ownership
+            # mask. With group_cp_size == 1 the arithmetic degenerates to the
+            # identity mapping.
+            if HAS_GROUP_CP_SIZES:
+                group_cp_size = tl.load(group_cp_sizes + group_id)
+            else:
+                group_cp_size = CP_SIZE
+            virtual_block_size = kv_block_size * group_cp_size
             virtual_block_indices = positions // virtual_block_size
             virtual_block_offsets = positions - virtual_block_indices * virtual_block_size
-            is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-            rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
+            is_local = (group_cp_size == 1) | (
+                virtual_block_offsets // CP_INTERLEAVE % group_cp_size == cp_rank
+            )
+            rounds = virtual_block_offsets // (CP_INTERLEAVE * group_cp_size)
             remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
             local_positions = virtual_block_indices * kv_block_size + local_offsets
@@ -98,7 +112,7 @@ def _compute_slot_mappings_kernel(
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
 
         slot_ids = block_numbers * kernel_block_size + block_offsets
-        if CP_SIZE != 1:
+        if CP_SIZE != 1 or HAS_GROUP_CP_SIZES:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)

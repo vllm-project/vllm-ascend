@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+import os
 from contextlib import AbstractContextManager
 
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -34,21 +40,49 @@ def initialize_kv_cache(
     block_sizes = []
     max_num_blocks_per_group = []
     slot_mapping_enabled = []
+    group_cp_sizes = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
+        # Sliding-window caches are REPLICATED across DCP ranks (upstream
+        # dcp_world_size_for_kv_cache_spec semantics); their slot mappings
+        # must keep full-sequence positions instead of the interleave
+        # ownership mask, or every rank outside the first stripe writes an
+        # empty cache (e.g. the DeepSeek-V4 SWA/state groups).
+        if isinstance(layer_spec, (SlidingWindowSpec, SlidingWindowMLASpec)):
+            group_cp_sizes.append(1)
+        else:
+            group_cp_sizes.append(self.dcp_size)
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
-        max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
+        raw_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
         # Preserve each cache type's alignment requirements after applying
         # its topology-aware block-table width.
         max_num_blocks = upstream.get_block_table_width(
-            max_num_blocks,
+            raw_blocks,
             spec.block_size,
             token_alignment=spec.block_table_token_alignment,
         )
+        # Replicated (sliding-window) caches are written per token position
+        # across the whole sequence -- the DCP SWA/state paths address them
+        # with the full seq_lens -- so their row must span max_model_len.  The
+        # spec reports a window-bounded width, which is smaller than what the
+        # scheduler allocates for long sequences (observed: needs 320 blocks
+        # against a window-sized width of 256).
+        if group_cp_sizes[-1] == 1:
+            full_seq_blocks = (block_table_max_model_len + spec.block_size - 1) // spec.block_size
+            max_num_blocks = max(max_num_blocks, full_seq_blocks)
+        if os.environ.get("DSA_DCP_DEBUG") == "1":
+            print(
+                f"[dsa-dcp-kv] init group={len(block_sizes) - 1}"
+                f" spec={type(layer_spec).__name__}"
+                f" block_size={spec.block_size} raw_blocks={raw_blocks}"
+                f" width={max_num_blocks} cp_size={group_cp_sizes[-1]}"
+                f" max_model_len={block_table_max_model_len}",
+                flush=True,
+            )
         max_num_blocks_per_group.append(max_num_blocks)
 
     target_attn_layer_names = None
@@ -89,18 +123,36 @@ def initialize_kv_cache(
         additional_attn_cg_support=additional_attn_cg_support,
     )
 
-    self.block_tables = upstream.BlockTables(
-        block_sizes=block_sizes,
-        max_num_reqs=self.max_num_reqs,
-        max_num_batched_tokens=self.max_num_tokens,
-        max_num_blocks_per_group=max_num_blocks_per_group,
-        device=self.device,
-        kernel_block_sizes=self.kernel_block_sizes,
-        slot_mapping_enabled=slot_mapping_enabled,
-        cp_size=self.dcp_size,
-        cp_rank=self.dcp_rank,
-        cp_interleave=self.cp_interleave,
-    )
+    if self.dcp_size > 1:
+        # DCP: per-group CP sizes keep replicated groups (the DSV4
+        # SWA/state caches) unmasked in the slot mappings.
+        self.block_tables = AscendBlockTables(
+            block_sizes=block_sizes,
+            max_num_reqs=self.max_num_reqs,
+            max_num_batched_tokens=self.max_num_tokens,
+            max_num_blocks_per_group=max_num_blocks_per_group,
+            device=self.device,
+            kernel_block_sizes=self.kernel_block_sizes,
+            slot_mapping_enabled=slot_mapping_enabled,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
+            cp_interleave=self.cp_interleave,
+            group_cp_size=group_cp_sizes,
+        )
+    else:
+        # Non-DCP: keep the upstream block tables exactly as before.
+        self.block_tables = upstream.BlockTables(
+            block_sizes=block_sizes,
+            max_num_reqs=self.max_num_reqs,
+            max_num_batched_tokens=self.max_num_tokens,
+            max_num_blocks_per_group=max_num_blocks_per_group,
+            device=self.device,
+            kernel_block_sizes=self.kernel_block_sizes,
+            slot_mapping_enabled=slot_mapping_enabled,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
+            cp_interleave=self.cp_interleave,
+        )
     self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
         self.vllm_config,
         self.device,
