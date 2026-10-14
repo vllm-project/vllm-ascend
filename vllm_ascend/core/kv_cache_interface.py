@@ -411,6 +411,27 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendCompressorStateSpec(AscendSlidingWindowMLASpec):
+    """Scratch cache for the DeepSeek-V4 compressor state (DSA).
+
+    ``block_size`` counts state slots (2 for C4, 8 for C128), not token
+    pages, and a prefix hit never resumes from a cached state snapshot —
+    the compressor recomputes the state while rewriting the overlapped
+    window. With the inherited default ``prefix_cacheable`` these
+    tiny-block groups dragged the engine-wide cache block size and hash
+    granularity down to 2 tokens (#16270) and published never-reusable
+    state blocks into the shared hash table. DeepSeek-V4.1 handles the
+    same cache with a non-cacheable ``CircularBufferSpec``; the indexer
+    K-pool tail (``AscendIndexerKPoolTailSpec``) is the in-tree precedent
+    for opting out via a dedicated spec + manager pair.
+    """
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
 
@@ -481,6 +502,7 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 
 def register_ascend_kv_cache_specs() -> None:
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
+    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateManager
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     KVCacheSpecRegistry.register(
@@ -509,4 +531,9 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendIndexerKPoolTailSpec,
         manager_class=KpoolTailManager,
         uniform_type_base_spec=AscendIndexerKPoolTailSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCompressorStateSpec,
+        manager_class=AscendCompressorStateManager,
+        uniform_type_base_spec=AscendCompressorStateSpec,
     )

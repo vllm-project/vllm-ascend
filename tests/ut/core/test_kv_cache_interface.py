@@ -14,12 +14,14 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
+    AscendCompressorStateSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
     declared_kwarg,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    is_prefix_cacheable,
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
@@ -293,3 +295,65 @@ def test_a_layer_that_may_replay_warns_about_nothing():
         resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
+
+
+def _compressor_state_spec() -> AscendCompressorStateSpec:
+    return AscendCompressorStateSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=2048,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+
+
+def test_compressor_state_spec_opts_out_of_prefix_caching():
+    spec = _compressor_state_spec()
+    assert not is_prefix_cacheable(spec)
+
+    # Geometry is unchanged: the state slot stays the storage unit, and the
+    # uniform wrapper propagates the opt-out to the coordinator's predicate.
+    assert spec.storage_block_size == 2
+    uniform = UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs={"state_c4": spec})
+    assert not is_prefix_cacheable(uniform)
+
+    # Group merging must not fall back to the cacheable base spec.
+    merged = AscendCompressorStateSpec.merge([spec, spec])
+    assert type(merged) is AscendCompressorStateSpec
+    assert not is_prefix_cacheable(merged)
+
+
+def test_compressor_state_spec_routes_to_dedicated_manager():
+    register_ascend_kv_cache_specs()
+
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateManager
+
+    # State groups get the dedicated manager; plain SWA-MLA content caches
+    # keep the stock one.
+    assert KVCacheSpecRegistry.get_manager_class(_compressor_state_spec()) is AscendCompressorStateManager
+    assert KVCacheSpecRegistry.get_manager_class(_swa_spec()) is SlidingWindowManager
+
+
+def test_compressor_state_manager_skips_hash_bookkeeping():
+    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateManager
+
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=32)
+    manager = AscendCompressorStateManager(
+        kv_cache_spec=_compressor_state_spec(),
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4096,
+    )
+    # Caching is disabled before the base constructor runs, whatever the
+    # caller asked for.
+    assert manager.enable_caching is False
+
+    request = SimpleNamespace(request_id="r1", num_prompt_tokens=8, block_hashes=[0] * 4)
+    # The no-op write path is load-bearing: state block_size=2 does not divide
+    # the MLA-derived hash_block_size=32, which upstream cache_full_blocks
+    # asserts against (the stock manager would raise here).
+    manager.cache_blocks(request, 8)
+    assert manager.get_num_common_prefix_blocks("r1") == 0
