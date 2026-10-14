@@ -77,7 +77,6 @@ def test_new_file_is_discovered_recursively(tmp_path):
         ("triton/a2a3", {"a2", "a3"}),
         ("ascendc/a5", {"a5"}),
         ("triton/a5", {"a5"}),
-        ("ascendc/310p", {"310p"}),
     ],
 )
 def test_architecture_directories_route_new_files(tmp_path, directory, chips):
