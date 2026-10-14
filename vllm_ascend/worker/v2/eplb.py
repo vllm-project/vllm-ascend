@@ -131,8 +131,8 @@ class AscendEPLBController(EPLBController):
             self._has_registered_models = True
 
     else:
-
-        def setup_from_mapping(
+        # The two supported upstream revisions intentionally expose different signatures.
+        def setup_from_mapping(  # type: ignore[misc]
             self,
             model_config: Any,
             expanded_physical_to_logical: torch.Tensor,
