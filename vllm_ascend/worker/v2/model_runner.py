@@ -779,7 +779,7 @@ class NPUModelRunner(GPUModelRunner):
             # Reorder every per-request field before positions, slots, tables
             # and sampling indices are constructed. A short prompt is prefill.
             order = np.argsort(batch_state.is_prefilling_np, kind="stable")
-            batch_state = batch_state._replace(
+            reordered_fields = dict(
                 req_ids=[batch_state.req_ids[index] for index in order],
                 num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
                 idx_mapping_np=batch_state.idx_mapping_np[order],
@@ -787,6 +787,12 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed_prefill_tokens_np=batch_state.num_computed_prefill_tokens_np[order],
                 is_prefilling_np=batch_state.is_prefilling_np[order],
             )
+            # vLLM main adds optional per-request arrays; v0.30.0 lacks them.
+            for field in ("num_draft_tokens_np", "prefill_runs_as_decode_np"):
+                if field in batch_state._fields:
+                    values = getattr(batch_state, field)
+                    reordered_fields[field] = values[order] if values is not None else None
+            batch_state = batch_state._replace(**reordered_fields)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
