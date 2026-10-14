@@ -301,7 +301,6 @@ class ACLGraphWrapper:
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
-        if not self.enable_enpu and need_sync:
             try:
                 torch.npu.current_stream().synchronize()
             except RuntimeError as e:
@@ -310,7 +309,8 @@ class ACLGraphWrapper:
                         "NPU stream synchronize timed out during aclgraph replay "
                         "(error: %s). Worker will exit to prevent stale output. "
                         "This likely indicates an HCCL operation on the stream "
-                        "is blocked due to a dead DP peer.", e
+                        "is blocked due to a dead DP peer.",
+                        e,
                     )
                 raise
         try:
@@ -326,7 +326,8 @@ class ACLGraphWrapper:
                     "(e.g., torch.nonzero via mask indexing) being captured "
                     "in the aclgraph. The operator output shape changes "
                     "between capture and replay, causing a vector core MTE "
-                    "address out-of-range error.", e
+                    "address out-of-range error.",
+                    e,
                 )
             raise
         logger.info_once("ACL graph replay is active (logged once).")
