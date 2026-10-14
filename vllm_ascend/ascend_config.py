@@ -1335,8 +1335,10 @@ class FinegrainedTPConfig:
             self.mlp_tensor_parallel_size,
         )
         pipeline_parallel_size = getattr(vc.parallel_config, "pipeline_parallel_size", 1)
-        if isinstance(pipeline_parallel_size, int) and pipeline_parallel_size > 1 and any(
-            size > 0 for size in module_tp_sizes
+        if (
+            isinstance(pipeline_parallel_size, int)
+            and pipeline_parallel_size > 1
+            and any(size > 0 for size in module_tp_sizes)
         ):
             raise AssertionError(
                 "finegrained_tp_config is not supported with pipeline_parallel_size > 1; "
