@@ -81,7 +81,7 @@ def split_qkv_rmsnorm_mrope_kernel(
 ):
     core_idx = tl.program_id(0)
     token_begin = core_idx * tokens_per_core
-    core_tokens = tl.minimum(num_tokens - token_begin, tokens_per_core)
+    core_tokens = tl.maximum(0, tl.minimum(num_tokens - token_begin, tokens_per_core))
 
     # Section masks are loop-invariant: compute them once per core.
     cos_offsets = tl.arange(0, half_rope_dim)
@@ -104,8 +104,8 @@ def split_qkv_rmsnorm_mrope_kernel(
         # Round `weight + offset` back to the weight dtype so the inline path
         # matches the numerics of the cached cos/sin call sites, which pass
         # `1.0 + weight` precomputed in the weight dtype.
-        q_rmsnorm_weight = q_rmsnorm_weight.to(q_weight_ptr.dtype.element_ty).to(tl.float32)
-        k_rmsnorm_weight = k_rmsnorm_weight.to(k_weight_ptr.dtype.element_ty).to(tl.float32)
+        q_rmsnorm_weight = q_rmsnorm_weight.to(q_weight_ptr.type.element_ty).to(tl.float32)
+        k_rmsnorm_weight = k_rmsnorm_weight.to(k_weight_ptr.type.element_ty).to(tl.float32)
 
     if has_bias:
         q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
@@ -119,7 +119,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     if INLINE_COS_SIN:
         inv_freq_row = tl.load(inv_freq_ptr + cos_offsets).to(tl.float32)
 
-    qkv_ty = in_qkv_ptr.dtype.element_ty
+    qkv_ty = in_qkv_ptr.type.element_ty
 
     # Token blocks: positions are loaded once per block as vectors and the
     # inline cos/sin transcendentals run on full-width (block, half) tiles.
