@@ -738,6 +738,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
         q_pe = q_pe.view(num_tokens, num_heads, -1)
         if flash is None:
+            assert cache_k_pe is not None
             history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
             history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
         else:
@@ -752,6 +753,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
         if _EXTRA_CTX.capturing and flash is None:
+            assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+            assert decode_meta.actual_seq_lengths_q is not None
+            assert decode_meta.cp_history_seq_len is not None
             if _EXTRA_CTX.is_draft_model:
                 graph_params = (
                     get_draft_graph_prefill_params() if _EXTRA_CTX.is_draft_model_prefill else get_draft_graph_params()
@@ -806,6 +810,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 del workspaces
 
         if flash is None:
+            assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+            assert decode_meta.actual_seq_lengths_q is not None
+            assert decode_meta.cp_history_seq_len is not None
+            assert history_k_pe is not None
             history_output, history_lse = self._run_dcp_mtp_split_attention_op(
                 q_nope,
                 q_pe,
@@ -832,11 +840,18 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         if has_current:
             attn_stream = cp_decode_comm_stream()
             history_ready = main_stream.record_event()
-            current_tensors = (current_q_nope, current_q_pe, current_k_nope, current_k_pe)
+            current_tensors: tuple[torch.Tensor | None, ...] = (
+                current_q_nope,
+                current_q_pe,
+                current_k_nope,
+                current_k_pe,
+            )
             if flash is None:
+                assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
                 current_tensors += (decode_meta.attn_mask,)
             else:
                 current = flash.current
+                assert current is not None
                 current_tensors += (
                     current.query,
                     current.cache,
@@ -855,6 +870,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 attn_stream.wait_event(history_ready)
                 # Replicated current KV contributes once for this rank's heads.
                 if flash is None:
+                    assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+                    assert decode_meta.actual_seq_lengths_q is not None
                     current_output, current_lse = self._run_dcp_mtp_split_attention_op(
                         current_q_nope,
                         current_q_pe,

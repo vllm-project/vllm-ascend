@@ -150,11 +150,13 @@ class FlashMLAMetadataBuilder:
                 raise ValueError("FlashMLA graph buffers require a decode-only batch")
             flash = self._allocate(tokens, rows, columns, common.causal)
         else:
-            flash = self.buffers.get(key)
-            if flash is None:
+            cached_flash = self.buffers.get(key)
+            if cached_flash is None:
                 flash = self._allocate(tokens, rows, columns, common.causal)
                 if retain_for_graph:
                     self.buffers[key] = flash
+            else:
+                flash = cached_flash
 
         def refresh():
             # All refreshes belong to the executor task, after its reuse fence.
@@ -194,6 +196,7 @@ class FlashMLAMetadataBuilder:
             positions = common.positions[:num_decode_tokens]
             flash.positions[: positions.numel()].copy_(positions)
             if self.use_rope:
+                assert flash.cos is not None and flash.sin is not None
                 cos, sin = get_cos_and_sin_mla(flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
