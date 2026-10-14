@@ -409,6 +409,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits_indices_np=logits_indices_np,
         )
         input_batch_kwargs["has_prefill"] = batch_has_prefill
+        # vLLM main added `decode_graph_eligible` (required) to InputBatch; the
+        # v0.30.0 lane has no such field.
+        if not vllm_version_is("0.30.0"):
+            input_batch_kwargs["decode_graph_eligible"] = not batch_has_prefill
         input_batch = Ascend310PInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
