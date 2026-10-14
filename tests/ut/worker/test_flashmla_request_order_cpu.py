@@ -26,7 +26,9 @@ def runner():
     path = ROOT / "vllm_ascend/worker/v2/model_runner.py"
     tree = ast.parse(path.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner")
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "gather_batch_req_state")
+    method = next(
+        node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "gather_batch_req_state"
+    )
 
     class Parent:
         def gather_batch_req_state(self, scheduler_output, dummy_run):
@@ -37,7 +39,9 @@ def runner():
     )
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
     scope = {"np": np, "Parent": Parent}
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[future, owner], type_ignores=[])), str(path), "exec"), scope)
+    exec(
+        compile(ast.fix_missing_locations(ast.Module(body=[future, owner], type_ignores=[])), str(path), "exec"), scope
+    )
     instance = scope["Runner"]()
     instance.vllm_config = SimpleNamespace(kv_transfer_config=None)
     instance.flashmla_executor = object()
