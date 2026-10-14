@@ -1564,6 +1564,209 @@ def test_sparse_attn_decode_rejects_invalid_reused_prefix(shape: tuple[int, ...]
         )
 
 
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_sparse_decode_reuses_schedule_but_keeps_layer_inputs(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock], query_len: int
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    schedule = torch.zeros(1024, dtype=torch.int32)
+    metadata_op.return_value = schedule
+    cache: dict = {}
+    counts = torch.ones((2, query_len), dtype=torch.int32)
+    prefix = torch.tensor([0, query_len], dtype=torch.int64)
+    seq_lens = torch.tensor([512], dtype=torch.int32)
+    table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    for layer in range(3):
+        q = torch.full((query_len, 2, 4), layer, dtype=torch.bfloat16)
+        kv = torch.full((2, 4, 128, 2, 4), layer, dtype=torch.bfloat16)
+        indices = torch.full((2, query_len, 1), layer, dtype=torch.int32)
+        attention_op.return_value = (torch.full_like(q, layer + 1), torch.empty(0))
+        output = torch.empty_like(q)
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            kv,
+            indices,
+            table,
+            seq_lens,
+            2,
+            0.5,
+            output,
+            query_len,
+            select_num_idx=counts,
+            cu_seqlens_q=prefix,
+            gbsa_metadata_cache=cache,
+        )
+        args, kwargs = attention_op.call_args
+        assert args[0] is q
+        assert torch.equal(args[1], kv[0])
+        assert torch.equal(args[2], kv[1])
+        assert args[3] is indices
+        assert args[4] is counts
+        assert kwargs["metadata"] is schedule
+        assert torch.equal(output, torch.full_like(q, layer + 1))
+    assert metadata_op.call_count == 1
+    assert attention_op.call_count == 3
+
+
+def test_sparse_decode_new_forward_rebuilds_schedule_for_changed_counts(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    q = torch.zeros((4, 2, 4), dtype=torch.bfloat16)
+    kv = torch.zeros((2, 4, 128, 2, 4), dtype=torch.bfloat16)
+    attention_op.return_value = (q, torch.empty(0))
+    schedules = [torch.full((1024,), i, dtype=torch.int32) for i in range(2)]
+    metadata_op.side_effect = schedules
+    for count in (1, 2):
+        cache: dict = {}
+        for _ in range(2):
+            minimax_m3_sparse_attn_decode_npu(
+                q,
+                kv,
+                torch.zeros((2, 4, 2), dtype=torch.int32),
+                torch.zeros((1, 4), dtype=torch.int32),
+                torch.tensor([128 * count], dtype=torch.int32),
+                2,
+                0.5,
+                torch.empty_like(q),
+                4,
+                select_num_idx=torch.full((2, 4), count, dtype=torch.int32),
+                cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int64),
+                gbsa_metadata_cache=cache,
+            )
+            assert attention_op.call_args.kwargs["metadata"] is schedules[count - 1]
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize("changed", ["heads", "topk", "query_len", "head_dim"])
+def test_sparse_decode_cache_separates_scheduling_configurations(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    changed: str,
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    cache: dict = {}
+    metadata_op.side_effect = [torch.zeros(1024, dtype=torch.int32) for _ in range(2)]
+    for second in (False, True):
+        qlen = 1 if second and changed == "query_len" else 4
+        heads = 4 if second and changed == "heads" else 2
+        width = 2 if second and changed == "topk" else 1
+        dim = 8 if second and changed == "head_dim" else 4
+        q = torch.zeros((qlen, heads, dim), dtype=torch.bfloat16)
+        attention_op.return_value = (q, torch.empty(0))
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros((2, 4, 128, 2, dim), dtype=torch.bfloat16),
+            torch.zeros((2, qlen, width), dtype=torch.int32),
+            torch.zeros((1, 4), dtype=torch.int32),
+            torch.tensor([512], dtype=torch.int32),
+            2,
+            0.5,
+            torch.empty_like(q),
+            qlen,
+            cu_seqlens_q=torch.tensor([0, qlen], dtype=torch.int64),
+            gbsa_metadata_cache=cache,
+        )
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "query_len,block_size,dtype", [(2, 128, torch.bfloat16), (4, 64, torch.bfloat16), (4, 128, torch.float16)]
+)
+def test_sparse_decode_unverified_paths_do_not_reuse_metadata(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    query_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    q = torch.zeros((query_len, 2, 4), dtype=dtype)
+    attention_op.return_value = (q, torch.empty(0))
+    cache: dict = {}
+    for _ in range(2):
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros((2, 4, block_size, 2, 4), dtype=dtype),
+            torch.zeros((2, query_len, 1), dtype=torch.int32),
+            torch.zeros((1, 4), dtype=torch.int32),
+            torch.tensor([128], dtype=torch.int32),
+            2,
+            0.5,
+            torch.empty_like(q),
+            query_len,
+            block_size=block_size,
+            cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int64),
+            gbsa_metadata_cache=cache,
+        )
+    assert not cache
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "device_type,enabled", [(AscendDeviceType.A3, True), (AscendDeviceType.A2, False), (AscendDeviceType.A5, False)]
+)
+def test_sparse_builder_metadata_cache_is_forward_local(device_type: AscendDeviceType, enabled: bool) -> None:
+    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=device_type):
+        builder = _make_sparse_builder(torch.device("cpu"))
+        common = _create_common_attn_metadata(BatchSpec([512], [1]), 128, torch.device("cpu"))
+        first = builder.build(0, common).decode
+        second = builder.build(0, common).decode
+    assert first is not None and second is not None
+    if enabled:
+        assert first.gbsa_metadata_cache == {} and second.gbsa_metadata_cache == {}
+        assert first.gbsa_metadata_cache is not second.gbsa_metadata_cache
+    else:
+        assert first.gbsa_metadata_cache is None and second.gbsa_metadata_cache is None
+
+
+def test_sparse_impl_resets_reused_metadata_before_warmup_or_capture() -> None:
+    decode = AscendMiniMaxM3SparseDecodeMetadata(
+        seq_lens=torch.tensor([512], dtype=torch.int32),
+        block_table=torch.zeros((1, 4), dtype=torch.int32),
+        max_seq_len=512,
+        decode_query_len=4,
+        cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int64),
+        gbsa_metadata_cache={},
+    )
+    md = AscendMiniMaxM3SparseMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=512,
+        slot_mapping=torch.arange(4),
+        num_actual_tokens=4,
+        num_decodes=1,
+        num_decode_tokens=4,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    impl = AscendMiniMaxM3SparseImpl(2, 4, 0.5, 2, topk_blocks=16, sparse_block_size=128)
+    cache_sizes = []
+
+    def fake_decode(*args, **kwargs):
+        cache = kwargs["gbsa_metadata_cache"]
+        cache_sizes.append(len(cache))
+        cache[("schedule",)] = torch.zeros(1024, dtype=torch.int32)
+
+    with (
+        patch.object(
+            msa_m3_module,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={"layer3": md, "layer4": md},
+            ),
+        ),
+        patch.object(msa_m3_module, "minimax_m3_sparse_attn_decode", side_effect=fake_decode),
+    ):
+        for name in ["layer3", "layer4", "layer3", "layer4"]:
+            impl.forward(
+                SimpleNamespace(layer_name=name),
+                torch.zeros((4, 8), dtype=torch.bfloat16),
+                torch.empty(0),
+                (torch.zeros((2, 4, 16), dtype=torch.int32), None, None),
+                torch.empty((4, 8), dtype=torch.bfloat16),
+            )
+    assert cache_sizes == [0, 1, 0, 1]
+
+
 def test_m3_impls_provide_update_graph_params_protocol():
     """Both M3 impls must satisfy the update_graph_params protocol.
 

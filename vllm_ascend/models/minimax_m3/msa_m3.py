@@ -642,6 +642,8 @@ class AscendMiniMaxM3SparseDecodeMetadata:
     max_seq_len: int
     decode_query_len: int
     cu_seqlens_q: torch.Tensor | None = None
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None
+    gbsa_metadata_first_layer: str | None = None
 
 
 @dataclass
@@ -774,6 +776,12 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 cu_seqlens_q=(
                     self._get_decode_cu_seqlens_q(active_decodes, decode_query_len) if active_decodes > 0 else None
                 ),
+                # These layers share sequence lengths and the AscendC TopK
+                # validity mask. Their selected block IDs may differ, but the
+                # number of valid blocks per query does not. A new cache on
+                # every build prevents eager forwards from retaining a stale
+                # schedule; graph capture records the first metadata op.
+                gbsa_metadata_cache={} if get_ascend_device_type() == AscendDeviceType.A3 else None,
             )
 
         return AscendMiniMaxM3SparseMetadata(
@@ -840,6 +848,14 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None and decode_topk is not None
+            # Warmup and graph capture may reuse a metadata object. Starting
+            # its first sparse layer again must record a fresh metadata op,
+            # rather than capturing a schedule left by an earlier warmup.
+            if d.gbsa_metadata_cache is not None:
+                if d.gbsa_metadata_first_layer is None:
+                    d.gbsa_metadata_first_layer = layer.layer_name
+                elif d.gbsa_metadata_first_layer == layer.layer_name:
+                    d.gbsa_metadata_cache.clear()
             if self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
                 self._dequant_scale = torch.ones(
                     (1, 1, 1, 1),
@@ -860,6 +876,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 select_num_idx=decode_select_num_idx,
                 dequant_scale=self._dequant_scale,
                 cu_seqlens_q=d.cu_seqlens_q,
+                gbsa_metadata_cache=d.gbsa_metadata_cache,
             )
 
         if main_md.num_prefills > 0:
