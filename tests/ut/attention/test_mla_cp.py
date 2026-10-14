@@ -591,6 +591,8 @@ class TestMLADCPQReplication(unittest.TestCase):
         impl.num_heads = 2
         impl.dcp_size = dcp
         impl.dcp_rank = rank
+        impl.dcp_enabled = dcp > 1
+        impl.pcp_enabled = False
         impl.is_pcp_decode_sharded = False
         impl.speculative_config = None
         impl.dcp_q_replicate_enabled = active
@@ -602,6 +604,7 @@ class TestMLADCPQReplication(unittest.TestCase):
         impl.v_head_dim = 3
         impl.num_kv_heads = 1
         impl.enable_mlapo = impl.fa_quant_layer = False
+        impl.use_mla_rope = impl.enable_kv_nz = False
         return impl
 
     def test_decode_projection_matches_gathered_local_projections(self):

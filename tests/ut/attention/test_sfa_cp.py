@@ -1939,12 +1939,27 @@ class TestSFADCPQReplication(unittest.TestCase):
                         create=True,
                         return_value=(group_output, stats, torch.ones_like(stats)),
                     ) as kernel,
+                    patch.object(
+                        sfa_v1.torch_npu,
+                        "npu_kv_quant_sparse_flash_attention",
+                        create=True,
+                        return_value=group_output,
+                    ) as npu_kernel,
                 ):
                     output = impl._execute_sparse_flash_attention_process(q, pe, (cache,), topk, metadata, [2], [3])
-                kwargs = kernel.call_args.kwargs
+                # Prefill can use torch_npu; decode needs the custom op's LSE.
+                if npu_kernel.called:
+                    self.assertTrue(prefill)
+                    npu_kernel.assert_called_once()
+                    kernel.assert_not_called()
+                    kwargs = npu_kernel.call_args.kwargs
+                else:
+                    kernel.assert_called_once()
+                    npu_kernel.assert_not_called()
+                    kwargs = kernel.call_args.kwargs
+                    self.assertIs(kwargs["return_softmax_lse"], not prefill)
                 torch.testing.assert_close(kwargs["query"], torch.cat((q, pe), dim=-1))
                 self.assertIs(kwargs["key"], cache)
-                self.assertIs(kwargs["return_softmax_lse"], not prefill)
                 self.assertEqual(kwargs["sparse_mode"], 3 if prefill else 0)
                 self.assertIs(output, group_output if prefill else local_output)
                 self.assertEqual(impl._merge_dcp_outputs.call_count, int(not prefill))
