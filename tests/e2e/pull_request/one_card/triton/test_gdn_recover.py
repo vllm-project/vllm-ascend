@@ -129,6 +129,13 @@ def test_verify_commit_all_prefixes_and_guards(geometry, dtype, index_dtype):
         assert torch.equal(record_raw.cpu(), record_after), "commit modified replay records"
 
 
+@pytest.mark.parametrize("window", [3, 5, 6])
+def test_intermediate_mtp_windows(window):
+    # Window=2/4 is already covered above; include every other engine-supported
+    # MTP window, including five drafts plus the mandatory input.
+    test_verify_commit_all_prefixes_and_guards((2, 4, 64, 32, window), torch.bfloat16, torch.int32)
+
+
 @pytest.mark.parametrize("history,window,channels", [(1, 2, 19), (3, 4, 257), (5, 8, 10240)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_conv_save_and_every_prefix(history, window, channels, dtype):
