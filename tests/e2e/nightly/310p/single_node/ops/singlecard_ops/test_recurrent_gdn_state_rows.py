@@ -4,11 +4,11 @@
 
 import json
 from functools import partial
+from importlib import import_module
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.vllm_ascend_C  # noqa: F401
 
 from vllm_ascend._310p.ops.fla.gdn_310 import npu_recurrent_gated_delta_rule_310
 
@@ -57,6 +57,7 @@ def call_kernel(op, wrapper, q, k, v, beta, state, seq, indices, g, accepted, sc
 @pytest.mark.parametrize("graph_mode,use_wrapper", [(False, False), (True, False), (True, True)])
 def test_recurrent_state_rows(graph_mode, use_wrapper):
     # Exercise dynamic layouts on the same buffers, including graph replay.
+    import_module("vllm_ascend.vllm_ascend_C")
     torch.npu.set_device(0)
     torch.npu.set_compile_mode(jit_compile=False)
     torch.manual_seed(17856)
