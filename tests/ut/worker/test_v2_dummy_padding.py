@@ -129,8 +129,10 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert desc.cg_mode == CUDAGraphMode.PIECEWISE
         assert desc.num_tokens == capture_size
         batch = AscendInputBatch.make_dummy(1, desc.num_tokens, buffers, desc.max_query_len)
+        # vLLM main renamed the helper arg from has_prefill to decode_graph_eligible.
+        eligibility = batch.has_prefill if vllm_version_is("0.30.0") else batch.decode_graph_eligible
         actual_uniform = get_uniform_decode_token_count(
-            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.has_prefill
+            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), eligibility
         )
         assert actual_uniform == uniform
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(

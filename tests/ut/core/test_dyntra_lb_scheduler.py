@@ -31,8 +31,32 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
+
+
+def _mark_skipped(scheduler, request) -> None:
+    """Queue a request as skipped in the layout of the running upstream lane."""
+    if vllm_version_is("0.30.0"):
+        scheduler.skipped_waiting.add_request(request)
+    else:
+        # Upstream main (#58947): deferred requests are tracked in a set and
+        # physically live in `kv_holding_waiting` (block holders) or `waiting`.
+        scheduler.deferred_waiting.add(request)
+        scheduler.kv_holding_waiting.add_request(request)
+
+
+def _is_skipped(scheduler, request) -> bool:
+    if vllm_version_is("0.30.0"):
+        return request in scheduler.skipped_waiting
+    return request in scheduler.deferred_waiting
+
+
+def _summary_waiting_kwargs(skipped_waiting):
+    if vllm_version_is("0.30.0"):
+        return {"skipped_waiting": skipped_waiting}
+    return {"kv_holding_waiting": skipped_waiting}
 
 
 def make_dyntra_test_config(
@@ -183,7 +207,7 @@ def test_dyntra_lb_keeps_async_kv_load_in_skipped_waiting():
     scheduler_output = scheduler.schedule()
 
     assert remote_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert remote_request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, remote_request)
     assert remote_request not in scheduler.waiting
     assert ready_request in scheduler.running
     assert ready_request.request_id in scheduler_output.num_scheduled_tokens
@@ -200,8 +224,9 @@ def test_dyntra_lb_blocked_statuses_are_enqueued_in_skipped_waiting():
     request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
     scheduler._enqueue_waiting_request(request)
 
-    assert request in scheduler.skipped_waiting
-    assert request not in scheduler.waiting
+    assert _is_skipped(scheduler, request)
+    if vllm_version_is("0.30.0"):
+        assert request not in scheduler.waiting
 
 
 def test_dyntra_lb_invalid_async_load_scans_skipped_waiting(monkeypatch):
@@ -212,7 +237,7 @@ def test_dyntra_lb_invalid_async_load_scans_skipped_waiting(monkeypatch):
     )
     request = create_request(request_id=1)
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.skipped_waiting.add_request(request)
+    _mark_skipped(scheduler, request)
     scanned_requests = []
 
     def _capture_requests(requests, *args, **kwargs):
@@ -246,7 +271,7 @@ def test_dyntra_lb_prepare_moves_prefetched_request_to_skipped_waiting():
     candidates = scheduler.prepare_dyntra_lb_step()
 
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.waiting
     assert request not in candidates
     assert request in scheduler._inflight_prefills
@@ -270,7 +295,7 @@ def test_dyntra_lb_priority_merges_waiting_queues_in_schedule_order():
     lowest_priority.arrival_time = 1.0
     scheduler.waiting.add_request(highest_priority)
     scheduler.waiting.add_request(lowest_priority)
-    scheduler.skipped_waiting.add_request(middle_priority)
+    _mark_skipped(scheduler, middle_priority)
 
     ordered = scheduler._waiting_requests_in_schedule_order()
 
@@ -383,7 +408,7 @@ def test_dyntra_lb_does_not_resume_deliverable_stale_output():
 
     blocked_output = scheduler.schedule()
 
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.running
     assert request.request_id not in blocked_output.num_scheduled_tokens
 
@@ -632,11 +657,14 @@ def test_dyntra_lb_refreshes_blocked_waiting_requests(monkeypatch):
     )
     blocked_request = create_request(request_id=1)
     blocked_request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.skipped_waiting.add_request(blocked_request)
+    _mark_skipped(scheduler, blocked_request)
     promoted = []
+    promote_hook = (
+        "_try_promote_blocked_waiting_request" if vllm_version_is("0.30.0") else "_handle_blocked_waiting_request"
+    )
     monkeypatch.setattr(
         scheduler,
-        "_try_promote_blocked_waiting_request",
+        promote_hook,
         lambda request: promoted.append(request),
     )
 
@@ -722,7 +750,7 @@ def test_dyntra_lb_in_blk_builds_admission_mask():
 
     assert long_request in scheduler.running
     assert long_request.request_id in scheduler_output.num_scheduled_tokens
-    assert short_request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, short_request)
     assert short_request.request_id not in scheduler_output.num_scheduled_tokens
 
 
@@ -745,7 +773,7 @@ def test_dyntra_lb_empty_in_blk_blocks_all_admission():
     scheduler_output = scheduler.schedule()
 
     assert not scheduler.running
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request.request_id not in scheduler_output.num_scheduled_tokens
 
 
@@ -772,7 +800,7 @@ def test_dyntra_lb_same_block_count_uses_candidate_order():
 
     assert candidates == [first_request, second_request]
     assert first_request in scheduler.running
-    assert second_request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, second_request)
 
 
 def test_dyntra_lb_out_request_is_not_readmitted_in_same_step():
@@ -801,7 +829,7 @@ def test_dyntra_lb_out_request_is_not_readmitted_in_same_step():
 
     assert request.status == RequestStatus.PREEMPTED
     assert request.request_id in scheduler._lb_paused_req_ids
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.running
 
 
@@ -842,7 +870,7 @@ def test_dyntra_lb_async_finished_lb_paused_request_is_removed_from_skipped_wait
     scheduler.schedule()
 
     assert request.status == RequestStatus.PREEMPTED
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.waiting
 
     # The delayed token reaches max_tokens=1 and finishes the paused request.
@@ -853,7 +881,7 @@ def test_dyntra_lb_async_finished_lb_paused_request_is_removed_from_skipped_wait
 
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert request not in scheduler.waiting
-    assert request not in scheduler.skipped_waiting
+    assert not _is_skipped(scheduler, request)
 
     # Dynamic LB may become inactive on the following step. A stale finished
     # request must not be picked up again.
@@ -1084,13 +1112,15 @@ def test_print_scheduler_summary_includes_waiting_queues(monkeypatch):
                 9,
             )
         ],
-        skipped_waiting=[
-            _diagnostic_request(
-                "remote",
-                RequestStatus.WAITING_FOR_REMOTE_KVS,
-                5,
-            )
-        ],
+        **_summary_waiting_kwargs(
+            [
+                _diagnostic_request(
+                    "remote",
+                    RequestStatus.WAITING_FOR_REMOTE_KVS,
+                    5,
+                )
+            ]
+        ),
         block_size=8,
         cache_config=SimpleNamespace(block_size=8),
     )
@@ -1137,7 +1167,7 @@ def test_print_scheduler_summary_distinguishes_lb_pause_from_preemption(monkeypa
                 25,
             ),
         ],
-        skipped_waiting=[],
+        **_summary_waiting_kwargs([]),
         block_size=8,
         cache_config=SimpleNamespace(block_size=8),
         _lb_paused_req_ids={"lb-paused"},
@@ -1167,7 +1197,7 @@ def test_print_scheduler_summary_uses_effective_attention_block_size(monkeypatch
             )
         ],
         waiting=[],
-        skipped_waiting=[],
+        **_summary_waiting_kwargs([]),
         block_size=14080000,
         cache_config=SimpleNamespace(block_size=2048),
     )
@@ -1245,7 +1275,7 @@ def test_print_scheduler_summary_counts_structured_output_waiting(monkeypatch):
         SimpleNamespace(
             running=[],
             waiting=[],
-            skipped_waiting=[_diagnostic_request("fsm", grammar_status, 9)],
+            **_summary_waiting_kwargs([_diagnostic_request("fsm", grammar_status, 9)]),
             block_size=8,
             cache_config=SimpleNamespace(block_size=8),
         ),
@@ -1264,7 +1294,7 @@ def test_dyntra_lb_waiting_order_fcfs_and_priority_remainder():
     scheduler = _sync_scheduler()
     skipped = create_request(request_id=1)
     waiting = create_request(request_id=2)
-    scheduler.skipped_waiting.add_request(skipped)
+    _mark_skipped(scheduler, skipped)
     scheduler.waiting.add_request(waiting)
     assert scheduler._waiting_requests_in_schedule_order() == [skipped, waiting]
 
@@ -1277,8 +1307,8 @@ def test_dyntra_lb_waiting_order_fcfs_and_priority_remainder():
     highest.priority, middle.priority, lowest.priority = 0, 1, 2
     highest.arrival_time, middle.arrival_time, lowest.arrival_time = 3.0, 2.0, 1.0
     priority_scheduler.waiting.add_request(highest)
-    priority_scheduler.skipped_waiting.add_request(middle)
-    priority_scheduler.skipped_waiting.add_request(lowest)
+    _mark_skipped(priority_scheduler, middle)
+    _mark_skipped(priority_scheduler, lowest)
     assert priority_scheduler._waiting_requests_in_schedule_order() == [highest, middle, lowest]
 
 
@@ -1296,7 +1326,7 @@ def test_dyntra_lb_prefetch_skips_ineligible_requests(monkeypatch):
     computed.status = RequestStatus.PREEMPTED
     computed.num_computed_tokens = 4
     idle = create_request(request_id=3)
-    scheduler.skipped_waiting.add_request(blocked)
+    _mark_skipped(scheduler, blocked)
     scheduler.waiting.add_request(computed)
     scheduler.add_request(idle)
     monkeypatch.setattr(scheduler.connector, "get_num_new_matched_tokens", lambda *args: (0, False))
@@ -1350,10 +1380,10 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
 
     paused = create_request(request_id=1)
     paused.status = RequestStatus.PREEMPTED
-    scheduler.skipped_waiting.add_request(paused)
+    _mark_skipped(scheduler, paused)
     monkeypatch.setattr(Scheduler, "_handle_stopped_request", lambda self, request: True)
     assert scheduler._handle_stopped_request(paused) is True
-    assert paused not in scheduler.skipped_waiting
+    assert not _is_skipped(scheduler, paused)
 
     running = create_request(request_id=2)
     running.status = RequestStatus.RUNNING

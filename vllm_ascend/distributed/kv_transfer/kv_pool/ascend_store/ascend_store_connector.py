@@ -201,6 +201,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if cache is not None and request is not None:
             cache.save(request, through_tokens, block_ids)
 
+    def shutdown(self):
+        """Release the lookup RPC resources owned by this connector."""
+        try:
+            if self.connector_scheduler is not None:
+                client = self.connector_scheduler.client
+                if client is not None:
+                    client.close()
+        finally:
+            if hasattr(self, "lookup_server"):
+                self.lookup_server.close()
+            super().shutdown()
+
     ############################################################
     # Scheduler Side Methods
     ############################################################
@@ -498,32 +510,69 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
+        self._closed = False
 
         def process_request():
-            while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(all_frames[0], byteorder="big")
-                kv_group_ids = self.decoder.decode([all_frames[1]])
-                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                hashes_str = self.decoder.decode(all_frames[3:])
-                result = self.pool_worker.lookup_scheduler(
-                    token_len,
-                    hashes_str,
-                    kv_group_ids,
-                    use_layerwise=False,
-                    hbm_hit_tokens=hbm_hit_tokens,
-                )
-                logger.debug(
-                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                    token_len,
-                    kv_group_ids,
-                    result,
-                )
-                response = result.to_bytes(4, "big")
-                self.socket.send(response)
+            poller = zmq.Poller()  # type: ignore[attr-defined]
+            poller.register(self.socket, zmq.POLLIN)  # type: ignore[attr-defined]
+            try:
+                while self.running:
+                    if not poller.poll(timeout=100):
+                        continue
+
+                    # A failed receive leaves a REP socket in an unknown
+                    # protocol state. Do not try to send a synthetic reply.
+                    try:
+                        all_frames = self.socket.recv_multipart(copy=False)
+                    except zmq.ZMQError:  # type: ignore[attr-defined]
+                        if self.running:
+                            logger.exception("Failed to receive KV pool lookup request")
+                        break
+
+                    try:
+                        token_len = int.from_bytes(all_frames[0], byteorder="big")
+                        kv_group_ids = self.decoder.decode([all_frames[1]])
+                        hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
+                        hashes_str = self.decoder.decode(all_frames[3:])
+                        result = self.pool_worker.lookup_scheduler(
+                            token_len,
+                            hashes_str,
+                            kv_group_ids,
+                            use_layerwise=False,
+                            hbm_hit_tokens=hbm_hit_tokens,
+                        )
+                        logger.debug(
+                            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                            token_len,
+                            kv_group_ids,
+                            result,
+                        )
+                        response = result.to_bytes(4, "big")
+                    except Exception:
+                        logger.exception("KV pool lookup handler failed; reporting 0 hit tokens")
+                        response = (0).to_bytes(4, "big")
+
+                    try:
+                        self.socket.send(response)
+                    except zmq.ZMQError:  # type: ignore[attr-defined]
+                        if self.running:
+                            logger.exception("Failed to send KV pool lookup response")
+                        break
+            finally:
+                self.socket.close(linger=0)
+                self.ctx.term()
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
     def close(self):
-        self.socket.close(linger=0)
+        if self._closed:
+            return
+        self._closed = True
+        self.running = False
+        self.thread.join(timeout=1)
+        if self.thread.is_alive():
+            logger.warning(
+                "KV pool lookup server thread did not stop within 1 second; "
+                "the active lookup handler may still be running"
+            )
