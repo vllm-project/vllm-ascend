@@ -2,6 +2,20 @@
 
 Additional configuration is a mechanism provided by vLLM to allow plugins to control internal behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
+## GDN prefill
+
+Configure the GDN prefill backend and FLA chunk size with:
+
+```bash
+vllm serve <model> --additional-config '{"enable_fla_gdn": true, "fla_chunk_size": 128}'
+```
+
+- `enable_fla_gdn` (boolean, default `true`): prefer FLA where supported and available.
+  Set to `false` to use the existing torch_npu path. Existing Triton fallback and PCP behavior are preserved.
+- `fla_chunk_size` (`64` or `128`, default `128`): chunk size for FLA prefill only.
+
+These settings are validated during configuration initialization. They are not read from environment variables.
+
 ## Migration Guide
 
 Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating supported environment variables to `--additional-config`.

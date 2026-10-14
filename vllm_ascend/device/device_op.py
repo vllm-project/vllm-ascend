@@ -26,7 +26,7 @@ import torch_npu
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -48,9 +48,6 @@ else:
     triton_q_rms = None  # type: ignore
 
 
-_FLA_CHUNK_SIZE: int | None = None
-
-
 def _fla_gdn_chunk_indices(cu_seqlens: tuple[int, ...], chunk_size: int) -> tuple[int, ...]:
     """Build compact sequence/chunk pairs using host metadata only."""
     return tuple(
@@ -62,14 +59,7 @@ def _fla_gdn_chunk_indices(cu_seqlens: tuple[int, ...], chunk_size: int) -> tupl
 
 
 def _fla_gdn_chunk_metadata(prebuilt_meta):
-    global _FLA_CHUNK_SIZE
-    # Workers configure this before their first prefill. Cache only valid values.
-    if _FLA_CHUNK_SIZE is None:
-        chunk_size = envs.VLLM_ASCEND_FLA_CHUNK_SIZE
-        if chunk_size not in (64, 128):
-            raise ValueError("VLLM_ASCEND_FLA_CHUNK_SIZE must be 64 or 128")
-        _FLA_CHUNK_SIZE = chunk_size
-    chunk_size = _FLA_CHUNK_SIZE
+    chunk_size = get_ascend_config().fla_chunk_size
     cu_seqlens = prebuilt_meta.cu_seqlens_host if prebuilt_meta.keep_meta is None else prebuilt_meta.cu_seqlens_kern
     return chunk_size, cu_seqlens, _fla_gdn_chunk_indices(cu_seqlens, chunk_size)
 

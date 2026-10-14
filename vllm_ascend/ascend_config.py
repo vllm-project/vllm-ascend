@@ -409,6 +409,8 @@ class AscendConfig:
     value (see the mutex/validation notes below before copying).
 
         {
+            "enable_fla_gdn": true,
+            "fla_chunk_size": 128,
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
@@ -594,6 +596,10 @@ class AscendConfig:
     # Runtime object constructed in init_ascend_config (not from additional_config dict).
     runtime_config: Any = None
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
+
+    # FLA GDN prefill settings, validated once during configuration initialization.
+    enable_fla_gdn: bool = True
+    fla_chunk_size: Literal[64, 128] = 128
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0

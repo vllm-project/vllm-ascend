@@ -159,6 +159,7 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
 
     with (
         override_forward_context(forward_context),
+        patch("vllm_ascend.ops.gdn.get_ascend_config", return_value=SimpleNamespace(enable_fla_gdn=True)),
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),

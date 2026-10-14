@@ -381,6 +381,7 @@ def test_fused_backend_selects_host_metadata_only_when_supported(monkeypatch):
 
 
 def test_fla_prefill_supports_host_metadata(monkeypatch):
+    monkeypatch.setattr(ascend_gdn, "get_ascend_config", lambda: SimpleNamespace(enable_fla_gdn=True))
     monkeypatch.setattr(
         ascend_gdn,
         "get_current_hardware_profile",

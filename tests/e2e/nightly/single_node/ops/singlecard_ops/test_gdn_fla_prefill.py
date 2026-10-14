@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.device import device_op
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
@@ -16,8 +17,8 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefi
 @torch.inference_mode()
 def test_fla_prefill_matches_torch_npu(monkeypatch, chunk_size, lengths, with_initial_state):
     """Compare outputs AND cache-layout states across fused backends on NPU."""
-    monkeypatch.setattr(device_op, "_FLA_CHUNK_SIZE", None)
-    monkeypatch.setenv("VLLM_ASCEND_FLA_CHUNK_SIZE", str(chunk_size))
+    config = AscendConfig(sparse_kv_offload_config=None, fla_chunk_size=chunk_size)
+    monkeypatch.setattr(device_op, "get_ascend_config", lambda: config)
     fused_fwd = _get_fla_gdn_prefill_op()
     if fused_fwd is None:
         pytest.skip("FLA fused prefill is not installed")

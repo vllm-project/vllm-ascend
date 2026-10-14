@@ -195,6 +195,7 @@ def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
 
     with (
         override_forward_context(forward_context),
+        patch("vllm_ascend.ops.gdn.get_ascend_config", return_value=SimpleNamespace(enable_fla_gdn=True)),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
             "vllm_ascend.ops.gdn.get_current_hardware_profile",
@@ -270,6 +271,7 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     with (
         override_forward_context(forward_context),
         patch.object(torch.accelerator, "is_available", return_value=False),
+        patch("vllm_ascend.ops.gdn.get_ascend_config", return_value=SimpleNamespace(enable_fla_gdn=True)),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
             "vllm_ascend.ops.gdn.get_current_hardware_profile",

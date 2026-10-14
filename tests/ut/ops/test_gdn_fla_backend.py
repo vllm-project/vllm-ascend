@@ -6,70 +6,62 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.device import device_op
 from vllm_ascend.ops import gdn
 
 
-@pytest.fixture(autouse=True)
-def reset_fla_config(monkeypatch):
-    # Isolate worker-lifetime configuration between parameterized test cases.
-    monkeypatch.setattr(device_op, "_FLA_CHUNK_SIZE", None)
-    monkeypatch.setattr(gdn, "_ENABLE_FLA_GDN", None)
+@pytest.fixture
+def fla_config(monkeypatch):
+    config = AscendConfig(sparse_kv_offload_config=None)
+    monkeypatch.setattr(device_op, "get_ascend_config", lambda config=config: config)
+    monkeypatch.setattr(gdn, "get_ascend_config", lambda config=config: config)
+    return config
+
+
+def test_fla_config_defaults():
+    config = AscendConfig(sparse_kv_offload_config=None)
+    assert config.enable_fla_gdn is True
+    assert config.fla_chunk_size == 128
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_backend_setting_is_read_once(monkeypatch, enabled):
-    read = Mock(return_value=enabled)
-    monkeypatch.setitem(envs.env_variables, "VLLM_ASCEND_ENABLE_FLA_GDN", read)
-    assert gdn._is_fla_gdn_enabled() is enabled
-    read.return_value = not enabled
-    assert gdn._is_fla_gdn_enabled() is enabled
-    read.assert_called_once_with()
-
-
 @pytest.mark.parametrize("chunk_size", [64, 128])
-def test_chunk_setting_is_read_once_for_changing_sequences(monkeypatch, chunk_size):
-    read = Mock(return_value=chunk_size)
-    monkeypatch.setitem(envs.env_variables, "VLLM_ASCEND_FLA_CHUNK_SIZE", read)
-    for length in (1, 65, 257):
-        meta = SimpleNamespace(cu_seqlens_host=(0, length), keep_meta=None)
-        actual_size, cu, indices = device_op._fla_gdn_chunk_metadata(meta)
-        assert actual_size == chunk_size
-        assert cu == (0, length)
-        assert indices == tuple(x for i in range((length + chunk_size - 1) // chunk_size) for x in (0, i))
-        read.return_value = 32  # Changing the environment after first use has no effect.
-    read.assert_called_once_with()
+def test_fla_additional_config(enabled, chunk_size):
+    config = AscendConfig(sparse_kv_offload_config=None, enable_fla_gdn=enabled, fla_chunk_size=chunk_size)
+    assert config.enable_fla_gdn is enabled
+    assert config.fla_chunk_size == chunk_size
 
 
-@pytest.mark.parametrize("invalid", ["32", "0", "abc"])
-def test_invalid_chunk_setting_does_not_poison_cache(monkeypatch, invalid):
-    meta = SimpleNamespace(cu_seqlens_host=(0, 129), keep_meta=None)
-    monkeypatch.setenv("VLLM_ASCEND_FLA_CHUNK_SIZE", invalid)
-    for _ in range(2):
-        with pytest.raises(ValueError):
-            device_op._fla_gdn_chunk_metadata(meta)
-        assert device_op._FLA_CHUNK_SIZE is None
-    monkeypatch.setenv("VLLM_ASCEND_FLA_CHUNK_SIZE", "128")
-    assert device_op._fla_gdn_chunk_metadata(meta) == (128, (0, 129), (0, 0, 0, 1))
+@pytest.mark.parametrize("invalid", [0, 32, 256, "abc", None, True])
+def test_invalid_fla_chunk_size(invalid):
+    with pytest.raises(ValueError, match="fla_chunk_size"):
+        AscendConfig(sparse_kv_offload_config=None, fla_chunk_size=invalid)
 
 
-def test_invalid_backend_setting_does_not_poison_cache(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLA_GDN", "2")
-    for _ in range(2):
-        with pytest.raises(ValueError):
-            gdn._is_fla_gdn_enabled()
-        assert gdn._ENABLE_FLA_GDN is None
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLA_GDN", "0")
-    assert gdn._is_fla_gdn_enabled() is False
+def test_invalid_fla_enable_flag():
+    with pytest.raises(ValueError, match="enable_fla_gdn"):
+        AscendConfig(sparse_kv_offload_config=None, enable_fla_gdn="invalid")
+
+
+def test_fla_config_is_not_cached_across_engines(monkeypatch):
+    for enabled, size in [(False, 64), (True, 128)]:
+        config = AscendConfig(sparse_kv_offload_config=None, enable_fla_gdn=enabled, fla_chunk_size=size)
+        monkeypatch.setattr(device_op, "get_ascend_config", lambda config=config: config)
+        monkeypatch.setattr(gdn, "get_ascend_config", lambda config=config: config)
+        assert gdn._is_fla_gdn_enabled() is enabled
+        meta = SimpleNamespace(cu_seqlens_host=(0, 129), keep_meta=None)
+        actual_size, _, indices = device_op._fla_gdn_chunk_metadata(meta)
+        assert actual_size == size
+        assert len(indices) == 2 * ((129 + size - 1) // size)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("supported", [False, True])
 @pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("ops_available", [False, True])
-def test_prefill_metadata_backend_selection(monkeypatch, enabled, supported, available, ops_available):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLA_GDN", str(int(enabled)))
+def test_prefill_metadata_backend_selection(monkeypatch, fla_config, enabled, supported, available, ops_available):
+    fla_config.enable_fla_gdn = enabled
     monkeypatch.setattr(gdn, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: supported))
     fla = Mock(return_value=object() if available else None)
     monkeypatch.setattr(gdn, "_get_fla_gdn_prefill_op", fla)
@@ -80,25 +72,12 @@ def test_prefill_metadata_backend_selection(monkeypatch, enabled, supported, ava
     assert fla.call_count == int(enabled and supported)
 
 
-def test_fla_environment_defaults_and_validation(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLA_GDN", raising=False)
-    monkeypatch.delenv("VLLM_ASCEND_FLA_CHUNK_SIZE", raising=False)
-    assert envs.VLLM_ASCEND_ENABLE_FLA_GDN is True
-    assert envs.VLLM_ASCEND_FLA_CHUNK_SIZE == 128
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLA_GDN", "2")
-    with pytest.raises(ValueError, match="must be either"):
-        _ = envs.VLLM_ASCEND_ENABLE_FLA_GDN
-    monkeypatch.setenv("VLLM_ASCEND_FLA_CHUNK_SIZE", "32")
-    with pytest.raises(ValueError, match="must be 64 or 128"):
-        device_op._fla_gdn_chunk_metadata(SimpleNamespace())
-
-
 @pytest.mark.parametrize("adaptor", [device_op.BaseDeviceAdaptor, device_op.A5DeviceAdaptor])
 @pytest.mark.parametrize("chunk_size", [64, 128])
 @pytest.mark.parametrize("lengths", [(1, 65, 257), (0, 65, 0, 257, 0), (0, 0)])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-def test_fla_layout_chunks_and_empty_states(monkeypatch, adaptor, chunk_size, lengths, state_dtype):
-    monkeypatch.setenv("VLLM_ASCEND_FLA_CHUNK_SIZE", str(chunk_size))
+def test_fla_layout_chunks_and_empty_states(monkeypatch, fla_config, adaptor, chunk_size, lengths, state_dtype):
+    fla_config.fla_chunk_size = chunk_size
     monkeypatch.setattr(device_op, "l2norm_fwd", lambda x: torch.nn.functional.normalize(x, dim=-1))
     cu = [0]
     for length in lengths:

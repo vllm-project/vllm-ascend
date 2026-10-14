@@ -37,7 +37,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -53,15 +53,11 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
-_ENABLE_FLA_GDN: bool | None = None
 
 
 def _is_fla_gdn_enabled() -> bool:
-    """Read the worker's prefill backend setting once, on first use."""
-    global _ENABLE_FLA_GDN
-    if _ENABLE_FLA_GDN is None:
-        _ENABLE_FLA_GDN = envs.VLLM_ASCEND_ENABLE_FLA_GDN
-    return _ENABLE_FLA_GDN
+    """Use the validated configuration of the current engine."""
+    return get_ascend_config().enable_fla_gdn
 
 
 @lru_cache(maxsize=1)
