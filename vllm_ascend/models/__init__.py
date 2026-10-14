@@ -2,6 +2,17 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    # IQuest-Q1 is not an upstream vLLM architecture, so its config has to be
+    # registered with transformers before ModelConfig can build an HF config.
+    from transformers import AutoConfig
+
+    from vllm_ascend.models.iquest_q1.configs import IQuestQ1Config
+
+    AutoConfig.register(IQuestQ1Config.model_type, IQuestQ1Config, exist_ok=True)
+    ModelRegistry.register_model(
+        "IQuestQ1ForCausalLM",
+        "vllm_ascend.models.iquest_q1.model:IQuestQ1ForCausalLM",
+    )
     ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",
