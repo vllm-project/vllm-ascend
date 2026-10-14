@@ -146,8 +146,7 @@ The pooling backend still requires its own SDK and service configuration.
         "kv_connector_extra_config": {
           "backend": "memcache",
           "lookup_rpc_port": "0",
-          "use_layerwise": false,
-          "load_async": true
+          "use_layerwise": false
         }
       }
     ]
