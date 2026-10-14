@@ -27,6 +27,7 @@ BLOCK_SIZE = 128
 def _make_impl() -> AscendMLAImpl:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
+    impl.use_flashmla = False
     impl.use_mla_rope = True
     impl.qk_rope_head_dim = ROPE_DIM
     impl.dtype = torch.bfloat16
