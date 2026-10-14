@@ -36,6 +36,9 @@ from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
 def _speculative_config():
     config = MagicMock()
     config.method = "mtp"
+    # Falsy: init_speculator's enforce_eager branch copies compilation_config,
+    # which the stub vllm_config does not carry.
+    config.enforce_eager = None
     config.use_gemma4_mtp.return_value = True
     config.use_step3p5_mtp.return_value = False
     config.use_dspark.return_value = False
@@ -69,12 +72,17 @@ def test_eagle_speculator_is_not_reached_for_gemma4():
 
 
 def test_gemma4_speculator_mro():
-    assert AscendGemma4Speculator.__mro__[:4] == (
+    # Order invariants, not a fixed tuple: main may insert extra bases between
+    # ours (e.g. LmheadTPDraftSamplingMixin) without breaking this contract.
+    mro = AscendGemma4Speculator.__mro__
+    order = (
         AscendGemma4Speculator,
         AscendAutoRegressiveSpeculator,
         Gemma4Speculator,
         AutoRegressiveSpeculator,
     )
+    indices = [mro.index(cls) for cls in order]
+    assert indices == sorted(indices), f"MRO order broken: {mro}"
     assert AscendGemma4Speculator.advance_draft_positions is Gemma4Speculator.advance_draft_positions
     assert AscendGemma4Speculator._setup_gemma4_kv_sharing is Gemma4Speculator._setup_gemma4_kv_sharing
     assert AscendGemma4Speculator._share_embeddings is Gemma4Speculator._share_embeddings
