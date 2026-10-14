@@ -657,6 +657,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendSFAMetadata,
         output: torch.Tensor | None = None,
+        input_is_sequence_parallel: bool = False,
+        output_scale: float = 1.0,
     ) -> torch.Tensor:
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         self._current_layer_name = layer_name
@@ -666,7 +668,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             # once for fallback execution; only layer-local TopK reuse resets here.
             self.lim_reuse_request_count = 0
         try:
-            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+            return super().forward(
+                layer_name,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                output,
+                input_is_sequence_parallel=input_is_sequence_parallel,
+                output_scale=output_scale,
+            )
         finally:
             self._current_layer_name = None
             self._copy_sfa_metadata = None

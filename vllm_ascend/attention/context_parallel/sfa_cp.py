@@ -908,7 +908,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         attn_output: torch.Tensor,
         output: torch.Tensor,
         gather_full_o_proj: bool,
-        attn_metadata: M,
+        attn_metadata: AscendSFADSACPMetadata,
         output_scale: float,
     ) -> torch.Tensor:
         if gather_full_o_proj:
@@ -935,6 +935,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             torch.distributed.reduce_scatter_tensor(output, projected_output.contiguous(), group=tp_group.device_group)
 
         context = attn_metadata.dsa_cp_context
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
         valid_tokens = max(0, min(output.shape[0], context.num_tokens - context.local_start))
         if valid_tokens < output.shape[0]:
             output[valid_tokens:].zero_()

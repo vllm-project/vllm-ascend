@@ -724,4 +724,5 @@ def test_mla_sp_no_metadata_keeps_zero_output_local(profiling, turboquant):
     gather.assert_not_called()
     scatter.assert_not_called()
     if turboquant:
+        assert impl.turboquant is not None
         impl.turboquant._initialize.assert_called_once_with(hidden.device)

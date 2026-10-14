@@ -1038,6 +1038,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         impl._finalize_sequence_parallel_o_proj.assert_not_called()
         assert impl._finalize_o_proj.call_args.args[1].data_ptr() == output.data_ptr()
     if gated:
+        assert impl.g_proj is not None
         impl.g_proj.assert_called_once()
         torch.testing.assert_close(impl.g_proj.call_args.args[0], hidden_states)
     notify.assert_called_once_with(impl.layer_name)
