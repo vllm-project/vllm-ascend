@@ -18,7 +18,7 @@ Hence, we propose to integrate MooncakeStore with a brand new **MooncakeStoreCon
 
 vLLM Ascend currently supports MooncakeStore for KV Cache Pool. To enable MooncakeStore, one needs to configure `kv-transfer-config` and choose `MooncakeStoreConnector` as the KV Connector.
 
-For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html).
+For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html).
 
 ## How it works?
 

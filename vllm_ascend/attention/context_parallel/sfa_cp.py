@@ -177,6 +177,8 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         local_rows = self._pcp_o_proj_ag_in_buf[:num_tokens]
         local_rows.copy_(attn_output)
         global_rows = self._pcp_o_proj_ag_out_buf[: group.world_size * num_tokens]
+        # AllToAll reduces payload but adds a channel-packing transpose; measured
+        # small-batch decode showed no clear benefit, so use token AllGather.
         dist.all_gather_into_tensor(global_rows, local_rows, group=group.device_group)
         return global_rows
 

@@ -249,7 +249,7 @@ async def run_spec_decode_acceptance_test(
     server: "RemoteOpenAIServer | DisaggEpdProxy",
     spec_baseline: tuple[int, list[int]] | None = None,
 ) -> None:
-    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
 
     spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
     num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
@@ -260,13 +260,13 @@ async def run_spec_decode_acceptance_test(
 
     if baseline_val is None:
         logger.warning("acceptance_rate.baseline not set in config, skipping validation")
-        baseline_val = 0.0
+        return
 
     if spec_baseline is None:
         spec_baseline = (0, [0] * num_speculative_tokens)
 
     _, all_rates = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
-    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
+    validate_acceptance_rates(all_rates, baseline_val, float(tolerance))
 
 
 TEST_HANDLERS: dict[str, Callable[..., Awaitable[None]]] = {
