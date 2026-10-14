@@ -307,17 +307,37 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
 
 
 @pytest.mark.parametrize("placeholder_step", [0, 1])
+@pytest.mark.parametrize("method", ["standard", "synthetic", "block"])
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
 @torch.inference_mode()
-def test_block_verification_placeholder_recovers_from_target(placeholder_step):
-    """A placeholder ends the block and must not use the cached draft residual."""
+def test_placeholder_recovers_from_target(placeholder_step, method, has_draft_logits, temperature):
+    """Every verification mode must recover a placeholder from the target."""
     torch.manual_seed(7)
     target = torch.tensor([0.1, 0.2, 0.3, 0.4], device="npu")
-    inputs = _build_rejection_sample_inputs(target.log(), target.log(), 3, 1.0, num_trials=4096)
+    inputs = _build_rejection_sample_inputs(target.log(), target.log(), 3, temperature, num_trials=4096)
+    if temperature == 0.0 or not has_draft_logits:
+        inputs["draft_sampled"].view(-1, 4)[:, 1:] = 3
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+        # Ensure every request reaches the placeholder, even with one-hot
+        # proposals, while keeping its recovery distribution non-degenerate.
+        prefix_logits = inputs["target_logits"].view(-1, 4, 4)[:, :placeholder_step, :]
+        prefix_logits.fill_(-float("inf"))
+        prefix_logits[:, :, 3] = 0
     inputs["draft_sampled"].view(-1, 4)[:, placeholder_step + 1] = -1
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+    sampled, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=3,
+        use_block_verification=method == "block",
+        synthetic_conditional_rates=torch.ones(3, device="npu") if method == "synthetic" else None,
+    )
     assert (num_sampled == placeholder_step + 1).all()
-    counts = torch.bincount(sampled[:, placeholder_step].cpu(), minlength=4).float()
-    torch.testing.assert_close(counts / counts.sum(), target.cpu(), rtol=0, atol=0.03)
+    if temperature == 0.0:
+        assert (sampled[:, placeholder_step] == 3).all()
+    else:
+        counts = torch.bincount(sampled[:, placeholder_step].cpu(), minlength=4).float()
+        torch.testing.assert_close(counts / counts.sum(), target.cpu(), rtol=0, atol=0.03)
 
 
 @torch.inference_mode()

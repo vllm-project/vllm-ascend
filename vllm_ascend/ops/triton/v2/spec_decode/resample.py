@@ -82,14 +82,11 @@ def _resample_kernel(
         req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
         temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         is_bonus = resample_token_idx == end_idx - 1
-        use_target = is_bonus
-        if USE_BLOCK_VERIFICATION:
-            rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
-            # A placeholder is not a proposal: recover from the target directly.
-            use_target |= rejected_draft_token < 0
         needs_resample = (temperature != 0.0) | is_bonus
 
         if needs_resample:
+            rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
+            is_valid_rejected_draft = rejected_draft_token >= 0
             vocab_offsets = block_idx * BLOCK_SIZE + block_lanes
             vocab_mask = vocab_offsets < vocab_size
             target_block_logits = tl.load(
@@ -98,7 +95,8 @@ def _resample_kernel(
                 other=float("-inf"),
             ).to(tl.float32)
 
-            if use_target:
+            if is_bonus or not is_valid_rejected_draft:
+                # Bonus and placeholder tokens both use the target distribution.
                 block_max, block_argmax = tl.max(target_block_logits, axis=0, return_indices=True)
                 has_mass = block_max > float("-inf")
                 safe_block_max = tl.where(has_mass, block_max, 0.0)
@@ -139,7 +137,6 @@ def _resample_kernel(
                     # occurs when the draft closely matches the target.
                     token_mass = tl.maximum(target_prob - draft_prob, 0.0)
                 else:
-                    rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
                     token_mass = tl.where(vocab_offsets != rejected_draft_token, target_prob, 0.0)
 
                 token_mass = tl.where(vocab_mask, token_mass, 0.0)
@@ -207,14 +204,12 @@ def _categorical_finalize_kernel(
     temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temperature == 0.0
     is_bonus = resample_token_idx == end_idx - 1
-    use_target = is_bonus
-    if USE_BLOCK_VERIFICATION:
-        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
-        use_target |= rejected_draft_token < 0
+    rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
+    is_valid_rejected_draft = rejected_draft_token >= 0
     is_greedy_bonus = is_greedy & is_bonus
     is_random = ~is_greedy
-    is_random_bonus = is_random & use_target
-    is_random_residual = is_random & (~use_target)
+    is_random_target = is_random & (is_bonus | ~is_valid_rejected_draft)
+    is_random_residual = is_random & ~is_bonus & is_valid_rejected_draft
 
     block_ids = tl.arange(0, PADDED_NUM_BLOCKS)
     valid_block_mask = block_ids < num_blocks
@@ -246,16 +241,16 @@ def _categorical_finalize_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    # Bonus blocks use different local maxima, so convert their masses to one common scale.
-    bonus_block_max = tl.load(
+    # Target-distribution blocks use local maxima; convert masses to a common scale.
+    target_block_max = tl.load(
         local_max_ptr + req_idx * local_max_stride + block_ids,
-        mask=valid_block_mask & is_random_bonus,
+        mask=valid_block_mask & is_random_target,
         other=float("-inf"),
     ).to(tl.float32)
-    bonus_global_max = tl.max(bonus_block_max, axis=0)
-    safe_bonus_global_max = tl.where(bonus_global_max > float("-inf"), bonus_global_max, 0.0)
-    bonus_block_mass = stored_block_mass * tl.exp(bonus_block_max - safe_bonus_global_max)
-    block_mass = tl.where(use_target, bonus_block_mass, stored_block_mass)
+    target_global_max = tl.max(target_block_max, axis=0)
+    safe_target_global_max = tl.where(target_global_max > float("-inf"), target_global_max, 0.0)
+    target_block_mass = stored_block_mass * tl.exp(target_block_max - safe_target_global_max)
+    block_mass = tl.where(is_bonus | ~is_valid_rejected_draft, target_block_mass, stored_block_mass)
     block_mass = tl.where(valid_block_mask & is_random, block_mass, 0.0)
 
     total_mass = tl.sum(block_mass, axis=0)
@@ -284,14 +279,14 @@ def _categorical_finalize_kernel(
 
     selected_block_max = tl.load(
         local_max_ptr + req_idx * local_max_stride + selected_block,
-        mask=is_random_bonus & has_total_mass,
+        mask=is_random_target & has_total_mass,
         other=0.0,
     ).to(tl.float32)
-    safe_bonus_logits = tl.where(
-        is_random_bonus & has_total_mass & valid_token_mask, target_block_logits, float("-inf")
+    safe_target_logits = tl.where(
+        is_random_target & has_total_mass & valid_token_mask, target_block_logits, float("-inf")
     )
-    selected_block_scale = tl.exp(selected_block_max - safe_bonus_global_max)
-    bonus_token_mass = tl.exp(safe_bonus_logits - selected_block_max) * selected_block_scale
+    selected_block_scale = tl.exp(selected_block_max - safe_target_global_max)
+    target_token_mass = tl.exp(safe_target_logits - selected_block_max) * selected_block_scale
 
     target_lse = tl.load(
         target_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
@@ -324,12 +319,9 @@ def _categorical_finalize_kernel(
         draft_prob = tl.exp(draft_block_logits - draft_lse)
         residual_token_mass = tl.maximum(target_prob - draft_prob, 0.0)
     else:
-        rejected_draft_token = tl.load(
-            draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1
-        )
         residual_token_mass = tl.where(token_ids != rejected_draft_token, target_prob, 0.0)
 
-    token_mass = tl.where(use_target, bonus_token_mass, residual_token_mass)
+    token_mass = tl.where(is_bonus | ~is_valid_rejected_draft, target_token_mass, residual_token_mass)
     token_mass = tl.where(active_token_mask, token_mass, 0.0)
     selected_block_mass = tl.sum(token_mass, axis=0)
     has_selected_block_mass = selected_block_mass > 0.0
