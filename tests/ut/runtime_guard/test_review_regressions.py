@@ -820,6 +820,36 @@ def test_v17_spec_acceptance_short_batch_no_index_error():
     assert isinstance(alerts, list)
 
 
+def test_v17_spec_acceptance_none_accepted_token_nums_returns_empty():
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+
+    section = {
+        "enabled": True,
+        "window": 2,
+        "low_threshold": 0.3,
+        "len_low_threshold": 1.4,
+        "high_threshold": 0.96,
+        "len_high_threshold": 2.8,
+    }
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    runner = SimpleNamespace(
+        tp_rank=1,
+        speculative_config=SimpleNamespace(),
+        input_batch=SimpleNamespace(req_ids=["a"], num_draft_tokens_per_req=None),
+        requests=None,
+    )
+    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+    sampled = torch.tensor([[7, 8, 9, 10]])
+    with patch(
+        "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
+        return_value=SimpleNamespace(is_last_rank=True),
+    ):
+        assert det.check_all(sampled, None) == []
+
+
 def test_v17d_spec_acceptance_high_rate_below_len_high_no_alert():
     """Normal high accept: rate can be 1.0 but accept_len below len_high → no alert."""
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
