@@ -219,6 +219,86 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.token_database.load_mask = MagicMock(return_value=masks)
         return worker, store, arrays, jobs, errors
 
+    def test_decode_save_only_skips_historical_gets_in_every_group(self):
+        worker, store, arrays, jobs, errors = self.make_hybrid(
+            kv_role="kv_consumer",
+            save_decode_cache=True,
+        )
+        request = ReqMeta(
+            "decode",
+            save_start_token=32,
+            save_end_token=64,
+            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            can_save=False,
+        )
+        for group in worker.cacheable_group_ids:
+            index = 0 if group != 2 else 1
+            name = worker._make_layerwise_full_key(group, "historical")
+            worker._layerwise_session_tracker.register_put_keys("decode", [(name, index)], group_id=group)
+            worker._layerwise_session_tracker.commit_put_keys([name])
+        for load_spec in (None, LoadSpec(0, 32, False)):
+            with self.subTest(load_spec=load_spec):
+                request.load_spec = load_spec
+                with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
+                    views = mooncake_layerwise.prepare_group_sessions(worker, [request])
+                open_get.assert_called_once_with([])
+                self.assertTrue(all(not view.load_block_keys for group in views.values() for view in group))
+        # An explicit remote load must still populate group-local slots.
+        request.load_spec = LoadSpec(0, 32, True)
+        with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
+            mooncake_layerwise.prepare_group_sessions(worker, [request])
+        self.assertTrue(open_get.call_args.args[0])
+
+    def test_decode_save_only_runs_put_pipeline_without_gets(self):
+        worker, store, arrays, jobs, errors = self.make_hybrid(
+            kv_role="kv_consumer",
+            save_decode_cache=True,
+        )
+        # Create historical entries through real PUT handlers, including groups
+        # that finish on different physical layers, before the save-only step.
+        self.save_prefix(worker, last_chunk=False)
+        saved = {name: array.copy() for name, array in arrays.items()}
+        masks = ([True] * 6, [True] * 3, [False] * 5 + [True])
+        worker.token_database.store_mask.return_value = masks
+        worker.token_database.load_mask.return_value = masks
+        request = ReqMeta(
+            "request",
+            save_start_token=64,
+            save_end_token=96,
+            target_token_len=96,
+            block_ids_by_group=[list(range(1, 7)), [1, 2, 3], list(range(1, 7))],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+            can_save=True,
+            is_last_chunk=True,
+        )
+        metadata = AscendConnectorMetadata(set())
+        metadata.add_request(request)
+        with patch.object(store, "batch_get_start", wraps=store.batch_get_start) as start_get:
+            worker.prepare_layerwise_step(metadata)
+            self.assertTrue(all(not tasks for tasks in worker.layer_load_tasks))
+            worker.start_load_kv(metadata)
+            for _ in range(worker.num_layers):
+                worker.wait_for_layer_load()
+                with attention_transfer_window():
+                    pass
+                worker.save_kv_layer(metadata)
+            start_get.assert_not_called()
+        # Every new full block is committed, with no change to resident KV.
+        for group, hashes in ((0, (b"h4", b"h5")), (1, (b"h5",)), (2, (b"h5",))):
+            for block_hash in hashes:
+                self.assertIn(worker._make_layerwise_full_key(group, block_hash.hex()), store.complete)
+        for name, array in arrays.items():
+            np.testing.assert_array_equal(array, saved[name])
+        self.assertFalse(store.open_reads)
+        self.assertFalse(worker._put_started_keys)
+        worker.get_finished({"request"}, metadata)
+        self.assertEqual(worker._layerwise_session_tracker.prepare_load_entries("request", []), [])
+        for job in jobs:
+            job.join(timeout=2)
+            self.assertFalse(job.is_alive())
+        self.assertFalse(errors)
+
     def test_decode_multigroup_retry_preserves_group_offsets_and_reachable_state(self):
         for failed_group in (0, 1):
             with self.subTest(failed_group=failed_group):

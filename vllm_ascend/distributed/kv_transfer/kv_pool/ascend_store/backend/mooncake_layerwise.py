@@ -359,7 +359,15 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                 if request.load_spec is not None and request.load_spec.can_load
                 else []
             )
-            entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
+            # Resident decode KV needs no historical GETs on save-only steps.
+            # Keep explicit remote loads and physical layer reuse unchanged.
+            if not (
+                worker.kv_role == "kv_consumer"
+                and getattr(worker, "save_decode_cache", False)
+                and not worker.layerwise_offload
+                and (request.load_spec is None or not request.load_spec.can_load)
+            ):
+                entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
             entries = [
                 (name, index)
                 for name, index in entries
