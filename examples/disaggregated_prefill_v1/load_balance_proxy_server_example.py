@@ -134,7 +134,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -1226,6 +1226,20 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except httpx.HTTPStatusError as exc:
+        # Convert upstream HTTPStatusError to FastAPI HTTPException so the
+        # framework can properly handle it (return correct status code to
+        # client, trigger middleware, etc.) and we can release resources.
+        # Use the upstream response body as detail so the real error message
+        # (e.g. "maximum context length") reaches the client, instead of
+        # httpx's generic message which would leak internal worker URLs.
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text,
+        )
     except Exception as e:
         import traceback
 
