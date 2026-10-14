@@ -169,55 +169,113 @@ Ascend configuration.
 For RL with a floating-point base model and floating-point LoRA adapters,
 choose how the trainer exports weights to the rollout engine:
 
-| Synchronization mode | Weights sent to rollout | Rollout requirements |
-| --- | --- | --- |
-| Separate adapters | LoRA adapter weights, after the base model is available | LoRA support for the adapter's target modules and the selected hardware, parallelism, and execution mode; see [LoRA Adapters](./lora.md) |
-| Merged weights | Full model weights with the LoRA update merged into the base | Ordinary model inference and full-weight updates for the selected deployment; runtime LoRA support is not required |
+| Mode | Weights sent to rollout | Rollout requirements | Trade-off |
+| --- | --- | --- | --- |
+| Non-merged (`merge=False`, default) | Separate adapter weights after base-weight synchronization | Runtime LoRA support for the actual target modules and deployment configuration | Smaller subsequent updates; inference computes the adapter contribution |
+| Merged (`merge=True`) | Full model weights with the adapter merged into the base | Ordinary inference and full-weight updates for the deployment; runtime LoRA support is not required | Larger updates and merge cost; inference uses ordinary model weights; merging can introduce rounding differences |
 
-#### Merged LoRA weights with verl
+Both modes train LoRA adapters. Merging for synchronization does not turn the
+training job into full-parameter fine-tuning. The merge setting selects the
+weight representation; it does not select HTTP, HCCL, or IPC as the transport.
 
-In verl versions that provide `actor_rollout_ref.model.lora.merge`, set it
-to `True` to export merged weights. Add the following overrides to an
-otherwise configured verl training job using vLLM rollout:
+#### Configure verl
+
+The examples below use the configuration layout in
+[verl revision `2bc6ac4`](https://github.com/verl-project/verl/blob/2bc6ac46043e31855cea194236ff7548c91817c8/verl/trainer/config/model/hf_model.yaml).
+Start from an Ascend training configuration that already supplies the model,
+dataset, training backend, resources, and parallelism. Replace the config path
+and name below with that configuration. These are launch templates, not complete
+training recipes or validated settings for every model.
+
+For the FSDP engine, rank, alpha, and target modules are top-level model options:
+
+```bash
+python -m verl.trainer.main_ppo \
+    --config-path /path/to/your/config \
+    --config-name your_fsdp_ascend_job \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.model.lora_rank=32 \
+    actor_rollout_ref.model.lora_alpha=32 \
+    actor_rollout_ref.model.lora.merge=False
+```
+
+For the Megatron engine, use the nested LoRA options:
+
+```bash
+python -m verl.trainer.main_ppo \
+    --config-path /path/to/your/config \
+    --config-name your_megatron_ascend_job \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.model.lora.rank=32 \
+    actor_rollout_ref.model.lora.alpha=32 \
+    actor_rollout_ref.model.lora.merge=False
+```
+
+To use merged synchronization, change the last override in either command to
+`actor_rollout_ref.model.lora.merge=True`. Select target modules in the training
+configuration: FSDP uses `actor_rollout_ref.model.target_modules`, while Megatron
+uses `actor_rollout_ref.model.lora.target_modules`. Their module names differ;
+use names supported by the selected training backend and model.
+
+With `merge=False`, verl enables LoRA on its vLLM rollout server and selects the
+loaded adapter for generation. The base weights must be available before
+adapter-only updates. Check [LoRA Adapters](./lora.md) for Ascend runtime
+restrictions; model inference support alone does not establish adapter support.
+
+With `merge=True`, the trainer exports merged weights and verl disables its
+rollout adapter mode. The rollout engine uses its full-weight update path;
+there is no need to add `--enable-lora` or manually load an adapter. The trainer
+must support merging and exporting every target module, and rollout must support
+updating the resulting weights, including packed or sharded MoE layouts.
+
+For a deployment using verl's HCCL checkpoint engine, add this override to the
+training command:
 
 ```text
-actor_rollout_ref.model.lora.rank=32
-actor_rollout_ref.model.lora.alpha=32
-actor_rollout_ref.model.lora.merge=True
 actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
 ```
 
-These are verl options, not `vllm serve` arguments. See verl's
-[LoRA configuration](https://github.com/verl-project/verl/blob/main/verl/trainer/config/model/hf_model.yaml).
-For cross-NPU synchronization on Ascend, verl registers its
-[HCCL checkpoint engine](https://github.com/verl-project/verl/blob/main/verl/checkpoint_engine/hccl_checkpoint_engine.py)
-under the name `nccl`. The standalone vLLM-Ascend HTTP weight-transfer
-examples above use `--weight-transfer-config '{"backend": "hccl"}'` instead;
-these names belong to different configuration interfaces.
+On Ascend, verl registers its
+[HCCL checkpoint engine](https://github.com/verl-project/verl/blob/2bc6ac46043e31855cea194236ff7548c91817c8/verl/checkpoint_engine/hccl_checkpoint_engine.py)
+under `nccl`. This is a verl option. The standalone vLLM-Ascend server examples
+above use `--weight-transfer-config '{"backend": "hccl"}'` instead. Configure
+the checkpoint engine for the deployment independently of the merge setting.
 
-The trainer merges the adapter into the base weights for export and sends
-ordinary model weights. The rollout engine loads them through its full-weight
-update path. With `merge=True`, verl disables its rollout adapter mode, so
-this workflow does not require `--enable-lora` or a runtime adapter load.
-Training continues with trainable adapters; merging for synchronization does
-not turn the training job into full-parameter fine-tuning.
+#### Standalone adapter-update example
 
-This path is useful when runtime LoRA does not cover the adapter's target
-modules. The trainer must still support merging and exporting those modules,
-and the rollout engine must support loading and updating the resulting
-weights, including any packed or sharded MoE layout. Ordinary inference
-support alone does not establish weight-update compatibility.
+To inspect adapter loading, replacement, rollback, and unloading without a
+verl training job, run the repository's
+[`rlhf_http_lora.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_lora.py)
+example from the repository root in an Ascend environment:
 
-Merged synchronization transfers full weights on each update, increasing
-transfer volume compared with adapter-only updates, and merging can introduce
-floating-point rounding differences. It installs one merged policy at a time;
-per-request adapter selection requires the separate-adapter path.
+```bash
+python examples/rl/rlhf_http_lora.py
+```
 
-Follow the pause/update/resume lifecycle for the chosen integration and
-invalidate caches derived from previous weights before the next rollout.
-Validate the complete cycle with a base-weight baseline, merged-weight output
-compared against a reference, and restoration of the base weights. Check the
-actual target modules, TP/EP configuration, and graph mode used by the job.
+The example uses Qwen3-0.6B and two existing adapters. It starts a server with
+`--enable-lora` and runtime adapter updates enabled, or reuses a compatible
+server on port 8000. It demonstrates HTTP adapter updates, not a training loop
+or verl's checkpoint-engine transport.
+
+#### Model coverage for RL weight updates
+
+Use the following evidence to choose what to validate for an RL deployment.
+The listed tests cover specific inference or weight-update paths; they do not
+establish a complete verl LoRA training run on every Ascend device.
+
+| Model | Available coverage | Scope for LoRA RL |
+| --- | --- | --- |
+| `Qwen/Qwen3-30B-A3B` | [LoRA inference tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py): TP=2, with and without EP, eager mode; mixed adapter/base requests on EP | Evidence for separate-adapter inference. Repeated trainer-to-rollout updates and merged export require validation in the chosen verl job. |
+| `Qwen/Qwen3.5-35B-A3B` | [Weight-update model case](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/rlhf/weight_transfer_test_utils.py), exercised by [NPU IPC](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py) and [HCCL](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py) tests | Four-layer text-only configuration with synthetic BF16 weights, TP=1, packed/unpacked full-weight updates. This covers the update path, not LoRA merging, separate adapters, or full-size verl training. |
+
+Before recording a deployment as validated, capture the model and adapter,
+verl/vLLM/vLLM-Ascend revisions, NPU type, training backend, target modules,
+TP/EP, and graph mode. Exercise repeated updates, compare outputs with a
+reference using the same policy weights, and verify rollback. Coordinate
+requests and weight updates through the integration's lifecycle so each rollout
+uses the intended policy version; handle caches derived from previous weights
+before serving the next version. Do not assume that changing an adapter in place
+is safe for in-flight requests merely because loading succeeds.
 
 ### Pause and resume generation
 
