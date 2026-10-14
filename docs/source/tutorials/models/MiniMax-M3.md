@@ -26,7 +26,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
-- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D, or 3 nodes, 1P + 2D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
 - `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency and compatibility with the target model. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
 
 It is recommended to place the model weight in a shared cache directory.
@@ -236,6 +236,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "950DT products"
 
     ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -432,7 +433,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
 ### 5.3 Prefill-Decode Disaggregation
 
-This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P1D), or two 950DT nodes (1P1D). The 950DT tab also includes the three-node 1P + 2D variant.
+This section deploys MiniMax-M3 PD disaggregation as 1P1D: on Atlas 800 A3 it spans three nodes (one Prefill node and two Decode nodes); on 950DT it runs on two nodes, and the 950DT example below also describes scaling the same 1P1D deployment to three nodes. Here, 1P1D means one Prefill service group and one Decode service group. The Decode group can span two machines while remaining one global DP group.
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
@@ -852,11 +853,9 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
 
 === "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on two 950DT nodes (96GB × 8, 1P1D) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`, or three nodes (1P + 2D) as described below. These examples use the default Model Runner V1; leave `VLLM_USE_V2_MODEL_RUNNER` unset.
+    Prefill-Decode disaggregation can be deployed on two 950DT nodes (96GB × 8, 1P1D) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`, and scales to three nodes while remaining 1P1D (one Prefill service group and one Decode service group; see below). On SuperPod systems (UB fabric), export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` as in the templates below; mounting `/etc/hixlep/` applies to RoCE-attached 950DT instead. The examples explicitly enable Model Runner V2.
 
-    The templates target SuperPod systems with UB fabric. Export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` to let Mooncake negotiate local endpoints, and omit `ascend_local_comm_res_path`. For RoCE-attached 950DT, omit that export, mount `/etc/hixlep/`, and add `"ascend_local_comm_res_path":"/etc/hixlep"` inside `kv_connector_extra_config` on both roles. In the verified UB setup, using static `/etc/hixlep` endpoint IDs caused E19999 KV transfer failures (`ret=-1` in Mooncake logs and HTTP 500).
-
-    Set `PREFILL_IP` and `DECODE_IP` to the Prefill and Decode communication IPs. For the three-node variant, also set `DECODE0_IP` and `DECODE1_IP`. Set `LOCAL_IP` and `NIC_NAME` separately in each node's template. The example uses `--max-model-len 150000`: the verified 96GB configuration with EAGLE3 and fp8 KV cache could not allocate enough KV cache for 263000 tokens. Check the startup KV capacity before increasing this limit.
+    Set `PREFILL_IP` and `DECODE_IP` to the Prefill and Decode communication IPs. For the three-node variant, also set `DECODE0_IP` and `DECODE1_IP`. Set `LOCAL_IP` and `NIC_NAME` separately in each node's template.
 
     1. Prefill node
 
@@ -880,10 +879,10 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
     # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
     # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -958,10 +957,10 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
     # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
     # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -985,6 +984,7 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
         --distributed-executor-backend mp \
         --max-model-len 150000 \
         --max-num-batched-tokens 32768 \
@@ -1083,7 +1083,7 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
-    **Scaling to three nodes (1P + 2D)**
+    **Scaling to three nodes (still 1P1D)**
 
     The deployment above scales to three nodes: one Prefill node (DP2 × TP4) plus two Decode nodes forming one global DP4 group (two local DP ranks per Decode node, TP4 each; 24 NPUs in total). Only one template change is required: in **both** the Prefill and Decode `run_dp_template.sh`, update the Mooncake extra config to describe the new Decode group — `"decode":{"dp_size":4,"tp_size":4,"pp_size":1}` (Prefill stays `dp_size: 2`). Also set `LOCAL_IP` in each node's template to that node's compute-network IP.
 
@@ -1200,7 +1200,7 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section builds on [Section 5.3](#53-prefill-decode-disaggregation). The A3 example uses the same three-node topology, `launch_online_dp.py`, proxy mapping, and MiniMax `vllm serve` settings as Section 5.3 (one P plus two D nodes). The 950DT pool example retains its two-node topology. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
+This section builds on [Section 5.3](#53-prefill-decode-disaggregation). The A3 example uses the same three-node 1P1D topology, `launch_online_dp.py`, proxy mapping, and MiniMax `vllm serve` settings as Section 5.3 (one P plus two D nodes). The 950DT pool example retains its two-node 1P1D topology. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
 
 - `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time (same role as Section 5.3).
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
@@ -1543,6 +1543,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1641,6 +1642,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
     
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1671,6 +1673,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
         --distributed-executor-backend mp \
         --max-model-len 263000 \
         --max-num-batched-tokens 32768 \
@@ -1877,7 +1880,7 @@ When using local media paths in requests, such as `file:///path/to/video.mp4`, a
 
 If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
 
-FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`. For A3, keep the existing compatibility guidance and avoid enabling both together. In the verified 950DT text-only PD setup in [Section 5.3](#53-prefill-decode-disaggregation), both options worked together. The `--language-model-only` flag remains optional and must be omitted for multimodal inputs.
+FLASHCOMM1 and language-model-only mode can be enabled at the same time: the verified 950DT text-only PD deployment in [Section 5.3](#53-prefill-decode-disaggregation) ran with `enable_flashcomm1` on Prefill and Decode together with `--language-model-only`. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`. The `--language-model-only` flag remains optional and must be omitted for multimodal inputs.
 
 ```bash
 # Enable FLASHCOMM1.
