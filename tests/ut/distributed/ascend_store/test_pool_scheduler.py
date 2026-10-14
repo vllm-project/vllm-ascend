@@ -32,6 +32,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from zmq.constants import RCVTIMEO
+from zmq.error import ZMQError
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -1021,9 +1023,9 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
 class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
-    def test_lookup(self, mock_encoder_cls, mock_zmq, mock_make_socket):
+    def test_lookup(self, mock_encoder_cls, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
@@ -1031,26 +1033,78 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
-
         mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"], hbm_hit_tokens=16)
-        self.assertEqual(result, 32)
+        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 32)
         mock_socket.send_multipart.assert_called_once()
-        frames = mock_socket.send_multipart.call_args.args[0]
         self.assertEqual(
-            frames,
-            [
-                (64).to_bytes(4, "big"),
-                b"groups",
-                (16).to_bytes(4, "big"),
-                b"hashes",
-            ],
+            mock_socket.send_multipart.call_args.args[0],
+            [(64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"hashes"],
         )
+        client.close()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
-    def test_close(self, mock_zmq, mock_make_socket):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    def test_lookup_zmq_error_returns_zero_and_closes_client(
+        self, mock_encoder_cls, mock_context_cls, mock_make_socket
+    ):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.side_effect = ZMQError("timeout")
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+
+        client = LookupKeyClient(config)
+        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 0)
+        self.assertTrue(client.closed)
+        mock_socket.close.assert_called_once_with(linger=0)
+        client.ctx.term.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    def test_socket_sets_receive_timeout(self, mock_context_cls, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+
+        LookupKeyClient(config)
+        mock_socket.setsockopt.assert_called_once_with(RCVTIMEO, 1000)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_lookup_failure_rebuilds_client(self, mock_client_cls):
+        scheduler = KVPoolScheduler(make_config(block_size=16), use_layerwise=False)
+        request = MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id="r1",
+            block_hashes=[b"h"] * 4,
+        )
+
+        first_client = MagicMock()
+        first_client.closed = True
+        first_client.lookup.return_value = 0
+        second_client = MagicMock()
+        second_client.closed = False
+        second_client.lookup.return_value = 32
+        mock_client_cls.side_effect = [first_client, second_client]
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+        self.assertIs(scheduler.client, first_client)
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
+        self.assertIs(scheduler.client, second_client)
+        self.assertEqual(mock_client_cls.call_count, 2)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    def test_close_is_idempotent_and_terminates_context(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
@@ -1060,7 +1114,10 @@ class TestLookupKeyClient(unittest.TestCase):
 
         client = LookupKeyClient(config)
         client.close()
+        client.close()
+        self.assertTrue(client.closed)
         mock_socket.close.assert_called_once_with(linger=0)
+        client.ctx.term.assert_called_once_with()
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):

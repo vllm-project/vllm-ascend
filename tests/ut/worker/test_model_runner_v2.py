@@ -123,6 +123,16 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
 def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
     num_reqs = len(computed)
     is_prefilling = np.array(computed) < np.array(prefill_lens)
+    has_prefill = bool(is_prefilling.any())
+    # vLLM main added num_draft_tokens_np/prefill_runs_as_decode_np/
+    # decode_graph_eligible to BatchReqState; 0.30.0 predates them.
+    version_kwargs: dict = {}
+    if not vllm_version_is("0.30.0"):
+        version_kwargs = {
+            "num_draft_tokens_np": None,
+            "prefill_runs_as_decode_np": None,
+            "decode_graph_eligible": not has_prefill,
+        }
     return BatchReqState(
         req_ids=[f"req-{i}" for i in range(num_reqs)],
         num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
@@ -131,7 +141,8 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
         prefill_len_np=np.array(prefill_lens, dtype=np.int32),
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
-        has_prefill=bool(is_prefilling.any()),
+        has_prefill=has_prefill,
+        **version_kwargs,
     )
 
 
@@ -1368,6 +1379,10 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
+        # vLLM main added these BatchReqState fields; ignored by the
+        # version-gated 0.30.0 prepare_inputs wrapper.
+        decode_graph_eligible=False,
+        prefill_runs_as_decode_np=None,
     )
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,

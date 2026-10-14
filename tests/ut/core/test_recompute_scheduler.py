@@ -10,7 +10,11 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.request import RequestStatus
 
-from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
+from tests.ut.core.test_dyntra_lb_scheduler import (
+    _is_skipped,
+    create_dyntra_lb_scheduler,
+    make_dyntra_test_config,
+)
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
@@ -358,7 +362,7 @@ def test_schedule_waits_for_encoder_cache_on_running_and_resumed_requests(resume
     assert request.num_computed_tokens == original_computed
     assert request.request_id not in output.num_scheduled_tokens
     if resume_with_retained_kv:
-        assert request in scheduler.skipped_waiting
+        assert _is_skipped(scheduler, request)
         assert request.status == RequestStatus.PREEMPTED
     else:
         assert request in scheduler.running
