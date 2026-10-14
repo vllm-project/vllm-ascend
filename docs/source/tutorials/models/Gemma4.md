@@ -175,7 +175,7 @@ Gemma4 MTP: propagated KV-sharing target to 4/4 draft layers.
 
 The Gemma4 assistant checkpoint has four attention layers, so a correctly wired service reports `4/4`. A first number lower than the second means some draft layers would read their own (empty) cache instead of the target's, which collapses the acceptance rate.
 
-**Verify the acceptance rate.** The `/metrics` endpoint exposes the number of accepted draft tokens per position as `vllm:spec_decode_num_accepted_tokens_per_pos`, and the number of draft rounds as `vllm:spec_decode_num_drafts`. Scrape both before and after a batch of requests, then divide the deltas:
+**Verify the acceptance rate.** The `/metrics` endpoint exposes the number of accepted draft tokens per position as `vllm:spec_decode_num_accepted_tokens_per_pos_total`, labelled by `position`, and the number of draft rounds as `vllm:spec_decode_num_drafts_total`. Scrape both before and after a batch of requests, then divide the deltas:
 
 ```text
 acceptance[pos] = accepted_tokens_per_pos_delta[pos] / drafts_delta
@@ -187,7 +187,6 @@ Acceptance normally decreases with the draft position (`pos0` > `pos1` > `pos2`)
 
 - MTP is supported on Ascend 950 (A5) only. It is not supported on Atlas A2 or Atlas A3.
 - The assistant checkpoint must be available in addition to the target checkpoint.
-- Centroid-based draft sampling runs eagerly and is not captured in an ACL graph. Decode graphs are still captured as usual with `FULL_DECODE_ONLY`.
 - The throughput benefit depends on the acceptance rate, which is workload-dependent. Compare against the configuration without MTP on your own traffic before enabling it in production.
 
 ## 6 Functional Verification
