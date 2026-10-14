@@ -491,11 +491,6 @@ class RecomputeScheduler(Scheduler):
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if not self._handle_blocked_waiting_request(request):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
                     skip_request(request_queue)
                     continue
 
