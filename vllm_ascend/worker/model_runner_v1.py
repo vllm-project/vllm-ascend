@@ -5731,7 +5731,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         if (
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                            and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                            and current_kv_cache_spec.num_query_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                             and get_flashmla_ops() is not None
                             # The outer eligibility check admits only supported
                             # PD, which requires component-major pages.
@@ -6415,14 +6415,10 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
-                        # Keep the physical MLA latent head count for Kimi K3;
-                        # query heads must not inflate the generic KV page shape.
-                        num_heads=(
-                            spec.num_heads
-                            if getattr(self.model_config.hf_text_config, "model_type", None) == "kimi_linear"
-                            else attn_module.num_heads
-                        ),
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=spec.num_kv_heads,
+                        num_head_slots=getattr(spec, "num_head_slots", None),
+                        state_content_bytes=getattr(spec, "state_content_bytes", None),
                         head_size=head_size,
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,

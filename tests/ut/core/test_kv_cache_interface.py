@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -46,6 +48,60 @@ def test_matching_ascend_mla_specs_merge():
     spec = _mla_spec()
     assert AscendMLAAttentionSpec.merge([spec, spec]) == spec
     assert is_kv_cache_spec_uniform({"layer0": spec, "layer1": spec})
+
+
+@pytest.mark.parametrize("num_query_heads", [None, 4, 8, 12, 48, 64, 96])
+def test_mla_merge_preserves_query_head_metadata(num_query_heads):
+    spec = replace(_mla_spec(), num_query_heads=num_query_heads)
+    merged = AscendMLAAttentionSpec.merge([spec, spec])
+    assert merged.num_heads == 1
+    assert merged.num_query_heads == num_query_heads
+    assert merged == spec
+
+
+def test_mla_merge_rejects_different_query_head_layouts():
+    spec = replace(_mla_spec(), num_query_heads=8)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([spec, replace(spec, num_query_heads=4)])
+
+
+@pytest.mark.parametrize("num_query_heads", [4, 8, 12, 48, 64, 96])
+@pytest.mark.parametrize("block_size", [384, 640])
+def test_mla_query_heads_do_not_inflate_planner_page_strides(num_query_heads, block_size):
+    # Query heads select a compute kernel; MLA still stores one latent KV head.
+    # Exercise the real generic planner, not only spec.page_size_bytes: the
+    # latter alone passed even when num_heads incorrectly meant query heads.
+    spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_query_heads=num_query_heads,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    num_blocks = 12
+    page_bytes = block_size * 576 * 2
+    layer_names = ["model.layers.0.attn", "model.layers.1.attn"]
+    groups = [KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)]
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        kv_transfer_config=None,
+        speculative_config=None,
+    )
+    planned = get_kv_cache_config_from_groups(config, groups, num_blocks * len(layer_names) * page_bytes)
+
+    assert spec.num_heads == 1
+    assert spec.page_size_bytes == page_bytes
+    assert planned.num_blocks == num_blocks
+    assert len(planned.kv_cache_tensors) == 1
+    descriptor = planned.kv_cache_tensors[0]
+    assert descriptor.block_stride == page_bytes
+    assert descriptor.layer_stride == num_blocks * page_bytes
+    assert descriptor.size == num_blocks * len(layer_names) * page_bytes
 
 
 def test_get_storage_block_size_and_dcp_memory():

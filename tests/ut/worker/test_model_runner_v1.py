@@ -1223,7 +1223,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         num_blocks = 2
         spec = AscendMLAAttentionSpec(
             block_size=384,
-            num_heads=64,
+            num_query_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1261,7 +1261,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             for q_heads in (8, 12, 64, 96):
                 with self.subTest(q_heads=q_heads):
-                    spec = replace(spec, num_heads=q_heads)
+                    spec = replace(spec, num_query_heads=q_heads)
                     with patch(
                         "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
                         return_value=flash_profile,
@@ -1274,7 +1274,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         # A5 FlashMLA does not support arbitrary query-head counts. Keep these
         # models on the FIA-compatible component-major layout.
-        spec = replace(spec, num_heads=48)
+        spec = replace(spec, num_query_heads=48)
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,
@@ -1285,7 +1285,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         # A5 also falls back to FIA when the active CANN package does not
         # provide both FlashMLA APIs.
-        spec = replace(spec, num_heads=64)
+        spec = replace(spec, num_query_heads=64)
         with (
             patch(
                 "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
@@ -1300,7 +1300,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         # MooncakeV2 transfers raw physical slots without layout metadata, so
         # every PD endpoint uses the common component-major wire layout even
         # when local FlashMLA support would otherwise select token-fused.
-        spec = replace(spec, num_heads=64)
+        spec = replace(spec, num_query_heads=64)
         runner.vllm_config.kv_transfer_config = SimpleNamespace(
             kv_connector="MooncakeConnectorV2",
             kv_connector_module_path=None,
@@ -1361,7 +1361,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         layer_name = "model.layers.0.self_attn.attn"
         spec = AscendMLAAttentionSpec(
             block_size=384,
-            num_heads=64,
+            num_query_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1964,6 +1964,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            num_head_slots=2,
+            state_content_bytes=576,
         )
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
@@ -1979,7 +1981,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(spec, AscendMLAAttentionSpec)
         self.assertEqual(spec.model_version, attn_module.model_version)
         self.assertTrue(spec.indexes_kv_by_block_stride)
-        self.assertEqual(spec.num_heads, 64)
+        self.assertEqual(spec.num_heads, 2)
+        self.assertEqual(spec.num_query_heads, 64)
+        self.assertEqual(spec.num_head_slots, source_spec.num_head_slots)
+        self.assertEqual(spec.state_content_bytes, source_spec.state_content_bytes)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
