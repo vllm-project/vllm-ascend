@@ -82,7 +82,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for the health check ping used to detect hung
     # EngineCore processes. If an EngineCore does not respond within this
     # timeout, it is marked as dead and /health returns 503. Default 10.0.
-    "VLLM_HEALTH_CHECK_TIMEOUT_S": lambda: float(os.getenv("VLLM_HEALTH_CHECK_TIMEOUT_S", "10.0")),
+    "VLLM_HEALTH_CHECK_TIMEOUT_S": lambda: os.getenv("VLLM_HEALTH_CHECK_TIMEOUT_S", "10.0"),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
