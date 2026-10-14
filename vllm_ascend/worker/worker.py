@@ -1436,8 +1436,7 @@ class NPUWorker(WorkerBase):
         self.log_memory_stats()
         if getattr(self.model_runner, "_dp_peer_disconnected", False) is True:
             logger.warning(
-                "DP peer already disconnected (flag set). "
-                "Skipping dummy batch. Engine is in degraded state."
+                "DP peer already disconnected (flag set). Skipping dummy batch. Engine is in degraded state."
             )
             return
         from vllm_ascend.utils import _is_dp_peer_disconnect_error
