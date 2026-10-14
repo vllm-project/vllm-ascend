@@ -150,6 +150,13 @@ def test_comparisons_keep_repeats_connectors_and_external_load_separate() -> Non
 
 def test_diagnostic_ci_route_freezes_only_its_single_card_experiment(tmp_path: Path) -> None:
     repository_root = Path(__file__).resolve().parents[5]
+    subprocess.run(
+        [sys.executable, ".github/workflows/scripts/coverage.py"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     jobs = yaml.safe_load((repository_root / ".github/workflows/pr_test.yaml").read_text())["jobs"]
     selection = jobs["select-tests"]
     step = next(step for step in selection["steps"] if step.get("id") == "scope-v1")
