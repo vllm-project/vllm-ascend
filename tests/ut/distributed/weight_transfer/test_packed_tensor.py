@@ -337,6 +337,7 @@ def test_packed_broadcast_consumer_orders_cross_chunk_processing(num_buffers):
     Reload twice into the same runtime storage, as the graph-captured HCCL
     transaction does.
     """
+    fake_npu: types.SimpleNamespace
 
     class QueuedStream:
         def __init__(self):
