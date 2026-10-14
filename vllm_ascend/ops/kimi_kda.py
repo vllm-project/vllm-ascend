@@ -82,8 +82,6 @@ class AscendKimiK3RoutedLinear(ReplicatedLinear):
             can_use_gmm = x[0].ndim == 2
         else:
             can_use_gmm = x.ndim == 2
-        weight = getattr(layer, "weight", None)
-        can_use_gmm = can_use_gmm and (weight is None or weight.ndim == 2)
         if (
             bias is None
             and isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
@@ -95,7 +93,7 @@ class AscendKimiK3RoutedLinear(ReplicatedLinear):
         output = quant_method.apply(layer, x, bias=bias)
         # Remove only the artificial singleton group dimension from the NZ
         # fallback path. Other quantized projections keep their native shape.
-        if getattr(layer, "_kimi_single_group_gmm_nz", False) and output.dim() == 3 and output.shape[0] == 1:
+        if getattr(layer, "_mxfp8_gmm_nz_layout", False) and can_use_gmm and output.dim() == 3 and output.shape[0] == 1:
             output = output.squeeze(0)
         return output
 

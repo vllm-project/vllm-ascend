@@ -25,14 +25,18 @@ from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
+@pytest.mark.parametrize("nz_layout", [False, True])
+def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, nz_layout):
     layer = kimi_k3.AscendKimiK3RoutedLinear.__new__(kimi_k3.AscendKimiK3RoutedLinear)
     nn.Module.__init__(layer)
     method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
     x = torch.randn(4, 128, dtype=torch.bfloat16)
     output = torch.randn(4, 192, dtype=torch.bfloat16)
-    quant_method = SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output))
+    fallback_output = output.unsqueeze(0) if nz_layout else output
+    quant_method = SimpleNamespace(quant_method=method, apply=MagicMock(return_value=fallback_output))
     layer.quant_method = quant_method
+    layer.weight = nn.Parameter(torch.empty((1, 128, 192) if nz_layout else (128, 192)), requires_grad=False)
+    layer._mxfp8_gmm_nz_layout = nz_layout
     layer.bias = None
     layer.skip_bias_add = False
     layer.return_bias = True
@@ -47,7 +51,7 @@ def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
     ):
         actual = layer.forward(x)
 
-    assert actual[0] is output
+    torch.testing.assert_close(actual[0], output)
     assert actual[1] is None
     if runtime_mode == CUDAGraphMode.NONE:
         grouped.assert_called_once_with(layer, x)
@@ -55,6 +59,18 @@ def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
     else:
         grouped.assert_not_called()
         quant_method.apply.assert_called_once_with(layer, x, bias=None)
+
+
+def test_kimi_routed_nz_fallback_preserves_batched_input_shape():
+    method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    output = torch.randn(1, 4, 192)
+    layer = SimpleNamespace(
+        _mxfp8_gmm_nz_layout=True,
+        quant_method=SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output)),
+    )
+    with patch("vllm_ascend.ops.kimi_kda.is_forward_context_available", return_value=False):
+        actual = kimi_k3.AscendKimiK3RoutedLinear.apply_projection(layer, torch.randn(1, 4, 128))
+    assert actual is output
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():

@@ -337,10 +337,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight.data = target_weight
             target_scale = layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()
             layer.weight_scale.data = target_scale
-            if hasattr(layer, "_mxfp8_weight_buf"):
-                del layer._mxfp8_weight_buf
-            if hasattr(layer, "_mxfp8_scale_buf"):
-                del layer._mxfp8_scale_buf
+            # Retain the transformed buffers captured by ACL graphs.
+            # process_weights_after_loading copies reloaded data into them.
             layer._mxfp8_gmm_nz_layout = False
         else:
             # Restore weight: (input_size, output_size) -> (output_size, input_size)
