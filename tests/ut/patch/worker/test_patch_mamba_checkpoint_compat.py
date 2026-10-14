@@ -195,12 +195,17 @@ def test_generic_api_transitive_missing_dependency_is_not_treated_as_old_vllm(mo
 
 def test_present_generic_api_installs_generic_policy_only(monkeypatch):
     class GenericBuilder:
+        vllm_config: SimpleNamespace
+        kv_cache_spec: SimpleNamespace
+
         def build(self, metadata, request_rows):
             return self.vllm_config.speculative_config.use_eagle_block_drop()
 
     generic_module = ModuleType(GENERIC_CHECKPOINT_MODULE)
-    generic_module.MambaPrefillCheckpointBuilder = GenericBuilder
-    generic_module.MambaPrefillCheckpointMetadata = SimpleNamespace
+    generic_module.__dict__.update(
+        MambaPrefillCheckpointBuilder=GenericBuilder,
+        MambaPrefillCheckpointMetadata=SimpleNamespace,
+    )
     patch_module, builder_base = _load_patch_with_checkpoint_import(monkeypatch, generic_module)
     assert patch_module.HAS_GENERIC_CHECKPOINT_BUILDER is True
     assert GenericBuilder.build is patch_module.build_mamba_prefill_checkpoint
@@ -239,6 +244,7 @@ def _legacy_checkpoint_section():
         "    spec_sequence_masks_cpu = None\n"
         "    return checkpoint\n"
     ).body[0]
+    assert isinstance(function, ast.FunctionDef)
     function.body[-1:-1] = section
     namespace = {
         "torch": torch,
