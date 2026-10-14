@@ -216,18 +216,33 @@ def test_new_and_running_publish_monotonic_store_without_new_blocks() -> None:
         scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
 
 
-def test_resumed_prefill_frontier_survives_multiple_running_chunks() -> None:
-    scheduler = SynchronousBulkScheduler(
+@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+def test_resumed_prefill_frontier_survives_multiple_running_chunks(scheduler_type) -> None:
+    scheduler = scheduler_type(
         make_config(load=False, store=True),
         FakeRemoteLookup(),
     )
     scheduler.bind_gpu_block_pool(FakeBlockPool())
-    request = make_request(prompt_tokens=4, tokens=12, hashes=4)
-    scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3, 4]), 0)
+    request = make_request(prompt_tokens=4, hashes=1)
+    scheduler.confirm_allocation(request, FakeBlocks([1]), 0)
+    initial = scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1],), 0),), scheduled_tokens={"request": 4})
+    )
+    assert [command.store_range for command in initial.store.commands] == [TokenRange(0, 4)]
+    for computed_tokens, block_id in ((4, 2), (8, 3)):
+        request.num_tokens = computed_tokens + 4
+        request.block_hashes.append(bytes((block_id,)))
+        step = scheduler.build_step(
+            make_output(cached=(("request", ([block_id],), computed_tokens),), scheduled_tokens={"request": 4})
+        )
+        assert step.load.commands == step.store.commands == ()
+
+    scheduler.build_step(make_output(preempted=("request",)))
+    scheduler.confirm_allocation(request, FakeBlocks([4, 5, 6, 7]), 0)
 
     resumed = scheduler.build_step(
         make_output(
-            cached=(("request", ([1, 2, 3, 4],), 4),),
+            cached=(("request", ([4, 5, 6, 7],), 4),),
             resumed=("request",),
             scheduled_tokens={"request": 4},
         )
@@ -257,6 +272,8 @@ def test_resumed_prefill_frontier_survives_multiple_running_chunks() -> None:
         TokenRange(0, 8),
         TokenRange(8, 12),
     )
+    assert all(command.block_ids_by_group == ((4, 5, 6, 7),) for command in reconstruction)
+    assert all(command.block_hashes == tuple(request.block_hashes) for command in reconstruction)
     assert decode.store.commands == ()
 
 
@@ -325,6 +342,23 @@ def test_step_checkpoint_is_source_ready_and_preserves_exact_source() -> None:
         (StateCheckpointSource(1, 11, 12),),
     ]
     assert all(command.block_ids_by_group == ((1, 2, 3), (10, 11)) for command in checkpoints)
+
+    # Even without decode-range Store, align-state offloads consume current
+    # positions, confirmed hashes, and blocks appended during decode.
+    request.num_tokens = 16
+    request.block_hashes.append(b"decode")
+    decode = scheduler.build_step(
+        make_output(
+            cached=(("request", ([4], [12]), 12),),
+            scheduled_tokens={"request": 4},
+            checkpoints={"request": [(1, 12, 16)]},
+        )
+    )
+    assert decode.store.source_pending_commands == ()
+    checkpoint = decode.store.source_ready_commands[0]
+    assert checkpoint.sources == (StateCheckpointSource(1, 12, 16),)
+    assert checkpoint.block_ids_by_group == ((1, 2, 3, 4), (10, 11, 12))
+    assert checkpoint.block_hashes == tuple(request.block_hashes)
 
 
 def test_finished_and_preempted_cancel_unpublished_load() -> None:

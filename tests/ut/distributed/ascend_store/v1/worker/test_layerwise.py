@@ -713,27 +713,60 @@ def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) 
     assert resources.closed
 
 
-def test_layerwise_store_aggregates_terminal_evidence_across_layers() -> None:
-    worker, resources, _ = make_worker(layerwise=True)
-    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
-    begin_step(worker, store=(command,))
-    worker.save_layer("layers.0.group.0")
-    worker.save_layer("layers.1.group.0")
+@pytest.mark.parametrize(
+    "observed_layers,fail_second_request",
+    (((), False), ((0,), False), ((0, 1), False), ((0, 1, 2), False), ((0, 1, 2), True)),
+)
+def test_layerwise_store_aggregates_terminal_evidence_across_layers(observed_layers, fail_second_request) -> None:
+    topology = make_topology(group_ids=(0, 1), physical_layers=(0, 1, 2))
+    topology = replace(
+        topology,
+        groups=(
+            replace(topology.groups[0], layers=topology.groups[0].layers[:2]),
+            replace(topology.groups[1], layers=topology.groups[1].layers[1:]),
+        ),
+    )
+    backend = FakeBackend()
+    if fail_second_request:
+        backend.store_session_commit_result = [0, -1, 0, -1]
+    worker, resources, _ = make_worker(backend, layerwise=True, topology=topology)
+    commands = (
+        RangeStoreCommand("first", TokenRange(0, 4), ((1,), (2,)), (b"a",), 4, 17),
+        RangeStoreCommand("second", TokenRange(0, 4), ((3,), (4,)), (b"b",), 4, 18),
+    )
+    layer_names = ("layers.0.group.0", "layers.1.group.0", "layers.2.group.1")
+    expected_layers = {
+        group_id: tuple(layer for layer in layers if layer in observed_layers)
+        for group_id, layers in ((0, (0, 1)), (1, (1, 2)))
+    }
+    try:
+        begin_step(worker, store=commands)
+        for layer_id in observed_layers:
+            worker.save_layer(layer_names[layer_id])
+        context = worker._active_step
+        assert context is not None
+        worker._finalize_layerwise_store(context)
+        completions = worker.fence_previous_store()
 
-    context = worker._active_step
-    assert context is not None
-    worker._finalize_layerwise_store(context)
-    completions = worker.fence_previous_store()
-
-    assert len(completions) == 1
-    evidence = completions[0].evidence.transfer_evidence
-    assert len(evidence) == 1
-    assert evidence[0].source.physical_layer_ids == (0, 1)
-    assert evidence[0].result_code == 0
-    assert evidence[0].source_release_confirmed
-
-    worker.end_step()
-    worker.close()
+        assert [completion.request_id for completion in completions] == ["first", "second"]
+        for request_index, completion in enumerate(completions):
+            evidence = completion.evidence.transfer_evidence
+            assert [
+                (item.source.group_id, item.source.block_id, item.source.physical_layer_ids) for item in evidence
+            ] == [
+                (group_id, commands[request_index].block_ids_by_group[group_id][0], layers)
+                for group_id, layers in expected_layers.items()
+                if layers
+            ]
+            succeeded = len(observed_layers) == 3 and not (fail_second_request and request_index == 1)
+            assert completion.evidence.succeeded == succeeded
+            assert completion.evidence.source_release_confirmed
+            if len(observed_layers) == 3:
+                assert all(item.result_code == (0 if succeeded else -1) for item in evidence)
+        assert worker.take_released_store_job_ids() == {17, 18}
+        worker.end_step()
+    finally:
+        worker.close()
     assert resources.closed
 
 

@@ -260,6 +260,12 @@ class KVPoolScheduler:
         if request is None or progress is None:
             raise ValueError(f"Scheduled RUNNING request {request_id} has no Scheduler progress")
 
+        is_decoding = num_computed_tokens >= progress.prefill_end_token
+        if is_decoding and not self._config.save_decode_cache and not self._config.align_state_group_ids:
+            # No decode transfer consumes these snapshots. Resumption rebuilds
+            # them from the confirmed allocation; state checkpoints still need progress.
+            return None, None
+
         scheduled_end = num_computed_tokens + num_scheduled_tokens
         progress = progress.advance(
             scheduled_end,
@@ -269,7 +275,6 @@ class KVPoolScheduler:
         )
         self._request_progress[request_id] = progress
         load_command = self._plan_running_load(progress, num_computed_tokens)
-        is_decoding = num_computed_tokens >= progress.prefill_end_token
         store_command = None if is_decoding and not self._config.save_decode_cache else self._plan_range_store(progress)
         return load_command, store_command
 

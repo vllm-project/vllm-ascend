@@ -469,18 +469,25 @@ def _sources_by_request(batch: KVTransferBatch) -> tuple[tuple[TransferSource, .
 def _sources_for_observed_layers(
     sources_by_request: tuple[tuple[TransferSource, ...], ...], observed_layer_ids: set[int]
 ) -> tuple[tuple[TransferSource, ...], ...]:
+    observed_layers_by_group: dict[int, tuple[int, ...]] = {}
     observed_by_request = []
     for sources in sources_by_request:
         observed_sources = []
         for source in sources:
-            physical_layer_ids = tuple(
-                layer_id for layer_id in source.physical_layer_ids if layer_id in observed_layer_ids
-            )
+            group_id = source.group_id
+            physical_layer_ids = observed_layers_by_group.get(group_id)
+            if physical_layer_ids is None:
+                # Every source in a Layerwise group shares its original layer tuple.
+                group_layer_ids: tuple[int, ...] = source.physical_layer_ids
+                physical_layer_ids = tuple(layer_id for layer_id in group_layer_ids if layer_id in observed_layer_ids)
+                if physical_layer_ids == group_layer_ids:
+                    physical_layer_ids = group_layer_ids
+                observed_layers_by_group[group_id] = physical_layer_ids
             if not physical_layer_ids:
                 continue
             observed_sources.append(
                 source
-                if physical_layer_ids == source.physical_layer_ids
+                if physical_layer_ids is source.physical_layer_ids
                 else replace(source, physical_layer_ids=physical_layer_ids)
             )
         observed_by_request.append(tuple(observed_sources))
