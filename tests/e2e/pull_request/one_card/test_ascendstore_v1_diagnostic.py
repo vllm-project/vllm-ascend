@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TEMPORARY text-divergence experiment. Remove with its helper, UT and CI route after diagnosis."""
+"""TEMPORARY byte-exact KV experiment. Remove all diagnostic helpers, UTs and CI route after diagnosis."""
 
 import asyncio
 import json
 import os
 import shlex
 import shutil
+import subprocess
 from contextlib import ExitStack
 from hashlib import sha256
 from importlib import import_module
-from importlib.metadata import version
+from importlib.metadata import distributions, version
 from pathlib import Path
 from typing import Any
 
@@ -34,16 +35,18 @@ from tests.e2e.pull_request.ascendstore_v1_benchmark import (
     reset_local_prefix_cache,
     write_report,
 )
-from tests.e2e.pull_request.one_card.ascendstore_v1_diagnostic import compare_phases, token_batch_context
+from tests.e2e.pull_request.one_card.ascendstore_v1_diagnostic import token_batch_context
+from tests.e2e.pull_request.one_card.ascendstore_v1_kv_diagnostic import compare_byte_audit_phases
 
 REQUEST_COUNT = 8
 OUTPUT_TOKEN_COUNT = 32
-REPEATS = 2
 TARGET_REQUEST = 6
 POOL_MEMORY_BYTES = 32 << 30
 LOCAL_BUFFER_BYTES = 1 << 30
 REQUEST_TIMEOUT_SECONDS = 600
-WORKER_EXTENSION = "tests.e2e.pull_request.one_card.ascendstore_v1_diagnostic.AscendStoreDiagnosticWorkerExtension"
+WORKER_EXTENSION = (
+    "tests.e2e.pull_request.one_card.ascendstore_v1_kv_diagnostic.AscendStoreKVByteDiagnosticWorkerExtension"
+)
 # Frozen from the earlier eight-request, 32-output-token report, not the newer performance workload.
 EXPECTED_PROMPT_HASHES = (
     "2f61840793eaba0085b8b838b9c88dada7e44094d67fb5259c6e2829b10da628",
@@ -59,7 +62,7 @@ EXPECTED_PROMPT_HASHES = (
 pytestmark = pytest.mark.e2e_model(MODEL)
 
 
-def test_temporary_ascendstore_text_divergence(tmp_path: Path) -> None:
+def test_temporary_ascendstore_kv_byte_integrity(tmp_path: Path) -> None:
     assert shutil.which("mooncake_master") is not None, "The diagnostic requires a private Mooncake master"
     model_path = maybe_model_redirect(MODEL)
     tokenizer = get_tokenizer(model_path)
@@ -84,28 +87,44 @@ def test_temporary_ascendstore_text_divergence(tmp_path: Path) -> None:
     report: dict[str, Any] = {
         "model": MODEL,
         "vllm_package_version": version("vllm"),
+        "ascend_git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "package_versions": {
+            distribution.metadata["Name"]: distribution.version
+            for distribution in distributions()
+            if any(name in distribution.metadata["Name"].lower() for name in ("torch", "vllm", "mooncake"))
+        },
         "prompt_sha256": hashes,
         "prompt_tokens": PROMPT_TOKEN_COUNT,
         "output_tokens": OUTPUT_TOKEN_COUNT,
         "target_request_index": TARGET_REQUEST,
         "status": "incomplete",
-        "scope": "Current code, old inputs; not a replay of the old binaries or a performance benchmark",
+        "kv_byte_status": "incomplete",
+        "scope": "Qwen3-8B BF16/NHD, single-card synchronous Bulk Mooncake; not a general hardware certification",
         "limitations": [
             "Client submission order does not force admission/model-row order; use the actual batch trace",
             "Nonstream responses and optional logprobs differ from the original streaming benchmark",
             "Returned normalized logprobs are not raw logits; only compare scores at the first divergence",
-            "No KV byte checksum: small logprob gaps alone cannot establish lossless transfer",
+            "Byte probes synchronize and copy NPU data; no timing here is a performance or race-freedom result",
+            "The poison control modifies only this test's assigned destination prefix, before synchronous Load",
+            "The last prompt token is recomputed rather than transferred, and is compared separately",
             "A finite run with no divergence is not proof of determinism or strict correctness",
         ],
         "runs": [],
         "phases": [],
     }
     try:
-        for connector in (("none", "", ""), *CONNECTORS):
+        for connector in CONNECTORS:
             run_path = tmp_path / connector[0]
             run_path.mkdir()
             _exercise_implementation(run_path, model_path, inputs, warmup, connector, report)
-        report["comparisons"] = compare_phases(report["phases"])
+        report["comparisons"] = compare_byte_audit_phases(report["phases"])
+        assert len(report["phases"]) == 20
+        audited = [phase for phase in report["phases"] if phase["byte_audit_mode"] in ("observe", "poison")]
+        assert len(audited) == 8
+        report["kv_byte_status"] = "equal_before_and_after_forward"
+        report["compared_prefix_bytes"] = sum(
+            request["prefix_bytes"] for phase in audited for request in phase["kv_byte_audit"]["requests"]
+        )
         report["status"] = (
             "divergence_observed" if any(item["differences"] for item in report["comparisons"]) else "not_reproduced"
         )
@@ -113,7 +132,7 @@ def test_temporary_ascendstore_text_divergence(tmp_path: Path) -> None:
         report["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        write_report(tmp_path / "ascendstore-text-diagnostic.json", "ASCENDSTORE_TEXT_DIAGNOSTIC", report)
+        write_report(tmp_path / "ascendstore-kv-byte-diagnostic.json", "ASCENDSTORE_KV_BYTE_DIAGNOSTIC", report)
 
 
 def _exercise_implementation(
@@ -175,7 +194,8 @@ def _exercise_implementation(
                 },
             }
             server_args += ["--kv-transfer-config", json.dumps(transfer_config)]
-        report["runs"].append({"implementation": implementation, "server_args": server_args})
+        run: dict[str, Any] = {"implementation": implementation, "server_args": server_args, "byte_audits": []}
+        report["runs"].append(run)
         server = stack.enter_context(
             RemoteOpenAIServer(
                 model_path,
@@ -188,39 +208,47 @@ def _exercise_implementation(
         )
         warmup_phase: dict[str, Any] = {"id": f"{implementation}-warmup"}
         _run_phase(server, warmup, [0], 1, warmup_phase, instrumented=False, external=False)
-        natural_order = list(range(REQUEST_COUNT))
-        cases = [("control-before", natural_order, REQUEST_COUNT), ("c1", natural_order, 1)]
-        cases.append(("c8-natural", natural_order, REQUEST_COUNT))
-        for slot in (1, 6, 8):
-            order = [index for index in natural_order if index != TARGET_REQUEST]
-            order.insert(slot - 1, TARGET_REQUEST)
-            cases.append((f"c8-slot{slot}", order, REQUEST_COUNT))
-        cases.append(("control-after", natural_order, REQUEST_COUNT))
-        for case, order, concurrency in cases:
-            instrumented = not case.startswith("control")
-            for repeat in range(1, REPEATS + 1) if instrumented else (1,):
-                sources = ("cold", "external") if pool is not None and case in ("c1", "c8-natural") else ("cold",)
-                for source in sources:
+        assert pool is not None
+        order = list(range(REQUEST_COUNT))
+        for case, concurrency in (("c1", 1), ("c8-natural", REQUEST_COUNT)):
+            audit_installed = False
+            try:
+                for source, mode in (
+                    ("cold", "off"),
+                    ("external", "off"),
+                    ("cold", "record"),
+                    ("external", "observe"),
+                    ("external", "poison"),
+                ):
                     phase = {
-                        "id": f"{implementation}-{case}-r{repeat}-{source}",
+                        "id": f"{implementation}-{case}-{mode}-{source}",
                         "implementation": implementation,
                         "case": case,
-                        "repeat": repeat,
                         "source": source,
                         "submission_order": order,
                         "concurrency": concurrency,
-                        "instrumented": instrumented,
+                        "instrumented": True,
+                        "byte_audit_mode": mode,
                     }
                     report["phases"].append(phase)
-                    if pool is not None:
-                        if source == "cold":
-                            phase["pool_reset"] = call_worker_rpc(
-                                server, "reset_ascendstore_benchmark_pool", args=[pool.master_address]
-                            )
-                        else:
-                            phase["store_drain"] = call_worker_rpc(server, "drain_ascendstore_benchmark_stores")
+                    if source == "cold":
+                        phase["pool_reset"] = call_worker_rpc(
+                            server, "reset_ascendstore_benchmark_pool", args=[pool.master_address]
+                        )
+                    else:
+                        phase["store_drain"] = call_worker_rpc(server, "drain_ascendstore_benchmark_stores")
                     phase["local_reset"] = reset_local_prefix_cache(server)
-                    _run_phase(server, inputs, order, concurrency, phase, instrumented, source == "external")
+                    if mode == "record":
+                        run["byte_audits"].append(call_worker_rpc(server, "start_ascendstore_kv_byte_audit"))
+                        audit_installed = True
+                    if mode != "off":
+                        call_worker_rpc(server, "begin_ascendstore_kv_byte_phase", args=[phase["id"], mode])
+                    _run_phase(server, inputs, order, concurrency, phase, True, source == "external")
+                    if mode != "off":
+                        phase["kv_byte_audit"] = call_worker_rpc(server, "end_ascendstore_kv_byte_phase")["workers"][0]
+            finally:
+                if audit_installed:
+                    run["byte_audits"].append(call_worker_rpc(server, "stop_ascendstore_kv_byte_audit"))
 
 
 def _run_phase(
