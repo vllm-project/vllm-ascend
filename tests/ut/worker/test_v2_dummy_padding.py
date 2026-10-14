@@ -207,12 +207,14 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
 
 
 def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
-    speculator = object()
+    speculator = SimpleNamespace(num_query_per_req=8)
     runner.speculator = speculator
+    original_max_num_reqs = runner.max_num_reqs
 
     def execute_dummy(*args, **kwargs):
         assert buffers.profile_cpp
         assert runner.speculator is None
+        assert runner.max_num_reqs == original_max_num_reqs
         raise RuntimeError("test")
 
     with (
@@ -222,6 +224,21 @@ def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
         runner._dummy_run(16, profile_cpp=True)
 
     assert not buffers.profile_cpp
+    assert runner.speculator is speculator
+
+
+def test_disabled_cpp_dummy_context_is_noop(runner):
+    class RejectCppStateAccess:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected input buffer access: {name}")
+
+    speculator = object()
+    runner.input_buffers = RejectCppStateAccess()
+    runner.speculator = speculator
+
+    with runner._cpp_profile_dummy(False):
+        assert runner.speculator is speculator
+
     assert runner.speculator is speculator
 
 
