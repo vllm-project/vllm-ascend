@@ -172,7 +172,8 @@ def test_mla_preprocess_whole_batch_matches_split_mm2_tiles():
     indices from the tiling-selected swizzle direction. If the Cube traversal
     order diverges from the Vector core's, the dequantized MM2 outputs
     (q_nope / q_rope) are paired with the wrong tile: q_nope and q_rope are
-    corrupted while q_c (EinSum path) stays correct. A 256-token call avoids
+    corrupted while q_c, which bypasses that pairing, stays correct. A
+    256-token call avoids
     the multi-tile traversal, so it serves as the reference for the first 256
     tokens. The weights and per-token inputs are identical across calls, so
     the outputs must match bit-exactly.
