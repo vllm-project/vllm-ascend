@@ -532,7 +532,7 @@ def _regroup_prefix(self, dataset_path):
     import json
 
     with open(dataset_path, encoding="utf-8") as f:
-        lines = [json.loads(l) for l in f]
+        lines = [json.loads(line) for line in f]
 
     prefixes = [lines[i]["question"] for i in range(self.prefix_num)]
     for i, line in enumerate(lines):
