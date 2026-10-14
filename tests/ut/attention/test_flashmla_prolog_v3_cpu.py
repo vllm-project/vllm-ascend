@@ -16,7 +16,7 @@ DSPARK = "vllm_ascend/models/kimi_k3_dspark.py"
 
 
 def load(path, name, scope, owner=None):
-    nodes = ast.parse((ROOT / path).read_text()).body
+    nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
     if owner:
         nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == owner).body
     node = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -254,7 +254,8 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, heads):
         ("MooncakeConnectorV2", "custom.connector", False),
     ],
 )
-def test_external_selection_retains_token_fused_pd(connector, module, expected):
+@pytest.mark.parametrize("writer_supported", [False, True])
+def test_external_selection_requires_supported_pd_page_transfer(connector, module, expected, writer_supported):
     scope = {
         "torch": torch,
         "HardwareCapability": SimpleNamespace(MLA_FLASH="mla"),
@@ -280,6 +281,7 @@ def test_external_selection_retains_token_fused_pd(connector, module, expected):
         pcp_enabled=False,
         supports_prolog_v3_quantization=lambda: True,
         supports_prolog_v3_projection=lambda: True,
+        supports_prolog_v3_writer=lambda: writer_supported,
         q_proj=SimpleNamespace(_chunk_size=0),
         vllm_config=SimpleNamespace(
             use_v2_model_runner=True,
@@ -288,6 +290,7 @@ def test_external_selection_retains_token_fused_pd(connector, module, expected):
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
     )
+    expected = expected and (connector is None or writer_supported)
     assert select(impl) is expected
     if not expected:
         scope["get_flashmla_ops"].assert_not_called()
@@ -467,3 +470,27 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
     assert writer[0].data_ptr() == buffers[0].data_ptr()
     with pytest.raises(RuntimeError, match="scheduled token rows"):
         impl._prolog_v3_writer_workspace(161, views, torch.arange(161))
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("block_size", [128, 768])
+def test_prolog_tile_is_not_derived_from_external_current_workspace(external, block_size):
+    # Native PROLOG retains main's geometry-derived attribute. External DCP and
+    # context writers retain tile128 even when their private dense cache is768.
+    write = Mock(return_value=(object(), object(), object()))
+    scope = {"torch": torch, "torch_npu": SimpleNamespace(npu_mla_prolog_v3=write)}
+    weights = {name: object() for name in ("weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr")}
+    norm = SimpleNamespace(weight=SimpleNamespace(data=object()), variance_epsilon=1e-6)
+    impl = SimpleNamespace(
+        use_flashmla=external,
+        fa_quant_layer=False,
+        q_a_layernorm=norm,
+        kv_a_layernorm=norm,
+        _prepare_prolog_v3_token=lambda x: (x, {}, weights),
+        _flatten_prolog_rope_table=lambda x, _: x,
+        _prolog_v3_writer_workspace=lambda tokens, cache, slots: (cache, slots, False),
+    )
+    run = load(MLA, "_run_prolog_v3", scope, "AscendMLAImpl")
+    cache = (torch.empty(1, block_size, 1, 512), torch.empty(1, block_size, 1, 64))
+    run(impl, torch.zeros(1, 16), object(), object(), cache, torch.tensor([0]), quantize_query=False)
+    assert write.call_args.kwargs["tile_size"] == (128 if external else block_size)

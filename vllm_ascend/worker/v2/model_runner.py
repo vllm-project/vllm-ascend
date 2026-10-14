@@ -793,6 +793,14 @@ class NPUModelRunner(GPUModelRunner):
                     values = getattr(batch_state, field)
                     reordered_fields[field] = values[order] if values is not None else None
             batch_state = batch_state._replace(**reordered_fields)
+            # This backend retains FIA for real prefill, including prompt tails
+            # that upstream can execute as decode. Match graph dispatch to the
+            # same phase decision instead of replaying stale decode buffers.
+            has_fia_prefill = bool(batch_state.is_prefilling_np.any())
+            if "decode_graph_eligible" in batch_state._fields:
+                batch_state = batch_state._replace(decode_graph_eligible=not has_fia_prefill)
+            if has_fia_prefill:
+                uniform_token_count = None
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

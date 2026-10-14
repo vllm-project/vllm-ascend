@@ -1053,10 +1053,10 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
 
 
 @pytest.mark.parametrize(
-    ("model_type", "expected_num_heads"),
-    [("kimi_linear", 1), ("deepseek_v3", 12)],
+    "model_type",
+    ["kimi_linear", "deepseek_v3"],
 )
-def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads):
+def test_mla_cache_spec_keeps_query_heads_separate_from_physical_heads(monkeypatch, model_type):
     source_spec = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -1096,7 +1096,9 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
     spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
 
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.num_heads == expected_num_heads
+    assert spec.num_heads == 1
+    assert spec.num_kv_heads == 1
+    assert spec.num_query_heads == 12
     assert spec.page_size_bytes == source_spec.page_size_bytes
 
 
@@ -2532,7 +2534,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
     layer_names, specs, _, _, kv_cache_config = _make_dsa_metadata_groups()
     for group in kv_cache_config.kv_cache_groups:
         group.kv_cache_spec = replace(group.kv_cache_spec, cache_dtype_str="turboquant_4bit_nc")
-    builders = [MagicMock(tq_group_block_sizes=None) for _ in layer_names]
+    builders = [MagicMock(tq_group_block_sizes=None, flashmla_state=None) for _ in layer_names]
     attn_groups = [
         [
             AttentionGroup(

@@ -61,6 +61,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
     )
     impl = SimpleNamespace(
         vllm_config=config,
@@ -78,7 +79,6 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         "get_current_hardware_profile",
         lambda: SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH),
     )
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _config: True)
     monkeypatch.setattr(mla_v1, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
 

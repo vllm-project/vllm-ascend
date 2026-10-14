@@ -2667,6 +2667,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.num_heads = 64
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
@@ -2709,6 +2710,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.num_heads = 64
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
@@ -3174,6 +3176,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.num_heads = 64
         torch.nn.Module.__init__(attn_module)
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64

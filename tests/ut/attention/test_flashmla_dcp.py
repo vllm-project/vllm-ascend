@@ -664,6 +664,7 @@ def test_selection_checks_both_local_and_gathered_heads(runtime, heads, size, ex
             use_v2_model_runner=True,
             speculative_config=None,
             parallel_config=SimpleNamespace(decode_context_parallel_size=size),
+            kv_transfer_config=None,
         ),
     )
     assert select(impl) is expected

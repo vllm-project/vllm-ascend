@@ -182,9 +182,12 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     and block stride describe the complete slot.  Other connectors still use
     the legacy separate NoPE/RoPE protocol.
 
-    Without PD, local layout selection is unrestricted. With supported PD,
-    both endpoints must use component-major pages because raw transfers carry
-    no metadata distinguishing them from token-fused FlashMLA pages.
+    Without PD, local layout selection is unrestricted. Supported pull
+    connectors also preserve token-fused FlashMLA pages; their block-shape
+    descriptors distinguish these from flat component-major slots and must
+    match at both endpoints before transfer. Both endpoints must publish
+    these descriptors and the consumer must validate them; mixing an older
+    consumer with a new producer is not supported.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:

@@ -25,7 +25,7 @@ DRAFT = "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py"
 
 
 def source_node(path, name, owner=None):
-    body = ast.parse((ROOT / path).read_text()).body
+    body = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
     if owner:
         body = next(n for n in body if isinstance(n, ast.ClassDef) and n.name == owner).body
     return next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -373,6 +373,8 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
         actual = getattr(result, field)
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
+        elif field == "decode_graph_eligible" and external:
+            assert actual is False
         elif field != "req_ids":
             assert actual == expected
-    assert uniform_count == 4
+    assert uniform_count == (None if external else 4)

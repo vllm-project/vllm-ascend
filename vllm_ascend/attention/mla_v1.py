@@ -1048,7 +1048,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
+        # Mooncake pull publishes the complete page representation and checks
+        # it against the peer before transferring MLA pages.
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
+            return False
+        if config.kv_transfer_config is not None and not self.supports_prolog_v3_writer():
             return False
         return get_flashmla_ops() is not None
 
@@ -2194,7 +2198,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=128,
+            tile_size=128 if self.use_flashmla else writer_cache[0].shape[1],
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer
