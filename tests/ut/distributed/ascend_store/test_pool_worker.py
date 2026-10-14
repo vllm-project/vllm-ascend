@@ -1766,6 +1766,46 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(layer_tasks, [])
 
+    def test_layerwise_prefetch_window_advances_with_model_layer(self):
+        """load(L) is submitted at model layer max(0, L - P), for every shard.
+
+        A rank owns only part of the layers under KVPP. A window counted in
+        local submissions skips the layers a rank does not own, so a rank that
+        owns a late shard requests its whole partition during the first model
+        layers: the transfer then runs at the front of the forward and competes
+        with compute instead of overlapping the P layers before its consumer.
+        """
+        prefetch = 2
+        for owned in ([0, 1, 2, 3, 4, 5, 6, 7], [5, 6, 7], [0, 1, 2]):
+            with self.subTest(owned=owned):
+                worker = make_worker(self, use_layerwise=True)
+                worker.num_layers = 8
+                worker.num_prefetch_layers = prefetch
+                worker.current_layer = 0
+                worker.next_layer_to_submit = 0
+                worker.prefetch_layer_map = {}
+                worker.layer_load_tasks = [[object()] if layer in owned else [] for layer in range(8)]
+                recv_thread = MagicMock()
+                worker.kv_recv_thread = recv_thread
+
+                submitted_at: dict[int, int] = {}
+                for model_layer in range(8):
+                    worker.current_layer = model_layer
+                    first_new = recv_thread.add_request.call_count
+                    worker._submit_ready_layer_loads()
+                    for call_index in range(first_new, recv_thread.add_request.call_count):
+                        task = recv_thread.add_request.call_args_list[call_index].args[0]
+                        self.assertNotIn(task.layer_id, submitted_at, "layer submitted twice")
+                        submitted_at[task.layer_id] = model_layer
+
+                self.assertEqual(set(submitted_at), set(owned))
+                for layer_id in owned:
+                    self.assertEqual(
+                        submitted_at[layer_id],
+                        max(0, layer_id - prefetch),
+                        f"layer {layer_id} submitted at the wrong model layer",
+                    )
+
     def test_empty_layerwise_step_reowns_task_lists(self):
         worker = self._make_worker()
         worker.use_layerwise = True
