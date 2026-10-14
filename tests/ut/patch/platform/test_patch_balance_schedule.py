@@ -72,6 +72,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
+from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -611,21 +612,38 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
-    "_select_waiting_queue_for_scheduling",
-    "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
     "_inflight_prefill_reserved_blocks",
 ]
 
+# v0.30.0 keeps the single `skipped_waiting` queue and its helpers; upstream
+# main (#58947) replaced them with `kv_holding_waiting`/`deferred_waiting` and
+# the `_handle_blocked_waiting_request`/`_holds_kv_blocks` helpers.
+_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS = [
+    "_select_waiting_queue_for_scheduling",
+    "_is_blocked_waiting_status",
+    "_try_promote_blocked_waiting_request",
+]
+_MAIN_ONLY_SCHEDULER_METHOD_SEAMS = [
+    "_is_blocked_waiting_status",
+    "_handle_blocked_waiting_request",
+    "_holds_kv_blocks",
+]
+
+
+def _scheduler_method_seams() -> list[str]:
+    if vllm_version_is("0.30.0"):
+        return [*_SCHEDULER_METHOD_SEAMS, *_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS]
+    return [*_SCHEDULER_METHOD_SEAMS, *_MAIN_ONLY_SCHEDULER_METHOD_SEAMS]
+
 
 def test_upstream_scheduler_seams_still_exist():
     """Guard the upstream method names the patch depends on. The copied
     ``schedule()`` body calls a fixed set of Scheduler internals by name; if
     upstream renames/removes any, the body breaks when balance runs."""
-    missing = [n for n in _SCHEDULER_METHOD_SEAMS if not hasattr(_UpstreamScheduler, n)]
+    missing = [n for n in _scheduler_method_seams() if not hasattr(_UpstreamScheduler, n)]
     assert not missing, "upstream Scheduler lost methods the patch depends on: " + ", ".join(missing)
     assert hasattr(_UpstreamDPEngineCoreProc, "run_busy_loop"), (
         "upstream DPEngineCoreProc lost run_busy_loop (BalanceDPEngineCoreProc inherits it)"

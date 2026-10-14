@@ -46,7 +46,6 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
     smart_resize,
 )
-from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
@@ -60,6 +59,21 @@ from vllm.model_executor.models.qwen3_vl import (
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+
+from vllm_ascend.utils import vllm_version_is
+
+# On vLLM main the fused input norm lives in the fusion package; on the
+# v0.30.0 release line it is FusedInputNorm in the vision module. Both expose
+# the same (pixel_values, visual_dtype) forward semantics, so route the
+# builder through the release-lane class.
+if vllm_version_is("0.30.0"):
+    from vllm.model_executor.models.vision import FusedInputNorm
+
+    def build_mm_input_norm(model_config):
+        return FusedInputNorm.from_model_config(model_config)
+
+else:
+    from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 
 # Marker stored in the mm_kwargs dicts produced by select_encoder_cudagraph_items
 # once device-side preprocessing has been applied. The graph manager re-packs
