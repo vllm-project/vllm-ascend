@@ -119,7 +119,6 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    # Mask future draft tokens during multi-token verification.
                     num_decode_tokens > num_decodes,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
@@ -128,7 +127,6 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         if num_prefills > 0:
             prefill_query_start_loc = attn_metadata.query_start_loc
             if num_decode_tokens > 0:
-                # Rebase sliced queries; pure prefill already starts at zero.
                 prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
