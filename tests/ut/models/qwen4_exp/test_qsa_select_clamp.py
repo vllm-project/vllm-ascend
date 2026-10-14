@@ -22,36 +22,43 @@ def test_select_short_request(token_topk: int, sequence_length: int) -> None:
 
     out = qsa_select_paged_tokens(query, cache, block_table, token_to_req, positions, seq_lens, token_topk, 4)
 
-    expected = list(range(min(token_topk, 20))) + list(range(20, sequence_length))
-    assert out.shape == (1, token_topk + 3)
-    assert out[0, : len(expected)].tolist() == expected
-    assert (out[0, len(expected) :] == -1).all()
+    group_topk = token_topk // 4
+    complete_groups = min(sequence_length // 4, 8, group_topk)
+    tail = list(range((sequence_length // 4) * 4, sequence_length))
+    expected = (
+        list(range(complete_groups))
+        + [-1] * (group_topk - complete_groups)
+        + tail
+        + [-1] * (3 - len(tail))
+    )
+    assert out.shape == (1, group_topk + 3)
+    assert out[0].tolist() == expected
 
 
 @pytest.mark.parametrize("num_pages", [1, 3])
 @pytest.mark.parametrize("use_e3", [False, True])
-def test_triton_selector_preserves_expansion_buffer(monkeypatch, num_pages: int, use_e3: bool) -> None:
+def test_triton_selector_preserves_compact_buffer(monkeypatch, num_pages: int, use_e3: bool) -> None:
     rows = 129  # Exercise both a full chunk and the final partial chunk.
     capacity = num_pages * 192
     selected = min(512, capacity)
-    expanded_rows = []
+    packed_rows = []
 
     def score(query, *args):
         logits = torch.arange(capacity, 0, -1, dtype=torch.float32).expand(query.shape[0], -1)
         return logits, None
 
-    def expand(indices, positions, sequence_lengths, token_to_req, compress_ratio, token_topk, out):
+    def pack(indices, positions, sequence_lengths, token_to_req, compress_ratio, token_topk, out):
         assert indices.shape == (positions.numel(), 512)
         assert (indices[:, :selected] == torch.arange(selected)).all()
         assert (indices[:, selected:] == -1).all()
-        expanded_rows.append(indices.shape[0])
+        assert out.shape == (positions.numel(), 515)
+        packed_rows.append(indices.shape[0])
         out.fill_(-1)
         return out
 
     monkeypatch.setattr(triton_qsa, "qsa_mqa_paged", score)
-    expander = "expand_qsa_block_indices_e3" if use_e3 else "expand_qsa_block_indices_npu"
-    monkeypatch.setattr(triton_qsa, expander, expand)
-    output = torch.empty(rows, 2051, dtype=torch.int32)
+    monkeypatch.setattr(triton_qsa, "pack_qsa_group_indices_npu", pack)
+    output = torch.empty(rows, 515, dtype=torch.int32)
 
     result = triton_qsa.qsa_select_paged_tokens(
         torch.zeros(rows, 2, 128),
@@ -67,5 +74,5 @@ def test_triton_selector_preserves_expansion_buffer(monkeypatch, num_pages: int,
     )
 
     assert result is output
-    assert expanded_rows == [128, 1]
+    assert packed_rows == [128, 1]
     assert (output == -1).all()
