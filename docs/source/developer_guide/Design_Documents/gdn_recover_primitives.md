@@ -90,6 +90,7 @@ caching, TP/PP or cache-transfer support.
 pytest -q tests/ut/ops/test_gdn_recover_contract.py
 pytest -q tests/e2e/pull_request/one_card/triton/test_gdn_recover.py
 pytest -q tests/e2e/pull_request/one_card/triton/test_gdn_recover_batch.py
+pytest -q tests/e2e/pull_request/one_card/triton/test_gdn_recover_conv.py
 ```
 
 The NPU tests use a direct CPU recurrence oracle independent of replay records.
@@ -98,6 +99,9 @@ maximum dimensions, padded storage, INT32/INT64 metadata, unchanged checkpoint
 and unselected bytes, convolution rollback/compaction, dynamic graph replay,
 consecutive rounds, slot reuse and a slot-stride product beyond 8GiB.
 The large-address test initializes and checks occupied regions only.
+The real-convolution test calls the installed FLA prefill/update operators,
+checks output against a direct convolution oracle, and verifies history across
+speculative commits and ordinary decode transitions.
 
 ## Memory accounting
 
