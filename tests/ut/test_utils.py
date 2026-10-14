@@ -977,6 +977,7 @@ def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
     assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
 
+
 class TestIsDpPeerDisconnectError:
     """Tests for _is_dp_peer_disconnect_error helper function."""
 
