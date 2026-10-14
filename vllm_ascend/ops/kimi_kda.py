@@ -59,8 +59,14 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     return _KDA_BFG_STREAM
 
 
-class AscendKimiRoutedLinear(ReplicatedLinear):
+class AscendKimiK3RoutedLinear(ReplicatedLinear):
     """Dispatch eager Kimi K3 MXFP8 projections through single-group GMM."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # MXFP8 NZ weights need a leading single-group dimension before the
+        # format cast so GroupedMatmulWeightNz receives its 5-D contract.
+        self._kimi_single_group_gmm_nz = True
 
     @staticmethod
     def apply_projection(
@@ -86,7 +92,12 @@ class AscendKimiRoutedLinear(ReplicatedLinear):
             and can_use_gmm
         ):
             return inner_method.apply_single_group_gmm(layer, x)
-        return quant_method.apply(layer, x, bias=bias)
+        output = quant_method.apply(layer, x, bias=bias)
+        # Remove only the artificial singleton group dimension from the NZ
+        # fallback path. Other quantized projections keep their native shape.
+        if getattr(layer, "_kimi_single_group_gmm_nz", False) and output.dim() == 3 and output.shape[0] == 1:
+            output = output.squeeze(0)
+        return output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
@@ -248,6 +259,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
+            # This marker is consumed by the MXFP8 loader before weight
+            # processing so fused QKV follows the same NZ GMM layout.
+            self.in_proj_qkvgfab._kimi_single_group_gmm_nz = True
             del self.f_b_proj
             self.fused_bfg_proj = _KDAFusedBFGLinear(
                 hidden_size=self.hidden_size,
@@ -414,7 +428,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
             raise RuntimeError("KDA fused QKV quantization method is not initialized")
-        return AscendKimiRoutedLinear.apply_projection(self.in_proj_qkvgfab, qkv_input)
+        return AscendKimiK3RoutedLinear.apply_projection(self.in_proj_qkvgfab, qkv_input)
 
     @staticmethod
     def _run_causal_conv1d(

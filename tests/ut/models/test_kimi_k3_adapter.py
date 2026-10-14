@@ -26,7 +26,7 @@ from vllm_ascend.utils import vllm_version_is
 
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode):
-    layer = kimi_k3.AscendKimiRoutedLinear.__new__(kimi_k3.AscendKimiRoutedLinear)
+    layer = kimi_k3.AscendKimiK3RoutedLinear.__new__(kimi_k3.AscendKimiK3RoutedLinear)
     nn.Module.__init__(layer)
     method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
     x = torch.randn(4, 128, dtype=torch.bfloat16)

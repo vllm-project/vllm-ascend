@@ -90,7 +90,7 @@ from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention,
-    AscendKimiRoutedLinear,
+    AscendKimiK3RoutedLinear,
 )
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -320,7 +320,7 @@ class AscendKimiMoE(nn.Module):
         self.routed_expert_up_proj: ReplicatedLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
-            self.routed_expert_down_proj = AscendKimiRoutedLinear(
+            self.routed_expert_down_proj = AscendKimiK3RoutedLinear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
@@ -330,7 +330,7 @@ class AscendKimiMoE(nn.Module):
             self.routed_expert_norm = (
                 RMSNorm(self.moe_hidden_size, eps=config.rms_norm_eps) if self.latent_moe_use_norm else None
             )
-            self.routed_expert_up_proj = AscendKimiRoutedLinear(
+            self.routed_expert_up_proj = AscendKimiK3RoutedLinear(
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,

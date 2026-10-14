@@ -87,6 +87,32 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
 
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._should_trans_nz", return_value=True)
+    @patch(
+        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz",
+        side_effect=lambda weight, **kwargs: weight.contiguous(),
+    )
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_kimi_single_group_nz_layout_round_trip(self, mock_cast, mock_trans_nz, mock_should_trans_nz):
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.randn(128, 256).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(0, 255, (128, 8), dtype=torch.uint8), requires_grad=False)
+        layer._kimi_single_group_gmm_nz = True
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (1, 256, 128))
+        self.assertEqual(layer.weight_scale.shape, (1, 4, 128, 2))
+        self.assertTrue(layer._mxfp8_gmm_nz_layout)
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (128, 256))
+        self.assertEqual(layer.weight_scale.shape, (128, 8))
+        self.assertFalse(layer._mxfp8_gmm_nz_layout)
+        self.assertFalse(hasattr(layer, "_mxfp8_weight_buf"))
+        self.assertFalse(hasattr(layer, "_mxfp8_scale_buf"))
+
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
     def test_transform_buffer_data_ptr_stable_across_reloads(self, mock_cast, mock_should_trans_nz):
