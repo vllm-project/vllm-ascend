@@ -726,6 +726,8 @@
       "vllm-ascend/gsm8k_step",
       "vllm-ascend/GSM8K_prefix90_in131072_bs500_DeepSeek-V4-Flash-0731",
       "vllm-ascend/GSM8K_prefix90_in131072_bs512_ds_prefix",
-      "vllm-ascend/GSM8K_prefix90_in131072_bs512_ds"
+      "vllm-ascend/GSM8K_prefix90_in131072_bs512_ds",
+      "vllm-ascend/GSM8K_prefix90_in65536_bs512_ds_prefix_kv",
+      "vllm-ascend/GSM8K_prefix90_in65536_bs512_ds_kv"
     ]
 }
