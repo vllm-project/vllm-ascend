@@ -25,7 +25,7 @@ _MIN_K_DWELL_STEPS = 8
 # batch (for example 128) through 64/32/16 down to 8 or fewer requests.
 PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 1
 PHYSICAL_K_RECOMMEND_INTERVAL = 128
-PHYSICAL_K_MAX_TP_SIZE = 4
+PHYSICAL_K_MAX_TP_SIZE = 8
 _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
@@ -53,12 +53,11 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def physical_k_runtime_enabled(vllm_config: Any) -> bool:
-    """Enable variable physical K only where it beats the adaptive baseline.
+    """Enable physical K through TP8; keep wider TP on the adaptive path.
 
-    On A3, TP8 and wider drafts pay enough collective and graph-management
-    overhead that even K=max regresses versus ordinary adaptive verification.
-    Keep the user-facing configuration valid, but fall back to that proven
-    adaptive path for high TP instead of enabling a known-slower runtime.
+    TP8 is enabled for measurement, not assumed to outperform adaptive
+    verification. Its extra collective and graph-management costs must be
+    checked against an otherwise identical adaptive benchmark.
     """
 
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
