@@ -2045,6 +2045,47 @@ class TestKVPPConfig(TestBase):
                     with self.assertRaisesRegex(ValueError, "PIECEWISE"):
                         KVPPConfig.from_vllm_config(config).validate(config)
 
+    def test_kv_transfer_connectors(self):
+        from copy import deepcopy
+
+        from vllm.config import KVTransferConfig
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+
+        mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
+
+        def multi(children):
+            return {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {"connectors": children},
+            }
+
+        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, multi([mooncake])])):
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                KVPPConfig.from_vllm_config(config).validate(config)
+
+        consumer = {**mooncake, "kv_role": "kv_consumer"}
+        unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
+        cases = (
+            (consumer, "decode-only"),
+            (multi([store, consumer]), "decode-only"),
+            (multi([multi([consumer])]), "decode-only"),
+            (unsupported, "MooncakeConnectorV1"),
+            (multi([mooncake, unsupported]), "MooncakeConnectorV1"),
+            (multi([]), "non-empty"),
+            (multi([multi([])]), "non-empty"),
+        )
+        for transfer, message in cases:
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                with self.assertRaisesRegex(ValueError, message):
+                    KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
