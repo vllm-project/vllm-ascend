@@ -358,7 +358,6 @@ def test_hang(monkeypatch):
         print(f"Output tokens: {output_tokens}")
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
 @pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
 @pytest.mark.parametrize("max_tokens", [1024])
@@ -389,9 +388,7 @@ def test_qwen36_35b_dspark_spec_decoding(
     max_tokens: int,
     enforce_eager: bool,
     compilation_config: dict,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     num_speculative_tokens = 7
     # Baseline calibrated from repeated 40-prompt CI runs.
     _run_speculative_decoding(
