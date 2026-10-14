@@ -324,6 +324,7 @@ class TestHealthCheckGuards:
         import vllm.v1.engine.async_llm as async_llm_module
 
         async_llm = MagicMock(spec=async_llm_module.AsyncLLM)
+        async_llm.errored = False
         engine_core = MagicMock(spec=[])
         async_llm.engine_core = engine_core
 
