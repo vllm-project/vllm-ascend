@@ -20,15 +20,14 @@
 # - ``runner_mapping:``  regex patterns mapping test paths to logical
 #                        partitions (patterns are evaluated longest first,
 #                        most specific wins). Each entry has a ``default``
-#                        partition and an optional ``310p`` override for
-#                        files whose name contains ``_310p``.
+#                        partition (or list of partitions for multiple devices)
+#                        and an optional ``310p`` override for files whose name
+#                        contains ``_310p``.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
 #                        single_npu reports one test device even when the
 #                        runner allocates more cards (singlecard launcher only).
-# - ``additional_hardware:`` selected files or directory prefixes that also run on another device
-#                        to exercise hardware-specific cases in mixed files.
 #
 # Per-file estimated execution times live in ``estimated_times.yaml`` so
 # timing-only updates do not force the full PR suite.
@@ -110,12 +109,12 @@ accuracy_tests:
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
-# Each entry has a ``default`` partition and an optional ``310p`` override
-# for files whose name contains ``_310p``.
+# Each entry has a ``default`` partition or list of partitions and an optional
+# ``310p`` override for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/nightly/single_node/ops/singlecard_ops/(ascendc|triton)/a2a3/:
-    default: ops-a2-1
+    default: [ops-a2-1, ops-a3-1]
   tests/e2e/nightly/single_node/ops/singlecard_ops/(ascendc|triton)/a5/:
     default: ops-a5-1
   # Keep these tests in their existing directory. More specific file routes
@@ -126,6 +125,11 @@ runner_mapping:
     default: ops-a3-1
   tests/e2e/nightly/single_node/ops/singlecard_ops/(test_add_rms_norm_bias_a5|test_cann_qli_binding|test_gmm_situ_small_experts|test_qfa_c8_paged_layout|test_sparse_flash_attention_dcp_lse)\.py$:
     default: ops-a5-1
+  # Mixed files retain common A2 cases and A5-specific cases in one file.
+  tests/e2e/nightly/single_node/ops/singlecard_ops/test_scatter_nd_update_sk\.py$:
+    default: [ops-a2-1, ops-a5-1]
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_(rope|dcp_a2a)\.py$:
+    default: [ops-a2-1, ops-a5-1]
   tests/e2e/nightly/single_node/ops/singlecard_ops/:
     default: ops-a2-1
   tests/e2e/pull_request/one_card:
@@ -181,14 +185,3 @@ partition:
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
     count: 1
-
-# Mixed files include common cases and A5-only cases (FP8, MXFP, or the A5
-# dispatch). Run them on both devices so A2 skips do not hide A5 coverage.
-# Applied only when the file/nodeid was selected, after global skip filtering.
-additional_hardware:
-  # A2/A3 directories run on both chips; preserve explicit nodeid selection.
-  tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/: [ops-a3-1]
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/: [ops-a3-1]
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_scatter_nd_update_sk.py: [ops-a5-1]
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py: [ops-a5-1]
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py: [ops-a5-1]

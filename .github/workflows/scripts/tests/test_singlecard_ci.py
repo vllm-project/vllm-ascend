@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import collect_merged_new_tests
 import pytest
 import run_singlecard_test
+import select_tests
 import test_selector
 import yaml
 
@@ -106,10 +107,75 @@ def test_nodeid_scope_and_override_deduplication(tmp_path):
     assert groups[0]["num_npus"] == 1
 
 
-def test_skip_is_not_resurrected_on_another_device(tmp_path):
+@pytest.mark.parametrize("mode", ["explicit", "recommended"])
+@pytest.mark.parametrize("override", [False, True])
+def test_file_and_nodeid_run_once_per_device(tmp_path, mode, override):
+    target = f"{OPS}/ascendc/a2a3/test_kda_layout_swap12.py"
+    targets = [target + "::test_kda_layout_swap12_output_metadata", target, target]
+    if mode == "explicit":
+        args = ["--explicit-e2e-tests", *targets]
+    else:
+        test_list = tmp_path / "recommended.txt"
+        test_list.write_text("\n".join(targets))
+        args = ["--test-list-file", str(test_list)]
+    if override:
+        args.extend(["--runner-label-override", "linux-aarch64-a5-4"])
+    groups = select(tmp_path, *args)
+    chips = {"a5"} if override else {"a2", "a3"}
+    assert assignments(groups) == {(target, chip) for chip in chips}
+    assert sum(len(group["tests"].split()) for group in groups) == len(chips)
+
+
+def test_dedup_preserves_other_partition_nodeids():
+    target = "tests/e2e/example/test_operator.py"
+    nodeid = target + "::test_case"
+    groups = {"a2": [nodeid, target, target], "a3": [nodeid, nodeid]}
+    select_tests._dedup_groups(groups)
+    assert groups == {"a2": [target], "a3": [nodeid]}
+
+
+def test_legacy_routes_and_310p_override(tmp_path):
+    root = "tests/e2e/pull_request/one_card"
+    expected = {(f"{root}/test_operator.py", "a2"), (f"{root}/test_operator_310p.py", "310p")}
+    for target, _ in expected:
+        source = tmp_path / target
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("def test_case(): pass\n")
+    groups = select(tmp_path, "--explicit-e2e-tests", root, cwd=tmp_path)
+    assert assignments(groups) == expected
+
+
+def test_specific_route_replaces_directory_devices(tmp_path):
+    target = f"{OPS}/ascendc/a2a3/test_kda_layout_swap12.py"
+    config = yaml.safe_load(SCRIPT.with_name("test_config.yaml").read_text())
+    config["runner_mapping"][target.replace(".", r"\.") + "$"] = {"default": ["ops-a5-1"]}
+    custom_config = tmp_path / "test_config.yaml"
+    custom_config.write_text(yaml.safe_dump(config))
+    groups = select(tmp_path, "--config", str(custom_config), "--explicit-e2e-tests", target)
+    assert assignments(groups) == {(target, "a5")}
+
+
+@pytest.mark.parametrize("value", [[], ["ops-a2-1", 3], None])
+def test_invalid_partition_lists_are_rejected(monkeypatch, value):
+    monkeypatch.setattr(select_tests, "_RUNNER_MAPPING", [])
+    with pytest.raises(ValueError, match="must name a partition or a non-empty list"):
+        select_tests._load_runner_mapping({"runner_mapping": {"tests/": {"default": value}}})
+
+
+def test_unknown_partition_in_list_is_rejected(monkeypatch):
+    monkeypatch.setattr(select_tests, "_RUNNER_MAPPING", [])
+    config = yaml.safe_load(SCRIPT.with_name("test_config.yaml").read_text())
+    config["runner_mapping"]["tests/example/"] = {"default": ["ops-a2-1", "missing-partition"]}
+    select_tests._load_runner_mapping(config)
+    with pytest.raises(ValueError, match="undefined logical partition.*missing-partition"):
+        select_tests._validate_runner_config(select_tests._load_runners(), select_tests._load_partition_config(config))
+
+
+@pytest.mark.parametrize("suffix", ["", "::test_rotary_embedding_triton_kernel_fp8"])
+def test_skipped_target_is_removed_from_all_devices(tmp_path, suffix):
     config_path = SCRIPT.with_name("test_config.yaml")
     config = yaml.safe_load(config_path.read_text())
-    target = f"{OPS}/triton/test_rope.py"
+    target = f"{OPS}/triton/test_rope.py{suffix}"
     config["skip_tests"].append(target)
     custom_config = tmp_path / "test_config.yaml"
     custom_config.write_text(yaml.safe_dump(config))

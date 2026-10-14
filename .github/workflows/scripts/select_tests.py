@@ -38,9 +38,9 @@ Test selection is driven by the coverage/AST based precision testing pipeline
 
 Pipeline (all modes):
   1. Collect    -- gather test paths (always resolved to individual files).
-  2. Skip       -- remove configured ``skip_tests`` entries.
-  3. Route      -- map tests to logical partitions via runner_mapping.
-  4. Replicate  -- add configured hardware-specific coverage for mixed files.
+  2. Route      -- map tests to one or more partitions via runner_mapping.
+  3. Skip       -- remove configured ``skip_tests`` entries.
+  4. Deduplicate -- remove redundant targets within each partition.
   5. Partition  -- select exact runner labels and split groups by estimated time.
   6. Output     -- write test_groups / has_tests / matched_modules.
 
@@ -130,8 +130,8 @@ _A3_560T_LABEL_MAP = {
 }
 
 # Populated by _load_runner_mapping(). Ordered list of
-# (regex, {variant: logical partition key}).
-_RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, PartitionKey]]] = []
+# (regex, {variant: logical partition keys}).
+_RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, list[PartitionKey]]]] = []
 
 
 def _load_runner_mapping(meta: dict) -> None:
@@ -141,7 +141,7 @@ def _load_runner_mapping(meta: dict) -> None:
 
         runner_mapping:
           <regex_pattern>:
-            default: <partition_key>
+            default: <partition_key>  # or a list for multiple devices
             "310p": <partition_key>   # optional override for 310P files
 
     Patterns are sorted longest first so more specific patterns match first.
@@ -151,16 +151,25 @@ def _load_runner_mapping(meta: dict) -> None:
     raw = list((meta.get("runner_mapping", {}) or {}).items())
     raw.sort(key=lambda x: -len(x[0]))
     for pattern_str, runner_config in raw:
-        runners: dict[str, PartitionKey] = {}
+        runners: dict[str, list[PartitionKey]] = {}
         for key, val in runner_config.items():
-            runners[key] = str(val)
+            partitions = [val] if isinstance(val, str) else val
+            if (
+                not isinstance(partitions, list)
+                or not partitions
+                or not all(isinstance(partition, str) and partition for partition in partitions)
+            ):
+                raise ValueError(
+                    f"Runner mapping {pattern_str!r} variant {key!r} must name a partition or a non-empty list"
+                )
+            runners[key] = partitions
         _RUNNER_MAPPING.append((re.compile(pattern_str), runners))
 
 
-def _resolve_partition(file_path: str) -> PartitionKey | None:
+def _resolve_partitions(file_path: str) -> list[PartitionKey]:
     """Match *file_path* against ``_RUNNER_MAPPING``.
 
-    Returns the ``default`` logical partition for the first matching pattern.
+    Returns the ``default`` logical partitions for the first matching pattern.
     If the filename contains ``_310p`` and the matched pattern has
     a ``"310p"`` entry, that entry is returned instead.
     """
@@ -169,16 +178,16 @@ def _resolve_partition(file_path: str) -> PartitionKey | None:
         if pattern.search(route_path):
             if "_310p" in Path(route_path).name and "310p" in runners:
                 return runners["310p"]
-            return runners.get("default")
-    return None
+            return runners.get("default", [])
+    return []
 
 
-def _route_e2e_dir(dir_path: str) -> PartitionKey | None:
-    return _resolve_partition(dir_path)
+def _route_e2e_dir(dir_path: str) -> list[PartitionKey]:
+    return _resolve_partitions(dir_path)
 
 
-def _route_e2e_file(file_path: str) -> PartitionKey | None:
-    return _resolve_partition(file_path)
+def _route_e2e_file(file_path: str) -> list[PartitionKey]:
+    return _resolve_partitions(file_path)
 
 
 def _as_posix_path(path: str) -> str:
@@ -251,7 +260,7 @@ def _scan_e2e_test_dir(
     dir_path: str,
     groups: dict[PartitionKey, list[str]],
 ) -> None:
-    """Scan an E2E directory or single file and route by directory convention.
+    """Scan an E2E directory or single file and route by configuration.
 
     *dir_path* may be either a directory (all ``test_*.py`` under it are
     collected) or a single test file.
@@ -265,9 +274,10 @@ def _scan_e2e_test_dir(
         return
 
     if path.is_file():
-        key = _route_e2e_file(dir_path)
-        if key is not None:
-            groups[key].append(dir_path)
+        keys = _route_e2e_file(dir_path)
+        if keys:
+            for key in keys:
+                groups[key].append(dir_path)
         else:
             print(
                 f"Warning: E2E test file {dir_path} does not match any runner pattern, skipping.",
@@ -275,25 +285,21 @@ def _scan_e2e_test_dir(
             )
         return
 
-    key = _route_e2e_dir(dir_path + "/")
-    if key is not None:
+    if _route_e2e_dir(dir_path + "/"):
         test_files = sorted(str(f) for f in path.rglob("test_*.py"))
         if test_files:
             for f in test_files:
-                f_key = _route_e2e_file(f)
-                if f_key is not None:
+                for f_key in _route_e2e_file(f):
                     groups[f_key].append(f)
         return
 
     for entry in sorted(path.iterdir()):
         if entry.is_dir():
-            sub_key = _route_e2e_dir(str(entry) + "/")
-            if sub_key is not None:
+            if _route_e2e_dir(str(entry) + "/"):
                 test_files = sorted(str(f) for f in entry.rglob("test_*.py"))
                 if test_files:
                     for f in test_files:
-                        f_key = _route_e2e_file(f)
-                        if f_key is not None:
+                        for f_key in _route_e2e_file(f):
                             groups[f_key].append(f)
             else:
                 _scan_e2e_test_dir(str(entry), groups)
@@ -361,18 +367,17 @@ def _route_explicit_test_target(
 
 
 def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
-    """Deduplicate exact targets and file/nodeid containment across groups.
+    """Deduplicate exact targets and file/nodeid containment within each group.
 
     A bare file target already executes every test in that file, so any
-    ``file.py::nodeid`` target for the same file must be discarded. This is
-    intentionally global: selection paths can add the two targets to different
-    logical partitions before pinned routes are applied.
+    ``file.py::nodeid`` target for the same file in that group is discarded.
+    Copies in other partitions are kept for independent device coverage.
     """
-    bare_files = {_as_posix_path(target) for tests in groups.values() for target in tests if "::" not in target}
-    seen: set[str] = set()
-    for key in groups:
+    for key, tests in groups.items():
+        bare_files = {_as_posix_path(target) for target in tests if "::" not in target}
+        seen: set[str] = set()
         deduped: list[str] = []
-        for target in groups[key]:
+        for target in tests:
             normalized = _as_posix_path(target)
             if "::" in normalized and _pytest_node_file_path(normalized) in bare_files:
                 continue
@@ -460,32 +465,6 @@ def _load_skip_tests(meta: dict) -> set[str]:
     return {t.rstrip("/") for t in raw}
 
 
-def _add_hardware_coverage(
-    groups: dict[PartitionKey, list[str]],
-    meta: dict,
-    partitions: dict[PartitionKey, PartitionInfo],
-) -> None:
-    """Repeat selected files on devices needed by their hardware-specific cases.
-
-    Run after normal deduplication and skip filtering: copies across hardware
-    partitions are intentional. A selected nodeid keeps its original scope.
-    """
-    selected = [target for targets in groups.values() for target in targets]
-    for path, destinations in (meta.get("additional_hardware", {}) or {}).items():
-        if not isinstance(destinations, list) or not destinations:
-            raise ValueError(f"additional_hardware must list destination partitions: {path}")
-        for destination in destinations:
-            if destination not in partitions or not partitions[destination].single_npu:
-                raise ValueError(f"additional_hardware requires a single-NPU partition: {destination}")
-            for target in selected:
-                test_file = _as_posix_path(_pytest_node_file_path(target))
-                matches = test_file.startswith(path) if path.endswith("/") else test_file == path
-                if matches:
-                    bucket = groups.setdefault(destination, [])
-                    if target not in bucket:
-                        bucket.append(target)
-
-
 def _validate_runner_config(
     runners: dict[str, RunnerInfo],
     partition_config: dict[PartitionKey, PartitionInfo],
@@ -496,7 +475,9 @@ def _validate_runner_config(
     if unknown_labels:
         raise ValueError("Partition configuration references unknown runner label(s): " + ", ".join(unknown_labels))
 
-    referenced_partitions = {partition_key for _, variants in _RUNNER_MAPPING for partition_key in variants.values()}
+    referenced_partitions = {
+        partition_key for _, variants in _RUNNER_MAPPING for keys in variants.values() for partition_key in keys
+    }
     unknown_partitions = sorted(referenced_partitions - partition_config.keys())
     if unknown_partitions:
         raise ValueError(
@@ -564,6 +545,7 @@ def _apply_runner_label_override(
             overridden.setdefault(key, []).extend(tests)
             updated_partition_config[key] = PartitionInfo(runner_label=runner_label, count=1, single_npu=single_npu)
 
+    _dedup_groups(overridden)
     return overridden, updated_partition_config
 
 
@@ -868,8 +850,6 @@ def main():
         for target in curated_tests[args.curated]:
             _route_explicit_test_target(target, all_groups)
 
-    _dedup_groups(all_groups)
-
     if skip_tests:
         for key in list(all_groups.keys()):
             filtered: list[str] = []
@@ -886,10 +866,8 @@ def main():
                 else:
                     filtered.append(t)
             all_groups[key] = filtered
-        _dedup_groups(all_groups)
 
-    # Normalize every input mode. A bare file contains all of its nodeids,
-    # even when the targets came from different selection modes.
+    # A bare file contains all of its nodeids within the same partition.
     _dedup_groups(all_groups)
 
     # Full-suite runs (ready-all) and any run that includes accuracy tests
@@ -897,8 +875,6 @@ def main():
     # the mixed-pool A3 labels before resolving partitions to runners.
     if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):
         partition_config = _prefer_560t_partitions(partition_config)
-
-    _add_hardware_coverage(all_groups, meta, partition_config)
 
     # A command-line override is an explicit, transient choice and therefore
     # has higher priority than static routing.
@@ -910,8 +886,6 @@ def main():
                 runners,
                 partition_config,
             )
-            # An explicit override can merge the hardware copies again.
-            _dedup_groups(all_groups)
         except ValueError as exc:
             parser.error(str(exc))
 
