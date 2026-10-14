@@ -191,7 +191,7 @@ def _skip_missing_nodeid(target: str) -> bool:
 
     Extra recommended tests use only this form, including class methods with
     the class segment removed. File targets pass through. Unreadable or
-    unparseable files are kept so pytest still reports the failure.
+    unparsable files are kept so pytest still reports the failure.
     """
     if "::" not in target:
         return False
