@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. MXFP4 quantization is supported on Ascend 950.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. MXFP4 quantization is supported on 950PR&950DT Products.
 
 ## 3 Prerequisites
 
@@ -31,7 +31,7 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 
 Both MXFP4 checkpoints contain a `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing quantized weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
 
-The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the Ascend 950 quantized commands use TP4DP2 across all 8 NPUs. Adjust the parallel configuration according to the model size and available devices.
+The examples below assume a single node with visible NPUs. The BF16 commands use 4 visible NPUs as an example, while the 950PR&950DT Products quantized commands use TP4DP2 across all 8 NPUs. Adjust the parallel configuration according to the model size and available devices.
 
 ## 4 Installation
 
@@ -113,7 +113,7 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-#### Ascend 950 MXFP4 Quantized Models
+#### 950PR&950DT Products MXFP4 Quantized Models
 
 The following commands use TP4DP2 across all 8 NPUs on one 950DT Products node. The quantized checkpoints require `--quantization ascend`.
 
@@ -317,7 +317,7 @@ The following configurations are for reference only. The optimal configuration d
 | Generation serving | Single-node online serving | 4 | Dense or MoE | Use ACLGraph with `FULL_DECODE_ONLY` to reduce decode dispatch overhead. |
 | Long context | Single-node online serving | 4 | Dense or MoE | Increase `--max-model-len` only when enough KV cache is available; lower concurrency if OOM occurs. |
 | MoE serving | Single-node online serving | 4 | MoE | Use tensor parallelism or expert parallelism according to model size and deployment plan. |
-| Quantized serving on Ascend 950 | Single-node online serving | 8 | Dense or MoE | Use TP4DP2 with the MXFP4 checkpoint and add `--quantization ascend`. |
+| Quantized serving on 950PR&950DT Products | Single-node online serving | 8 | Dense or MoE | Use TP4DP2 with the MXFP4 checkpoint and add `--quantization ascend`. |
 
 ### 9.2 Tuning Guidelines
 
