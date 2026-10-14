@@ -55,7 +55,9 @@ pytest.importorskip(
 )
 
 INIT_TIMEOUT = 120
-GPU_MEMORY_UTILIZATION = 0.45
+# Matches the validated acceptance setup; leaves HBM headroom for the
+# co-located trainer in the same-chip transfer lanes.
+GPU_MEMORY_UTILIZATION = 0.25
 MODEL = "Qwen/Qwen3-0.6B"
 HF_OVERRIDES = {"num_hidden_layers": 4}
 # Physical cards; see the NPU weight-transfer tests.
@@ -94,6 +96,7 @@ def _basic_serve_args(port: int, *, extra_args=()) -> list[str]:
         json.dumps({"weight_nz_mode": 0}),
         "--port",
         str(port),
+        "--enforce-eager",
         *extra_args,
     ]
 
