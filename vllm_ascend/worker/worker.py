@@ -1301,7 +1301,7 @@ class NPUWorker(WorkerBase):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        if getattr(self.model_runner, "_dp_peer_disconnected", False):
+        if getattr(self.model_runner, "_dp_peer_disconnected", False) is True:
             logger.warning(
                 "DP peer already disconnected (flag set). Skipping dummy batch. Engine is in degraded state."
             )
