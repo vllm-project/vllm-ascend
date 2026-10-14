@@ -3,10 +3,15 @@
 """CPU-only checks for the temporary diagnostic; these do not validate NPU output or KV transfer."""
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from tests.e2e.pull_request.one_card.ascendstore_v1_diagnostic import (
     AscendStoreDiagnosticWorkerExtension,
@@ -51,7 +56,8 @@ def test_batch_snapshot_copies_only_real_rows_and_is_json_serializable() -> None
 @pytest.mark.parametrize("computed,scheduled,position", ((0, 8193, 0), (8192, 1, 0), (8193, 1, 1), (8223, 1, 31)))
 def test_batch_context_maps_cold_external_and_decode_steps(computed: int, scheduled: int, position: int) -> None:
     records = [snapshot_batch(make_batch(computed, scheduled), 0)]
-    assert token_batch_context(records, 6, position)["model_row"] == 0
+    context = token_batch_context(records, 6, position)
+    assert context is not None and context["model_row"] == 0
     assert token_batch_context(records, 6, position + 1) is None
     assert token_batch_context(records, 4, position) is None
 
@@ -67,6 +73,8 @@ def test_unknown_request_identity_fails_instead_of_being_misattributed() -> None
 
 
 def test_trace_hook_restores_worker_and_propagates_preparation_errors() -> None:
+    # An annotation must not create a runtime attribute that conflicts with vLLM's Worker mixin injection.
+    assert not hasattr(AscendStoreDiagnosticWorkerExtension, "model_runner")
     worker = AscendStoreDiagnosticWorkerExtension()
     batch = make_batch()
     runner = SimpleNamespace(_prepare_inputs_impl=lambda: batch)
@@ -103,6 +111,7 @@ def test_first_divergence_uses_token_ids_and_only_equal_prefix_scores() -> None:
         "logprobs": {"top_logprobs": [{}, {"token_id:9": -0.1, "token_id:2": -0.11}, {}]},
     }
     result = first_divergence(left, right)
+    assert result is not None
     assert result["token_position"] == 1 and result["shared_prefix_token_ids"] == [1]
     assert result["left"]["top_logprobs"] is None
     assert result["right"]["top_two_logprob_gap"] == pytest.approx(0.01)
@@ -137,3 +146,28 @@ def test_comparisons_keep_repeats_connectors_and_external_load_separate() -> Non
     difference = mismatch["differences"][0]
     assert difference["request_index"] == 6 and difference["token_position"] == 0
     assert difference["right"]["batch"]["model_row"] == 0
+
+
+def test_diagnostic_ci_route_freezes_only_its_single_card_experiment(tmp_path: Path) -> None:
+    repository_root = Path(__file__).resolve().parents[5]
+    jobs = yaml.safe_load((repository_root / ".github/workflows/pr_test.yaml").read_text())["jobs"]
+    selection = jobs["select-tests"]
+    step = next(step for step in selection["steps"] if step.get("id") == "scope-v1")
+    assert step["if"] == "steps.decide.outputs.mode == 'ascendstore-v1'"
+    script = step["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    output = tmp_path / "selection-output"
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository_root,
+        env={**os.environ, "GITHUB_OUTPUT": str(output)},
+        check=True,
+    )
+    fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(fields["diagnostic_vllm_versions"]) == ["8cc9aa5ad350f6f80cf3bebb298d410803ff75a9"]
+    groups = json.loads(fields["test_groups"])
+    assert len(groups) == 1 and groups[0]["runner"] == "linux-aarch64-a2b3-1"
+    assert groups[0]["tests"] == "tests/e2e/pull_request/one_card/test_ascendstore_v1_diagnostic.py"
+    assert selection["outputs"]["diagnostic_vllm_versions"] == "${{ steps.scope-v1.outputs.diagnostic_vllm_versions }}"
+    assert jobs["run-selected-tests"]["strategy"]["matrix"]["vllm_version"] == (
+        "${{ fromJSON(needs.select-tests.outputs.diagnostic_vllm_versions || needs.pre-commit.outputs.vllm_versions) }}"
+    )

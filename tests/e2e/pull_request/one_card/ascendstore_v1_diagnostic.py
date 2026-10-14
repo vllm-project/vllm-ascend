@@ -17,6 +17,9 @@ MAX_TRACE_STEPS = 1024
 
 
 class AscendStoreDiagnosticWorkerExtension(AscendStoreBenchmarkWorkerExtension):
+    # vLLM injects this mixin into the Worker; the Worker owns and initializes the runner.
+    model_runner: Any
+
     def start_ascendstore_diagnostic_trace(self) -> dict[str, bool]:
         assert not hasattr(self, "_diagnostic_prepare_inputs"), "A previous trace is still installed"
         runner = self.model_runner
