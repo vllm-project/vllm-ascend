@@ -16,10 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import torch
-from vllm.config import VllmConfig
+import copy
 
-from vllm_ascend.utils import vllm_version_is
+import torch
+from vllm.config import CompilationMode, VllmConfig
 
 
 def init_speculator(
@@ -31,11 +31,11 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.enforce_eager:
+        vllm_config = copy.copy(vllm_config)
+        vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
+        vllm_config.compilation_config.mode = CompilationMode.NONE
     if speculative_config.method == "extract_hidden_states":
-        # vLLM #49811 adds this MRV2 speculator on main only. The release
-        # configuration rejects this method for MRV2; keep direct calls explicit.
-        if vllm_version_is("0.28.0"):
-            raise NotImplementedError("extract_hidden_states is not supported by Model Runner V2 in vLLM 0.28.0.")
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (

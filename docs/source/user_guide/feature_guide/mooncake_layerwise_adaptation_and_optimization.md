@@ -1,5 +1,8 @@
 # Mooncake Layerwise Adaptation and Optimization Analysis
 
+For the subsequent multi-group attention extension and its validation boundaries,
+see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid_attention.md).
+
 ## 1. Adaptation Baseline and Conclusion
 
 - Baseline: `Eric-dot/vllm-ascend:mooncake` at local commit `0a023b094e9e88ffaca0b1fda02529cef6277f8e`.
@@ -140,11 +143,13 @@ Mooncake layerwise transfer checks all required session and range methods during
 startup fails immediately and reports that the client must include Mooncake PR #2881, instead of failing in an
 asynchronous thread on the first request.
 
-The current key schema encodes only the model, block hash, and TP/head rank, so the implementation explicitly rejects:
+The initial single-group implementation used only model, block hash and TP/head rank.
+Hybrid attention and topology-matched PP are covered by the
+[hybrid guide](mooncake_hybrid_attention.md).
+The implementation still explicitly rejects:
 
-- Pipeline parallel size greater than 1.
 - Prefill or decode context parallel size greater than 1.
-- Hybrid or multi-group KV cache layouts.
+- Recurrent Mamba state in hybrid layerwise mode, and PP stages with empty projected cache groups.
 - TP mismatch with layerwise transfer.
 
 ### 4.5 Exceptions and Fallbacks

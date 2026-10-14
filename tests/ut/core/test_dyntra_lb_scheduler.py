@@ -31,7 +31,6 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -549,12 +548,11 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         "SchedulerOutput",
         RecordingSchedulerOutput,
     )
-    if not vllm_version_is("0.28.0"):
-        monkeypatch.setattr(
-            scheduler.kv_cache_manager,
-            "take_boundary_state_offloads",
-            lambda: boundary_state_offloads,
-        )
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "take_boundary_state_offloads",
+        lambda: boundary_state_offloads,
+    )
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
         "get_manager_metadata",
@@ -564,11 +562,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     def build_metadata(connector, output):
         assert connector is scheduler.connector
-        if vllm_version_is("0.28.0"):
-            assert "kv_connector_block_state" not in vars(output)
-            block_states.append(None)
-        else:
-            block_states.append(output.kv_connector_block_state)
+        block_states.append(output.kv_connector_block_state)
         return connector_metadata
 
     monkeypatch.setattr(scheduler, "_build_kv_connector_meta", build_metadata)
@@ -576,13 +570,9 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     scheduler_output = scheduler.schedule()
 
     assert len(block_states) == 1
-    if vllm_version_is("0.28.0"):
-        assert block_states == [None]
-        assert "kv_connector_block_state" not in vars(scheduler_output)
-    else:
-        assert block_states[0].boundary_state_offloads is boundary_state_offloads
-        assert block_states[0].req_ids == set()
-        assert scheduler_output.kv_connector_block_state is None
+    assert block_states[0].boundary_state_offloads is boundary_state_offloads
+    assert block_states[0].req_ids == set()
+    assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 
@@ -1379,3 +1369,133 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     )
     assert scheduler._free_request(free_req, delay_free_blocks=True) == {"ok": True}
     assert free_req.request_id not in scheduler._lb_paused_req_ids
+
+
+# Deferred block freeing (vllm-project/vllm#49675): with async scheduling and a
+# KV-consumer connector, a preempted request's blocks return to the pool only
+# after its in-flight step is processed. Preempting such a request cannot help
+# the current allocation, so the retry loop must stop instead of cascading.
+DEFER_FREE_BLOCK_SIZE = 16
+DEFER_FREE_PROMPT_TOKENS = 33  # 3 blocks with block_size=16
+
+
+def _create_deferring_dyntra_lb_scheduler(policy: str = "fcfs", num_blocks: int = 10000) -> AsyncDyntraLBScheduler:
+    vllm_config = make_dyntra_test_config(block_size=DEFER_FREE_BLOCK_SIZE)
+    vllm_config.scheduler_config.async_scheduling = True
+    vllm_config.scheduler_config.policy = policy
+    scheduler = create_dyntra_lb_scheduler(
+        vllm_config,
+        scheduler_cls=AsyncDyntraLBScheduler,
+        num_blocks=num_blocks,
+    )
+    # The production gate also requires a KV-consumer connector; the
+    # mechanism itself is independent of it.
+    scheduler.defer_block_free = True
+    return scheduler
+
+
+def _make_output_for(scheduler, scheduler_output):
+    return create_model_runner_output([scheduler.requests[req_id] for req_id in scheduler_output.num_scheduled_tokens])
+
+
+def _fail_one_allocation(scheduler, call_number: int):
+    real_allocate = scheduler.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            return None
+        return real_allocate(*args, **kwargs)
+
+    return patch.object(scheduler.kv_cache_manager, "allocate_slots", side_effect=allocate)
+
+
+@pytest.mark.parametrize(
+    ("policy", "failed_call"),
+    [
+        ("fcfs", 1),
+        ("priority", 2),
+    ],
+)
+def test_dyntra_lb_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
+    scheduler = _create_deferring_dyntra_lb_scheduler(policy)
+    requests = [
+        create_request(
+            request_id=i,
+            num_tokens=DEFER_FREE_PROMPT_TOKENS,
+            max_tokens=10,
+            block_size=DEFER_FREE_BLOCK_SIZE,
+        )
+        for i in range(1, 4)
+    ]
+    for request in requests:
+        scheduler.add_request(request)
+    out0 = scheduler.schedule()
+    out1 = scheduler.schedule()
+
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
+
+    # Every victim is still in flight: preempting it frees nothing this step.
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        blocked = scheduler.schedule()
+    assert allocate.call_count == failed_call
+    assert not blocked.preempted_req_ids
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked.num_scheduled_tokens
+
+    for output in (out0, out1, blocked):
+        if output.total_num_scheduled_tokens:
+            scheduler.update_from_output(output, _make_output_for(scheduler, output))
+
+    # Once the fence has advanced, preempting the victim makes progress.
+    expected_victim = worst if policy == "priority" else tail
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        resumed = scheduler.schedule()
+
+    assert allocate.call_count > failed_call
+    assert expected_victim.request_id in resumed.preempted_req_ids
+    assert retry_trigger.request_id in resumed.num_scheduled_tokens
+    if policy == "priority":
+        assert tail.request_id in resumed.num_scheduled_tokens
+
+
+def test_dyntra_lb_full_pool_does_not_cascade_preempt_on_deferred_free():
+    num_reqs, prompt_blocks = 4, 2
+    # One extra block for the null block reserved by the block pool.
+    scheduler = _create_deferring_dyntra_lb_scheduler(num_blocks=num_reqs * prompt_blocks + 1)
+    pool = scheduler.kv_cache_manager.block_pool
+    requests = [
+        create_request(
+            request_id=i,
+            num_tokens=prompt_blocks * DEFER_FREE_BLOCK_SIZE,
+            max_tokens=8,
+            block_size=DEFER_FREE_BLOCK_SIZE,
+        )
+        for i in range(1, num_reqs + 1)
+    ]
+    for request in requests:
+        scheduler.add_request(request)
+
+    out0 = scheduler.schedule()
+    assert len(out0.num_scheduled_tokens) == num_reqs
+    assert pool.get_num_free_blocks() == 0
+
+    # The prefill step is still in flight and every request needs a new block
+    # for its first decode token. Without the guard the retry loop preempted
+    # the whole running queue while the free-block count stayed 0.
+    out1 = scheduler.schedule()
+    assert not out1.preempted_req_ids
+    assert len(scheduler.running) == num_reqs
+    assert not scheduler.deferred_frees
+
+    # Once the prefill output is processed, victims free their blocks at once:
+    # id-4's blocks serve id-1 and id-2, and id-3 then preempts itself, the
+    # same outcome as upstream's AsyncScheduler.
+    scheduler.update_from_output(out0, _make_output_for(scheduler, out0))
+    out2 = scheduler.schedule()
+    assert out2.preempted_req_ids == {"id-3", "id-4"}
+    assert set(out2.num_scheduled_tokens) == {"id-1", "id-2"}
+    assert not scheduler.deferred_frees

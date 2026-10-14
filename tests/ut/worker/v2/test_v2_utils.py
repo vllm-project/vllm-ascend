@@ -23,6 +23,11 @@ def test_v2_utils_context_managers_switch_and_restore():
         patch.object(v2_utils, "weak_ref_workspaces") as weak_ref,
         patch.object(v2_utils, "get_graph_params", return_value="graph"),
         patch.object(v2_utils, "get_draft_graph_params", return_value="draft"),
+        patch.object(
+            v2_utils,
+            "get_ascend_config",
+            return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_super_kernel=False)),
+        ),
         patch.object(v2_utils.logger, "info_once", create=True),
         patch.object(v2_utils.logger, "debug"),
         patch(

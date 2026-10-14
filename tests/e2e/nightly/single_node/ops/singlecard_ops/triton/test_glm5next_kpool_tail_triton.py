@@ -130,6 +130,66 @@ def test_empty_compression_preserves_caches(empty):
     torch.testing.assert_close(cache.cpu(), torch.ones_like(cache, device="cpu"), rtol=0, atol=0)
 
 
+@torch.inference_mode()
+def test_mtp_rejection_replay_preserves_open_pool_history():
+    """Rejected lookahead must not overwrite history needed by replay.
+
+    Pool 4-7 is verified while candidates 8 and 9 are also written.  Only
+    position 6 is retained, so position 7 is replayed with a replacement key.
+    A four-row ring would let rejected 8/9 overwrite committed 4/5; capacity
+    pool+lookahead keeps 4/5/6 available for the replacement compression.
+    """
+    pool, capacity, dim = 4, 7, HEAD_DIM
+    generator = torch.Generator().manual_seed(911)
+    keys = torch.randn(10, dim, generator=generator)
+    gates = torch.randn(10, dim, generator=generator) * 0.1
+    replacement_k = torch.randn(dim, generator=generator)
+    replacement_g = torch.randn(dim, generator=generator) * 0.1
+    ape = torch.randn(pool, dim, generator=generator) * 0.1
+    tail_block, indexer_block = 2, 1
+    tail = torch.zeros(4, 2, capacity, dim, device="npu")
+    cache = torch.zeros(3, 16, 1, dim, dtype=torch.bfloat16, device="npu")
+    table = torch.tensor([[tail_block]], dtype=torch.int32, device="npu")
+
+    def run(positions, current_k, current_g, output_slots):
+        positions_cpu = torch.tensor(positions, dtype=torch.int64)
+        tail_slots = tail_block * capacity + positions_cpu % capacity
+        compress(
+            tail,
+            cache,
+            current_k.npu(),
+            current_g.npu(),
+            ape.npu(),
+            positions_cpu.npu(),
+            torch.tensor([len(positions)], dtype=torch.int32, device="npu"),
+            torch.tensor([positions[-1] + 1], dtype=torch.int32, device="npu"),
+            tail_slots.npu(),
+            table,
+            torch.tensor(output_slots, dtype=torch.int64, device="npu"),
+            pool,
+        )
+
+    # Committed incomplete history.
+    run([4, 5], keys[4:6], gates[4:6], [-1, -1])
+    # Target verification tentatively writes 6..9.  Acceptance later keeps 6
+    # and rejects 7..9; the kernel intentionally does not know that yet.
+    pooled_slot = indexer_block * cache.shape[1] + 1
+    run([6, 7, 8, 9], keys[6:10], gates[6:10], [-1, pooled_slot, -1, -1])
+    # Logical rollback replays position 7 with the target replacement token.
+    run([7], replacement_k[None], replacement_g[None], [pooled_slot])
+    torch.npu.synchronize()
+
+    committed_k = torch.stack((keys[4], keys[5], keys[6], replacement_k))
+    committed_g = torch.stack((gates[4], gates[5], gates[6], replacement_g))
+    expected = (torch.softmax(committed_g + ape, dim=0) * committed_k).sum(0).bfloat16()
+    torch.testing.assert_close(
+        cache[indexer_block, 1, 0].cpu(),
+        expected,
+        rtol=BF16_RTOL,
+        atol=BF16_ATOL,
+    )
+
+
 @pytest.mark.parametrize("shape", [(1, 4, HEAD_DIM), (1, 3, 4, HEAD_DIM), (1, 2, 2, HEAD_DIM)])
 def test_invalid_tail_layout_raises(shape):
     tail = torch.zeros(shape, device="npu")

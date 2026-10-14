@@ -14,11 +14,15 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 class TestAscendEPLBController(unittest.TestCase):
     @staticmethod
-    def _make_controller(*, enable_eplb=True, log_balancedness=False):
+    def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=enable_eplb,
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
+                policy=policy,
+                communicator="torch_gloo",
             ),
         )
         controller = AscendEPLBController(
@@ -54,6 +58,7 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            controller.eplb_policy,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -65,6 +70,41 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.set_batch_phase(batch_has_prefill=False)
         self.assertFalse(controller._load_collection_phase_matched)
+
+    def test_draft_eplb_controls_registration_without_disabling_target(self):
+        for enabled in (True, False):
+            with self.subTest(draft_eplb=enabled):
+                controller = self._make_controller()
+                controller.parallel_config.enable_elastic_ep = False
+                controller._has_registered_models = False
+                controller.state = MagicMock()
+                speculator = SimpleNamespace(
+                    vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=enabled)),
+                    model=nn.Linear(2, 2),
+                    set_eplb_state=MagicMock(),
+                )
+                draft_config = SimpleNamespace()
+                with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
+                    added = controller.maybe_register_speculator(
+                        speculator, SimpleNamespace(draft_model_config=draft_config), False
+                    )
+                self.assertEqual(added, enabled)
+                self.assertEqual(controller._has_registered_models, enabled)
+                if enabled:
+                    controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    speculator.set_eplb_state.assert_called_once_with(controller.state)
+                else:
+                    controller.state.add_model.assert_not_called()
+                    speculator.set_eplb_state.assert_not_called()
+
+                    target = nn.Linear(2, 2)
+                    model_config = SimpleNamespace(model="target")
+                    with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
+                        added = controller.maybe_register_model(target, model_config, False)
+                    controller.state.add_model.assert_called_once_with(target, model_config)
+                    self.assertTrue(added)
+                    controller.maybe_start_async_loop(added)
+                    controller.state.start_async_loop.assert_called_once()
 
     def test_step_early_return_conditions(self):
         for condition in (
@@ -122,11 +162,7 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.prepare_forward(model_config, 4, ubatch_slices)
 
-        state.prepare_forward.assert_called_once_with(
-            model_config,
-            4,
-            ubatch_slices,
-        )
+        state.prepare_forward.assert_not_called()
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )
@@ -203,6 +239,7 @@ class TestAscendEPLBController(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=2,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)

@@ -36,6 +36,10 @@ def register_model():
         "vllm_ascend.models.deepseek_v4.vl_model:AscendDeepseekV4ForConditionalGeneration",
     )
     ModelRegistry.register_model(
+        "DeepseekV41ForCausalLM",
+        "vllm_ascend.models.deepseek_v41.vl_model:AscendDeepseekV41ForCausalLM",
+    )
+    ModelRegistry.register_model(
         "MiniMaxM3SparseForCausalLM",
         "vllm_ascend.models.minimax_m3:MiniMaxM3SparseForCausalLM",
     )
@@ -49,9 +53,14 @@ def register_model():
         "vllm_ascend.models.deepseek_v4.dspark:DSparkDeepseekV4ForCausalLM",
     )
     ModelRegistry.register_model(
+        "DeepseekV41DSparkModel",
+        "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",
+    )
+    ModelRegistry.register_model(
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
+    ModelRegistry.register_model("Glm5DSparkForCausalLM", "vllm_ascend.models.glm5_dspark:Glm5DSparkForCausalLM")
     ModelRegistry.register_model(
         "Qwen3OmniDSparkModel",
         "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM",
@@ -63,6 +72,17 @@ def register_model():
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("DeepseekV32MTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")
+    # Ascend Qwen3.5-VL: NPU-side image preprocessing (resize/patchify +
+    # fused rescale/normalize); overwrites the upstream architecture mapping,
+    # same pattern as AscendDeepseekV4ForConditionalGeneration (see PR #15457).
+    ModelRegistry.register_model(
+        "Qwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5MoeForConditionalGeneration",
+    )
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )

@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    BatchResultShapeError,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
@@ -237,12 +238,14 @@ class MooncakeBackend(Backend):
         self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # Scheduler-only clients must not register SSD storage with Mooncake,
+        # which would inflate the active client count and reported SSD usage.
+        ssd_kwargs = _ssd_setup_kwargs(self.config) if self._contribute_memory else {}
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
@@ -335,6 +338,13 @@ class MooncakeBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Map committed Mooncake objects to the common readability contract."""
+        states = require_aligned_batch_results("batch_is_exist", keys, self.batch_is_exist(keys))
+        if any(state not in (0, 1) for state in states):
+            raise BatchResultShapeError("batch_is_exist returned states other than 0 or 1")
+        return [state == 1 for state in states]
+
     def _build_replicate_config(self) -> ReplicateConfig:
         config = ReplicateConfig()
         if self.config.preferred_segment:
@@ -424,7 +434,7 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -444,6 +454,7 @@ class MooncakeBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) >= 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -455,6 +466,7 @@ class MooncakeBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:

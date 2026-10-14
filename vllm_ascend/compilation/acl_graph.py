@@ -4,7 +4,7 @@
 import dataclasses
 import weakref
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import use_updatable_graph, weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -37,19 +37,6 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
-
-
-@contextmanager
-def _super_kernel_scope(scope: str, enabled: bool):
-    if not enabled:
-        yield
-        return
-
-    torch.npu.super_kernel_scope_begin(scope)
-    try:
-        yield
-    finally:
-        torch.npu.super_kernel_scope_end(scope)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -192,7 +179,7 @@ class ACLGraphWrapper:
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
-                logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+                logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
@@ -222,7 +209,7 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        with _super_kernel_scope("full_model", self.enable_super_kernel):
+                        with super_kernel_scope("full_model", self.enable_super_kernel):
                             output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
@@ -262,6 +249,7 @@ class ACLGraphWrapper:
                         "dcci_after_kernel_end": [".*"],
                     },
                 )
+                logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
             # here we always use weak ref for the workspaces
             # to save memory
@@ -293,7 +281,6 @@ class ACLGraphWrapper:
                 f"got {new_input_addresses}"
             )
 
-        logger.info_once("Replaying aclgraph")
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.
@@ -311,6 +298,7 @@ class ACLGraphWrapper:
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
+        logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
 
     def _updatable_graph_replay(

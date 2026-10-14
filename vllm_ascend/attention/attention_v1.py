@@ -15,14 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -38,13 +38,19 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    _select_seq_lens,
     enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -57,13 +63,8 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache, vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -99,9 +100,10 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         # vLLM checks this capability before any instance-level PCP dispatch.
-        # Only the main GQA implementation owns the PCP path; exact identity
-        # prevents backends such as 310P from inheriting unsupported capability.
-        return cls.get_impl_cls() is AscendAttentionBackendImpl
+        # The main backend owns both the ordinary GQA implementation and its
+        # DCP specialization. Keep derived backends such as 310P and C8 opted
+        # out unless they declare support themselves.
+        return cls is AscendAttentionBackend
 
     @staticmethod
     def get_kv_cache_shape(
@@ -121,13 +123,13 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        # C8-MXFP layers carry (k, v, k_scale, v_scale) tuples; generalize to
+        # any cache tuple length so scale caches are swapped alongside K/V.
+        for src_cache, dst_cache in zip(src_kv_cache, dst_kv_cache):
+            dst_cache[dst_indices] = src_cache[src_indices].to(dst_cache.device)
 
     @staticmethod
     def copy_blocks(
@@ -138,13 +140,14 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
+            for cache in kv_cache:
+                cache[dst_indices] = cache[src_indices]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        if is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            # Keep 128 as a common kernel block with M3 sparse/indexer caches.
+            return [MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
         return [128]
 
 
@@ -192,6 +195,16 @@ class AscendMetadata:
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
 
+    # Persistent GPU-side length sources, refreshed in place by the model
+    # runner every step: query_start_loc_gpu is the 0-prefixed cumulative
+    # query boundaries (int32) and seq_lens_gpu the per-request KV lengths
+    # (int32). Graph-capturing backends must source cu_seqlens/seqused from
+    # these instead of the CPU lists above -- ACL-graph replay re-executes
+    # only device work, so Python-side refreshes of hand-managed buffers
+    # never run again after capture.
+    query_start_loc_gpu: torch.Tensor = None
+    seq_lens_gpu: torch.Tensor = None
+
     # ********************** KV Cache Related Properties ********************* #
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
@@ -209,6 +222,14 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
+    # Per-step scratch for C8-MXFP (QFA) layers. The builder creates one
+    # AscendMetadata per step shared by all attention layers, so the QFA
+    # metadata operator output is computed once per step instead of once
+    # per layer. Key: layout_q_descale -> QFA metadata tensor, because that
+    # layout is what selects the prefill or decode kernel the plan is computed
+    # for. Only used on the eager path -- graph capture bypasses the cache so
+    # the metadata op executes inside the captured region.
+    qfa_metadata_cache: dict = field(default_factory=dict)
     pcp_local_num_input_tokens: int | None = None
 
 
@@ -318,23 +339,19 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
+        # TODO: This will be moved to propose and deleted after fia ops fixed.
+        seq_lens = _select_seq_lens(
+            common_attn_metadata,
+            kv_cache_spec=self.kv_cache_spec,
+            speculative_config=self.speculative_config,
+            vllm_config=self.vllm_config,
+        )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
-            seq_lens = common_attn_metadata.seq_lens
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
-        elif self.speculative_config and self.speculative_config.parallel_drafting:
-            seq_lens = common_attn_metadata.seq_lens
 
         attn_state = common_attn_metadata.attn_state
 
@@ -345,6 +362,39 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+        # vLLM main keeps speculative-decode request metadata at the real
+        # request extent, so a padded FULL-graph decode query tensor can exceed
+        # the last cumulative query length. FIA's TND layout requires that last
+        # entry to equal the model input token count, so append the padded tail
+        # as a final synthetic request. This only applies to multi-token
+        # (speculative) decode where one request spans several query tokens:
+        # single-token decode never pads requests beyond the query start loc,
+        # and prefill (including the EAGLE drafter's merged prefill) reuses the
+        # target's num_input_tokens while its own query is shorter. Only the V2
+        # runner needs this: it applies the metadata to the FULL graph at every
+        # replay, while V1 bakes actual_seq_lengths_q into the captured graph
+        # (and trims the query to its last entry), so padding there only changes
+        # the captured graph. The V2 runner reports speculative decode as
+        # ChunkedPrefill, so decide from the per-request is_prefilling flags
+        # (falling back to the state when they are unavailable). v0.30.0 already
+        # pads this at the request level and stays unchanged behind
+        # vllm_version_is().
+        if not vllm_version_is("0.30.0") and self.vllm_config.use_v2_model_runner:
+            is_prefilling = common_attn_metadata.is_prefilling
+            if is_prefilling is None:
+                decode_like = common_attn_metadata.attn_state in (
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding,
+                )
+            else:
+                decode_like = not bool(is_prefilling.any())
+            if (
+                decode_like
+                and (common_attn_metadata.max_query_len or 0) > 1
+                and actual_seq_lengths_q
+                and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
+            ):
+                actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
@@ -393,6 +443,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
+            query_start_loc_gpu=common_attn_metadata.query_start_loc,
+            seq_lens_gpu=common_attn_metadata.seq_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
@@ -463,6 +515,7 @@ class FIAParamProvider:
     layer_name: str | None
     sliding_window: int | None
     is_draft_model: bool = False
+    is_non_pa: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -471,7 +524,7 @@ class FIAParamProvider:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": metadata.block_tables,
+                "block_table": None if self.is_non_pa else metadata.block_tables,
             }
         else:
             return {
@@ -525,6 +578,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -546,16 +600,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
-        )
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, self.vllm_config.model_config)
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        if self.kv_cache_dtype in [torch.float16, torch.bfloat16]:
+        # Note: Some embedding model weights are in float32 format.
+        if self.kv_cache_dtype in [torch.float16, torch.bfloat16, torch.float32]:
             self.enable_c8_quant = False
         else:
-            if not self.enable_c8_quant:
+            from vllm_ascend.utils import is_c8_mxfp_kv_quant
+
+            # MXFP8 is switched on by --kv-cache-dtype itself, so it must
+            # not be gated by the recipe-derived C8 flag.
+            if not self.enable_c8_quant and not is_c8_mxfp_kv_quant(self.vllm_config):
                 raise ValueError(
                     "The current GQA‑related models adopt static quantization. "
                     "KV quantization is configured via `--kv‑cache‑dtype` upon service startup, "
@@ -633,6 +690,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
 
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_WORKSPACE_KEY,
@@ -678,7 +739,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
                 **extra_args,
             },
-            FIAParamProvider(self._layer_name, self.sliding_window, _EXTRA_CTX.is_draft_model),
+            FIAParamProvider(
+                self._layer_name,
+                self.sliding_window,
+                _EXTRA_CTX.is_draft_model,
+                is_non_pa=block_table is None,
+            ),
         )
         return output, num_tokens
 
@@ -696,6 +762,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_V2_WORKSPACE_KEY,
@@ -868,6 +938,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1191,7 +1265,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value[:local_num_input_tokens],
             ),
             expanded_slot_mapping,
-            attn_metadata.num_decode_tokens,
+            get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded),
         )
         local_num_actual_tokens = attn_metadata.num_actual_tokens
         try:
@@ -1202,7 +1276,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.slot_mapping = expanded_slot_mapping
             attn_metadata.num_actual_tokens = local_num_actual_tokens
 
-        return query, key, value, output
+        return query, cache_key, cache_value, output
 
     def forward_impl(
         self,
@@ -1213,19 +1287,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        record_attention_compute_start()
-        num_tokens = query.shape[0]
+        with attention_transfer_window():
+            num_tokens = query.shape[0]
 
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and self.sliding_window is None
-            and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
-        ):
-            output = self.forward_paged_attention(query, attn_metadata, output)
-        else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+            if (
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and self.sliding_window is None
+                and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
+            ):
+                output = self.forward_paged_attention(query, attn_metadata, output)
+            else:
+                output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
-        return output
+            return output
 
     def forward(
         self,
@@ -1628,8 +1702,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             cache_block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
                 query=prefill_q,
-                key=prefill_k,
-                value=prefill_v,
+                key=prefill_k.contiguous(),
+                value=prefill_v.contiguous(),
                 atten_mask=attn_metadata.attn_mask,
                 block_table=None,
                 input_layout="TND",
@@ -1686,6 +1760,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             else:
                 key = (key.to(query.dtype) - layer._c8_k_offset) * layer._c8_k_scale
                 value = (value.to(query.dtype) - layer._c8_v_offset) * layer._c8_v_scale
+
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,

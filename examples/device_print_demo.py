@@ -1,6 +1,6 @@
 import torch
 
-from vllm_ascend.utils import device_print
+from vllm_ascend.utils import device_print, register_device_print
 
 
 def compute_and_print(x: torch.Tensor) -> torch.Tensor:
@@ -15,17 +15,18 @@ def compute_and_print(x: torch.Tensor) -> torch.Tensor:
 
 def main() -> None:
     torch.npu.set_device(0)
+    register_device_print()
     torch.npu.set_compile_mode(jit_compile=False)
 
     x = torch.arange(1, 28, dtype=torch.float32).reshape(3, 3, 3).npu()
 
-    print("=== eager ===", flush=True)
-    eager_out = compute_and_print(x)
+    print("=== torch.compile(backend='aot_eager') ===", flush=True)
+    compiled_compute_and_print = torch.compile(compute_and_print, backend="aot_eager", fullgraph=True)
+    compiled_out = compiled_compute_and_print(x)
     torch.npu.synchronize()
 
-    print("=== torch.compile(backend='aot_eager') ===", flush=True)
-    compiled_compute_and_print = torch.compile(compute_and_print, backend="aot_eager")
-    compiled_out = compiled_compute_and_print(x)
+    print("=== eager ===", flush=True)
+    eager_out = compute_and_print(x)
     torch.npu.synchronize()
 
     assert torch.allclose(eager_out, compiled_out), "Outputs from eager and compiled modes do not match."

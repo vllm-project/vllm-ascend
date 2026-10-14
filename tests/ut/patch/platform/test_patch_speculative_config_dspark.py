@@ -8,7 +8,8 @@ from vllm.config.speculative import SpeculativeConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
-    _normalize_deepseek_v4_dspark_draft,
+    _ascend_verify_with_parallel_config,
+    _normalize_deepseek_dspark_draft,
 )
 
 
@@ -71,7 +72,7 @@ def test_deepseek_v4_vision_dspark_restores_draft_architecture():
         registry=registry,
     )
 
-    _normalize_deepseek_v4_dspark_draft(draft_model_config)
+    _normalize_deepseek_dspark_draft(draft_model_config)
 
     assert hf_config.architectures == ["DSparkDraftModel"]
     assert draft_model_config.architectures == ["DSparkDraftModel"]
@@ -175,3 +176,185 @@ def test_non_dcp_dspark_config_is_not_replaced_during_validation(
 
     patch_speculative_config._dspark_post_init(config)
     assert config.target_parallel_config is original_parallel_config
+
+
+def test_gqa_pcp_dcp_preserves_other_upstream_checks(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+    )
+    validated = []
+
+    def validate_config(model, config):
+        validated.append((model, config))
+        assert config is not parallel_config
+        assert config.enable_expert_parallel is True
+        assert config.decode_context_parallel_size == 1
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
+    _ascend_verify_with_parallel_config(model_config, parallel_config)
+    assert len(validated) == 1
+    assert validated[0][0] is model_config
+    assert parallel_config.decode_context_parallel_size == 2
+
+
+def test_non_moe_draft_keeps_original_parallel_validation_bypass(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=False, runner_type="draft")
+    parallel_config = SimpleNamespace(enable_expert_parallel=True)
+    validated = []
+    monkeypatch.setattr(
+        patch_speculative_config, "_orig_verify_with_parallel_config", lambda *args: validated.append(args)
+    )
+    assert _ascend_verify_with_parallel_config(model_config, parallel_config) is None
+    assert not validated
+
+
+def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+    )
+
+    def fail(model, config):
+        assert config.enable_expert_parallel is True
+        assert config.decode_context_parallel_size == 1
+        raise ValueError("other upstream validation failed")
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", fail)
+    with pytest.raises(ValueError, match="other upstream validation failed"):
+        _ascend_verify_with_parallel_config(model_config, parallel_config)
+
+    assert parallel_config.enable_expert_parallel is True
+    assert parallel_config.decode_context_parallel_size == 2
+
+
+def test_gqa_tp_only_dcp_keeps_upstream_validation(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=2,
+    )
+    validated = []
+
+    def validate_config(model, config):
+        validated.append((model, config))
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
+
+    _ascend_verify_with_parallel_config(model_config, parallel_config)
+    assert validated == [(model_config, parallel_config)]
+
+
+@pytest.mark.parametrize("flattened", [False, True])
+def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
+    text_config = SimpleNamespace(
+        model_type="deepseek_v41_text",
+        dspark_target_layer_ids=[37, 38, 39],
+        dspark_n_routed_experts=128,
+        num_nextn_predict_layers=3,
+        dspark_num_experts_per_tok=3,
+    )
+    text_config.update = lambda values: text_config.__dict__.update(values)
+    hf_config = SimpleNamespace(
+        model_type="deepseek_v41",
+        architectures=["DSparkDraftModel"],
+        text_config=text_config,
+    )
+    hf_config.update = lambda values: hf_config.__dict__.update(values)
+    if flattened:
+        from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+        hf_config = DeepseekV41Config(
+            text_config={
+                "dspark_target_layer_ids": [37, 38, 39],
+                "dspark_n_routed_experts": 128,
+                "num_nextn_predict_layers": 3,
+                "dspark_num_experts_per_tok": 3,
+            }
+        )
+        hf_config.model_type = "deepseek_v4"
+        hf_config.architectures = ["DSparkDraftModel"]
+        text_config = hf_config
+    model_arch_config = ModelArchitectureConfig(
+        architectures=["DeepseekV41ForCausalLM"],
+        model_type="deepseek_v41",
+        text_model_type=text_config.model_type,
+        hidden_size=5120,
+        total_num_hidden_layers=43,
+        total_num_attention_heads=64,
+        head_size=512,
+        vocab_size=129280,
+        total_num_kv_heads=1,
+        num_experts=384,
+        num_experts_per_token=6,
+        quantization_config=None,
+        is_deepseek_mla=True,
+        is_mm_prefix_lm=True,
+        rswa_window=128,
+        derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
+    )
+    registry = MagicMock()
+    registry.inspect_model_cls.return_value = ("model-info", "DeepseekV41DSparkModel")
+    draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        registry=registry,
+    )
+
+    _normalize_deepseek_dspark_draft(draft_model_config)
+
+    assert hf_config.architectures == ["DeepseekV41DSparkModel"]
+    assert hf_config.model_type == "deepseek_v41"
+    assert text_config.n_routed_experts == 128
+    assert text_config.num_experts_per_tok == 3
+    assert text_config.n_mtp_layers == 3
+    assert draft_model_config.model_arch_config.num_experts == 128
+    assert draft_model_config.model_arch_config.num_experts_per_token == 3
+    assert draft_model_config.model_arch_config.text_model_type == text_config.model_type
+    registry.inspect_model_cls.assert_called_once_with(["DeepseekV41DSparkModel"], draft_model_config)
+
+
+def test_deepseek_v41_dspark_keeps_expert_count_when_optional_field_is_absent():
+    text_config = SimpleNamespace(
+        model_type="deepseek_v41_text",
+        dspark_target_layer_ids=[1],
+        dspark_n_routed_experts=128,
+        num_nextn_predict_layers=3,
+    )
+    text_config.update = lambda values: text_config.__dict__.update(values)
+    hf_config = SimpleNamespace(model_type="deepseek_v41", text_config=text_config, architectures=["DSparkDraftModel"])
+    hf_config.update = lambda values: hf_config.__dict__.update(values)
+    model_arch_config = ModelArchitectureConfig(
+        architectures=["DeepseekV41ForCausalLM"],
+        model_type="deepseek_v41",
+        text_model_type="deepseek_v41_text",
+        hidden_size=5120,
+        total_num_hidden_layers=43,
+        total_num_attention_heads=64,
+        head_size=512,
+        vocab_size=129280,
+        total_num_kv_heads=1,
+        num_experts=384,
+        num_experts_per_token=6,
+        quantization_config=None,
+        is_deepseek_mla=True,
+        is_mm_prefix_lm=True,
+        rswa_window=128,
+        derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
+    )
+    registry = MagicMock()
+    registry.inspect_model_cls.return_value = ("model-info", "DeepseekV41DSparkModel")
+    draft_model_config = SimpleNamespace(hf_config=hf_config, model_arch_config=model_arch_config, registry=registry)
+
+    _normalize_deepseek_dspark_draft(draft_model_config)
+
+    assert not hasattr(text_config, "num_experts_per_tok")
+    assert draft_model_config.model_arch_config.num_experts_per_token == 6

@@ -61,6 +61,23 @@ def _looks_like_sha(ref: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref))
 
 
+def ensure_full_history(repo: Path) -> None:
+    """Recover the full history of a shallow clone (no-op otherwise).
+
+    The nightly pods clone with ``--depth 1``, so every commit other than the
+    clone tip must be fetched before it can be checked out. This is slow and
+    network-bound -- callers that can should run it outside any time-boxed
+    window (the multi-node worker unshallows at agent startup, before the
+    first barrier; ``prepare`` re-resolves as a no-op backstop).
+    """
+    if not _is_shallow(repo):
+        return
+    logger.info(
+        "Repo is a shallow clone; running 'git fetch --unshallow' to recover full history (this can take a while)"
+    )
+    _git(repo, "fetch", "--unshallow", "--quiet", "origin", check=False)
+
+
 def resolve_commit(repo: Path, ref: str) -> str:
     """Resolve a ref / short-sha / full-sha / PR number to a full commit sha.
 
@@ -98,10 +115,7 @@ def resolve_commit(repo: Path, ref: str) -> str:
     #    intermediate commits missing so `git log good..bad` would silently
     #    return a truncated candidate list and break the bisect.
     if _is_shallow(repo):
-        logger.info(
-            "Repo is a shallow clone; running 'git fetch --unshallow' to recover full history (this can take a while)"
-        )
-        _git(repo, "fetch", "--unshallow", "--quiet", "origin", check=False)
+        ensure_full_history(repo)
         sha = _try_rev_parse(repo, ref)
         if sha:
             return sha
