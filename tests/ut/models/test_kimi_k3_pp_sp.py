@@ -61,6 +61,7 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
             pipeline_parallel_size=pp,
             data_parallel_size=dp,
             enable_expert_parallel=ep,
+            enable_eplb=False,
             use_sequence_parallel_moe=dp > 1 and tp > 1 and ep,
         ),
     )

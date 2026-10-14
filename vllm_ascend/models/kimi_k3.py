@@ -9,7 +9,9 @@ the generic MLA/MoE implementation and the Ascend KDA backend.
 
 import math
 from bisect import bisect_left
+from collections.abc import Callable, Iterable, Sequence
 from copy import copy
+from typing import Any, TypeVar, cast
 
 import torch
 import vllm.envs as envs
@@ -21,7 +23,10 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -34,6 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
     MoonViT3dPretrainedModel,
@@ -183,6 +189,73 @@ class AscendKimiMLP(KimiMLP):
         return x
 
 
+_WeightT = TypeVar("_WeightT", bound=tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]])
+
+
+def load_eplb_expert_weights(
+    model: nn.Module,
+    weights: Iterable[_WeightT],
+    num_redundant_experts: int,
+    map_weight_name: Callable[[str], str | None] | None = None,
+) -> Iterable[_WeightT]:
+    """Stream expert weights according to the complete initial EPLB layout.
+
+    Upstream Kimi loaders stop at the first matching expert mapping, so simply
+    adding redundant entries to that mapping would leave replicas uninitialized.
+    Remap the first logical-expert-count slots for the upstream loader and load
+    the remaining slots directly. MRV2 can place replicas in either range.
+    """
+    if not num_redundant_experts or not model.config.is_moe:
+        yield from weights
+        return
+
+    params_dict = dict(model.named_parameters())
+    expert_mapping = fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name="w3",
+        num_experts=model.config.num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
+    experts_unpacked = not any(name.endswith("w13_weight_packed") for name in params_dict)
+    for args in weights:
+        checkpoint_name = cast(str, args[0])
+        name = map_weight_name(checkpoint_name) if map_weight_name else checkpoint_name
+        handled = False
+        if name is not None:
+            if experts_unpacked and name.endswith(".weight_packed"):
+                name = name.replace(".weight_packed", ".weight")
+            for param_name, weight_name, expert_id, shard_id in expert_mapping:
+                if weight_name not in name:
+                    continue
+                mapped_name = name.replace(weight_name, param_name)
+                if mapped_name not in params_dict:
+                    continue
+                handled = True
+                if expert_id < model.config.num_experts:
+                    # The upstream mapping is identity and still owns loaded
+                    # parameter tracking and MTP checkpoint validation.
+                    logical_id = weight_name.split(".", 2)[1]
+                    physical_name = checkpoint_name.replace(f"experts.{logical_id}.", f"experts.{expert_id}.")
+                    yield cast(_WeightT, (physical_name, *args[1:]))
+                else:
+                    param = params_dict[mapped_name]
+                    param.weight_loader(param, args[1], mapped_name, expert_id=expert_id, shard_id=shard_id)
+        if not handled:
+            yield args
+
+
+def is_moe_layer_idx(config, layer_idx: int) -> bool:
+    """Whether the Kimi layer at ``layer_idx`` hosts routed experts."""
+    return bool(
+        config.is_moe
+        and config.num_experts is not None
+        and layer_idx >= config.first_k_dense_replace
+        and layer_idx % config.moe_layer_freq == 0
+    )
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -190,6 +263,7 @@ class AscendKimiMoE(nn.Module):
         self,
         *,
         config,
+        vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_sequence_parallel: bool = False,
@@ -202,6 +276,9 @@ class AscendKimiMoE(nn.Module):
         assert moe_intermediate_size is not None
         assert num_experts is not None
         assert num_experts_per_token is not None
+
+        parallel_config = vllm_config.parallel_config
+        num_redundant_experts = parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
 
         routed_expert_hidden_size = config.routed_expert_hidden_size
         self.use_latent_moe = routed_expert_hidden_size is not None
@@ -286,7 +363,17 @@ class AscendKimiMoE(nn.Module):
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
             is_sequence_parallel=use_sequence_parallel,
+            enable_eplb=parallel_config.enable_eplb,
+            num_redundant_experts=num_redundant_experts,
         )
+
+        # Use the factory's validated counts, including its effective EP size.
+        moe_config = self.experts.moe_config
+        self.n_routed_experts = num_experts
+        self.n_logical_experts = moe_config.num_logical_experts
+        self.n_physical_experts = moe_config.num_experts
+        self.n_local_physical_experts = moe_config.num_local_experts
+        self.n_redundant_experts = num_redundant_experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -461,15 +548,11 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prefix=f"{prefix}.self_attn",
             )
 
-        self.is_moe_layer = (
-            self.is_moe
-            and config.num_experts is not None
-            and layer_idx >= config.first_k_dense_replace
-            and layer_idx % config.moe_layer_freq == 0
-        )
+        self.is_moe_layer = is_moe_layer_idx(config, layer_idx)
         if self.is_moe_layer:
             self.block_sparse_moe = AscendKimiMoE(
                 config=config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_sequence_parallel=use_sequence_parallel,
@@ -712,6 +795,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
         parallel_config = vllm_config.parallel_config
+        # Physical expert slots appended by EPLB; load_weights needs the count
+        # so the duplicated initial expert placements receive weights.
+        self.n_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
+        )
         self.use_sequence_parallel = (
             (parallel_config.pipeline_parallel_size == 1 or vllm_config.use_v2_model_runner)
             and parallel_config.enable_expert_parallel
@@ -796,8 +884,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             include_start_layer=not self.dspark_aux_capture_materialized,
         )(batch_size, dtype, device)
 
-    def load_weights(self, weights):
-        """Route mixed-precision KDA gates through vLLM's packed loader."""
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
+    ) -> set[str]:
+        """Reuse upstream loading with Ascend KDA gates and EPLB replicas."""
         params_dict = dict(self.named_parameters())
         gate_mapping = (
             (".b_proj.weight", ".fused_bfg_proj.weight", 0),
@@ -821,7 +912,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(remap_mixed_gate_weights())
+        return super().load_weights(
+            load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
+        )
 
     def forward(
         self,
@@ -967,7 +1060,51 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         return hidden_states
 
 
-class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
+class KimiMixtureOfExperts(MixtureOfExperts):
+    """MoE bookkeeping shared by the Ascend Kimi K3 adapters."""
+
+    moe_mlp_layers: list[AscendKimiMoE]
+
+    def extract_moe_parameters(self) -> None:
+        self.expert_weights: list[Sequence[torch.Tensor]] = []
+        self.num_expert_groups = getattr(self.config, "num_expert_group", None) or 1
+        self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        # EPLB state and transfers operate within this PP stage.
+        self.num_moe_layers = len(self.moe_layers)
+        example_moe = self.moe_mlp_layers[-1] if self.moe_mlp_layers else None
+        if example_moe is None:
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.num_shared_experts or 0
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        # Rebalancing and elastic EP reuse the allocated per-rank weight slots.
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_physical_experts = num_physical_experts
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfExperts):
     """Causal-LM wrapper retaining vLLM 0.27 state/cache interfaces."""
 
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
@@ -995,6 +1132,18 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
             self.config.vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
+        # Set MoE hyperparameters for the EPLB registration.
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.moe_mlp_layers = []
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, AscendKimiDecoderLayer)
+            if isinstance(layer.mlp, AscendKimiMoE):
+                self.moe_mlp_layers.append(layer.mlp)
+        self.extract_moe_parameters()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
@@ -1094,6 +1243,9 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
             self.language_model.make_empty_intermediate_tensors
         )
         self.media_placeholder = self.config.media_placeholder_token_id
+
+    def get_language_model(self) -> AscendKimiLinearForCausalLM:
+        return self.language_model
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)

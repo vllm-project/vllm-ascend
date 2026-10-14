@@ -149,8 +149,6 @@ class HardwareCapability(Enum):
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
-    # Allow C8 SFA decode-context parallelism with a replicated indexer.
-    SFA_C8_DCP_REPLICATED_INDEXER = auto()
     # Legacy implementation selector: install the standard worker patch bundle.
     STANDARD_WORKER_PATCHES = auto()
     # Legacy implementation selector: install the standard Mamba platform patch.
@@ -268,7 +266,6 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
-        HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,

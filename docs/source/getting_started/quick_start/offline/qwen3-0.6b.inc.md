@@ -4,27 +4,37 @@ In the container terminal, create `example.py` with the following code:
 
 <!-- doctest: quickstart-standard-offline -->
 ```python
+import os
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 from vllm import LLM, SamplingParams
 
-prompts = [
-    "Hello, my name is",
-    "The future of AI is",
-]
 
-sampling_params = SamplingParams(
-    temperature=0.0,
-    max_tokens=32,
-)
+def main():
+    prompts = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
 
-llm = LLM(model="Qwen/Qwen3-0.6B")
-outputs = llm.generate(prompts, sampling_params)
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=32,
+    )
 
-assert len(outputs) == len(prompts)
+    llm = LLM(model="Qwen/Qwen3-0.6B")
+    outputs = llm.generate(prompts, sampling_params)
 
-for output in outputs:
-    generated_text = output.outputs[0].text
-    assert generated_text.strip()
-    print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
+    assert len(outputs) == len(prompts)
+
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        assert generated_text.strip()
+        print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 Run the example:

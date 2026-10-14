@@ -48,7 +48,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -92,7 +92,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -402,6 +402,10 @@ Only the key parameters specific to this model/scenario are described below. max
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
+**KV cache configuration:**
+
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
+
 **Notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
@@ -423,7 +427,7 @@ Each container exposes devices 0-15. P0 exposes the only Prefill API;
 P1 runs the second PP stage without an API server. Decode ranks 0-7 run
 on D0 and ranks 8-15 on D1, with API ports 8000-8007 on each node.
 
-Use the A3 `v0.30.0rc1-a3` image from Section 4.1 on all four nodes.
+Use the A3 `{{ vllm_ascend_version }}-a3` image from Section 4.1 on all four nodes.
 
 1. Prepare the same weights and software on all four nodes. Set `MODEL_PATH`
    and `PYTHON_LIB_DIR` in each role script to the installed paths. Install
@@ -1967,6 +1971,11 @@ Key Parameter Descriptions:
 - Both roles use int8 KV and indexer KV caches. Prefill enables DSA CP,
   fused MC2 and FlashComm1; Decode enables fused MC2, MLAPO and the
   recomputation scheduler. See [Performance Tuning](#9-performance-tuning).
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant
+  quantization for the SFA packed main KV cache, as an alternative to
+  `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be
+  combined with the C8 cache, and in Prefill-Decode disaggregation the
+  Mooncake option `"use_ascend_direct"` must be `false`.
 
 ## 6 Functional Verification
 
