@@ -1171,6 +1171,28 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
+    @contextmanager
+    def _cpp_profile_dummy(self, enabled: bool):
+        """Scope the target-only prefill semantics used by CPP profiling."""
+        if not enabled:
+            yield
+            return
+
+        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
+        previous_speculator = self.speculator
+        previous_max_num_reqs = self.max_num_reqs
+        try:
+            self.input_buffers.profile_cpp = True
+            # CPP profiles the target prefill. This also matches MRV1, where the
+            # drafter dummy run is explicitly skipped for profile_cpp.
+            self.speculator = None
+            self.max_num_reqs = 1
+            yield
+        finally:
+            self.input_buffers.profile_cpp = previous_profile_cpp
+            self.speculator = previous_speculator
+            self.max_num_reqs = previous_max_num_reqs
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -1181,6 +1203,7 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1199,6 +1222,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
+            # Disable the CPP drafter before entering contexts that inspect it.
+            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             # TODO: Remove this context and its use after the next main2main
