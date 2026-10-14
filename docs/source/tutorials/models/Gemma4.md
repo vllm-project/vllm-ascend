@@ -33,7 +33,7 @@ The examples below assume a single node with visible NPUs. The commands use 4 vi
 
 ### 4.1 Image Availability
 
-If you need a prebuilt image, contact Huawei engineers to obtain the appropriate image and software stack for your target hardware.
+If you need a prebuilt image, please submit an ISSUE to obtain the appropriate image and software stack for your target hardware.
 
 After the environment is prepared, verify that the NPU devices are visible:
 
