@@ -328,6 +328,88 @@ def test_packed_broadcast_consumer_handles_multiple_dtypes():
     assert torch.equal(received[1][1].cpu(), f32)
 
 
+@pytest.mark.parametrize("num_buffers", [1, 2, 3])
+def test_packed_broadcast_consumer_orders_cross_chunk_processing(num_buffers):
+    """A layer completed by a later chunk must see all earlier async loads.
+
+    CPU copies normally hide stream races. Queue them until synchronization,
+    like NPU kernels, and derive runtime weights only after the final shard.
+    Reload twice into the same runtime storage, as the graph-captured HCCL
+    transaction does.
+    """
+
+    class QueuedStream:
+        def __init__(self):
+            self.pending = []
+
+        def synchronize(self):
+            while self.pending:
+                self.pending.pop(0)()
+
+        def __enter__(self):
+            self.previous = fake_npu.active
+            fake_npu.active = self
+            return self
+
+        def __exit__(self, *exc):
+            fake_npu.active = self.previous
+
+    default_stream = QueuedStream()
+    fake_npu = types.SimpleNamespace(
+        active=default_stream,
+        Stream=QueuedStream,
+        current_stream=lambda: fake_npu.active,
+        stream=lambda stream: stream,
+    )
+    num_shards = 2 * num_buffers + 1
+    expected = torch.arange(1, num_shards + 1, dtype=torch.float32)
+    source_weight = torch.zeros_like(expected)
+    runtime_weight = torch.zeros_like(expected)
+    runtime_ptr = runtime_weight.data_ptr()
+    loaded_order = []
+    processed_prefixes = []
+
+    def copy_shard(index, tensor):
+        source_weight[index].copy_(tensor[0])
+        loaded_order.append(index)
+        processed_prefixes.append(source_weight[: index + 1].sum().item())
+
+    def load_shards(weights):
+        for name, tensor in weights:
+            index = int(name)
+            fake_npu.current_stream().pending.append(lambda index=index, tensor=tensor: copy_shard(index, tensor))
+            if index == num_shards - 1:
+                fake_npu.current_stream().pending.append(lambda: runtime_weight.copy_(source_weight * 2))
+            # Allow a later stream to run ahead while earlier streams still
+            # have queued kernels. One ordered stream must also handle this
+            # schedule correctly.
+            if index % 2:
+                fake_npu.current_stream().synchronize()
+
+    with patch.object(torch, "npu", fake_npu):
+        for _ in range(2):
+            source_weight.zero_()
+            loaded_order.clear()
+            processed_prefixes.clear()
+            payloads = iter(expected.split(1))
+            group = _make_group_mock()
+            group.broadcast.side_effect = lambda tensor, payloads=payloads, **kwargs: tensor.copy_(
+                next(payloads).view(torch.uint8)
+            )
+            packed_broadcast_consumer(
+                iterator=iter((str(index), ([1], torch.float32)) for index in range(num_shards)),
+                group=group,
+                src=0,
+                post_unpack_func=load_shards,
+                buffer_size_bytes=1,
+                num_buffers=num_buffers,
+            )
+            torch.testing.assert_close(runtime_weight, expected * 2)
+            assert runtime_weight.data_ptr() == runtime_ptr
+            assert loaded_order == list(range(num_shards))
+            assert processed_prefixes == expected.cumsum(0).tolist()
+
+
 # ---------------------------------------------------------------------------
 # packed_npu_ipc_producer
 # ---------------------------------------------------------------------------
