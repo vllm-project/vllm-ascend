@@ -2806,15 +2806,21 @@ class KVPoolWorker:
             )
             return True
 
-        submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
-        if getattr(self, "block_key_hybrid", False):
-            submit_count = max(0, self.current_layer + self.num_prefetch_layers + 1 - self.next_layer_to_submit)
-        submitted_layers = 0
-        while submitted_layers < submit_count and self.next_layer_to_submit < self.num_layers:
+        # Advance every rank through the same global layer window instead of
+        # counting local submissions. With KVPP a rank owns only a contiguous
+        # share of the layers, so a window counted in *local* submissions lets a
+        # rank skip the layers it does not own and submit its whole partition
+        # during the first few model layers. Load(L) is then no longer
+        # prefetched: it is fetched at the very front of the forward and
+        # competes with compute there. A model-layer window keeps the designed
+        # schedule: load(L) is submitted at model layer L - P, so its H2D
+        # overlaps the P layers of compute before the one that needs it.
+        # Layers this rank does not own are skipped by submit_layer_load().
+        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
+        while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
-            if submit_layer_load(layer_id):
-                submitted_layers += 1
+            submit_layer_load(layer_id)
 
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
