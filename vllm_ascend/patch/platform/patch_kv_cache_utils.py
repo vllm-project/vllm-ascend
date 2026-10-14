@@ -54,6 +54,7 @@ else:
     _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
     _orig_annotate_eagle_groups = vllm.v1.core.kv_cache_utils._annotate_eagle_groups
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
+_orig_get_kv_cache_bytes_per_block = vllm.v1.core.kv_cache_utils._get_kv_cache_bytes_per_block
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
 _QSA_GBSA_PAGE_SIZE = 128
@@ -411,6 +412,7 @@ def _ascend_annotate_eagle_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     kv_cache_groups: list[KVCacheGroupSpec],
+    use_trailing_layer_fallback: bool = False,
     use_deepseek_v4_fallback: bool = False,
 ) -> None:
     """Annotate Qwen4Exp's actual MTP cache group, not every group.
@@ -423,11 +425,17 @@ def _ascend_annotate_eagle_groups(
     disables cross-request prefix reuse.
     """
     assert _orig_annotate_eagle_groups is not None
+    fallback = use_trailing_layer_fallback or use_deepseek_v4_fallback
+    fallback_kwarg = (
+        {"use_deepseek_v4_fallback": fallback}
+        if vllm_version_is("0.30.0")
+        else {"use_trailing_layer_fallback": fallback}
+    )
     _orig_annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
         kv_cache_groups,
-        use_deepseek_v4_fallback=use_deepseek_v4_fallback,
+        **fallback_kwarg,
     )
     speculative_config = vllm_config.speculative_config
     if (
@@ -736,6 +744,17 @@ def _qsa_gbsa_page_alignment(
     return math.lcm(*alignments) if alignments else None
 
 
+def _ascend_get_kv_cache_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """Include QSA GBSA page padding in every capacity calculation."""
+    bytes_per_block = _orig_get_kv_cache_bytes_per_block(kv_cache_groups)
+    page_alignment = _qsa_gbsa_page_alignment(kv_cache_groups)
+    if page_alignment is None:
+        return bytes_per_block
+    return round_up(bytes_per_block, page_alignment)
+
+
 def _align_qsa_gbsa_block_stride(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -895,6 +914,7 @@ KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
 vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+vllm.v1.core.kv_cache_utils._get_kv_cache_bytes_per_block = _ascend_get_kv_cache_bytes_per_block
 vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
 

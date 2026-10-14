@@ -56,6 +56,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_triton,
 )
+from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 
 from .lightning_indexer import (
     is_qsa_lightning_cache_compatible,
@@ -250,33 +251,68 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         # the host would synchronize the stream during FULL graph capture.
         return raw, compressed
 
+    def _fused_norm_rope_eligible(
+        self,
+        tensor: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE
+            and tensor.dtype == torch.bfloat16
+            and tensor.ndim == 3
+            and tensor.shape[-1] == self.index_head_dim == 128
+            and self.k_layernorm.weight.dtype == tensor.dtype
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _fused_norm_rope(
+        self,
+        tensor: torch.Tensor,
+        norm: torch.nn.Module,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        logger.info_once("QSA indexer is using fused Triton RMSNorm + MRoPE.")
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
+        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+        cos_sin = cache[safe_positions]
+        return torch.ops.vllm.triton_qsa_rmsnorm_mrope(
+            tensor=tensor,
+            weight=norm.weight,
+            cos_sin=cos_sin,
+            eps=norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            rope_dim=self.rotary_emb.rotary_dim,
+        )
+
     def normalize_compressed_keys(
         self,
         pooled: torch.Tensor,
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Apply the reference K normalization and RoPE to compressed keys."""
-        if (
-            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE
-            and pooled.dtype == torch.bfloat16
-            and pooled.shape[-1] == 128
-        ):
-            compressed_keys = self.k_layernorm(pooled.reshape(-1, self.index_head_dim)).reshape(
-                -1, 1, self.index_head_dim
-            )
-        else:
-            # Keep this path on upstream's public portable normalization
-            # helper. The former private Triton helper was removed when
-            # Qwen4Exp's AMD indexer switched to the shared GemmaRMSNorm
-            # module.
-            compressed_keys = upstream_indexer.apply_qsa_rmsnorm(
-                self.k_layernorm,
-                pooled.reshape(-1, self.index_head_dim),
-            ).reshape(-1, 1, self.index_head_dim)
+        """Normalize and rotate compressed Indexer keys."""
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
+        pooled = pooled.reshape(-1, 1, self.index_head_dim)
+        if self._fused_norm_rope_eligible(pooled, first_positions):
+            return self._fused_norm_rope(
+                pooled,
+                self.k_layernorm,
+                first_positions,
+            )
+
+        compressed_keys = upstream_indexer.apply_qsa_rmsnorm(
+            self.k_layernorm,
+            pooled.reshape(-1, self.index_head_dim),
+        ).reshape(-1, 1, self.index_head_dim)
         return apply_qsa_rope(
             self.rotary_emb,
             first_positions,

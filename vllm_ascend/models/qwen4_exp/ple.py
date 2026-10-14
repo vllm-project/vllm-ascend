@@ -75,15 +75,48 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def patch_upstream_ple_short_conv() -> None:
-    """Install the scoped PLE override once on the upstream model class."""
+    """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+    from vllm.models.qwen4_exp.common.ngram_embedding import (
+        Qwen4ExpPLEEmbeddingMethod,
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+    from vllm_ascend.quantization.configs.modelslim_config import (
+        AscendModelSlimConfig,
+    )
 
     original_attr = "_ascend_original_short_conv"
-    if hasattr(Qwen4ExpPLELayer, original_attr):
-        return
-    original = Qwen4ExpPLELayer._short_conv
-    setattr(Qwen4ExpPLELayer, original_attr, original)
-    Qwen4ExpPLELayer._short_conv = _wrap_ple_short_conv(original)
+    if not hasattr(Qwen4ExpPLELayer, original_attr):
+        original = Qwen4ExpPLELayer._short_conv
+        setattr(Qwen4ExpPLELayer, original_attr, original)
+        Qwen4ExpPLELayer._short_conv = _wrap_ple_short_conv(original)
+
+    quant_attr = "_ascend_original_from_quant_config"
+    if not hasattr(Qwen4ExpPLEEmbeddingMethod, quant_attr):
+        original_from_quant_config = Qwen4ExpPLEEmbeddingMethod.from_quant_config
+        setattr(
+            Qwen4ExpPLEEmbeddingMethod,
+            quant_attr,
+            original_from_quant_config,
+        )
+
+        def from_quant_config(
+            quant_config: Any,
+            prefix: str,
+            embedding_dtype: str | None = None,
+        ) -> Qwen4ExpPLEEmbeddingMethod:
+            if isinstance(quant_config, AscendModelSlimConfig):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            return original_from_quant_config(
+                quant_config,
+                prefix,
+                embedding_dtype,
+            )
+
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(
+            from_quant_config
+        )
 
 
 __all__ = ["patch_upstream_ple_short_conv"]

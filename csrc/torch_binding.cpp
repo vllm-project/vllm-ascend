@@ -42,7 +42,7 @@
 #include "attention/qsa_expand_e3/qsa_expand_e3_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "attention/generic_block_sparse_attention/generic_block_sparse_attention_torch_adpt.h"
+#include "attention/generic_block_sparse_attention/gbsa_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
