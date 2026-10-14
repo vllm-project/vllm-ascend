@@ -94,6 +94,12 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         assert torch.equal(cache.cpu().view(blocks * block_size, -1)[untouched], gold[untouched])
 
 
+@pytest.mark.parametrize("tokens", [1024, 2048, 4096, 8192])
+@torch.inference_mode()
+def test_minimax_qknorm_rope_cache_prefill(tokens):
+    test_minimax_qknorm_rope_cache(tokens, (8, 1, 1), 64)
+
+
 @torch.inference_mode()
 def test_empty_minimax_qknorm_rope_cache():
     device = "npu"
