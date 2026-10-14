@@ -331,11 +331,22 @@ jobs:
           START_TIME=$(date +%s)
           while true; do
             ELAPSED=$(( $(date +%s) - START_TIME ))
-            if [[ $ELAPSED -ge $TIMEOUT ]]; then
-              echo "Timeout reached after ${ELAPSED}s, dumping pod status:"
-              kubectl get pods -n "$NAMESPACE"
-              kubectl describe pod "$LEADER_POD" -n "$NAMESPACE"
-              exit 1
+            if [[$ELAPSED -ge $TIMEOUT]]; then
+                echo"Timeout reached after \({ELAPSED}s, dumping pod status:"
+                kubectl get pods -n "\)NAMESPACE"
+                echo ""
+                echo "=== kubectl describe \({LEADER_POD} ==="
+                kubectl describe pod "\)LEADER_POD" -n "$NAMESPACE"
+                echo ""
+                echo "=== kubectl logs ${LEADER_POD} ==="
+                kubectl logs "\(LEADER_POD" -n "\)NAMESPACE" --tail=200 || echo "(no logs available)"
+                for ((i=1; i<SIZE; i++)); do
+                    WORKER_POD="\({LWS_NAME}-0-\){i}"
+                    echo ""
+                    echo "=== kubectl logs \({WORKER_POD} ==="
+                    kubectl logs "\)WORKER_POD" -n "$NAMESPACE" --tail=200 || echo "(no logs available)"
+                done
+                exit 1
             fi
 
             ALL_READY=true
