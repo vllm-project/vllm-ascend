@@ -193,6 +193,7 @@ def test_scheduler_modes_keep_mixed_request_priorities(mode):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.qos_policy = KvQosPolicy.from_config(POLICY)
     scheduler.kv_role, scheduler.consumer_is_to_put = "kv_both", False
+    scheduler.can_put = True
     scheduler.tp_mismatch = scheduler.layerwise_offload = scheduler.save_decode_cache = False
     ids = ["r0", "r3", "r7"]
     scheduler._unfinished_requests = {
