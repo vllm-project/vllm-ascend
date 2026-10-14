@@ -690,7 +690,7 @@ def test_rejection_sample_residual_is_independent_of_acceptance_draw(has_draft_l
     torch.testing.assert_close(rejected.float().mean(), torch.tensor(0.5, device=DEVICE), rtol=0.0, atol=STAT_ATOL)
     if rejection_step:
         assert bool((sampled[:, :rejection_step] == 0).all())
-    _assert_distribution(sampled[:, rejection_step], target_probs)
+    _assert_distribution(sampled[:, rejection_step], target_probs.cpu())
     # The recovered token has equal residual mass on tokens 1 and 2,
     # even though rejection conditions the acceptance draw to be above 0.5.
     _assert_distribution(sampled[rejected, rejection_step] - 1, torch.tensor([0.5, 0.5]))
