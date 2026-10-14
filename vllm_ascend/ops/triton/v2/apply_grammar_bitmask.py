@@ -33,52 +33,49 @@ def _apply_grammar_bitmask_kernel_impl(
     bitmask_ptr,
     bitmask_stride,
     vocab_size,
-    total_tasks,
+    num_masks,
     NUM_PROGRAMS: tl.constexpr,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Apply masks with mask-major scheduling to reuse request metadata."""
     pid = tl.program_id(0)
-
-    tasks_per_program = total_tasks // NUM_PROGRAMS
-    remainder = total_tasks % NUM_PROGRAMS
-    task_start = pid * tasks_per_program + tl.minimum(pid, remainder)
-    task_end = task_start + tasks_per_program + tl.where(pid < remainder, 1, 0)
-
+    masks_per_program = tl.cdiv(num_masks, NUM_PROGRAMS)
+    start_mask = pid * masks_per_program
+    end_mask = tl.minimum(start_mask + masks_per_program, num_masks)
     bit_mask = tl.full((32,), 1, tl.int32) << tl.arange(0, 32)
 
-    for task_id in tl.range(task_start, task_end):
-        bitmask_idx = task_id // NUM_VOCAB_BLOCKS
-        block_id = task_id - bitmask_idx * NUM_VOCAB_BLOCKS
-
-        # Each mapping entry packs (req_idx, position) as
-        # req_idx * MASK_STRIDE + position; the absolute logit row is
-        # resolved on device from cu_num_logits (adaptive verification
-        # finalizes per-request logit offsets there).
+    for bitmask_idx in tl.range(start_mask, end_mask):
+        # Resolve the request/position mapping once for all vocabulary blocks.
         mapping_idx = tl.load(logits_indices_ptr + bitmask_idx)
         req_idx = mapping_idx // MASK_STRIDE
         position_idx = mapping_idx % MASK_STRIDE
         logits_idx = tl.load(cu_num_logits_ptr + req_idx)
         num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_idx
         logits_idx += position_idx
-        position_is_active = position_idx < num_req_logits
-
-        bitmask_offset = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
-        packed_bitmask = tl.load(
-            bitmask_ptr + bitmask_idx * bitmask_stride + bitmask_offset,
-            mask=bitmask_offset < bitmask_stride,
-            other=0,
-        )
-        blocked = (packed_bitmask[:, None] & bit_mask[None, :]) == 0
-        blocked = blocked.reshape(BLOCK_SIZE)
-
-        block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        if position_idx < num_req_logits:
+            for block_id in tl.range(0, NUM_VOCAB_BLOCKS):
+                bitmask_offset = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
+                valid_words = bitmask_offset < tl.cdiv(vocab_size, 32)
+                packed_bitmask = tl.load(
+                    bitmask_ptr + bitmask_idx * bitmask_stride + bitmask_offset,
+                    mask=valid_words & (bitmask_offset < bitmask_stride),
+                    other=0,
+                )
+                any_blocked = tl.sum((valid_words & (packed_bitmask != -1)).to(tl.int32), 0) > 0
+                if any_blocked:
+                    block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    ptrs = logits_ptr + logits_idx * logits_stride + block_offset
+                    valid = block_offset < vocab_size
+                    any_allowed = tl.sum((valid_words & (packed_bitmask != 0)).to(tl.int32), 0) > 0
+                    if any_allowed:
+                        blocked = ((packed_bitmask[:, None] & bit_mask[None, :]) == 0).reshape(BLOCK_SIZE)
+                        values = tl.load(ptrs, mask=valid, other=0)
+                        negative_inf = tl.full((BLOCK_SIZE,), -float("inf"), values.dtype)
+                        tl.store(ptrs, tl.where(blocked, negative_inf, values), mask=valid)
+                    else:
+                        tl.store(ptrs, -float("inf"), mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
@@ -86,10 +83,9 @@ class _ApplyGrammarBitmaskKernelLauncher:
 
     def __getitem__(self, grid):
         num_masks, num_vocab_blocks = grid
-        total_tasks = num_masks * num_vocab_blocks
 
         init_device_properties_triton()
-        num_programs = min(get_vectorcore_num(), total_tasks)
+        num_programs = min(get_vectorcore_num(), num_masks)
 
         def launch(
             logits_ptr,
@@ -102,6 +98,8 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            if num_masks == 0:
+                return None
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.
@@ -113,7 +111,7 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 bitmask_ptr,
                 bitmask_stride,
                 vocab_size,
-                total_tasks,
+                num_masks,
                 NUM_PROGRAMS=num_programs,
                 NUM_VOCAB_BLOCKS=num_vocab_blocks,
                 MASK_STRIDE=MASK_STRIDE,
