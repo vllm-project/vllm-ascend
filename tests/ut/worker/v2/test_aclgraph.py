@@ -174,7 +174,12 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     manager.speculator = object()
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
-    manager.dp_size = 2
+    if vllm_version_is("0.30.0"):
+        # v0.30.0 stores dp_size as a plain instance attribute.
+        manager.dp_size = 2
+    else:
+        # vLLM main exposes dp_size as a read-only property backed by vllm_config.
+        manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
     forward_fn = MagicMock()
     model_state = object()
     input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([10, 20, 30], dtype=torch.int32))

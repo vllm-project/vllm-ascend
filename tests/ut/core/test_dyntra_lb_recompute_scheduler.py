@@ -7,6 +7,7 @@ from vllm.v1.request import RequestStatus
 
 import vllm_ascend.core.recompute_scheduler as recompute_scheduler_module
 from tests.ut.core.test_dyntra_lb_scheduler import (
+    _is_skipped,
     create_dyntra_lb_scheduler,
     make_dyntra_test_config,
 )
@@ -60,7 +61,7 @@ def test_dyntra_lb_recompute_invokes_policy_hooks():
 
     scheduler._apply_load_balance_modifications.assert_called_once_with()
     scheduler._can_admit_waiting_request.assert_called_once_with(request)
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.running
     assert request.request_id not in scheduler_output.num_scheduled_tokens
 
@@ -95,7 +96,7 @@ def test_dyntra_lb_recompute_prefetch_waits_for_offload_store():
     assert candidates == []
     assert request.status == RequestStatus.PREEMPTED
     assert request in scheduler.waiting
-    assert request not in scheduler.skipped_waiting
+    assert not _is_skipped(scheduler, request)
     scheduler.connector.update_state_after_alloc.assert_not_called()
 
 
@@ -114,7 +115,7 @@ def test_dyntra_lb_recompute_prefetch_restores_ready_cpu_kv():
     assert candidates == []
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == 8
-    assert request in scheduler.skipped_waiting
+    assert _is_skipped(scheduler, request)
     assert request not in scheduler.waiting
     assert request in scheduler._inflight_prefills
     scheduler.connector.update_state_after_alloc.assert_called_once()

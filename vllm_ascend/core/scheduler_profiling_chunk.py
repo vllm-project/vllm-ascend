@@ -17,13 +17,18 @@
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
 The ``schedule()`` override below is re-based on the ``Scheduler.schedule()``
-of vLLM v0.29.0 and kept compatible with vLLM v0.30.0 and main through
-``vllm_version_is`` branches and capability checks.  When the upstream
-``schedule()`` method is refactored, this override must be updated accordingly.
+of vLLM v0.30.0 and kept compatible with vLLM main through
+``vllm_version_is`` branches and capability checks.  In particular, upstream
+#58947 reworked the waiting queues (``skipped_waiting`` became
+``kv_holding_waiting`` + ``deferred_waiting``); the waiting-request section is
+branched on ``vllm_version_is("0.30.0")`` so both layouts are supported.  When
+the upstream ``schedule()`` method is refactored, this override must be updated
+accordingly.
 """
 
 import inspect
 import time
+from collections import deque
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -352,7 +357,7 @@ class ProfilingChunkScheduler(Scheduler):
                 req_index += 1
                 continue
 
-            if not vllm_version_is("0.29.0") and (
+            if (
                 self.ec_connector is not None
                 and request.mm_features
                 and not self.ec_connector.ensure_cache_available(
@@ -480,77 +485,42 @@ class ProfilingChunkScheduler(Scheduler):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if vllm_version_is("0.29.0"):
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                            # Record the index of the preemption victim to
-                            # maintain accurate loop state.
-                            victim_index = self.running.index(preempted_req)
-                            del self.running[victim_index]
-                            # Decrement the loop cursor if the removed request
-                            # preceded the current iteration, preventing the
-                            # silent omission of the subsequent request.
-                            if victim_index < req_index:
-                                req_index -= 1
-
-                            if preempted_req in scheduled_running_reqs:
-                                preempted_req_id = preempted_req.request_id
-                                scheduled_running_reqs.remove(preempted_req)
-                                restored = num_scheduled_tokens.pop(preempted_req_id)
-                                token_budget += restored
-                                input_budget += restored + draft_slots
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                                if preempted_encoder_inputs:
-                                    # Restore encoder compute budget if the preempted
-                                    # request had encoder inputs scheduled in this step.
-                                    num_embeds_to_restore = sum(
-                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += num_embeds_to_restore
-                        else:
-                            preempted_req = self.running.pop()
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
                     else:
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                        else:
-                            preempted_req = self.running[-1]
+                        preempted_req = self.running[-1]
 
-                        # A deferred free will not help with immediate allocation.
-                        if not self._request_blocks_can_be_freed(preempted_req):
-                            break
+                    # A deferred free will not help with immediate allocation.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
 
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            victim_index = self.running.index(preempted_req)
-                            del self.running[victim_index]
-                            if victim_index < req_index:
-                                req_index -= 1
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        victim_index = self.running.index(preempted_req)
+                        del self.running[victim_index]
+                        if victim_index < req_index:
+                            req_index -= 1
 
-                            if preempted_req in scheduled_running_reqs:
-                                preempted_req_id = preempted_req.request_id
-                                scheduled_running_reqs.remove(preempted_req)
-                                restored = num_scheduled_tokens.pop(preempted_req_id)
-                                token_budget += restored
-                                input_budget += restored + draft_slots
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                                if preempted_encoder_inputs:
-                                    # Restore encoder compute budget if the preempted
-                                    # request had encoder inputs scheduled in this step.
-                                    num_embeds_to_restore = sum(
-                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += num_embeds_to_restore
-                        else:
-                            preempted_req = self.running.pop()
+                        if preempted_req in scheduled_running_reqs:
+                            preempted_req_id = preempted_req.request_id
+                            scheduled_running_reqs.remove(preempted_req)
+                            restored = num_scheduled_tokens.pop(preempted_req_id)
+                            token_budget += restored
+                            input_budget += restored + draft_slots
+                            req_to_new_blocks.pop(preempted_req_id)
+                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_embeds_to_restore
+                    else:
+                        preempted_req = self.running.pop()
 
                     self._preempt_request(
                         preempted_req,
@@ -619,44 +589,76 @@ class ProfilingChunkScheduler(Scheduler):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
+            # >>> PROFILING CHUNK: waiting-queue bookkeeping per vLLM version >>>
+            # v0.30.0 keeps a single `skipped_waiting` queue. Upstream main
+            # (#58947) split it into `kv_holding_waiting` (a queue) and
+            # `deferred_waiting` (a set), and renamed the blocked-status helper.
+            if vllm_version_is("0.30.0"):
+                legacy_skipped_waiting = create_request_queue(self.policy)
+
+                def _skip_request(from_queue) -> None:
+                    legacy_skipped_waiting.prepend_request(from_queue.pop_request())
+
+            else:
+                step_skipped_waiting: deque[Request] = deque()
+                step_skipped_kv_holding: deque[Request] = deque()
+
+                def _skip_request(from_queue) -> None:
+                    skipped = from_queue.pop_request()
+                    self.deferred_waiting.add(skipped)
+                    if self._holds_kv_blocks(skipped):
+                        step_skipped_kv_holding.appendleft(skipped)
+                    else:
+                        step_skipped_waiting.appendleft(skipped)
+            # <<< PROFILING CHUNK <<<
 
             # >>> PROFILING CHUNK >>>
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                # <<< PROFILING CHUNK <<<
-                if input_budget <= draft_slots:
-                    break
+            while token_budget > 0:
+                if vllm_version_is("0.30.0"):
+                    if not (self.waiting or self.skipped_waiting) or input_budget <= draft_slots:
+                        break
+                    request_queue = self._select_waiting_queue_for_scheduling()
+                    assert request_queue is not None
+                else:
+                    # Requests holding KV blocks are always drained first.
+                    request_queue = self.kv_holding_waiting or self.waiting
+                    if not request_queue or input_budget <= draft_slots:
+                        break
+
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
+                if vllm_version_is("0.30.0"):
+                    if num_running >= self.max_num_running_reqs:
+                        break
+                elif num_running >= self.max_num_active_reqs:
                     break
-
-                request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
+                # <<< PROFILING CHUNK <<<
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                if vllm_version_is("0.30.0"):
+                    if self._is_blocked_waiting_status(
+                        request.status
+                    ) and not self._try_promote_blocked_waiting_request(request):
+                        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request_id,
+                            )
+                        _skip_request(request_queue)
+                        continue
+                elif not self._handle_blocked_waiting_request(request):
+                    _skip_request(request_queue)
                     continue
 
                 if request.num_stale_output_tokens > 0 and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -670,8 +672,7 @@ class ProfilingChunkScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 num_external_computed_tokens = 0
@@ -704,8 +705,7 @@ class ProfilingChunkScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            _skip_request(request_queue)
                             continue
 
                         if partial_tail and ext_tokens > partial_tail:
@@ -746,18 +746,8 @@ class ProfilingChunkScheduler(Scheduler):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if vllm_version_is("0.29.0"):
-                        if (
-                            self.ec_connector is not None
-                            and request.mm_features
-                            and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
-                        ):
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
-                            continue
-                    elif self._ec_transfer_pending(request, num_computed_tokens):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        _skip_request(request_queue)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -775,9 +765,8 @@ class ProfilingChunkScheduler(Scheduler):
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
-                    if not vllm_version_is("0.29.0") and self._ec_transfer_pending(request, num_computed_tokens):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        _skip_request(request_queue)
                         continue
 
                 encoder_inputs_to_schedule = None
@@ -804,25 +793,7 @@ class ProfilingChunkScheduler(Scheduler):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
-                    if vllm_version_is("0.29.0"):
-                        if (
-                            (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
-                            and self.num_sampled_tokens_per_step > 0
-                            and num_new_tokens == 1
-                            and (scheduled_running_reqs and not prefill_scheduled)
-                        ):
-                            padded_num_tokens = 1 + self.num_spec_tokens
-                            # Pad only when there is room for the sampled token(s).
-                            if (
-                                num_computed_tokens + padded_num_tokens + self.num_sampled_tokens_per_step
-                                <= self.max_model_len
-                            ):
-                                if padded_num_tokens > request_token_budget:
-                                    # Prefer to not schedule than schedule un-padded.
-                                    break
-                                num_new_tokens = padded_num_tokens
-                                pad_spec_decode = True
-                    elif (
+                    if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
@@ -985,12 +956,10 @@ class ProfilingChunkScheduler(Scheduler):
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1016,8 +985,12 @@ class ProfilingChunkScheduler(Scheduler):
                                 num_computed_tokens,
                             )
                         )
+                    _skip_request(request_queue)
                     continue
 
+                request = request_queue.pop_request()
+                if not vllm_version_is("0.30.0"):
+                    self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
@@ -1063,13 +1036,23 @@ class ProfilingChunkScheduler(Scheduler):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
-            if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+            if vllm_version_is("0.30.0"):
+                if legacy_skipped_waiting:
+                    self.skipped_waiting.prepend_requests(legacy_skipped_waiting)
+            else:
+                if step_skipped_kv_holding:
+                    self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
+                if step_skipped_waiting:
+                    self.waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                if vllm_version_is("0.30.0"):
+                    self.prefill_capacity_bound = bool(self.waiting)
+                else:
+                    _, num_waiting = self.get_request_counts()
+                    self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1095,47 +1078,24 @@ class ProfilingChunkScheduler(Scheduler):
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
-            if vllm_version_is("0.29.0"):
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        req._all_token_ids,
-                        uses_mrope=self.model_uses_mrope,
-                        uses_xdrope=self.model_uses_xdrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
-            else:
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        req._all_token_ids,
-                        uses_mrope=self.model_uses_mrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
         else:
-            if vllm_version_is("0.29.0"):
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        uses_mrope=self.model_uses_mrope,
-                        uses_xdrope=self.model_uses_xdrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
-            else:
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        uses_mrope=self.model_uses_mrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1158,33 +1118,16 @@ class ProfilingChunkScheduler(Scheduler):
 
         kv_connector_block_state = None
         if self.connector is not None:
-            if vllm_version_is("0.29.0"):
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                    boundary_state_offloads=boundary_state_offloads,
-                )
-            else:
-                # Any request scheduled this step can become a connector job now,
-                # not only the ones that were allocated blocks: a store save lands
-                # on the step that fills a block, which allocated none.
-                block_state_req_ids = set(num_scheduled_tokens)
-                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    req_ids=block_state_req_ids,
-                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
-                    boundary_state_offloads=boundary_state_offloads,
-                )
+            # Any request scheduled this step can become a connector job now,
+            # not only the ones that were allocated blocks: a store save lands
+            # on the step that fills a block, which allocated none.
+            block_state_req_ids = set(num_scheduled_tokens)
+            block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
@@ -100,7 +101,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     target = nn.Linear(2, 2)
                     model_config = SimpleNamespace(model="target")
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
-                        added = controller.maybe_register_model(target, model_config, False)
+                        if vllm_version_is("0.30.0"):
+                            added = controller.maybe_register_model(target, model_config, False)
+                        else:
+                            added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)
                     self.assertTrue(added)
                     controller.maybe_start_async_loop(added)
