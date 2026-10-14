@@ -1180,15 +1180,18 @@ class NPUModelRunner(GPUModelRunner):
 
         previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
         previous_speculator = self.speculator
-        self.input_buffers.profile_cpp = True
-        # CPP profiles the target prefill. This also matches MRV1, where the
-        # drafter dummy run is explicitly skipped for profile_cpp.
-        self.speculator = None
+        previous_max_num_reqs = self.max_num_reqs
         try:
+            self.input_buffers.profile_cpp = True
+            # CPP profiles the target prefill. This also matches MRV1, where the
+            # drafter dummy run is explicitly skipped for profile_cpp.
+            self.speculator = None
+            self.max_num_reqs = 1
             yield
         finally:
             self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
+            self.max_num_reqs = previous_max_num_reqs
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

@@ -19,7 +19,6 @@
 
 import copy
 import gc
-import inspect
 import logging
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
@@ -1023,23 +1022,13 @@ class NPUWorker(WorkerBase):
 
         # Run a real model forward with attention enabled in eager mode.
         # _dummy_run handles PP internally (intermediate tensors, etc.).
-        old_max_num_reqs = self.model_runner.max_num_reqs
-        try:
-            self.model_runner.max_num_reqs = 1
-
-            dummy_run_kwargs = {
-                "num_tokens": num_tokens,
-                "force_attention": True,
-                "is_profile": False,
-                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
-            }
-
-            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
-                dummy_run_kwargs["profile_cpp"] = True
-
-            self.model_runner._dummy_run(**dummy_run_kwargs)
-        finally:
-            self.model_runner.max_num_reqs = old_max_num_reqs
+        self.model_runner._dummy_run(
+            num_tokens=num_tokens,
+            force_attention=True,
+            is_profile=False,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            profile_cpp=True,
+        )
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
