@@ -17,6 +17,11 @@ DSPARK = "vllm_ascend/models/kimi_k3_dspark.py"
 
 def load(path, name, scope, owner=None):
     nodes = ast.parse((ROOT / path).read_text()).body
+    for node in nodes:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "PROLOG_V3_TILE_SIZE" for target in node.targets
+        ):
+            scope["PROLOG_V3_TILE_SIZE"] = ast.literal_eval(node.value)
     if owner:
         nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == owner).body
     node = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -358,7 +363,8 @@ def test_external_selection_reaches_single_raw_allocation(mode, runner):
 
 @pytest.mark.parametrize("interleaved", [False, True])
 @pytest.mark.parametrize("context_write", [False, True])
-def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved, context_write):
+@pytest.mark.parametrize("writer_block_size", [128, 768])
+def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved, context_write, writer_block_size):
     history, raw = fused_cache()
     if not interleaved:
         page_stride = history.stride(0)
@@ -371,10 +377,11 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
         history = (history[..., :512], history[..., 512:])
     before = raw.clone()
     slots = torch.tensor([0, -1, 128, -1])
-    buffers = (torch.empty(1, 128, 1, 512), torch.empty(1, 128, 1, 64), torch.arange(4))
+    buffers = (torch.empty(1, writer_block_size, 1, 512), torch.empty(1, writer_block_size, 1, 64), torch.arange(4))
     outputs = (object(), object(), object())
 
     def strict_prolog(**kwargs):
+        assert kwargs["tile_size"] == 128
         nope, rope = kwargs["kv_cache"], kwargs["kr_cache"]
         # Match the device failure contract: only the outer page may be strided.
         for cache in (nope, rope):

@@ -89,6 +89,9 @@ if TYPE_CHECKING:
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
+# PROLOG kernel tiling is independent of scratch pages and DCP interleave.
+PROLOG_V3_TILE_SIZE = 128
+
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
@@ -2194,7 +2197,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=writer_cache[0].shape[1],
+            tile_size=PROLOG_V3_TILE_SIZE,
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer
