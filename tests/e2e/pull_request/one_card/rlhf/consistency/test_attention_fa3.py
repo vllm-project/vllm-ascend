@@ -160,12 +160,7 @@ def test_fa3_vs_fia_logprobs():
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_mixed_speculative_decoding():
-    """Ngram verification must preserve the non-speculative FA3 trajectory.
-
-    Short repetitive requests exercise multi-token decode while the longer
-    requests are still being prefetched in chunks. Backend-level tests also
-    construct this mixed metadata explicitly, independent of scheduling.
-    """
+    """Compare ngram and ordinary decode with short/long prompts."""
     prompts = ["ab " * 12, "cd " * 12, "The quick brown fox jumps over the lazy dog. " * 30]
     kwargs = dict(
         additional_config=FA3_ADDITIONAL_CONFIG,
