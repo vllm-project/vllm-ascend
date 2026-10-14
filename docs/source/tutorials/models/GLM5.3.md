@@ -48,7 +48,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -92,7 +92,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -423,7 +423,7 @@ Each container exposes devices 0-15. P0 exposes the only Prefill API;
 P1 runs the second PP stage without an API server. Decode ranks 0-7 run
 on D0 and ranks 8-15 on D1, with API ports 8000-8007 on each node.
 
-Use the A3 `v0.30.0rc1-a3` image from Section 4.1 on all four nodes.
+Use the A3 `{{ vllm_ascend_version }}-a3` image from Section 4.1 on all four nodes.
 
 1. Prepare the same weights and software on all four nodes. Set `MODEL_PATH`
    and `PYTHON_LIB_DIR` in each role script to the installed paths. Install

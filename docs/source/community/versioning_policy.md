@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|
+| v0.30.0rc2  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 / 2.10.0.post7           | 3.2.2             | v0.3.11.post1 |
 | v0.30.0rc1  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 / 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |
 | v0.26.0rc1  | v0.26.0           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 / 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |
 | v0.23.0.post1 | v0.23.0           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 / 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |
@@ -91,6 +92,7 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.10.13 | Release candidates, v0.30.0rc2            |
 | 2026.10.11 | Release candidates, v0.30.0rc1            |
 | 2026.09.21 | v0.23.0 post release, v0.23.0.post1  |
 | 2026.09.03 | Release candidates, v0.26.0rc1            |
