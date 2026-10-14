@@ -719,7 +719,7 @@ def _patch_sync_dp_state():
 
     _original_sync_dp_state = ParallelConfig.sync_dp_state
 
-    @staticmethod
+    @staticmethod  # type: ignore[misc]
     def _patched_sync_dp_state(dp_group, has_unfinished, pending_pause):
         try:
             return _original_sync_dp_state(dp_group, has_unfinished, pending_pause)
@@ -742,7 +742,7 @@ def _patch_sync_dp_state():
                 return False, False
             raise
 
-    _patched_sync_dp_state._ascend_dp_patched = True
+    _patched_sync_dp_state._ascend_dp_patched = True  # type: ignore[attr-defined]
     ParallelConfig.sync_dp_state = _patched_sync_dp_state
 
 
@@ -759,7 +759,7 @@ def _patch_has_unfinished_dp():
 
     _original_has_unfinished_dp = ParallelConfig.has_unfinished_dp
 
-    @staticmethod
+    @staticmethod  # type: ignore[misc]
     def _patched_has_unfinished_dp(dp_group, has_unfinished):
         try:
             return _original_has_unfinished_dp(dp_group, has_unfinished)
@@ -774,7 +774,7 @@ def _patch_has_unfinished_dp():
                 return True
             raise
 
-    _patched_has_unfinished_dp._ascend_dp_patched = True
+    _patched_has_unfinished_dp._ascend_dp_patched = True  # type: ignore[attr-defined]
     ParallelConfig.has_unfinished_dp = _patched_has_unfinished_dp
 
 
@@ -857,7 +857,7 @@ def _patch_monitor_engine_liveness():
             return
         self.shutdown()
 
-    _tolerant_monitor_engine_liveness._ascend_dp_patched = True
+    _tolerant_monitor_engine_liveness._ascend_dp_patched = True  # type: ignore[attr-defined]
     CoreEngineProcManager.monitor_engine_liveness = _tolerant_monitor_engine_liveness
 
 
@@ -927,7 +927,7 @@ def _patch_wait_for_completion_or_failure():
                         # (main) thread, then fall through to the
                         # failed_proc_name check below so a total engine-core
                         # failure is surfaced immediately.
-                        sentinel.close()
+                        sentinel.close()  # type: ignore[union-attr]
                     elif proc.exitcode != 0:
                         if is_dp:
                             logger.warning(
@@ -951,7 +951,7 @@ def _patch_wait_for_completion_or_failure():
 
     vllm_utils_mod.wait_for_completion_or_failure = _tolerant_wait_for_completion_or_failure
 
-    _tolerant_wait_for_completion_or_failure._ascend_dp_patched = True
+    _tolerant_wait_for_completion_or_failure._ascend_dp_patched = True  # type: ignore[attr-defined]
 
     try:
         import vllm.entrypoints.cli.serve as serve_mod

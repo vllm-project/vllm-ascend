@@ -929,6 +929,7 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert getattr(utils, enable_fn)() is enabled
 
+
 class TestIsDpPeerDisconnectError:
     """Tests for _is_dp_peer_disconnect_error helper function."""
 
