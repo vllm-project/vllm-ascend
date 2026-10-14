@@ -300,6 +300,7 @@ jobs:
         with:
           sparse-checkout: |
             .github/workflows/scripts
+            extra_recommended_tests.yaml
           sparse-checkout-cone-mode: false
 
       - name: Download test case map and coverage package
@@ -343,9 +344,11 @@ jobs:
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
 
-      # Extra OBS tests are for uncovered code changes. Skip the merge when
-      # the PR has no src paths (docs-only and other non-src diffs). Do not
-      # skip this job: ready-precise requires recommend-tests to succeed.
+      # Extra tests are for uncovered code changes. Merge the repo-local
+      # extra_recommended_tests.yaml first, then the shared OBS list. Skip
+      # the merge when the PR has no src paths (docs-only and other non-src
+      # diffs). Do not skip this job: ready-precise requires recommend-tests
+      # to succeed.
       - name: Merge extra tests from YAML
         if: ${{ needs.pre-commit.outputs.src == 'true' }}
         run: |
@@ -355,6 +358,15 @@ jobs:
             curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
             python3 get-pip.py --break-system-packages
             python3 -m pip install --break-system-packages pyyaml
+          fi
+          if [ -s extra_recommended_tests.yaml ]; then
+            echo "Merging local extra_recommended_tests.yaml first"
+            cat extra_recommended_tests.yaml
+            python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
+              --list-file recommended_pytest_paths.txt \
+              --extra-yaml extra_recommended_tests.yaml
+          else
+            echo "No local extra_recommended_tests.yaml; skipped"
           fi
           OBS_EXTRA_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
           http_code=$(curl -sSL --retry 3 --retry-delay 5 -o extra_recommended_tests.obs.yaml -w "%{http_code}" "${OBS_EXTRA_URL}" || echo "000")
