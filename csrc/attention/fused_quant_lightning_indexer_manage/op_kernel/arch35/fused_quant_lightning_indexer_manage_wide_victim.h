@@ -19,7 +19,7 @@ static_assert(lim_payload_layout::PACKED_SOURCE_CAPACITY % CHUNK == 0U,
               "victim chunks must not cross a packed source page");
 
 // The whole protection table occupies pairInputBuf_ and the scan uses
-// pairOutputBuf_. This still fits at the largest A3 cache budget.
+// pairOutputBuf_. This still fits at the zero-tail A5 prefix ceiling.
 static_assert(lim_cache_budget::MAX_CACHE_TOKENS * sizeof(uint16_t) <=
                   PAIR_BUFFER_BYTES,
               "wide victim protection table exceeds pairInputBuf_");

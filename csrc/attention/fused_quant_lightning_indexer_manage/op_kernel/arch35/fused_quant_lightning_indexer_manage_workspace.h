@@ -12,7 +12,6 @@ constexpr uint64_t THRESHOLD_STRIDE = 16U;
 // Different AIV cores publish route counts concurrently. Give each scalar
 // its own 32-byte GM transfer unit to avoid read-modify-write interference.
 constexpr uint64_t ROUTE_COUNT_STRIDE = 8U; // int32 elements
-constexpr uint64_t TAIL_CAPACITY = lim_request_limits::MAX_TAIL_TOKENS;
 constexpr uint64_t ATTENTION_CAPACITY = TOPK;
 constexpr uint64_t S2_BLOCK = lim_request_limits::BLOCK_SIZE;
 constexpr uint64_t MIN_TOPK_BLOCKS = 18U;

@@ -9,18 +9,29 @@
 namespace lim_cache_budget {
 constexpr uint32_t TOPK = lim_request_limits::TOPK;
 constexpr uint32_t BLOCK = lim_request_limits::BLOCK_SIZE;
-constexpr uint32_t MAX_CACHE_TOKENS = 32384U;
-static_assert(MAX_CACHE_TOKENS + 255U < lim_payload_layout::PENDING_MISS_SLOT,
-              "the largest tail slot must fit below reserved payload slots");
-static_assert(MAX_CACHE_TOKENS + BLOCK + 255U >= lim_payload_layout::PENDING_MISS_SLOT,
-              "the cache budget must be the largest safe aligned value");
+// Absolute prefix ceiling (zero tail), also used to size/check UB scratch.
+// Each request's effective ceiling is reduced by its block-aligned tail.
+constexpr uint32_t MAX_CACHE_TOKENS =
+    lim_payload_layout::PENDING_MISS_SLOT / BLOCK * BLOCK;
+static_assert(MAX_CACHE_TOKENS < lim_payload_layout::PENDING_MISS_SLOT,
+              "prefix slots must stay below reserved payload slots");
+
+__aicore__ inline uint32_t MaxBudget(uint32_t tailLength)
+{
+    const uint64_t tailSlots =
+        (static_cast<uint64_t>(tailLength) + BLOCK - 1U) / BLOCK * BLOCK;
+    if (tailSlots > lim_payload_layout::PENDING_MISS_SLOT) return 0U;
+    return static_cast<uint32_t>(
+        (lim_payload_layout::PENDING_MISS_SLOT - tailSlots) / BLOCK * BLOCK);
+}
 
 // A3's request-level C contract, with the current A5 Q range supplied by
-// the caller. The full-visible A5 LI and tail-hit behavior are unchanged.
-__aicore__ inline bool Valid(uint32_t budget, uint32_t prefix, uint32_t routes)
+// the caller. Tail hits occupy consecutive slots after the prefix budget.
+__aicore__ inline bool Valid(
+    uint32_t budget, uint32_t prefix, uint32_t routes, uint32_t tailLength)
 {
     return routes != 0U && budget != 0U && budget % BLOCK == 0U &&
-        budget <= MAX_CACHE_TOKENS && budget <= prefix &&
+        budget <= MaxBudget(tailLength) && budget <= prefix &&
         (prefix <= routes * TOPK
             ? budget == prefix : budget >= routes * TOPK);
 }

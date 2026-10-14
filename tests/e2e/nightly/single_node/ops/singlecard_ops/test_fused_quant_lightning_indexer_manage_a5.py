@@ -269,7 +269,7 @@ def _assert_offload_source_order(case):
 def _steady_pool_changes(old_slots, prefix, budget, selected, copied, slots):
     """Reconstruct only legal A5 prefix replacements from pre-call slots.
 
-    Tail winners are direct hits at C + token % 256; they neither own a
+    Tail winners are direct hits at C + token - offload_len; they neither own a
     resident slot nor protect a prefix victim through that tail address.
     """
     selected_prefix = {int(token) for token in selected if 0 <= token < prefix}
@@ -439,7 +439,7 @@ def validate_tight_causal_boundary(device, heads, seed, route_counts=(1, 2, 3, 4
             if int(route_miss[route]) != expected_misses:
                 raise AssertionError(f"tight Q{routes} route {route} miss count is wrong")
             for token, slot in zip(sources, slots):
-                expected_slot = token if token < prefix else budget + token % 256
+                expected_slot = token if token < prefix else budget + (token - prefix)
                 if slot != expected_slot:
                     raise AssertionError(f"tight Q{routes} route {route} slot is wrong")
 
@@ -461,7 +461,7 @@ def validate_tight_causal_boundary(device, heads, seed, route_counts=(1, 2, 3, 4
             if set(sources) != set(golden.tolist()):
                 raise AssertionError(f"tight Q{routes} steady route differs from official LI")
             for token, slot in zip(sources, slots):
-                expected_slot = token if token < prefix else budget + token % 256
+                expected_slot = token if token < prefix else budget + (token - prefix)
                 if slot != expected_slot:
                     raise AssertionError(f"tight Q{routes} steady slot is wrong")
 
@@ -533,7 +533,7 @@ def validate_steady_union_against_oracle(case, budget):
         for index, (token, slot) in enumerate(zip(actual_sources, actual_slots)):
             if (index < miss_count) != (token in missed):
                 raise AssertionError("steady miss/hit partition is incorrect")
-            expected = int(row_pool[token]) if token < prefix else budget + token % 256
+            expected = int(row_pool[token]) if token < prefix else budget + (token - prefix)
             if slot != expected:
                 raise AssertionError("steady destination disagrees with final pool")
     # The peer request has no newly missing sources and must not be affected.
@@ -651,8 +651,8 @@ def validate_first_fill(case, budget):
                     selected_prefix_union[request].add(token)
                     if slot != int(row_pool[token]):
                         raise AssertionError("prefix TopK slot disagrees with cache_slots_pool")
-                elif slot != budget + token % 256:
-                    raise AssertionError("selected tail did not use C + token % 256")
+                elif slot != budget + (token - prefix):
+                    raise AssertionError("selected tail did not use C + token - offload_len")
         start = end
 
         valid_sources = miss_src[request, :budget].cpu().tolist()
@@ -715,7 +715,7 @@ def validate_steady_zero_miss(case, budget):
             if set(sources.tolist()) != set(golden.tolist()):
                 raise AssertionError("zero-miss steady TopK differs from A5 LI")
             for token, slot in zip(sources.tolist(), slots.tolist()):
-                expected = int(row_pool[token]) if token < prefix else budget + token % 256
+                expected = int(row_pool[token]) if token < prefix else budget + (token - prefix)
                 if slot != expected:
                     raise AssertionError("zero-miss steady slot mapping is incorrect")
         start = end
@@ -824,7 +824,7 @@ def validate_steady_miss_and_atomicity(case, budget, misses_per_request=8):
             if any(int(token) in chosen for token in sources[actual_route_misses:].tolist()):
                 raise AssertionError("steady hit suffix contains a miss")
             for token, slot in zip(sources.tolist(), slots.tolist()):
-                expected = int(row_pool[token]) if token < prefix else budget + token % 256
+                expected = int(row_pool[token]) if token < prefix else budget + (token - prefix)
                 if slot != expected:
                     raise AssertionError("steady TopK destination is incorrect")
         start = end
@@ -920,7 +920,7 @@ def validate_identity_to_steady(case, budget, *, final_length=None):
             if any(not (budget <= int(token) < prefix) for token in sources[:expected_route_misses].tolist()):
                 raise AssertionError("identity-to-steady miss prefix contains a hit")
             for token, slot in zip(sources.tolist(), slots.tolist()):
-                expected = int(row_pool[token]) if token < prefix else budget + token % 256
+                expected = int(row_pool[token]) if token < prefix else budget + (token - prefix)
                 if slot != expected:
                     raise AssertionError("identity-to-steady slot mapping is incorrect")
         start = end
@@ -964,9 +964,6 @@ def validate_dynamic_failure_matrix(device, heads, source_capacity, seed):
     def causal_prefix_violation(case):
         case[7][0] = prefix
 
-    def oversized_tail(case):
-        case[7][0] = prefix + 257
-
     def unsupported_budget(case):
         case[9][0] = 9000
 
@@ -986,7 +983,6 @@ def validate_dynamic_failure_matrix(device, heads, source_capacity, seed):
         ("final length shorter than Q", short_final_length),
         ("final length beyond source capacity", oversized_final_length),
         ("prefix beyond earliest visible length", causal_prefix_violation),
-        ("tail longer than 256", oversized_tail),
         ("unsupported cache budget", unsupported_budget),
         ("cache budget larger than prefix", budget_exceeds_prefix),
     )
@@ -1220,7 +1216,9 @@ def _check_controlled_routes(case, selected_by_route, prefix, budget, state, old
             if any(token in expected_route_misses for token in actual_src[count:]):
                 raise AssertionError("controlled hit-suffix contains a miss")
         for token, slot in zip(actual_src, actual_dst):
-            expected_slot = token if state == -3 else (int(pool[token]) if token < prefix else budget + token % 256)
+            expected_slot = (
+                token if state == -3 else (int(pool[token]) if token < prefix else budget + (token - prefix))
+            )
             if slot != expected_slot:
                 raise AssertionError("controlled TopK destination is incorrect")
     expected_request_miss = 0 if state == -3 else budget if state == -2 else len(expected_union)
@@ -1321,7 +1319,7 @@ def validate_controlled_tail_and_future(device, heads, seed):
 
 def _install_controlled_sparse_pool(case, prefix, budget, selected_by_route, missing):
     # Only durable-prefix sources belong to the sparse pool. Selected tail
-    # sources are direct hits at C + token % 256 and must never be residents.
+    # sources are direct hits at C + token - offload_len and must never be residents.
     selected_union = {token for route in selected_by_route for token in route if token < prefix}
     if not missing.issubset(selected_union):
         raise ValueError("controlled misses must belong to selected TopK")
@@ -1579,7 +1577,7 @@ def _assert_extended_requests(case, goldens, before_pool):
                 raise AssertionError("extended route miss/hit partition is wrong")
             for token, slot in zip(sources, slots):
                 expected_slot = (
-                    token if state == -3 else (int(current[token]) if token < prefix else budget + token % 256)
+                    token if state == -3 else (int(current[token]) if token < prefix else budget + (token - prefix))
                 )
                 if slot != expected_slot:
                     raise AssertionError(
@@ -2085,3 +2083,77 @@ def test_a5_short_mixed_batch_and_invalid_peer(a5_device, heads):
     # Original source suite: lengths 1/1024/2047/2048/2049, a Q4 request
     # crossing the TopK boundary, a mixed-length batch and invalid-peer isolation.
     validate_short_non_offload_cases(a5_device, heads, 2 * TOPK, 20261012)
+
+
+@pytest.mark.parametrize(
+    "tail,routes,budget",
+    [
+        pytest.param(0, 1, 32640, id="zero-tail-max-budget"),
+        pytest.param(129, 2, 32384, id="tail129-alignment"),
+        pytest.param(384, 5, 32256, id="tail384-wide-partial-prefix"),
+        pytest.param(640, 8, 32000, id="tail640-wide"),
+        pytest.param(2052, 5, 10240, id="tail2052-wide-zero-prefix"),
+    ],
+)
+def test_a5_contiguous_tail_slots(a5_device, heads, tail, routes, budget):
+    """Selected tail hits use relative slots; wide first fill survives list reuse."""
+    prefix = 32768
+    selected_by_route: list[list[int]] = []
+    for route in range(routes):
+        tail_count = min(TOPK, tail - (routes - 1 - route))
+        selected_by_route.append(list(range(TOPK - tail_count)) + list(range(prefix, prefix + tail_count)))
+    case = _controlled_case(a5_device, heads, 20261014 + tail, prefix, tail, selected_by_route)
+    case[9].fill_(budget)
+    goldens = list(map(set, selected_by_route))
+    for state in (-3, -2):
+        case[10].fill_(state)
+        # Repeated -2 calls exercise the wide partial-sort and GM-list handoff.
+        for _ in range(2 if state == -2 else 1):
+            case[12].fill_(37)
+            for output in case[13]:
+                output.fill_(-7)
+            before = case[12].cpu().clone()
+            launch(case)
+            torch.npu.synchronize()
+            _check_controlled_routes(case, selected_by_route, prefix, budget, state)
+            _assert_extended_requests(case, goldens, before)
+    old_pool = _install_controlled_sparse_pool(case, prefix, budget, selected_by_route, set(range(16)))
+    case[10].fill_(-1)
+    for repeat in range(2):
+        before = case[12].cpu().clone()
+        launch(case)
+        torch.npu.synchronize()
+        _check_controlled_routes(case, selected_by_route, prefix, budget, -1, old_pool)
+        _assert_extended_requests(case, goldens, before)
+        if repeat == 1 and bool((case[13][5] != 0).any()):
+            raise AssertionError("contiguous tail repeat did not converge to all hits")
+        old_pool = case[12][int(case[11][0])].cpu().clone()
+
+
+@pytest.mark.parametrize("tail", [129, 640], ids=["tail129", "tail640"])
+def test_a5_dynamic_tail_budget_failure(a5_device, heads, tail):
+    """An overflowing tail/C budget must preserve -2/-1 pools and the -3 peer."""
+    prefix = 65536
+    tail_slots = (tail + BLOCK - 1) // BLOCK * BLOCK
+    invalid_budget = (32766 - tail_slots) // BLOCK * BLOCK + BLOCK
+    case = make_case(
+        a5_device, heads, prefix + tail_slots, 20261014 + tail, key_length=prefix + tail, query_counts=[1, 5, 1]
+    )
+    case[8].fill_(prefix)
+    case[9].fill_(invalid_budget)
+    case[10].copy_(torch.tensor([-2, -1, -3], dtype=torch.int32, device=a5_device))
+    identity = torch.arange(case[12].shape[1], dtype=torch.int32, device=a5_device)
+    case[12].copy_(identity.expand_as(case[12]))
+    before = case[12].cpu().clone()
+    launch(case)
+    torch.npu.synchronize()
+    src, dst, route_miss, _, _, request_miss = case[13]
+    invalid_end = sum(case[14][:2])
+    if bool((src[:invalid_end] != -1).any()) or bool((dst[:invalid_end] != -1).any()):
+        raise AssertionError("dynamic tail overflow published valid TopK outputs")
+    if bool((route_miss != 0).any()) or bool((request_miss != 0).any()):
+        raise AssertionError("dynamic tail overflow published nonzero miss counts")
+    if not torch.equal(src[invalid_end:], dst[invalid_end:]) or bool((src[invalid_end:] < 0).any()):
+        raise AssertionError("dynamic tail overflow affected the identity peer")
+    if not torch.equal(case[12].cpu(), before):
+        raise AssertionError("dynamic tail failure modified a pool row")

@@ -8,7 +8,6 @@ namespace lim_request_limits {
 constexpr uint32_t BLOCK_SIZE = 128U;
 constexpr uint32_t TOPK = 2048U;
 constexpr uint32_t MAX_ROUTES = 14U;
-constexpr uint32_t MAX_TAIL_TOKENS = 256U;
 constexpr uint32_t MISS_CAPACITY = 32768U;
 
 constexpr int32_t IDENTITY_STATE = -3;

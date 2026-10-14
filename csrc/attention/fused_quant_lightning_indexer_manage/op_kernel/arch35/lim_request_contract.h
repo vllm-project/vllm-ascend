@@ -62,11 +62,11 @@ public:
         if (prefix < static_cast<int32_t>(lim_request_limits::TOPK) ||
             (prefix & static_cast<int32_t>(lim_request_limits::BLOCK_SIZE - 1U)) != 0 ||
             prefix > finalLen - (routes - 1) ||
-            finalLen - prefix > static_cast<int32_t>(lim_request_limits::MAX_TAIL_TOKENS) ||
             budget <= 0) return false;
         return lim_cache_budget::Valid(
             static_cast<uint32_t>(budget), static_cast<uint32_t>(prefix),
-            static_cast<uint32_t>(routes));
+            static_cast<uint32_t>(routes),
+            static_cast<uint32_t>(finalLen - prefix));
     }
 
     __aicore__ inline int32_t QueryEnd(uint32_t batch) const

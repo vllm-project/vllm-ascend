@@ -16,6 +16,7 @@
 #include "lim_request_contract.h"
 #include "lim_request_limits.h"
 #include "fused_quant_lightning_indexer_manage_hit_sort_vf.h"
+#include "fused_quant_lightning_indexer_manage_sort.h"
 #include "fused_quant_lightning_indexer_manage_union.h"
 
 namespace {
@@ -414,7 +415,6 @@ private:
     static constexpr uint32_t SLOT_SHIFT = lim_payload_layout::SOURCE_BITS;
     static constexpr uint32_t MISS_SLOT = lim_payload_layout::PENDING_MISS_SLOT;
     static constexpr uint32_t HASH_EMPTY = 0xffffffffU;
-    static constexpr uint32_t TAIL_CAPACITY = lim_request_limits::MAX_TAIL_TOKENS;
     static constexpr int32_t WIDE_NO_SOURCE = 0x7fffffff;
 
     __aicore__ inline uint32_t MinU32(uint32_t left, uint32_t right) const
@@ -453,10 +453,10 @@ private:
             finalValue > static_cast<int32_t>(tiling_->sourceCapacity) ||
             prefix > finalValue - static_cast<int32_t>(queryCount - 1U) ||
             finalValue - prefix < 0 ||
-            finalValue - prefix > static_cast<int32_t>(TAIL_CAPACITY) ||
             cache <= 0 || !lim_cache_budget::Valid(
                 static_cast<uint32_t>(cache),
-                static_cast<uint32_t>(prefix), queryCount)) {
+                static_cast<uint32_t>(prefix), queryCount,
+                static_cast<uint32_t>(finalValue - prefix))) {
             return false;
         }
         prefixLength = static_cast<uint32_t>(prefix);
@@ -843,7 +843,26 @@ private:
             counts[localRoute] = selected;
             if (selected == 0U) continue;
             SyncPipes<HardEvent::S_V>();
-            SortPairsTo(sources, slots, selected, sorted, scratch);
+            // A partial prefix row can contain any number of winners. Use
+            // complete SortAll runs, as in wide steady management, rather
+            // than passing arbitrary 32-element run counts to Sort.
+            const uint32_t sortLength = fused_quant_li_manage_sort::SortLength(selected);
+            LocalTensor<uint32_t> keys = topkBuf_.Get<uint32_t>();
+            LocalTensor<uint32_t> payloads = cacheChunkBuf_.Get<uint32_t>();
+            asc_vf_call<fused_quant_li_manage_hit_sort_vf::Pack>(
+                (__ubuf__ uint32_t *)keys.GetPhyAddr(),
+                (__ubuf__ uint32_t *)payloads.GetPhyAddr(),
+                (__ubuf__ uint32_t *)sources.GetPhyAddr(),
+                (__ubuf__ uint32_t *)slots.GetPhyAddr(), sortLength / 64U);
+            PipeBarrier<PIPE_V>();
+            SyncPipes<HardEvent::V_S>();
+            for (uint32_t index = selected; index < sortLength; ++index)
+                keys.SetValue(index, 0U);
+            SyncPipes<HardEvent::S_V>();
+            DataCopy(sorted, keys.ReinterpretCast<float>(), sortLength);
+            DataCopy(sorted[sortLength], payloads.ReinterpretCast<float>(), sortLength);
+            PipeBarrier<PIPE_V>();
+            fused_quant_li_manage_sort::SortAll(sorted, scratch, sortLength);
             asc_vf_call<fused_quant_li_manage_hit_sort_vf::Unpack>(
                 (__ubuf__ uint32_t *)sources.GetPhyAddr(),
                 (__ubuf__ uint32_t *)slots.GetPhyAddr(),
@@ -855,6 +874,14 @@ private:
                        sources, selected);
         }
         return true;
+    }
+
+    __aicore__ inline void SyncWideFirstFillLists(uint64_t missBase)
+    {
+        // MTE3 completion does not invalidate scalar GM cache lines. These
+        // output tensors are reused across calls and as temporary route rows.
+        DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE,
+                                 DcciDst::CACHELINE_OUT>(missSources_[missBase]);
     }
 
     __aicore__ inline void AppendWideSource(
@@ -886,11 +913,13 @@ private:
         uint32_t counts[MAX_QUERIES_PER_REQUEST] = {0U};
         uint32_t cursors[MAX_QUERIES_PER_REQUEST] = {0U};
         int32_t heads[MAX_QUERIES_PER_REQUEST];
+        const uint64_t missBase = static_cast<uint64_t>(batch) * MISS_CAPACITY;
+        SyncWideFirstFillLists(missBase);
         if (!StageWideSelectedRoutes(batch, queryStart, queryEnd,
                                      prefixLength, finalLength, counts))
             return false;
+        SyncWideFirstFillLists(missBase);
 
-        const uint64_t missBase = static_cast<uint64_t>(batch) * MISS_CAPACITY;
         for (uint32_t route = 0U; route < routes; ++route)
             heads[route] = counts[route] == 0U ? WIDE_NO_SOURCE :
                 missDestinations_.GetValue(missBase + route * TOPK);
@@ -922,6 +951,7 @@ private:
             buffered = 0U;
         }
         unionCount = written;
+        SyncWideFirstFillLists(missBase);
 
         // Select the smallest non-union source IDs as fillers. The union is
         // already materialized in GM, so appending fillers cannot overwrite
@@ -942,26 +972,35 @@ private:
         if (buffered != 0U)
             StoreRange(missSources_[missBase + written - buffered],
                        chunk, buffered);
+        SyncWideFirstFillLists(missBase);
         return written == budget;
     }
 
-    __aicore__ inline void CommitWideFirstFill(
+    __aicore__ inline bool CommitWideFirstFill(
         uint32_t batch, uint32_t queryStart, uint32_t queryEnd,
         uint32_t row, uint32_t prefixLength, uint32_t budget)
     {
         const uint64_t poolBase =
             static_cast<uint64_t>(row) * tiling_->sourceCapacity;
         const uint64_t missBase = static_cast<uint64_t>(batch) * MISS_CAPACITY;
+        // Validate the complete immutable COPY list before touching the pool.
+        for (uint32_t slot = 0U; slot < budget; ++slot) {
+            const int32_t source = missSources_.GetValue(missBase + slot);
+            if (source < 0 || static_cast<uint32_t>(source) >= prefixLength)
+                return false;
+        }
+        SyncFirstFillPoolCache(poolBase);
         ClearFirstFillPool(poolBase);
         for (uint32_t slot = 0U; slot < budget; ++slot) {
             const int32_t source = missSources_.GetValue(missBase + slot);
-            // Q5-Q14 may publish 32384 residents. A separate four-byte DMA
+            // Q5-Q14 may publish up to 32640 residents. A separate four-byte DMA
             // and event wait per slot can stall the other AIVs at SyncAll on
             // a 2M-source request. A3 uses scalar GM stores after the full
             // row clear has completed; retain the existing Q1-Q4 DMA path.
             pool_.SetValue(poolBase + static_cast<uint32_t>(source),
                            static_cast<int32_t>(slot));
         }
+        SyncFirstFillPoolCache(poolBase);
         // Scratch destination rows are no longer needed after selection.
         PublishFirstFillDestinations(batch, budget);
 
@@ -985,7 +1024,7 @@ private:
                 sources.SetValue(output, static_cast<int32_t>(source));
                 slots.SetValue(output, isMiss ?
                     pool_.GetValue(poolBase + source) :
-                    static_cast<int32_t>(budget + source % TAIL_CAPACITY));
+                    static_cast<int32_t>(budget + (source - prefixLength)));
             }
             SyncPipes<HardEvent::S_V>();
             SortTopkRow(sources, slots, missCount);
@@ -995,6 +1034,7 @@ private:
             WriteRouteStatus(route, static_cast<int32_t>(missCount));
         }
         WriteRequestStatus(batch, static_cast<int32_t>(budget));
+        return true;
     }
 
     __aicore__ inline void SortTopkRow(
@@ -1132,7 +1172,7 @@ private:
             for (uint32_t index = 0; index < TOPK; ++index) {
                 const int32_t token = topk.GetValue(index);
                 const bool prefix = static_cast<uint32_t>(token) < prefixLength;
-                uint32_t slot = budget + static_cast<uint32_t>(token) % TAIL_CAPACITY;
+                uint32_t slot = 0U;
                 if (prefix) {
                     uint32_t position = 0;
                     bool found = false;
@@ -1140,6 +1180,8 @@ private:
                         return false;
                     }
                     slot = hash.GetValue(position) >> SLOT_SHIFT;
+                } else {
+                    slot = budget + (static_cast<uint32_t>(token) - prefixLength);
                 }
                 const uint32_t output = prefix ? missCursor++ : hitCursor++;
                 sources.SetValue(output, token);
@@ -1195,7 +1237,7 @@ private:
                                     prefixLength, finalLength, budget,
                                     unionCount);
             if (ok)
-                CommitWideFirstFill(batch, queryStart, queryEnd,
+                ok = CommitWideFirstFill(batch, queryStart, queryEnd,
                                     static_cast<uint32_t>(rowValue),
                                     prefixLength, budget);
         }

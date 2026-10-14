@@ -409,7 +409,7 @@ private:
         if (written >= required) {
             return written;
         }
-        // One byte per slot covers the complete 32384-slot C range in the
+        // One byte per slot covers the complete 32640-slot C range in the
         // existing pair scratch buffer.
         LocalTensor<uint8_t> protectedSlots =
             pairInputBuf_.Get<uint8_t>();
@@ -835,16 +835,14 @@ private:
         finalLen = static_cast<uint32_t>(finalRaw);
         poolRow = static_cast<uint32_t>(poolRowRaw);
         const uint32_t earliestVisible = finalLen - (routeCount - 1U);
-        const uint32_t tailCapacity = static_cast<uint32_t>(
-            FusedQuantLiManageUnionVF::TAIL_CAPACITY);
-        if (candidate > earliestVisible ||
-            finalLen - candidate > tailCapacity) {
+        if (candidate > earliestVisible) {
             return false;
         }
         const int32_t budgetRaw = numCacheTokensGm_.GetValue(batch);
         if (budgetRaw <= 0) return false;
         budget = static_cast<uint32_t>(budgetRaw);
-        return lim_cache_budget::Valid(budget, candidate, routeCount);
+        return lim_cache_budget::Valid(
+            budget, candidate, routeCount, finalLen - candidate);
     }
 
     __aicore__ inline void ProcessSparse(

@@ -461,7 +461,7 @@ public:
     {
         // Only the durable prefix has reverse-map entries. Tail keys take
         // part in exactly the same score TopK, but their slots are resident
-        // in the two parity blocks, never misses or eviction candidates.
+        // consecutively after cacheBudget, never misses or eviction candidates.
         const uint32_t prefixLen = tokenBase >= offloadedLen ? 0U :
             VllmFastHistTopkIndexUpdateA5Common::Min(currentValidLen, offloadedLen - tokenBase);
         uint32_t prefetchLen = prefixLen;
@@ -501,13 +501,13 @@ public:
         }
 
         if (prefixLen < currentValidLen) {
-            // At most 256 tail entries. Order scalar sidecar stores after
+            // Fill this trunk's tail slots. Order scalar sidecar stores after
             // the histogram/slot casts and before payload vector gather.
             SetFlag<HardEvent::V_S>(EVENT_ID6);
             WaitFlag<HardEvent::V_S>(EVENT_ID6);
             for (uint32_t i = prefixLen; i < currentValidLen; ++i) {
                 inputValueLocal.SetValue(i, static_cast<uint16_t>(
-                    cacheBudget + (tokenBase + i) % 256U));
+                    cacheBudget + (tokenBase + i - offloadedLen)));
             }
             SetFlag<HardEvent::S_V>(EVENT_ID6);
             WaitFlag<HardEvent::S_V>(EVENT_ID6);

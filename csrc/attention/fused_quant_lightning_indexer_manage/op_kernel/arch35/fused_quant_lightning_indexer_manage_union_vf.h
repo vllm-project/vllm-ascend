@@ -8,7 +8,6 @@ namespace FusedQuantLiManageUnionVF {
 using namespace AscendC;
 
 constexpr uint32_t LANES = 64U;
-constexpr uint32_t TAIL_CAPACITY = lim_request_limits::MAX_TAIL_TOKENS;
 
 // MrgSort emits sorted (key, source) pairs. Compare each source with its
 // global predecessor, including at vector boundaries, then compact once.
