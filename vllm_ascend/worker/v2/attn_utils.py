@@ -404,6 +404,7 @@ def build_attn_metadata(
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
     is_prefilling: torch.Tensor | None = None,
+    flashmla_is_prefilling: torch.Tensor | None = None,
     pcp_context: "AscendPCPAttentionContext | None" = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
@@ -620,6 +621,14 @@ def build_attn_metadata(
                 )
 
             for variant_names, variant_common in metadata_variants:
+                if (
+                    flashmla_is_prefilling is not None
+                    and getattr(attn_metadata_builder, "flashmla_state", None) is not None
+                ):
+                    # The cache-group common object also serves hybrid backends;
+                    # replace the phase only on this external MLA builder's copy.
+                    variant_common = copy(variant_common)
+                    variant_common.is_prefilling = flashmla_is_prefilling
                 if for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
                         variant_common,

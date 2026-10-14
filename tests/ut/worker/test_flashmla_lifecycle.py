@@ -361,12 +361,20 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
     method = source_node(RUNNER, "gather_batch_req_state", "NPUModelRunner")
     cls = class_node("Runner", [ast.Name(id="Parent", ctx=ast.Load())], [method])
     scope: dict[str, Any] = {"np": np, "Parent": Parent}
+    compile_nodes([source_node("vllm_ascend/attention/flashmla.py", "flashmla_prefill_flags")], scope)
+    scope["vllm_model_runner"] = SimpleNamespace(
+        get_uniform_decode_token_count=lambda reqs, tokens, width, has_prefill: (
+            width if not has_prefill and reqs * width == tokens else None
+        )
+    )
     compile_nodes([cls], scope)
     runner = scope["Runner"]()
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.flashmla_executor = object() if external else None
-    result, uniform_count = runner.gather_batch_req_state(None, False)
-    order = [1, 0, 2] if external else [0, 1, 2]
+    runner.pcp_manager = None
+    result, uniform_count = runner.gather_batch_req_state(SimpleNamespace(scheduled_spec_decode_tokens={}), False)
+    has_fia_prefill = contract == "main_without_optional_arrays"
+    order = [1, 0, 2] if external and has_fia_prefill else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
     for field in state._fields:
         expected = getattr(state, field)
@@ -374,7 +382,7 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
         elif field == "decode_graph_eligible" and external:
-            assert actual is False
+            assert actual is (not has_fia_prefill)
         elif field != "req_ids":
             assert actual == expected
-    assert uniform_count == (None if external else 4)
+    assert uniform_count == (None if external and (has_fia_prefill or contract == "legacy") else 4)

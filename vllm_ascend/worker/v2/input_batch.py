@@ -83,6 +83,9 @@ class AscendInputBatch(InputBatch):
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
     is_cpp_profile: bool = False
+    # Attention execution can treat a prompt extension as decode while hybrid
+    # model state and sampling still consume the original logical phase.
+    flashmla_is_prefilling_np: np.ndarray | None = None
 
     @staticmethod
     def _prepare_cpp_profile_dummy(

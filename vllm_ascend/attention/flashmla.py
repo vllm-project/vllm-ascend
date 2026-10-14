@@ -8,9 +8,10 @@ and cache writes. Tensor-content checks belong in preflight tests, not here: the
 decode hot path must not copy lengths or block tables to the CPU.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops
@@ -22,11 +23,47 @@ FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
-def split_flashmla_requests(common) -> tuple[int, int, int, int]:
-    """Split real generation stages after the runner's stable phase ordering.
+def flashmla_prefill_flags(
+    batch_state, draft_tokens: Mapping[str, Sequence[int]], *, allow_short_extends: bool, attn_groups=()
+) -> np.ndarray:
+    """Choose the attention route without changing logical prompt progress.
 
-    Read only CPU scheduler metadata. A one-token prompt suffix is still FIA
-    prefill; query length alone must never opt a request into FlashMLA.
+    Main supplies its exact decode-like prompt mask. The legacy lane has no
+    mask, so mirror the one-new-token-over-context rule using original scheduler
+    draft counts, before adaptive verification compacts those counts.
+    """
+    logical_prefill = batch_state.is_prefilling_np
+    # A mixed model must use an ordering compatible with every MLA group.
+    # Native DCP MLA still classifies logical prompt extensions as prefill.
+    native_dcp = any(
+        getattr(builder, "dcp_enabled", False) and getattr(builder, "flashmla_state", None) is None
+        for groups in attn_groups
+        for group in groups
+        for builder in (group.get_metadata_builder(0),)
+    )
+    if not allow_short_extends or native_dcp:
+        return logical_prefill.copy()
+    if "prefill_runs_as_decode_np" in batch_state._fields:
+        runs_as_decode = batch_state.prefill_runs_as_decode_np
+        if runs_as_decode is None:
+            return logical_prefill.copy()
+    else:
+        num_drafts = np.fromiter(
+            (len(draft_tokens.get(req_id, ())) for req_id in batch_state.req_ids),
+            dtype=np.int32,
+            count=len(batch_state.req_ids),
+        )
+        runs_as_decode = (batch_state.num_scheduled_tokens - num_drafts == 1) & (
+            batch_state.num_computed_prefill_tokens_np > 0
+        )
+    return logical_prefill & ~runs_as_decode
+
+
+def split_flashmla_requests(common) -> tuple[int, int, int, int]:
+    """Split attention routes after the runner's stable phase ordering.
+
+    The external builder receives execution-phase flags, including eligible
+    short prompt extensions. Logical prompt progress remains in the input batch.
     """
     flags = common.is_prefilling
     offsets = common.query_start_loc_cpu[: common.num_reqs + 1]

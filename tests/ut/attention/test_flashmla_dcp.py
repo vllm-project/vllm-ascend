@@ -11,11 +11,13 @@ import ast
 import runpy
 import sys
 from contextlib import contextmanager
+from copy import copy
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -333,6 +335,69 @@ def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
     assert builder.buffers == {}
 
 
+def test_decode_tail_and_rejection_refresh_the_same_captured_capacity(runtime):
+    builder = runtime.builder(rank=3, interleave=4, use_rope=True)
+    captured = None
+    pointers = None
+    previous = None
+    for step, (length, qlen, logical_prefill) in enumerate(((37, 4, False), (103, 4, True), (100, 2, False))):
+        batch = SimpleNamespace(
+            _fields=("prefill_runs_as_decode_np",),
+            is_prefilling_np=np.array([logical_prefill]),
+            prefill_runs_as_decode_np=np.array([logical_prefill]),
+        )
+        phase = runtime.api.flashmla_prefill_flags(batch, {}, allow_short_extends=True)
+        inputs = common([length], [qlen], tokens=16)
+        inputs.positions = torch.arange(length - qlen, length)
+        inputs.slot_mapping = torch.arange(step * 128, step * 128 + qlen)
+        inputs.num_reqs = 1
+        inputs.query_start_loc_cpu = inputs.query_start_loc
+        inputs.is_prefilling = torch.from_numpy(batch.is_prefilling_np)
+        execution = copy(inputs)
+        execution.is_prefilling = torch.from_numpy(phase)
+        decodes, prefills, decode_tokens, _ = runtime.api.split_flashmla_requests(execution)
+        flash = builder.build(execution, decodes, decode_tokens, bool(prefills), retain_for_graph=step == 0)
+        assert inputs.is_prefilling.tolist() == [logical_prefill]
+        assert flash.used_q[0] == qlen  # Placeholder drafts remain actual attention queries.
+        assert flash.positions[:qlen].tolist() == list(range(length - qlen, length))
+        assert flash.slots[:qlen].tolist() == list(range(step * 128, step * 128 + qlen))
+        if step == 0:
+            captured, pointers = flash, addresses(flash)
+        else:
+            assert flash is captured and addresses(flash) == pointers
+            assert not torch.equal(flash.schedule, previous)
+        previous = flash.schedule.clone()
+
+
+@pytest.mark.parametrize("history,qlen", [(99, 1), (99, 4), (4, 1)])
+def test_short_extension_single_rank_matches_dense_attention(runtime, history, qlen):
+    torch.manual_seed(73)
+    length, heads = history + qlen, 8
+    keys = torch.randn(length, 576, dtype=torch.bfloat16) * 0.2
+    query = torch.randn(qlen + 1, heads, 576, dtype=torch.bfloat16) * 0.2
+    cache = torch.zeros(1, 128, 1, 576, dtype=torch.bfloat16)
+    cache[0, :length, 0].copy_(keys)
+    builder = runtime.builder(size=1, heads=heads, dtype=torch.bfloat16)
+    flash = builder.build(common([length], [qlen], tokens=qlen + 1), 1, qlen, False)
+    flash.query.copy_(query)
+    output, _ = flash.adapter.attention(
+        flash.query,
+        cache,
+        block_table=flash.block_table,
+        cache_seqlens=flash.cache_lens,
+        cu_seqlens_q=flash.cu,
+        metadata=flash.schedule,
+        seqused_q=flash.used_q,
+        attn_mask=flash.attn_mask,
+    )
+    expected = torch.zeros(qlen + 1, heads, 512, dtype=torch.float64)
+    for offset in range(qlen):
+        visible = history + offset + 1
+        scores = query[offset].double() @ keys[:visible].double().T * 0.125
+        expected[offset] = scores.softmax(-1) @ keys[:visible, :512].double()
+    torch.testing.assert_close(output.transpose(0, 1).double(), expected, atol=8e-4, rtol=0.02)
+
+
 @pytest.mark.parametrize("causal", [True, False])
 def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
     builder = runtime.builder(size=1)
@@ -348,26 +413,27 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
 @pytest.mark.parametrize("interleave", [1, 4, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("histories,queries", [([257, 0], [3, 1]), ([99, 4], [1, 1]), ([99, 4], [4, 1])])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, interleave, dtype, capturing
+    runtime, monkeypatch, causal, interleave, dtype, capturing, histories, queries
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
-    size, local_heads, tokens = 8, 8, 5
-    queries = [3, 1]
-    histories = [257, 0]
+    size, local_heads, tokens = 8, 8, sum(queries) + 1
     lengths = [history + query for history, query in zip(histories, queries)]
     keys = [torch.randn(length, 576, dtype=dtype) * 0.2 for length in lengths]
     query = torch.randn(tokens, size * local_heads, 576, dtype=dtype) * 0.2
     current_kv = torch.zeros(tokens, 1, 576, dtype=dtype)
-    current_kv[:3, 0] = keys[0][-3:]
-    current_kv[3, 0] = keys[1][-1]
+    start = 0
+    for sequence, qlen in zip(keys, queries):
+        current_kv[start : start + qlen, 0] = sequence[-qlen:]
+        start += qlen
     flashes, caches, partials = [], [], []
     for rank in range(size):
         builder = runtime.builder(rank=rank, interleave=interleave, dtype=dtype)
         inputs = common(lengths, queries, tokens=tokens, causal=causal)
         inputs.block_table_tensor.copy_(torch.tensor([[1, 3, 5], [2, 4, 6]]))
-        flash = builder.build(inputs, 2, 4, False)
+        flash = builder.build(inputs, 2, sum(queries), False)
         # Nonzero storage offset and padding between physical pages.
         stride = 128 * 576 + 32
         backing = torch.full((8 * stride + 64,), 17.0, dtype=dtype)

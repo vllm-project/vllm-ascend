@@ -53,6 +53,8 @@ def contract():
         ],
         scope,
     )
+    flashmla = (ROOT / "vllm_ascend/attention/flashmla.py").read_text(encoding="utf-8")
+    _compile([_node(flashmla, "flashmla_prefill_flags")], scope)
     main_contract = "decode_graph_eligible" in scope["BatchReqState"]._fields
     for name, source, owner, base in (
         ("Parent", upstream, "GPUModelRunner", ""),
@@ -76,7 +78,7 @@ def contract():
     _compile([pd_helper], scope)
     scope["Candidate"]._pd_uniform_decode_token_count = scope["_pd_uniform_decode_token_count"]
 
-    def gather(rows, *, external=True, pd=False, dummy=False):
+    def gather(rows, *, external=True, pd=False, dummy=False, pcp=False):
         # row = request id, computed prompt tokens, scheduled tokens, draft count.
         req_ids = [row[0] for row in rows]
         runner = scope["Candidate"]()
@@ -86,7 +88,7 @@ def contract():
             num_computed_prefill_tokens=np.array([row[1] for row in rows]),
         )
         runner.decode_query_len = max(row[2] for row in rows)
-        runner.pcp_manager = None
+        runner.pcp_manager = object() if pcp else None
         runner.adaptive_verification = None
         transfer = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False) if pd else None
         runner.vllm_config = SimpleNamespace(kv_transfer_config=transfer)
@@ -100,7 +102,9 @@ def contract():
         actual = runner.gather_batch_req_state(scheduler, dummy)
         return original, actual
 
-    return SimpleNamespace(gather=gather, main=main_contract, compatible=scope["_is_compatible"])
+    return SimpleNamespace(
+        gather=gather, main=main_contract, compatible=scope["_is_compatible"], phase=scope["flashmla_prefill_flags"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -114,14 +118,18 @@ def contract():
         [("chunk", 4, 2, 0)],
     ],
 )
-def test_fia_prefill_cannot_match_a_captured_decode_graph(contract, rows):
+def test_prompt_extension_route_and_graph_share_one_phase(contract, rows):
     (original, original_uniform), (state, uniform) = contract.gather(rows)
-    assert state.has_prefill and uniform is None
+    drafts = {row[0]: [0] * row[3] for row in rows if row[3]}
+    phase = contract.phase(original, drafts, allow_short_extends=True)
+    has_fia_prefill = bool(phase.any())
+    assert state.has_prefill
+    assert uniform == (None if has_fia_prefill else max(row[2] for row in rows))
     if contract.main:
-        assert state.decode_graph_eligible is False
+        assert state.decode_graph_eligible is (not has_fia_prefill)
         if rows[0][0] in ("tail", "middle"):
             assert original.decode_graph_eligible and original_uniform is not None
-    order = np.argsort(original.is_prefilling_np, kind="stable")
+    order = np.argsort(phase, kind="stable")
     assert state.req_ids == [original.req_ids[index] for index in order]
     for field in original._fields:
         expected, actual = getattr(original, field), getattr(state, field)
@@ -129,7 +137,9 @@ def test_fia_prefill_cannot_match_a_captured_decode_graph(contract, rows):
             np.testing.assert_array_equal(actual, expected[order])
     common = dict(num_reqs=len(rows), num_tokens=state.num_tokens, num_active_loras=0, num_ubatches=1)
     uniform_desc = SimpleNamespace(**common, uniform_token_count=max(row[2] for row in rows), max_query_len=None)
-    assert not contract.compatible(uniform_desc, uniform_token_count=uniform, max_query_len=None, **common)
+    assert contract.compatible(uniform_desc, uniform_token_count=uniform, max_query_len=None, **common) is (
+        not has_fia_prefill
+    )
     varlen_desc = SimpleNamespace(**common, uniform_token_count=None, max_query_len=4)
     assert not contract.compatible(varlen_desc, uniform_token_count=uniform, max_query_len=None, **common)
 

@@ -61,6 +61,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.flashmla import flashmla_prefill_flags
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -776,9 +777,15 @@ class NPUModelRunner(GPUModelRunner):
                 batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
                 uniform_token_count = self._pd_uniform_decode_token_count(batch_state)
         if self.flashmla_executor is not None and batch_state is not None:
-            # Reorder every per-request field before positions, slots, tables
-            # and sampling indices are constructed. A short prompt is prefill.
-            order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+            # Reorder by attention execution while retaining logical prompt
+            # flags for input preparation, hybrid state updates and sampling.
+            attention_prefill = flashmla_prefill_flags(
+                batch_state,
+                scheduler_output.scheduled_spec_decode_tokens,
+                allow_short_extends=self.pcp_manager is None,
+                attn_groups=getattr(self, "attn_groups", ()),
+            )
+            order = np.argsort(attention_prefill, kind="stable")
             reordered_fields = dict(
                 req_ids=[batch_state.req_ids[index] for index in order],
                 num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
@@ -793,9 +800,9 @@ class NPUModelRunner(GPUModelRunner):
                     values = getattr(batch_state, field)
                     reordered_fields[field] = values[order] if values is not None else None
             batch_state = batch_state._replace(**reordered_fields)
-            # Real prefill retains FIA, including prompt tails that upstream
-            # may run as decode. Keep FULL graph dispatch on the same route.
-            if batch_state.is_prefilling_np.any():
+            # Only rows that actually retain FIA prevent decode graph replay.
+            # Main's independent False gate must never be promoted to True.
+            if attention_prefill.any():
                 if "decode_graph_eligible" in batch_state._fields:
                     batch_state = batch_state._replace(decode_graph_eligible=False)
                 uniform_token_count = None
@@ -803,6 +810,13 @@ class NPUModelRunner(GPUModelRunner):
                 # PD reclassification may recompute a uniform count without
                 # satisfying upstream's graph gate. Keep that gate restrictive.
                 uniform_token_count = None
+            elif "decode_graph_eligible" not in batch_state._fields:
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    int(batch_state.num_scheduled_tokens.max()),
+                    False,
+                )
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -839,6 +853,18 @@ class NPUModelRunner(GPUModelRunner):
         assert num_tokens > 0
 
         req_ids = batch_req_state.req_ids
+        # Persist the same phase used for sorting, before compact_batch mutates
+        # the draft counts and query bounds consumed by input preparation.
+        flashmla_is_prefilling_np = (
+            flashmla_prefill_flags(
+                batch_req_state,
+                scheduler_output.scheduled_spec_decode_tokens,
+                allow_short_extends=self.pcp_manager is None,
+                attn_groups=getattr(self, "attn_groups", ()),
+            )
+            if self.flashmla_executor is not None
+            else None
+        )
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
@@ -1059,6 +1085,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            flashmla_is_prefilling_np=flashmla_is_prefilling_np,
             # vLLM main added decode_graph_eligible (required) and
             # prefill_runs_as_decode_np to InputBatch; the v0.30.0 lane has no
             # such fields.
