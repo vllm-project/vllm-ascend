@@ -601,7 +601,8 @@ class BaseDeviceAdaptor:
         # torch.cat allocates a fresh contiguous output, so no extra
         # .contiguous() pass is needed here.
         query = torch.cat([ql_nope, q_pe], dim=-1)
-        if return_lse:
+        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1])
+        if return_lse or qk_rope_head_dim == 0:
             return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
                 query=query,
                 key=kv,
