@@ -729,6 +729,7 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
+        self.kv_transfer_config.kv_connector_extra_config = {}
         self.speculative_config = None
         self.quant_config = None
         self.model_config.use_mla = True

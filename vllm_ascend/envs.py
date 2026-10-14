@@ -25,6 +25,13 @@ from typing import Any
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
+# Upstream Mooncake configuration names (no new VLLM_ASCEND feature switches).
+# Keep names centralized: the startup adapter must snapshot/restore raw values,
+# including the difference between an absent variable and an empty one.
+MOONCAKE_ASCEND_RESOURCE_ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+MOONCAKE_TENT_CONFIG_ENV = "MC_TENT_CONF"
+MOONCAKE_FABRIC_MEMORY_ENV = "ASCEND_ENABLE_USE_FABRIC_MEM"
+
 # begin-env-vars-definition
 
 
@@ -36,6 +43,13 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Upstream flat resource JSON; default unset. Not a credential, but callers
+    # may include deployment-specific settings; do not log its raw contents.
+    MOONCAKE_ASCEND_RESOURCE_ENV: lambda: os.getenv(MOONCAKE_ASCEND_RESOURCE_ENV),
+    # Upstream TENT JSON file path; default unset. Do not log file contents.
+    MOONCAKE_TENT_CONFIG_ENV: lambda: os.getenv(MOONCAKE_TENT_CONFIG_ENV),
+    # Upstream fabric memory switch; default 0, valid 0/1; not sensitive.
+    MOONCAKE_FABRIC_MEMORY_ENV: lambda: os.getenv(MOONCAKE_FABRIC_MEMORY_ENV, "0"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

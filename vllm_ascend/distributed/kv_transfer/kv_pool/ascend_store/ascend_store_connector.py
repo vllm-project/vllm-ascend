@@ -53,6 +53,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_qos_mode
+from vllm_ascend.distributed.kv_transfer.qos_lifecycle import stop_queue
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -103,6 +105,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+        validate_qos_mode(vllm_config.kv_transfer_config.kv_connector_extra_config)
+        if (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get("kv_qos") is not None
+            and kv_cache_config is not None
+            and len(kv_cache_config.kv_cache_groups) != 1
+        ):
+            raise ValueError("KV QoS currently requires exactly one KV cache group")
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -202,7 +211,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             cache.save(request, through_tokens, block_ids)
 
     def shutdown(self):
-        """Release the lookup RPC resources owned by this connector."""
+        """Stop lookups and transfers before closing the worker's QoS pool."""
+        worker = self.connector_worker
+        qos_enabled = worker is not None and getattr(worker.m_store, "qos_pool", None) is not None
+        if qos_enabled:
+            self._qos_closing = True
         try:
             if self.connector_scheduler is not None:
                 client = self.connector_scheduler.client
@@ -211,6 +224,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         finally:
             if hasattr(self, "lookup_server"):
                 self.lookup_server.close()
+            if qos_enabled and worker is not None:
+                for name in ("kv_send_thread", "kv_recv_thread"):
+                    thread = getattr(worker, name, None)
+                    if thread is not None:
+                        stop_queue(thread, thread.request_queue)
+                worker.m_store.close()
             super().shutdown()
 
     ############################################################
@@ -337,6 +356,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.prepare_layerwise_step(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         assert self.connector_worker is not None
         if not self.use_layerwise:
             self._mamba_copy_bufs = None
@@ -404,6 +425,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         if not self.use_layerwise:
             return
 
@@ -568,11 +591,14 @@ class LookupKeyServer:
     def close(self):
         if self._closed:
             return
-        self._closed = True
         self.running = False
-        self.thread.join(timeout=1)
+        qos_enabled = getattr(self.pool_worker.m_store, "qos_pool", None) is not None
+        self.thread.join(timeout=60 if qos_enabled else 1)
         if self.thread.is_alive():
+            if qos_enabled:
+                raise TimeoutError("QoS lookup server did not stop")
             logger.warning(
                 "KV pool lookup server thread did not stop within 1 second; "
                 "the active lookup handler may still be running"
             )
+        self._closed = True

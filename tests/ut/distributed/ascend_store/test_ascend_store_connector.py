@@ -127,12 +127,29 @@ class TestLookupKeyServer(unittest.TestCase):
         thread.is_alive.return_value = False
         mock_thread_cls.return_value = thread
 
-        server = LookupKeyServer(MagicMock(), config)
+        pool_worker = MagicMock()
+        pool_worker.m_store.qos_pool = None
+        server = LookupKeyServer(pool_worker, config)
         server.close()
         server.close()
 
         self.assertFalse(server.running)
         thread.join.assert_called_once_with(timeout=1)
+
+    def test_qos_close_timeout_can_be_retried_before_pool_cleanup(self):
+        server = LookupKeyServer.__new__(LookupKeyServer)
+        server.pool_worker = MagicMock()
+        server._closed = False
+        server.running = True
+        server.thread = MagicMock()
+        server.thread.is_alive.side_effect = [True, False]
+        with self.assertRaisesRegex(TimeoutError, "lookup server did not stop"):
+            server.close()
+        self.assertFalse(server._closed)
+        server.close()
+        self.assertTrue(server._closed)
+        self.assertEqual(server.thread.join.call_count, 2)
+        server.thread.join.assert_called_with(timeout=60)
 
 
 class TestAscendStoreConnector(unittest.TestCase):
@@ -577,6 +594,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
     def test_shutdown_closes_lookup_server(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(extra_config={"use_layerwise": False})
+        mock_worker_cls.return_value.m_store.qos_pool = None
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
         connector = AscendStoreConnector(
@@ -586,6 +604,33 @@ class TestAscendStoreConnector(unittest.TestCase):
         )
         connector.shutdown()
         mock_lookup_cls.return_value.close.assert_called_once_with()
+
+    def test_qos_shutdown_stops_transfers_before_closing_pool(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_scheduler = None
+        connector.connector_worker = MagicMock()
+        connector.lookup_server = MagicMock()
+        worker = connector.connector_worker
+        order = []
+        connector.lookup_server.close.side_effect = lambda: order.append("lookup")
+        worker.m_store.close.side_effect = lambda: order.append("pool")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.stop_queue",
+            side_effect=lambda thread, queue: order.append(thread),
+        ):
+            connector.shutdown()
+        self.assertEqual(order, ["lookup", worker.kv_send_thread, worker.kv_recv_thread, "pool"])
+        self.assertTrue(connector._qos_closing)
+
+    def test_qos_shutdown_does_not_close_pool_while_lookup_is_running(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_scheduler = None
+        connector.connector_worker = MagicMock()
+        connector.lookup_server = MagicMock()
+        connector.lookup_server.close.side_effect = TimeoutError("lookup still running")
+        with self.assertRaisesRegex(TimeoutError, "lookup still running"):
+            connector.shutdown()
+        connector.connector_worker.m_store.close.assert_not_called()
 
 
 class TestAscendStoreConnectorLayerwise(unittest.TestCase):
