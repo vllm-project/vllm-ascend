@@ -32,8 +32,9 @@ from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig, VllmConfig
+    from vllm.config import VllmConfig
 
+_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
 
 
@@ -84,7 +85,18 @@ class KVPPConfig:
             raise ValueError("KVPP and DCP cannot be enabled at the same time.")
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            self._validate_kv_transfer_config(kv_transfer_config)
+            if kv_transfer_config.kv_connector == "MultiConnector":
+                connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+                if not connectors:
+                    raise ValueError("KVPP MultiConnector requires a non-empty connectors list.")
+            else:
+                connectors = [{"kv_connector": kv_transfer_config.kv_connector, "kv_role": kv_transfer_config.kv_role}]
+            for connector in connectors:
+                name = connector.get("kv_connector")
+                if name not in _KVPP_SUPPORTED_CONNECTORS:
+                    raise ValueError(f"KVPP does not support kv connector {name!r}.")
+                if name == "MooncakeConnectorV2" and connector.get("kv_role") == "kv_consumer":
+                    raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
@@ -94,26 +106,6 @@ class KVPPConfig:
                 raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
-
-    @classmethod
-    def _validate_kv_transfer_config(cls, kv_transfer_config: KVTransferConfig) -> None:
-        if kv_transfer_config.kv_connector == "MultiConnector":
-            from vllm.config.kv_transfer import KVTransferConfig
-
-            connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
-            if not connectors:
-                raise ValueError("KVPP MultiConnector requires a non-empty connectors list.")
-            for child in connectors:
-                cls._validate_kv_transfer_config(KVTransferConfig(**child))
-            return
-        if kv_transfer_config.kv_connector == "AscendStoreConnector":
-            return
-        if kv_transfer_config.kv_connector != "MooncakeConnectorV2":
-            raise ValueError(
-                f"KVPP PD disaggregation requires MooncakeConnectorV2, got {kv_transfer_config.kv_connector!r}."
-            )
-        if kv_transfer_config.kv_role == "kv_consumer":
-            raise ValueError("KVPP must be disabled on the decode-only node.")
 
 
 @config
