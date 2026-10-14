@@ -124,7 +124,7 @@ Each worker uses a handshake port derived from `kv_port` and its parallel rank. 
 ### Combining Connectors
 
 Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector`.
-KVPP validates every child connector, including nested `MultiConnector` entries.
+KVPP validates the type and role of each child connector.
 Set the P/D connector to `kv_producer` and enable KVPP only on the prefill node;
 child roles are configured independently of the wrapper role.
 The pooling backend still requires its own SDK and service configuration.

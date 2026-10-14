@@ -2062,7 +2062,7 @@ class TestKVPPConfig(TestBase):
                 "kv_connector_extra_config": {"connectors": children},
             }
 
-        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, multi([mooncake])])):
+        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
             with self.subTest(transfer=transfer):
                 config = make_kvpp_config()
                 config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
@@ -2073,11 +2073,10 @@ class TestKVPPConfig(TestBase):
         cases = (
             (consumer, "decode-only"),
             (multi([store, consumer]), "decode-only"),
-            (multi([multi([consumer])]), "decode-only"),
             (unsupported, "MooncakeConnectorV1"),
             (multi([mooncake, unsupported]), "MooncakeConnectorV1"),
             (multi([]), "non-empty"),
-            (multi([multi([])]), "non-empty"),
+            (multi([multi([mooncake])]), "MultiConnector"),
         )
         for transfer, message in cases:
             with self.subTest(transfer=transfer):
