@@ -204,9 +204,13 @@ digests, reset the weights, transfer them back, and confirm they match. See
 the upstream [Weight Checker](https://docs.vllm.ai/en/latest/training/weight_checker/)
 guide for the full API.
 
-It requires a paired vLLM that includes the weight-checker change
-(`v0.31.1rc0` or newer); with an older vLLM the endpoint does not exist and
-`POST /weight_checker` returns 404.
+The feature was introduced in vLLM merge commit `42d9f8ccdb`, and the first
+release tag containing it is `v0.31.1rc0`, which is newer than `v0.30.0rc1`,
+the version currently supported by vLLM-Ascend. Therefore, this feature is
+unavailable with the default vLLM/vLLM-Ascend version pairing — with an
+older vLLM the endpoint does not exist and `POST /weight_checker` returns
+404. Users must manually switch to a newer version of vLLM main to enable
+it.
 
 The checker's standard use is validating the *weight-sync path itself*
 during development and bring-up: hash the weights currently deployed, reset
@@ -253,11 +257,13 @@ Follow these operational constraints on Ascend:
 1. Stay paused from `checksum` to `compare`: the weights are invalid between
    `reset` and the transfer, and EPLB moves experts while serving. The worker
    methods do not enforce this — pausing is the caller's responsibility.
-2. Before `reset`, confirm a recovery path is available: a working transfer
-   configuration with FRACTAL_NZ disabled (`rl_config.enabled=true` disables
-   NZ automatically), or a checkpoint that `reload_weights` can restore. With
-   `weight_nz_mode` enabled the weight-update transaction refuses to start,
-   and `reset_weights` logs a warning that only checkpoint reload can recover.
+2. Before `reset`, confirm a recovery path is available: a working weight
+   transfer configuration, or a checkpoint that `reload_weights` can
+   restore. RL mode already disables FRACTAL_NZ automatically
+   (`rl_config.enabled=true` forces `weight_nz_mode=0`); only in non-RL
+   deployments with `weight_nz_mode` explicitly enabled does the
+   weight-update transaction refuse to start, and `reset_weights` logs a
+   warning that only checkpoint reload can recover.
 3. Resume only after `compare` reports a full match. If a transfer fails, do
    not resume serving; restore the weights first, for example with
    `POST /collective_rpc {"method": "reload_weights"}`.
