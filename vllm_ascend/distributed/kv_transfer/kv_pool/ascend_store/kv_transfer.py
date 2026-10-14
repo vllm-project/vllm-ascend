@@ -1231,13 +1231,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         )
         save_start_token = self.get_saved_offset(req_id)
 
-        def should_skip(start: int, end: int) -> bool:
+        def should_skip(start: int, end: int, group_save_start: int) -> bool:
             # This is the worker's durable high-water mark and intentionally
             # may lag ReqMeta.save_start_token. In Decode-only mode the first
             # job therefore checks the complete prefix and can restore missing
             # ancestors of the new Decode block. After a successful store it
             # advances, avoiding a full-prefix lookup on later boundaries.
-            if end <= save_start_token:
+            if end <= group_save_start:
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
@@ -1258,12 +1258,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             block_ids = req_meta.block_ids_by_group[group_id]
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
             align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+            # Align-state slots below the saved extent can become valid later.
+            save_start = 0 if align_state_group else save_start_token
 
             def chunk_filter(
                 start: int,
                 group_block_size=group_block_size,
+                save_start=save_start,
             ) -> bool:
-                return not should_skip(start, start + group_block_size)
+                return not should_skip(start, start + group_block_size, save_start)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
@@ -1272,8 +1275,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             #  0        1 / 3            1      1, 5, ...
             #  1        0 / 2            2      2, 6, ...
             #  1        1 / 3            3      3, 7, ...
-            # Align-state slots below the saved extent can become valid later.
-            save_start = 0 if align_state_group else save_start_token
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,

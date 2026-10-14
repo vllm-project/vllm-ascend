@@ -524,20 +524,30 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                     self.assertEqual(stored, expected)
 
     def test_save_keeps_checks_for_align_state_slots(self):
-        thread, store = self._make_thread([0, 0])
+        thread, store = self._make_thread()
         thread.group_uses_align_state = [True]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            save_start_token=32,
-            block_ids=[1, 2],
-            block_hashes=["h0", "h1"],
-            skip_null_blocks_by_group=[True],
+        store.exists = MagicMock(
+            side_effect=lambda keys: [int(any(key in call[0] for call in store.put_calls)) for key in keys]
         )
+        for token_len, saved_tokens, block_ids in ((32, 0, [0, 2]), (48, 32, [1, 2, 3])):
+            request = ReqMeta(
+                req_id="r1",
+                token_len_chunk=token_len,
+                save_start_token=saved_tokens,
+                block_ids=block_ids,
+                block_hashes=["h0", "h1", "h2"][: token_len // 16],
+                skip_null_blocks_by_group=[True],
+            )
+            thread.add_stored_request(request)
+            thread.request_queue.put(request)
+            thread._handle_request(request)
 
-        thread._handle_stored_request(request)
+            self.assertEqual(thread.get_saved_offset("r1"), token_len)
 
-        self.assertEqual([key.rsplit("@", 1)[1] for key in store.put_calls[0][0]], ["h0", "h1"])
+        self.assertEqual(
+            [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
+            [["h1"], ["h0", "h2"]],
+        )
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
