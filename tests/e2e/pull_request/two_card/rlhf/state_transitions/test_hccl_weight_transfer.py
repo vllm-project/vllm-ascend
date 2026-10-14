@@ -47,8 +47,6 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     wait_for_free_device_memory,
 )
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 INFERENCE_WORLD_SIZE = 1
 # Card the inference server runs on, as an absolute device index inside the
 # container: the harness hands the server `ASCEND_RT_VISIBLE_DEVICES` explicitly,
@@ -165,9 +163,6 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
-        # Live reload still diverges on the default V2 runner. Keep this lane
-        # on V1 for both the startup reference and the live updates.
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
     }
 
     # Independent oracle first: a server that loads exactly this payload at

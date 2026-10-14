@@ -26,8 +26,6 @@ import torch
 
 from vllm_ascend.utils import enable_custom_op
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 enable_custom_op()
 
 # Metrics log: survives vLLM stdout/stderr redirection; path via env.
@@ -147,22 +145,6 @@ def _validate_spec(spec: BatchSpec) -> None:
 
 
 _VLLM_CONFIG_CACHE: dict = {}
-
-
-@pytest.fixture(autouse=True)
-def _pin_v1_sfa_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep this V1 SFA kernel check off the default DeepSeek-V3.2 MRv2 path.
-
-    ``set_additional_forward_context`` reads TP groups on the V2 branch.
-    This file never initializes distributed groups.
-    """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
-    monkeypatch.setattr(
-        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
-        False,
-        raising=False,
-    )
 
 
 def _get_vllm_config(
