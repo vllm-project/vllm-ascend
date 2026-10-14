@@ -19,25 +19,6 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 
 Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
 
-## Supported Models
-
-vLLM-Ascend reuses the upstream LoRA implementation and keeps no separate list of
-LoRA models. A model can be served with `--enable-lora` when its architecture
-implements `SupportsLoRA` in vLLM and its linear layers and experts are ones the
-Ascend LoRA wrappers replace. That covers the dense, MoE, and hybrid-attention
-models served on this platform. For the exact set, see the upstream
-[supported models](https://docs.vllm.ai/en/latest/models/supported_models/) list.
-
-An architecture without a LoRA implementation in vLLM cannot use `--enable-lora`.
-Enabling one requires LoRA for that architecture upstream, or a dedicated Ascend
-wrapper here.
-
-### Restrictions
-
-- Model Runner V2 context parallel (PCP) does not support LoRA.
-- On multimodal models, LoRA applies to the language backbone. LoRA for the tower and
-  connector is experimental upstream.
-
 ## LoRA Parameters
 
 | Parameter | Type | Default | Description |
