@@ -553,7 +553,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 - Offline inference
 
-  ```python
+    ```python
     from vllm import LLM, SamplingParams
 
     prompts = [
