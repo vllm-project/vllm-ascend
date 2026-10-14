@@ -31,7 +31,6 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -1218,14 +1217,7 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
 
     assert result is local_batch
     stage.assert_not_called()
-    if vllm_version_is("0.30.0"):
-        partition.assert_called_once_with(dummy)
-    else:
-        partition.assert_called_once()
-        args = partition.call_args.args
-        assert args[0] is dummy
-        assert args[1].cg_mode == CUDAGraphMode.NONE
-        assert args[1].num_tokens == dummy.num_tokens
+    partition.assert_called_once_with(dummy)
 
 
 def test_capture_input_without_cpp_marker_uses_staging_path():
