@@ -300,7 +300,7 @@ def test_external_selection_reaches_single_raw_allocation(mode, runner):
         supports_single_raw_backing = True
 
     class Layer:
-        pass
+        impl: SimpleNamespace
 
     config = SimpleNamespace(
         use_v2_model_runner=True,
