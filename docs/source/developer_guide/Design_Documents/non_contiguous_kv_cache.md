@@ -11,8 +11,24 @@ incorrect stride.
 
 This feature keeps the logical block table and block IDs unchanged while
 constructing strided tensor views over the existing physical allocation. It is
-implemented in Model Runner V1 and applies to hybrid Attention + Mamba models
-and supported pure GQA Attention models.
+implemented in Model Runner V1 and V2 and applies to explicitly supported
+hybrid Attention + Mamba models and pure GQA Attention models.
+
+### 1.1 Model-Level Scope
+
+`supports_non_contiguous_kv_cache()` selects the generic layout from the
+resolved model architecture, not from an individual `FullAttentionSpec`.
+The current opt-in families are Qwen2 (including Qwen2.5), Qwen3 dense/MoE,
+Qwen3-Next, and Qwen3.5 dense/MoE, including Qwen3.5 MTP. Hybrid text configs
+must contain Full Attention and only use Full Attention or linear-attention
+layers. Sparse, windowed, and pure recurrent configurations do not opt in.
+
+Unknown architectures, including unlisted pure GQA models, keep the legacy
+generic layout until their complete model layout is explicitly supported.
+In particular, MiniMax-M3's dense GQA layers do not opt in independently of
+its MSA layers. Existing specialized GLM, DeepSeek, packed-KV, and auxiliary
+cache contracts are preserved; this scope check does not force those layouts
+to become contiguous. FLA operator selection is unchanged.
 
 ## 2. Goals and Non-Goals
 
@@ -222,7 +238,7 @@ removed after the layout implementation is considered stable.
 
 ## 8. Compatibility and Limitations
 
-- The feature is implemented for Model Runner V1 cache construction.
+- The feature is implemented for Model Runner V1 and V2 cache construction.
 - The logical block table and scheduler-visible block IDs remain unchanged.
 - The exact physical layout depends on the model's Attention and Mamba cache
   specifications and the selected kernel block sizes.

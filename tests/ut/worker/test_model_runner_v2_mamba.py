@@ -399,6 +399,11 @@ def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
+    # A PP rank can contain only Mamba layers of a supported hybrid model.
+    _mock_config.return_value.model_config = SimpleNamespace(
+        architecture="Qwen3_5ForCausalLM",
+        hf_text_config=SimpleNamespace(layer_types=["linear_attention", "full_attention"]),
+    )
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
 
@@ -441,6 +446,10 @@ def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
+    _mock_config.return_value.model_config = SimpleNamespace(
+        architecture="Qwen3_5ForCausalLM",
+        hf_text_config=SimpleNamespace(layer_types=["linear_attention", "full_attention"]),
+    )
     attention_spec = FullAttentionSpec(
         block_size=4,
         num_kv_heads=1,
