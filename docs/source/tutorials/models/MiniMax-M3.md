@@ -236,7 +236,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "950DT products"
 
     ```bash
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -775,7 +774,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -840,7 +838,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1282,7 +1279,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1370,7 +1366,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
     
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
