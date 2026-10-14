@@ -56,6 +56,7 @@ else:
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
+_QSA_GBSA_PAGE_SIZE = 128
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -679,6 +680,139 @@ def _get_ascend_kv_cache_groups(
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
+def _qsa_gbsa_page_alignment(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int | None:
+    """Return the byte alignment needed by QSA's 128-token GBSA page view.
+
+    The QSA backend publishes its packed main K/V page as two head slots whose
+    per-state content is one K (or V) row.  That contract is distinct from an
+    ordinary dense attention page and lets this cache-planning patch identify
+    QSA without depending on model-name or layer-name conventions.
+    """
+    alignments: list[int] = []
+    specs_by_layer: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_groups:
+        group_spec = getattr(group, "kv_cache_spec", None)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            specs_by_layer.update(group_spec.kv_cache_specs)
+            specs = group_spec.kv_cache_specs.values()
+        else:
+            specs = (group_spec,)
+            if isinstance(group_spec, KVCacheSpec):
+                specs_by_layer.update(
+                    (layer_name, group_spec)
+                    for layer_name in getattr(group, "layer_names", ())
+                )
+        for spec in specs:
+            if (
+                isinstance(spec, FullAttentionSpec)
+                and spec.num_head_slots == 2
+                and spec.state_content_bytes is not None
+                and spec.head_size_v == spec.head_size
+            ):
+                alignments.append(_QSA_GBSA_PAGE_SIZE * spec.state_content_bytes)
+
+    # Older Ascend runner paths returned the pre-customization main-KV spec.
+    # Pair QSA's compressed-key side cache with its owning attention layer so
+    # the planner can still derive the physical K-page alignment.  This is a
+    # cache-role contract, not a model-name heuristic; ordinary attention has
+    # no ``indexer.compressed_key_cache`` owner.
+    compressed_suffix = ".indexer.compressed_key_cache"
+    for layer_name in specs_by_layer:
+        if not layer_name.endswith(compressed_suffix):
+            continue
+        owner = layer_name[: -len(compressed_suffix)]
+        main_spec = specs_by_layer.get(f"{owner}.attn")
+        if not isinstance(main_spec, FullAttentionSpec):
+            continue
+        if main_spec.head_size_v != main_spec.head_size:
+            continue
+        if main_spec.num_head_slots == 2 and main_spec.state_content_bytes is not None:
+            row_bytes = main_spec.state_content_bytes
+        else:
+            row_bytes = main_spec.num_kv_heads * main_spec.state_content_size_bytes // 2
+        alignments.append(_QSA_GBSA_PAGE_SIZE * row_bytes)
+    return math.lcm(*alignments) if alignments else None
+
+
+def _align_qsa_gbsa_block_stride(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Pad a block-outer pool so QSA can expose zero-copy 128-token pages.
+
+    A packed vLLM pool may end a physical storage block halfway through a QSA
+    GBSA page.  The layer-local cache is still strided correctly, but no single
+    affine 128-token page axis can then represent both the subpages within one
+    storage block and the jump to the next block.  Padding only the end of the
+    shared block makes that jump an integer number of GBSA pages.  The QSA
+    wrapper can consequently create a zero-copy virtual page pool and remap its
+    block table across the unused page-id holes.
+    """
+    page_alignment = _qsa_gbsa_page_alignment(kv_cache_groups)
+    if page_alignment is None:
+        return kv_cache_config
+
+    tensors = getattr(kv_cache_config, "kv_cache_tensors", None)
+    if not tensors:
+        return kv_cache_config
+
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not layout.is_block_outermost:
+        return kv_cache_config
+
+    old_num_blocks = kv_cache_config.num_blocks
+    block_strides = {tensor.block_stride for tensor in tensors}
+    if len(block_strides) != 1:
+        logger.warning_once(
+            "QSA GBSA page alignment skipped because the shared KV pool has "
+            "multiple block strides: %s",
+            sorted(block_strides),
+        )
+        return kv_cache_config
+
+    old_stride = next(iter(block_strides))
+    new_stride = round_up(old_stride, page_alignment)
+    if new_stride == old_stride:
+        return kv_cache_config
+
+    expected_size = old_stride * old_num_blocks
+    if any(
+        tensor.host_resident or tensor.size != expected_size
+        for tensor in tensors
+    ):
+        logger.warning_once(
+            "QSA GBSA page alignment skipped because the KV descriptors do "
+            "not share one block-outer backing allocation."
+        )
+        return kv_cache_config
+
+    new_num_blocks = may_override_num_blocks(
+        vllm_config,
+        available_memory // new_stride,
+    )
+    kv_cache_config.num_blocks = new_num_blocks
+    kv_cache_config.kv_cache_tensors = [
+        replace(
+            tensor,
+            size=new_stride * new_num_blocks,
+            block_stride=new_stride,
+        )
+        for tensor in tensors
+    ]
+    logger.info_once(
+        "Aligned the QSA shared KV block stride from %d to %d bytes for "
+        "zero-copy 128-token CANN GBSA pages (%d bytes padding per block).",
+        old_stride,
+        new_stride,
+        new_stride - old_stride,
+    )
+    return kv_cache_config
+
+
 def _ascend_get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -712,6 +846,12 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    kv_cache_config = _align_qsa_gbsa_block_stride(
+        kv_cache_config,
+        vllm_config,
+        kv_cache_groups,
+        available_memory,
+    )
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":

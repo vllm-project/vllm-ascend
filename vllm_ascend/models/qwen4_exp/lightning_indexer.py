@@ -11,14 +11,12 @@ import math
 
 import torch
 
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    expand_qsa_block_indices_e3,
-    expand_qsa_block_indices_npu,
-)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
 _TOKEN_TOPK = 2048
+_SUPPORTED_HEAD_COUNTS = (8, 16, 24, 32, 64)
 
 
 def is_qsa_lightning_cache_compatible(cache: torch.Tensor) -> bool:
@@ -61,7 +59,11 @@ def qsa_select_paged_tokens_lightning(
     Request ownership and causal visibility come directly from QSA metadata;
     neither decode length nor speculative-token count is used as a phase
     heuristic.
+
+    The upstream 2051-column output ABI is preserved while the compact
+    515-column group selection occupies its prefix.
     """
+    del use_e3  # Compact GBSA/Triton consumers no longer need token expansion.
     _validate_request_boundaries(
         query,
         query_start_loc,
@@ -95,7 +97,10 @@ def qsa_select_paged_tokens_lightning(
     if not rows:
         return out
 
+    # Keep unused ABI columns deterministic; MTP copies complete rows.
+    out.fill_(-1)
     block_topk = token_topk // compress_ratio
+    packed_width = block_topk + compress_ratio - 1
     score_weight = 1.0 / math.sqrt(query.shape[2])
     row_requests = token_to_req.to(torch.int64)
     row_sequence_lengths = sequence_lengths[row_requests]
@@ -110,12 +115,37 @@ def qsa_select_paged_tokens_lightning(
         dtype=torch.int32,
         device=query.device,
     )
+    original_heads = query.shape[1]
+    padded_heads = next(heads for heads in _SUPPORTED_HEAD_COUNTS if heads >= original_heads)
     weights = torch.full(
-        (rows, query.shape[1]),
+        (rows, original_heads),
         score_weight,
-        dtype=torch.float32,
+        dtype=query.dtype,
         device=query.device,
     )
+    if padded_heads != original_heads:
+        query = torch.cat(
+            (
+                query,
+                torch.zeros(
+                    (rows, padded_heads - original_heads, query.shape[2]),
+                    dtype=query.dtype,
+                    device=query.device,
+                ),
+            ),
+            dim=1,
+        )
+        weights = torch.cat(
+            (
+                weights,
+                torch.zeros(
+                    (rows, padded_heads - original_heads),
+                    dtype=query.dtype,
+                    device=query.device,
+                ),
+            ),
+            dim=1,
+        )
     groups, _ = torch.ops.npu.npu_lightning_indexer.default(
         query,
         compressed_key_cache,
@@ -132,24 +162,13 @@ def qsa_select_paged_tokens_lightning(
         return_value=False,
     )
     groups = groups.squeeze(1)
-    if use_e3:
-        expand_qsa_block_indices_e3(
-            groups,
-            query_positions,
-            sequence_lengths,
-            token_to_req,
-            compress_ratio,
-            token_topk,
-            out,
-        )
-    else:
-        expand_qsa_block_indices_npu(
-            groups,
-            query_positions,
-            sequence_lengths,
-            token_to_req,
-            compress_ratio,
-            token_topk,
-            out,
-        )
+    pack_qsa_group_indices_npu(
+        groups,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out[:, :packed_width],
+    )
     return out

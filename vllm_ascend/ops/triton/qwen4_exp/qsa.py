@@ -321,8 +321,14 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     dim_offsets = tl.arange(0, HEAD_DIM)
     column_offsets = tl.arange(0, BLOCK_N)
     first_head = kv_head * GROUP_SIZE
+    # A5 can validate SIMT addresses before applying a load/store mask. Keep
+    # padded BLOCK_M lanes in-bounds instead of relying on the mask alone.
+    safe_head_offsets = tl.minimum(head_offsets, GROUP_SIZE - 1)
     query = tl.load(
-        q_ptr + row * stride_q_row + (first_head + head_offsets[:, None]) * stride_q_head + dim_offsets[None, :],
+        q_ptr
+        + row * stride_q_row
+        + (first_head + safe_head_offsets[:, None]) * stride_q_head
+        + dim_offsets[None, :],
         mask=head_offsets[:, None] < GROUP_SIZE,
         other=0.0,
     )
@@ -347,8 +353,12 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=-1,
         )
         tail_column = BLOCK_TOPK + (columns - LOGICAL_TOPK)
+        safe_tail_column = tl.minimum(
+            tl.maximum(tail_column, BLOCK_TOPK),
+            BLOCK_TOPK + COMPRESS_RATIO - 2,
+        )
         tail = tl.load(
-            indices_ptr + row * stride_indices_row + tail_column,
+            indices_ptr + row * stride_indices_row + safe_tail_column,
             mask=(columns >= LOGICAL_TOPK) & (columns < TOPK),
             other=-1,
         )
@@ -364,7 +374,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         )
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
-        safe_page = tl.maximum(physical_page, 0).to(tl.int64)
+        safe_page = tl.minimum(
+            tl.maximum(physical_page, 0), num_cache_blocks - 1
+        ).to(tl.int64)
         # Load K in its source-contiguous [token, head_dim] layout.  Loading
         # it directly as [head_dim, token] makes the scattered token axis the
         # innermost address expression, which Triton-Ascend lowers to costly
@@ -415,7 +427,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         tl.store(
             output_ptr
             + row * stride_output_row
-            + (first_head + head_offsets[:, None]) * stride_output_head
+            + (first_head + safe_head_offsets[:, None]) * stride_output_head
             + dim_offsets[None, :],
             normalized_output,
             mask=output_mask,
@@ -428,13 +440,21 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         )
         tl.store(
             partial_output_ptr
-            + ((split_id * num_rows + row) * NUM_QUERY_HEADS + first_head + head_offsets[:, None]) * HEAD_DIM
+            + (
+                (split_id * num_rows + row) * NUM_QUERY_HEADS
+                + first_head
+                + safe_head_offsets[:, None]
+            )
+            * HEAD_DIM
             + dim_offsets[None, :],
             normalized_output,
             mask=output_mask,
         )
         tl.store(
-            partial_lse_ptr + (split_id * num_rows + row) * NUM_QUERY_HEADS + first_head + head_offsets,
+            partial_lse_ptr
+            + (split_id * num_rows + row) * NUM_QUERY_HEADS
+            + first_head
+            + safe_head_offsets,
             partial_lse,
             mask=head_offsets < GROUP_SIZE,
         )
@@ -644,6 +664,10 @@ def _compress_qsa_groups_kernel(
         )
     else:
         position_values = tl.where(valid_row, first_position, 0)
+    # Rows without a completed compressed group are discarded by the later
+    # slot-mapped store.  Still initialize their RoPE metadata deterministically
+    # so an eager normalization/gather cannot observe a stale device value.
+    position_values = tl.where(valid_row, position_values, 0)
     tl.store(
         first_positions_ptr + row * stride_positions_row + position_dims * stride_positions_dim,
         position_values,
@@ -783,6 +807,29 @@ def expand_qsa_block_indices_npu(
         raise ValueError("QSA expansion output has an invalid shape")
     if not block_indices.shape[0]:
         return out
+    column_block = 256
+    _expand_qsa_indices_kernel[
+        (block_indices.shape[0], triton.cdiv(output_width, column_block))
+    ](
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        out,
+        block_indices.stride(0),
+        block_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        block_indices.shape[0],
+        sequence_lengths.shape[0],
+        BLOCK_TOPK=block_topk,
+        COMPRESS_RATIO=compress_ratio,
+        TOKEN_TOPK=token_topk,
+        OUTPUT_WIDTH=output_width,
+        COLUMN_BLOCK=column_block,
+        num_warps=4,
+    )
+    return out
 
 
 def pack_qsa_group_indices_npu(
@@ -832,27 +879,6 @@ def pack_qsa_group_indices_npu(
         COMPRESS_RATIO=compress_ratio,
         OUTPUT_WIDTH=output_width,
         num_warps=1,
-    )
-    return out
-    column_block = 256
-    _expand_qsa_indices_kernel[(block_indices.shape[0], triton.cdiv(output_width, column_block))](
-        block_indices,
-        query_positions,
-        sequence_lengths,
-        token_to_req,
-        out,
-        block_indices.stride(0),
-        block_indices.stride(1),
-        out.stride(0),
-        out.stride(1),
-        block_indices.shape[0],
-        sequence_lengths.shape[0],
-        BLOCK_TOPK=block_topk,
-        COMPRESS_RATIO=compress_ratio,
-        TOKEN_TOPK=token_topk,
-        OUTPUT_WIDTH=output_width,
-        COLUMN_BLOCK=column_block,
-        num_warps=4,
     )
     return out
 
@@ -1019,7 +1045,23 @@ def qsa_sparse_paged_attention(
 
     # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
     # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
+    if head_dim >= 256:
+        # A5 Qwen3.8 uses 256-wide QSA heads. A 64-token tile overflows the
+        # 216 KiB UB once the compiler materializes QK/PV intermediates and
+        # multi-buffering. Keep the sequence tile narrow for every row batch.
+        block_n = 16
+        if base_programs <= small_profile_limit:
+            target_splits = 64
+        elif base_programs < 32:
+            target_splits = 32
+        elif base_programs <= 256:
+            target_splits = 8
+        elif base_programs <= 512:
+            target_splits = 4
+        else:
+            target_splits = 1
+        partial_warps = 2
+    elif base_programs <= small_profile_limit:
         block_n, target_splits, partial_warps = 16, 64, 4
     elif base_programs < 32:
         block_n, target_splits, partial_warps = 16, 32, 4

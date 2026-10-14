@@ -40,6 +40,10 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
+from vllm_ascend.ops.gbsa_qsa import (
+    is_qsa_gbsa_cache_compatible,
+    qsa_gbsa_attention,
+)
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_triton,
 )
@@ -176,7 +180,12 @@ def apply_qsa_rope(
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
     use_merged_cache = False
-    cos_sin = cache[positions]
+    # Compression emits rows for every scheduled token, including rows whose
+    # compressed slot is invalid.  Never let such dead-row metadata reach the
+    # NPU Index kernel as an out-of-range address.  This materializes only the
+    # tiny position index, not any KV-cache tensor.
+    safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+    cos_sin = cache[safe_positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
 
     if positions.ndim == 2 and not use_merged_cache:
@@ -248,7 +257,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> torch.Tensor:
         """Apply the reference K normalization and RoPE to compressed keys."""
         if (
-            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE
+            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE
             and pooled.dtype == torch.bfloat16
             and pooled.shape[-1] == 128
         ):
@@ -401,8 +410,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        force_reference = envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or is_950()
-        if force_reference:
+        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
             return qsa_select_paged_tokens_reference(
                 query,
                 self.compressed_key_cache.kv_cache,
@@ -416,6 +424,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             )
         profile = get_current_hardware_profile()
         use_lightning = profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER)
+        packed_width = (
+            self.token_topk // self.compress_ratio + self.compress_ratio - 1
+        )
+        compact_out = None if out is None else out[:, :packed_width]
         use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V and profile.supports(HardwareCapability.QSA_E3_EXPAND)
         lightning_eligible = use_lightning and (
             profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES)
@@ -436,43 +448,17 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 out,
                 use_e3=use_e3,
             )
-            use_lightning = False
-        use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V
-        if use_e3 and not profile.supports(HardwareCapability.QSA_E3_EXPAND):
-            logger.warning_once(
-                "VLLM_ASCEND_ENABLE_QSA_E3V requires the A3 qsa_expand_e3 operator, which is "
-                "unavailable on this SoC; falling back to the portable QSA expansion."
+        if out is None:
+            out = torch.empty(
+                (query.shape[0], self.output_width),
+                dtype=torch.int32,
+                device=query.device,
             )
-            use_e3 = False
-        if use_lightning or use_e3:
-            if self._lightning_indexer_eligible(query, metadata):
-                if not use_lightning:
-                    return qsa_select_paged_tokens_triton(
-                        query,
-                        self.compressed_key_cache.kv_cache,
-                        metadata.block_table,
-                        metadata.token_to_req,
-                        metadata.logical_positions,
-                        metadata.seq_lens,
-                        self.token_topk,
-                        self.compress_ratio,
-                        out,
-                        use_e3=True,
-                    )
-                return qsa_select_paged_tokens_lightning(
-                    query,
-                    self.compressed_key_cache.kv_cache,
-                    metadata.block_table,
-                    metadata.token_to_req,
-                    metadata.logical_positions,
-                    metadata.seq_lens,
-                    metadata.query_start_loc,
-                    self.token_topk,
-                    self.compress_ratio,
-                    out,
-                    use_e3=use_e3,
-                )
-        return qsa_select_paged_tokens_triton(
+            compact_out = out[:, :packed_width]
+        # The upper vLLM ABI owns a 2051-column buffer. Compact QSA backends
+        # consume only 512 group ids plus three residual-token columns.
+        out.fill_(-1)
+        qsa_select_paged_tokens_triton(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
@@ -481,8 +467,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             metadata.seq_lens,
             self.token_topk,
             self.compress_ratio,
-            out,
+            compact_out,
         )
+        return out
 
 
 class AscendQSAImpl:
@@ -540,22 +527,33 @@ class AscendQSAImpl:
         output.zero_()
         if num_tokens == 0:
             return output
-        logical_indices = layer.topk_indices_buffer[:num_tokens]
+        selected_indices = layer.topk_indices_buffer[:num_tokens]
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or is_950():
+        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
             return qsa_sparse_paged_attention_reference(
                 query[:num_tokens],
                 key_cache,
                 value_cache,
-                compact_indices,
+                selected_indices,
                 attn_metadata.block_table,
                 token_to_req[:num_tokens],
                 output[:num_tokens],
             )
+        packed_width = (
+            layer.indexer.token_topk // layer.indexer.compress_ratio
+            + layer.indexer.compress_ratio
+            - 1
+        )
+        compact_indices = selected_indices[:, :packed_width]
         profile = get_current_hardware_profile()
-        if profile.supports(HardwareCapability.QSA_GBSA_ATTENTION):
+        use_gbsa = (
+            profile.supports(HardwareCapability.QSA_GBSA_ATTENTION)
+            and is_qsa_gbsa_cache_compatible(key_cache)
+            and is_qsa_gbsa_cache_compatible(value_cache)
+        )
+        if use_gbsa:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
             return qsa_gbsa_attention(
                 query[:num_tokens],
@@ -564,13 +562,25 @@ class AscendQSAImpl:
                 compact_indices,
                 attn_metadata.block_table,
                 token_to_req[:num_tokens],
+                attn_metadata.seq_lens,
                 output[:num_tokens],
+            )
+        if profile.supports(HardwareCapability.QSA_GBSA_ATTENTION):
+            logger.warning_once(
+                "QSA cache cannot be represented as non-overlapping GBSA "
+                "pages without copying; falling back to the stride-aware "
+                "Triton backend. key shape=%s stride=%s, "
+                "value shape=%s stride=%s",
+                tuple(key_cache.shape),
+                key_cache.stride(),
+                tuple(value_cache.shape),
+                value_cache.stride(),
             )
         return qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
             value_cache,
-            logical_indices,
+            compact_indices,
             attn_metadata.block_table,
             token_to_req[:num_tokens],
             output[:num_tokens],

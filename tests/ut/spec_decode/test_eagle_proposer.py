@@ -4255,6 +4255,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         """Test if _maybe_share_topk_indices correctly updates topk_indices_buffer for all submodules."""
         # Use __new__ to bypass the complex __init__ process
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = True
 
         # 1. Mock Target Model
         target_model = MagicMock()
@@ -4292,8 +4293,27 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
         self.assertEqual(proposer._lim_topk_compactors, [mod3])
 
+    def test_maybe_share_topk_indices_keeps_draft_buffer_when_disabled(self):
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = False
+        target_buffer = torch.empty((2, 4), dtype=torch.int32)
+        draft_buffer = torch.empty((2, 4), dtype=torch.int32)
+        draft_model = SimpleNamespace(
+            topk_indices_buffer=draft_buffer,
+            modules=lambda: (),
+        )
+        proposer.model = SimpleNamespace(model=draft_model)
+        target_model = SimpleNamespace(
+            model=SimpleNamespace(topk_indices_buffer=target_buffer)
+        )
+
+        proposer._maybe_share_topk_indices(target_model)
+
+        self.assertIs(proposer.model.model.topk_indices_buffer, draft_buffer)
+
     def test_maybe_collects_lim_compactor_without_target_buffer(self):
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = False
         copy_sfa_attention = SimpleNamespace(uses_lim_topk_metadata=True)
         draft_model = MagicMock()
         draft_model.modules.return_value = [copy_sfa_attention]
