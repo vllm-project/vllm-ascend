@@ -1242,14 +1242,12 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
 
     assert result is local_batch
     stage.assert_not_called()
-    if vllm_version_is("0.30.0"):
-        partition.assert_called_once_with(dummy)
-    else:
-        partition.assert_called_once()
-        args = partition.call_args.args
-        assert args[0] is dummy
-        assert args[1].cg_mode == CUDAGraphMode.NONE
-        assert args[1].num_tokens == dummy.num_tokens
+    partition.assert_called_once()
+    args = partition.call_args.args
+    assert len(args) == 2
+    assert args[0] is dummy
+    assert args[1].cg_mode == CUDAGraphMode.NONE
+    assert args[1].num_tokens == dummy.num_tokens
 
 
 def test_capture_input_without_cpp_marker_uses_staging_path():

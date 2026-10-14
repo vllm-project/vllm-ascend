@@ -351,8 +351,6 @@ class AscendPCPManager(PCPManager):
         # The parent implementation only copies a dummy into PCP-local buffers.
         # CPP instead supplies a global prompt, so use the real prefill splitter
         # before those buffers are overwritten with the rank-local layout.
-        if vllm_version_is("0.30.0"):
-            return self.partition_batch(input_batch)
         return self.partition_batch(
             input_batch,
             BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
