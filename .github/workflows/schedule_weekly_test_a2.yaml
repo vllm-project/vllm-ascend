@@ -47,6 +47,11 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
@@ -220,6 +225,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -250,6 +256,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   clear-pre-logs:
