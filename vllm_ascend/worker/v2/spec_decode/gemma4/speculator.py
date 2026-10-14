@@ -37,8 +37,8 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_metadata_wrapper,
     build_attn_metadata_factory,
+    build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
