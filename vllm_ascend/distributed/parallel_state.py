@@ -10,7 +10,6 @@ from vllm.distributed.parallel_state import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 if TYPE_CHECKING:
     from vllm.config import EngramConfig
@@ -58,16 +57,6 @@ class ReplicatedGroup:
 
 # Singleton: identical on every rank, no HCCL comm created.
 _REPLICATED = ReplicatedGroup()
-
-
-def _initialize_mega_moe_communicator(group: GroupCoordinator) -> None:
-    """Eagerly initialize the HCCL communicator required by SymmBuffer."""
-    device_group = group.device_group
-    rank_in_group = torch.distributed.get_rank(group=device_group)
-    backend = device_group._get_backend(torch.device("npu"))
-    group_name = backend.get_hccl_comm_name(rank_in_group)
-    if not group_name:
-        raise RuntimeError("Failed to initialize the MegaMoE HCCL communicator")
 
 
 def init_ascend_model_parallel(
@@ -172,16 +161,8 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    global _MC2, _MEGA_MOE
+    global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
-    if get_ascend_device_type() == AscendDeviceType.A5 and get_ascend_config().enable_fused_mc2 == 1:
-        _MEGA_MOE = init_model_parallel_group(
-            group_ranks,
-            get_world_group().local_rank,
-            backend,
-            group_name="mega_moe",
-        )
-        _initialize_mega_moe_communicator(_MEGA_MOE)
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
@@ -238,11 +219,6 @@ def model_parallel_initialized():
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, "mc2 group is not initialized"
     return _MC2
-
-
-def get_mega_moe_group() -> GroupCoordinator:
-    assert _MEGA_MOE is not None, "MegaMoE group is not initialized"
-    return _MEGA_MOE
 
 
 def get_mlp_tp_group() -> GroupCoordinator:

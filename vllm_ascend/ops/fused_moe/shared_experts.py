@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
@@ -126,20 +127,19 @@ class AscendSharedExperts:
         self.weights_replicated = ascend_config.enable_shared_expert_dp
         self._mega_moe_weights: MoEWeights | None = None
 
-        if self.multistream_overlap:
-            # Wrap the quant_method's process_weights_after_loading to validate that
-            # splitting shared expert computation (gate_up projection, activation,
-            # then down projection) yields identical results to integrated
-            # computation after weight loading.
-            original_process_weights = quant_method.process_weights_after_loading
+        # Clear contiguous shared-weight copies after an RL weight reload, and
+        # validate split execution when multistream overlap is enabled.
+        original_process_weights = quant_method.process_weights_after_loading
 
-            @wraps(original_process_weights)
-            def wrapped_process_weights(*args, **kwargs):
-                result = original_process_weights(*args, **kwargs)
+        @wraps(original_process_weights)
+        def wrapped_process_weights(*args, **kwargs):
+            result = original_process_weights(*args, **kwargs)
+            self._mega_moe_weights = None
+            if self.multistream_overlap:
                 self.validate_consistency()
-                return result
+            return result
 
-            quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+        quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -156,6 +156,10 @@ class AscendSharedExperts:
         """
 
         if self.quant_type not in (QuantType.W4A8MXFP, QuantType.W8A8MXFP):
+            return None
+        if self.swiglu_alpha != 1.0 or self.swiglu_beta != 0.0:
+            return None
+        if getattr(self.layer.act_fn, "limit", self.swiglu_limit) != self.swiglu_limit:
             return None
         if has_lora(self.lora_context):
             return None
@@ -204,6 +208,30 @@ class AscendSharedExperts:
             "w1_scale": (1, 2 * intermediate_hidden, (hidden_size + 63) // 64, 2),
             "w2_scale": (1, hidden_size, (intermediate_hidden + 63) // 64, 2),
         }
+        # Reject merged or TP-sharded layouts before allocating contiguous
+        # copies, so the standalone fallback allocates no extra device memory.
+        if gate_up_proj.weight.ndim != 2 or down_proj.weight.ndim != 2:
+            return None
+        if gate_up_proj.weight_scale.ndim != 3 or down_proj.weight_scale.ndim != 3:
+            return None
+        actual_shapes = {
+            "w1": (1, *reversed(gate_up_proj.weight.shape)),
+            "w2": (1, *reversed(down_proj.weight.shape)),
+            "w1_scale": (
+                1,
+                gate_up_proj.weight_scale.shape[1],
+                gate_up_proj.weight_scale.shape[0],
+                gate_up_proj.weight_scale.shape[2],
+            ),
+            "w2_scale": (
+                1,
+                down_proj.weight_scale.shape[1],
+                down_proj.weight_scale.shape[0],
+                down_proj.weight_scale.shape[2],
+            ),
+        }
+        if actual_shapes != expected_shapes:
+            return None
         shared_weights = MoEWeights(
             w1=[gate_up_proj.weight.transpose(-1, -2).unsqueeze(0).contiguous()],
             w2=[down_proj.weight.transpose(-1, -2).unsqueeze(0).contiguous()],
