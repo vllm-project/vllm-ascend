@@ -230,11 +230,12 @@ def qsa_select_paged_tokens(
     output_width = block_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((row_count, output_width), dtype=torch.int32, device=query.device)
+    out.fill_(-1)
     compressed_capacity = block_table.shape[1] * compressed_key_cache.shape[1]
-    block_topk = token_topk // compress_ratio
+    select_topk = token_topk // compress_ratio
     # Short requests may have less cache capacity than the selection budget.
     # Visibility masking below limits the output to valid token positions.
-    block_topk = min(block_topk, compressed_capacity)
+    select_topk = min(select_topk, compressed_capacity)
 
     columns = torch.arange(compressed_capacity, device=query.device)
     # Advanced paged indexing materializes one cache row. Bound the complete
@@ -262,12 +263,12 @@ def qsa_select_paged_tokens(
         )
         visible_mask = columns.unsqueeze(0) < visible.unsqueeze(1)
         scores.masked_fill_(~(visible_mask & valid_cache), -torch.inf)
-        selected_blocks = torch.topk(scores, block_topk, dim=-1).indices
+        selected_blocks = torch.topk(scores, select_topk, dim=-1).indices
 
-        complete_blocks = visible.clamp_max(block_topk)
-        group_columns = torch.arange(block_topk, device=query.device)
+        complete_blocks = visible.clamp_max(select_topk)
+        group_columns = torch.arange(select_topk, device=query.device)
         valid_groups = group_columns.unsqueeze(0) < complete_blocks.unsqueeze(1)
-        out[row_slice, :block_topk].copy_(
+        out[row_slice, :select_topk].copy_(
             torch.where(valid_groups, selected_blocks, -1).to(torch.int32)
         )
         tail_start = ((query_positions[row_slice].long() + 1) // compress_ratio) * compress_ratio
