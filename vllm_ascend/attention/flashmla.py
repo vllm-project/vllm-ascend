@@ -115,8 +115,8 @@ class FlashMLAAdapter:
         available_ops = get_flashmla_ops()
         if available_ops is None:
             raise RuntimeError(
-                "FlashMLA requires cann_ops_transformer.ops.flash_mla and flash_mla_metadata "
-                "(or the matching legacy flash_mla_with_kvcache API pair). Install a package matching the worker's "
+                "FlashMLA requires cann_ops_transformer.ops.flash_mla "
+                "and flash_mla_metadata. Install a package matching the worker's "
                 "CANN and torch_npu versions."
             )
         attention_op, metadata_op = available_ops
