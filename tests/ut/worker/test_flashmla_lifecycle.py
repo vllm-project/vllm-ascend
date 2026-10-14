@@ -373,6 +373,8 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
         actual = getattr(result, field)
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
+        elif field == "decode_graph_eligible" and external:
+            assert actual is False
         elif field != "req_ids":
             assert actual == expected
-    assert uniform_count == 4
+    assert uniform_count == (None if external else 4)

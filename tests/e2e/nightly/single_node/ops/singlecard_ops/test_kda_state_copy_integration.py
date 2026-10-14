@@ -32,8 +32,8 @@ def _forbid_compilation(monkeypatch):
 
 @pytest.mark.parametrize("to_cache", [False, True])
 @torch.inference_mode()
-def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
-    """Direct launches preserve the complete Triton-bound kernel signature."""
+def test_direct_compiled_launch_uses_prepared_runtime_arguments(to_cache):
+    """Check the adopted runtime-only call; device cases verify launcher ABI."""
     state = torch.empty((8, 1, 1, 1), dtype=torch.float32, device="npu")
     packed = torch.empty((2, 1, 1, 1), dtype=torch.float32, device="npu")
     indices = torch.tensor([0, 1], dtype=torch.int32, device="npu")
@@ -56,12 +56,11 @@ def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
     plan._launch(state, packed, indices, flags, to_cache=to_cache)
 
     (args,) = launches
-    assert len(args) == 12
+    assert len(args) == 9
     for actual, expected in zip(args[:3], (state, packed, indices)):
         assert actual is expected
     assert args[3] is (indices if to_cache else flags)
     assert args[4:9] == (*plan._scalars, 0 if to_cache else 1)
-    assert args[9:] == (to_cache, not to_cache, lowlevel.DEFAULT_KDA_BLOCK_SIZE)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
