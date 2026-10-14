@@ -61,8 +61,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30
   # Initial routing estimate uses the selector's default; not a measured runtime.
   tests/e2e/pull_request/one_card/test_ascendstore_v1.py: 600
-  # Temporary diagnostic planning estimate; remove with the diagnostic after evidence collection.
-  tests/e2e/pull_request/one_card/test_ascendstore_v1_diagnostic.py: 1800
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
