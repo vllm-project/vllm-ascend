@@ -22,8 +22,6 @@ from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -65,6 +63,50 @@ def _topk_log_softmax_kernel(
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
+@triton.jit
+def _topk_log_softmax_rank_kernel(
+    output_ptr,
+    rank_ptr,
+    logits_ptr,
+    logits_stride,
+    topk_ids_ptr,
+    sampled_token_ids_ptr,
+    topk,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+    PADDED_TOPK: tl.constexpr,
+):
+    """Compute selected logprobs and the sampled-token rank in two scans."""
+    req_idx = tl.program_id(0)
+    row_ptr = logits_ptr + req_idx * logits_stride
+    sampled_token_id = tl.load(sampled_token_ids_ptr + req_idx)
+    sampled_logit = tl.load(row_ptr + sampled_token_id).to(tl.float32)
+
+    max_val = float("-inf")
+    rank_vec = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        max_val = tl.max(tl.maximum(logits, max_val, propagate_nan=tl.PropagateNan.ALL))
+        rank_vec += (logits.to(tl.float32) > sampled_logit).to(tl.int32)
+    max_val = max_val.to(tl.float32)  # type: ignore
+    tl.store(rank_ptr + req_idx, tl.sum(rank_vec))
+
+    se = 0.0
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        logits = logits.to(tl.float32)
+        se += tl.sum(tl.exp(logits - max_val))
+    lse = tl.log(se)
+
+    k_offset = tl.arange(0, PADDED_TOPK)
+    k_mask = k_offset < topk
+    topk_ids = tl.load(topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0)
+    logits = tl.load(row_ptr + topk_ids, mask=k_mask).to(tl.float32)
+    tl.store(output_ptr + req_idx * topk + k_offset, logits - lse - max_val, mask=k_mask)
+
+
 def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
@@ -82,38 +124,6 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         multibuffer=False,
     )
     return logprobs
-
-
-@triton.jit(do_not_specialize=["batch_size", "rows_per_core"])
-def _ranks_kernel(
-    output_ptr,
-    logits_ptr,
-    logits_stride,
-    token_ids_ptr,
-    vocab_size,
-    batch_size,
-    rows_per_core,
-    BLOCK_SIZE: tl.constexpr,
-):
-    core_id = tl.program_id(0)
-
-    start_row = core_id * rows_per_core
-    end_row = start_row + rows_per_core
-
-    for req_idx in range(start_row, end_row):
-        if req_idx < batch_size:
-            row_ptr = logits_ptr + req_idx * logits_stride
-
-            token_id = tl.load(token_ids_ptr + req_idx)
-            x = tl.load(row_ptr + token_id)
-
-            n_vec = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
-            for i in range(0, vocab_size, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-                n_vec += (logits > x).to(tl.int32)
-            n = tl.sum(n_vec)
-            tl.store(output_ptr + req_idx, n)
 
 
 def compute_topk_logprobs(
@@ -135,29 +145,23 @@ def compute_topk_logprobs(
     if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
-    logprobs = compute_token_logprobs(logits, logprob_token_ids)
-
+    logprobs = logits.new_empty((batch_size, logprob_token_ids.shape[1]), dtype=torch.float32)
     token_ranks = torch.empty(
         batch_size,
         dtype=torch.int64,
         device=logits.device,
     )
-
-    vec_core = get_vectorcore_num()
-    NUM_CORES = min(batch_size, vec_core)
-
-    rows_per_core = triton.cdiv(batch_size, NUM_CORES)
-    BLOCK_SIZE = 8192
-    grid = (NUM_CORES,)
-    _ranks_kernel[grid](
+    _topk_log_softmax_rank_kernel[(batch_size,)](
+        logprobs,
         token_ranks,
         logits,
         logits.stride(0),
+        logprob_token_ids,
         sampled_token_ids,
+        logprob_token_ids.shape[1],
         vocab_size,
-        batch_size,
-        rows_per_core,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=12944,
+        PADDED_TOPK=max(triton.next_power_of_2(logprob_token_ids.shape[1]), 2),
         multibuffer=False,
     )
 
