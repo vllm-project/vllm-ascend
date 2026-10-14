@@ -1084,14 +1084,19 @@
 #
 # ** 8a. File: worker/patch_mamba_checkpoint.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `MambaPrefillCheckpointBuilder.build`
+#   1. `MambaPrefillCheckpointBuilder.build` (newer vLLM)
+#      `AttentionMetadataBuilder.__init__` (legacy Kimi K3 checkpoints)
 #    Why:
 #       Ascend standalone and pure PD producer processes suppress EAGLE's
 #       replay block drop. Worker checkpoint exports must use the same boundary
 #       as scheduler allocation and cache registration.
 #    How:
-#       Derive the effective drop from the worker's VllmConfig role, then
-#       delegate to the upstream builder with a private read-only config view.
+#       Select the available upstream checkpoint API. Newer vLLM delegates
+#       to the generic builder with a private read-only config view. v0.30.0
+#       computes KDA checkpoints inline: a narrow constructor hook recognizes
+#       that legacy builder when instantiated and installs its private view.
+#       The hook avoids eager CUDA model imports and retains the same stateful
+#       builder. Derive the effective drop from the worker's VllmConfig role.
 #       Consumers and kv_both keep the upstream drop. The shared speculative
 #       configuration and actual MTP execution are unchanged.
 #    Related PR (if no, explain why):

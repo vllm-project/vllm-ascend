@@ -5,14 +5,18 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.mamba import checkpoint
-from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointBuilder
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_interface import MambaSpec, get_mamba_prefill_checkpoint_position
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import _effective_eagle_block_drop
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.patch.worker import patch_mamba_checkpoint
+
+if patch_mamba_checkpoint.HAS_GENERIC_CHECKPOINT_BUILDER:
+    from vllm.model_executor.layers.mamba import checkpoint
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointBuilder
+else:
+    pytest.skip("This vLLM revision uses backend-local Mamba checkpoint metadata", allow_module_level=True)
 
 
 def _make_builder(role, num_checkpoint_blocks=1, use_eagle=True):

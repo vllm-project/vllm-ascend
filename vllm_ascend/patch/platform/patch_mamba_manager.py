@@ -133,7 +133,7 @@ class AscendMambaManager(MambaManager):
         resend_boundary = max(request.num_prompt_tokens - 1, 0) // alignment * alignment
         extension_boundary = request.num_prompt_tokens // hash_block_size * hash_block_size
         if num_tokens not in (resend_boundary, extension_boundary) and not (
-            self.shared_prefix_checkpoint
+            getattr(self, "shared_prefix_checkpoint", getattr(self, "fine_grained_prefix_cache", False))
             and num_tokens == request.shared_prefix_boundary
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):

@@ -572,6 +572,7 @@ def test_scheduler_materializes_sparse_retention_first_replay_state(monkeypatch,
         mamba_has_prefill_checkpoint_blocks=False,
         mamba_prefill_checkpoint_alignment=REPLAY_BLOCK_SIZE,
         mamba_shared_prefix_checkpoint=False,
+        mamba_fine_grained_prefix_cache=False,
     )
     chunk_ends = []
     while request.num_computed_tokens < prompt_tokens:

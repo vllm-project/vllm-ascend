@@ -201,6 +201,21 @@ def test_mamba_does_not_register_an_intermediate_running_state():
     assert not manager._partial_hit_reqs
 
 
+@pytest.mark.parametrize("option", ["shared_prefix_checkpoint", "fine_grained_prefix_cache"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_mamba_shared_junction_honors_installed_option_name(option, enabled):
+    manager, request = _mamba_manager_and_request(896)
+    for name in ("shared_prefix_checkpoint", "fine_grained_prefix_cache"):
+        if hasattr(manager, name):
+            delattr(manager, name)
+    setattr(manager, option, enabled)
+    request.shared_prefix_boundary = 640
+    actual = manager._cache_partial_tail_block(request, 640, retention_interval=0)
+    assert (actual is not None) is enabled
+    cached = manager.block_pool.get_cached_block(request.block_hashes[4], [0])
+    assert (cached is not None) is enabled
+
+
 def test_mamba_keeps_exported_prompt_checkpoint_with_rounded_cache_end():
     manager, request = _mamba_manager_and_request(1001)
     manager._checkpoints["request"] = (896, 0)
@@ -239,6 +254,14 @@ def test_mamba_transient_checkpoint_stays_request_local():
 
 def test_mamba_consumer_preserves_upstream_drop_registration():
     manager, request = _mamba_manager_and_request(896, skips_drop=False)
-    assert manager._cache_partial_tail_block(request, 896, retention_interval=0) is None
-    assert manager._cache_partial_tail_block(request, 768, retention_interval=0) is not None
-    assert manager.req_to_blocks["request"][1].block_hash_num_tokens == 768
+    reference, reference_request = _mamba_manager_and_request(896, skips_drop=False)
+    upstream_manager = AscendMambaManager.__bases__[0]
+    # Release and main use different flags for the original tail rule. The
+    # consumer must delegate to the installed upstream behavior in either case.
+    for end in (896, 768):
+        expected = upstream_manager._cache_partial_tail_block(reference, reference_request, end, retention_interval=0)
+        actual = manager._cache_partial_tail_block(request, end, retention_interval=0)
+        assert actual == expected
+        assert manager.req_to_blocks["request"][1].block_hash_num_tokens == (
+            reference.req_to_blocks["request"][1].block_hash_num_tokens
+        )
