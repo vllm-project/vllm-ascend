@@ -199,9 +199,14 @@ def test_native_constructor_preserves_weight_names_and_shared_index_buffer(monke
         ),
         quant_config=None,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
-        parallel_config=SimpleNamespace(eplb_config=SimpleNamespace(num_redundant_experts=0)),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            use_sequence_parallel_moe=True,
+            eplb_config=SimpleNamespace(num_redundant_experts=0),
+        ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
     )
+    config.model_config.hf_text_config = config.model_config.hf_config
     upstream = deepseek_v2.DeepseekV2Model(vllm_config=config, prefix="model")
     layer_args.clear()
     native = AscendDSACPModel(vllm_config=config, prefix="model")
