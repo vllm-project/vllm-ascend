@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -56,7 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-prompts", type=int, default=16)
     parser.add_argument("--startup-timeout", type=int, default=900)
+    parser.add_argument("--num-speculative-tokens", type=int, default=5)
     parser.add_argument("--physical-min-k", type=int)
+    parser.add_argument("--result-tag")
     parser.add_argument("--device-offset", type=int, default=0)
     return parser.parse_args()
 
@@ -105,13 +108,13 @@ def ensure_port_free(port: int) -> None:
             raise RuntimeError(f"port {port} is already in use")
 
 
-def speculative_config(case: str, draft_model: str) -> dict | None:
+def speculative_config(case: str, draft_model: str, num_speculative_tokens: int) -> dict | None:
     if case == "target":
         return None
     config = {
         "method": "dspark",
         "model": draft_model,
-        "num_speculative_tokens": 5,
+        "num_speculative_tokens": num_speculative_tokens,
     }
     if case in ("adaptive", "physical"):
         config["enable_adaptive_verification"] = True
@@ -143,7 +146,7 @@ def serve_command(args: argparse.Namespace) -> list[str]:
         "--safetensors-load-strategy",
         "prefetch",
     ]
-    spec = speculative_config(args.case, args.draft_model)
+    spec = speculative_config(args.case, args.draft_model, args.num_speculative_tokens)
     if spec is not None:
         command.extend(("--speculative-config", json.dumps(spec, separators=(",", ":"))))
     if args.case == "physical":
@@ -239,9 +242,14 @@ def main() -> int:
         raise ValueError("input-len + output-len must not exceed max-model-len")
     if args.max_concurrency > args.max_num_seqs:
         raise ValueError("max-concurrency must not exceed max-num-seqs")
+    if args.num_speculative_tokens <= 0:
+        raise ValueError("num-speculative-tokens must be positive")
+    if args.result_tag is not None and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.result_tag):
+        raise ValueError("result-tag must contain only letters, digits, underscores, or hyphens")
     ensure_port_free(args.port)
 
-    output_dir = Path(args.output_root) / f"tp{args.tp}" / args.case
+    case_dir = args.case if args.result_tag is None else f"{args.case}-{args.result_tag}"
+    output_dir = Path(args.output_root) / f"tp{args.tp}" / case_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     source_path = f"{args.ascend_source}:{args.vllm_source}"
@@ -269,6 +277,8 @@ def main() -> int:
         "visible_devices": env["ASCEND_RT_VISIBLE_DEVICES"],
         "device_offset": args.device_offset,
         "physical_min_k": args.physical_min_k,
+        "num_speculative_tokens": args.num_speculative_tokens if args.case != "target" else None,
+        "result_tag": args.result_tag,
         "model": args.model,
         "draft_model": args.draft_model if args.case != "target" else None,
         "max_model_len": args.max_model_len,
