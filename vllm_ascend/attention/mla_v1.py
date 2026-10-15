@@ -2838,6 +2838,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
+        # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
+        # TND(576) query. The backend retains this buffer for captured capacities
+        # so replay reuses its address.
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()

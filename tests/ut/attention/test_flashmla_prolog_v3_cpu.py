@@ -197,7 +197,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         torch.testing.assert_close(indices, torch.arange(tokens) if split else slots)
         keys = torch.arange(tokens).float()[:, None, None].expand(tokens, 1, 512) + 2
         scatter(key=keys, value=keys[..., :64] + 10, key_cache=dest[0], value_cache=dest[1], slot_mapping=indices)
-        q, pe = torch.ones(tokens, 16, 512), torch.ones(tokens, 16, 64)
+        q, pe = torch.ones(tokens, 16, 512), torch.full((tokens, 16, 64), 2.0)
         q[:, heads:] = 99
         pe[:, heads:] = 99
         return q, pe, None
@@ -220,7 +220,8 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         expected[-1].zero_()
         query_arg, cache_arg = flash.adapter.attention.call_args.args
         assert query_arg is flash.query and cache_arg is history
-        torch.testing.assert_close(flash.query, torch.ones_like(flash.query))
+        torch.testing.assert_close(flash.query[..., :512], torch.ones_like(flash.query[..., :512]))
+        torch.testing.assert_close(flash.query[..., 512:], torch.full_like(flash.query[..., 512:], 2.0))
     torch.testing.assert_close(output, expected)
     consumed, cache_arg, meta_arg = impl._forward_external_flashmla.call_args.args
     assert cache_arg is history and meta_arg is metadata
@@ -229,6 +230,9 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     assert consumed.ql_nope.shape == (tokens, heads * (8 if dcp else 1), 512)
     assert consumed.q_pe.shape == (tokens, heads * (8 if dcp else 1), 64)
     torch.testing.assert_close(consumed.ql_nope, torch.ones_like(consumed.ql_nope))
+    torch.testing.assert_close(consumed.q_pe, torch.full_like(consumed.q_pe, 2.0))
+    if not dcp:
+        assert not consumed.ql_nope.is_contiguous() and not consumed.q_pe.is_contiguous()
     assert consumed.k.untyped_storage().data_ptr() == history.untyped_storage().data_ptr()
     if dcp:
         impl._dcp_all_gather_fragments.assert_called_once()
