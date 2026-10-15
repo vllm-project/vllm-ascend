@@ -158,6 +158,38 @@ def _maybe_prune_gate_weight(
     return loaded_weight.index_select(0, index)
 
 
+def _remap_expert_weight_name(
+    name: str,
+    expert_pruning_map: dict[int, tuple[int, ...]] | None,
+) -> str | None:
+    if expert_pruning_map is None:
+        return name
+
+    expert_marker = ".mlp.experts."
+    if expert_marker not in name:
+        return name
+    if ".weight_offset" in name or "_weight_offset" in name:
+        return None
+
+    layer_idx = qm.extract_layer_index(name)
+    expert_ids = expert_pruning_map.get(layer_idx)
+    if expert_ids is None:
+        return name
+
+    prefix, _, expert_suffix = name.partition(expert_marker)
+    expert_id_text, separator, remainder = expert_suffix.partition(".")
+    if not separator or not expert_id_text.isdigit():
+        return name
+
+    original_expert_id = int(expert_id_text)
+    try:
+        pruned_expert_id = expert_ids.index(original_expert_id)
+    except ValueError:
+        return None
+
+    return f"{prefix}{expert_marker}{pruned_expert_id}.{remainder}"
+
+
 def _patched_sparse_moe_block_init(self, vllm_config, prefix: str = ""):
     config = vllm_config.model_config.hf_text_config
     original_num_experts = config.num_experts
@@ -185,33 +217,6 @@ def _patched_sparse_moe_block_init(self, vllm_config, prefix: str = ""):
         config.num_experts = original_num_experts
 
 
-def _patched_get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-    if getattr(self, "expert_pruning_map", None) is not None:
-        base_layer = "base_layer." if any(".base_layer." in name for name, _ in self.named_parameters()) else ""
-        remapped_suffixes = ("weight", "weight_scale")
-        return [
-            (
-                f"layers.{layer_idx}.mlp.experts.{base_layer}w13_{suffix}"
-                if weight_name in ["gate_proj", "up_proj"]
-                else f"layers.{layer_idx}.mlp.experts.{base_layer}w2_{suffix}",
-                f"layers.{layer_idx}.mlp.experts.{original_expert_id}.{weight_name}.{base_layer}{suffix}",
-                pruned_expert_id,
-                shard_id,
-            )
-            for layer_idx, expert_ids in sorted(self.expert_pruning_map.items())
-            for pruned_expert_id, original_expert_id in enumerate(expert_ids)
-            for suffix in remapped_suffixes
-            for shard_id, weight_name in [
-                ("w1", "gate_proj"),
-                ("w2", "down_proj"),
-                ("w3", "up_proj"),
-            ]
-        ]
-
-    original_get_expert_mapping = qm.Qwen3MoeModel._ascend_original_get_expert_mapping
-    return original_get_expert_mapping(self)
-
-
 def _patch_qwen3_moe_pruning() -> None:
     if hasattr(qm, "_load_ordered_expert_map"):
         return
@@ -223,7 +228,6 @@ def _patch_qwen3_moe_pruning() -> None:
 
     original_model_init = qm.Qwen3MoeModel.__init__
     original_load_weights = qm.Qwen3MoeModel.load_weights
-    qm.Qwen3MoeModel._ascend_original_get_expert_mapping = qm.Qwen3MoeModel.get_expert_mapping
 
     @wraps(original_model_init)
     def patched_model_init(self, *args, **kwargs):
@@ -236,19 +240,23 @@ def _patch_qwen3_moe_pruning() -> None:
     @wraps(original_load_weights)
     def patched_load_weights(self, weights):
         def pruned_weights():
+            expert_pruning_map = getattr(self, "expert_pruning_map", None)
             for name, loaded_weight in weights:
-                if (
-                    getattr(self, "expert_pruning_map", None) is not None
-                    and ".mlp.experts." in name
-                    and (".weight_offset" in name or "_weight_offset" in name)
-                ):
+                remapped_name = _remap_expert_weight_name(name, expert_pruning_map)
+                if remapped_name is None:
                     continue
-                yield name, _maybe_prune_gate_weight(name, loaded_weight, getattr(self, "expert_pruning_map", None))
+                yield (
+                    remapped_name,
+                    _maybe_prune_gate_weight(
+                        remapped_name,
+                        loaded_weight,
+                        expert_pruning_map,
+                    ),
+                )
 
         return original_load_weights(self, pruned_weights())
 
     qm.Qwen3MoeModel.__init__ = patched_model_init
-    qm.Qwen3MoeModel.get_expert_mapping = _patched_get_expert_mapping
     qm.Qwen3MoeModel.load_weights = patched_load_weights
     qm.Qwen3MoeModel._ascend_expert_pruning_patched = True
 
