@@ -74,6 +74,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -235,6 +236,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
+            # KPool uses the packed SFA C8 main cache even though enable_sfa() excludes KPool.
             if getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
@@ -245,7 +247,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     attn_module.qk_rope_head_dim,
                 )
                 dtype, cache_dtype_str = torch.int8, vllm_config.cache_config.cache_dtype
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
+            elif bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
                 cache_sparse_sfa_c8 = True
                 head_size = get_sfa_qsfa_packed_head_dim(
                     vllm_config.model_config.hf_text_config.kv_lora_rank,
@@ -1286,7 +1288,7 @@ def _allocate_kv_cache(
                     get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
                     lambda size, align: _allocate_int8_cache_tensor(size, align, device),
                 )
-        elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
+        elif kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
@@ -1754,6 +1756,8 @@ def _reshape_kv_cache_v2(
             num_blocks = total_bytes // page_stride_bytes
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+            if isinstance(kv_cache_spec, AscendKPoolIndexerCacheSpec):
+                kernel_num_blocks *= kv_cache_spec.dcp_replication_size
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
                 kernel_block_size,
@@ -1761,7 +1765,7 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.head_size,
                 cache_dtype,
             )
-            packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
+            packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
                 get_kv_cache_compression_ratio(kv_cache_spec) > 1
             ):

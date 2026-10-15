@@ -37,26 +37,21 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
     assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
 
 
-@pytest.mark.parametrize("mode", ["310p", "pcp", "dcp"])
-def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
+def test_kpool_unsupported_hardware_fails_explicitly(monkeypatch):
     monkeypatch.setattr(
         backend_module,
         "get_current_hardware_profile",
-        lambda: SimpleNamespace(
-            attention_backend_family=AttentionBackendFamily.COMPATIBILITY
-            if mode == "310p"
-            else AttentionBackendFamily.STANDARD
-        ),
+        lambda: SimpleNamespace(attention_backend_family=AttentionBackendFamily.COMPATIBILITY),
     )
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=2 if mode == "pcp" else 1,
-                decode_context_parallel_size=2 if mode == "dcp" else 1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
             )
         )
     )
-    with pytest.raises(NotImplementedError, match="requires Ascend|PCP or DCP"):
+    with pytest.raises(NotImplementedError, match="requires Ascend"):
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 
