@@ -107,7 +107,8 @@ def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
+@pytest.mark.parametrize("pooled_indexer", [False, True])
+def test_dsacp_nope_forward_keeps_local_padding_rows(rank, pooled_indexer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
@@ -131,7 +132,9 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
     )
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
-    impl._get_indexer_attn_metadata = MagicMock(return_value=object())
+    impl._get_indexer_attn_metadata = MagicMock(
+        return_value=SimpleNamespace(query_metadata=object() if pooled_indexer else None)
+    )
     impl._get_parallel_forward_context = MagicMock(
         return_value=SimpleNamespace(
             actual_seq_lengths_query=torch.tensor([1 if rank == 0 else 0]),
@@ -167,6 +170,12 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
     torch.testing.assert_close(impl.fused_qkv_a_proj.call_args.args[0], local)
     torch.testing.assert_close(impl.indexer.call_args.args[0], local)
     assert impl.indexer.call_args.args[1].shape[0] == 8
+    if pooled_indexer:
+        expected = torch.zeros_like(hidden)
+        expected[0] = 1
+    else:
+        expected = local
+    torch.testing.assert_close(impl.indexer.call_args.args[2], expected)
 
 
 class _Linear:

@@ -1770,8 +1770,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         hidden_states: torch.Tensor,
         attn_metadata: M,
-    ) -> torch.Tensor:
-        return hidden_states
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return hidden_states, hidden_states
 
     def _finalize_o_proj(
         self,
@@ -1952,7 +1952,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if fused_type == PreprocessType.NATIVE:
             # Trim in the input layout before CP adds padding and shards it.
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+            hidden_states, k_hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
             if gate_hidden_states is not None:
                 gate_hidden_states = hidden_states
 
@@ -1960,7 +1960,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
-            k_hidden_states = hidden_states if self.runtime_has_indexer else None
+            k_hidden_states = hidden_states
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
                 # The fused preprocess is the first operation that may read or
@@ -2000,9 +2000,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            # The prepared hidden states feed the indexer's k path (same stage
-            # as the weights path input).
-            k_hidden_states = hidden_states if self.runtime_has_indexer else None
+            if getattr(indexer_attn_metadata, "query_metadata", None) is None:
+                k_hidden_states = hidden_states
 
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:

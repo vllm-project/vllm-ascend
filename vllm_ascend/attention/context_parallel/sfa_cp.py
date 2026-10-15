@@ -654,7 +654,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self,
         hidden_states: torch.Tensor,
         attn_metadata: M,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         context = getattr(attn_metadata, "dsa_cp_context", None)
         assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
         actual_tokens = hidden_states.shape[0]
@@ -665,7 +665,8 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             )
         if actual_tokens < context.num_tokens_pad:
             hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
-        return hidden_states[context.local_start : context.local_end_with_pad]
+        # CANN pooling consumes the replicated input; queries stay token-local.
+        return hidden_states[context.local_start : context.local_end_with_pad], hidden_states
 
     def _get_parallel_forward_context(
         self,

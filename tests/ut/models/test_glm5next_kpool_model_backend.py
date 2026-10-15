@@ -263,6 +263,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     # A 64-row graph bucket does not imply reuse for eight one-token requests.
     normalized_q_c = torch.arange(128, dtype=torch.float32).reshape(64, 2)
     hidden = torch.ones(64, 3)
+    k_hidden = hidden + 3
     metadata = _indexer_metadata()
     metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
     metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
@@ -280,14 +281,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
             pool_tail=torch.zeros(8, dtype=torch.int64),
         )
         metadata.positions = torch.zeros(128, dtype=torch.int64)
-        monkeypatch.setattr(
-            backend_module, "get_tp_group", lambda: SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x)))
-        )
+        k_hidden = torch.arange(384, dtype=hidden.dtype).view(128, 3)
+        monkeypatch.setattr(backend_module, "get_tp_group", MagicMock(side_effect=AssertionError("redundant gather")))
 
     result = backend.forward(
         hidden,
         normalized_q_c,
-        hidden + 3,
+        k_hidden,
         metadata,
         compute_topk=True,
     )
@@ -299,7 +299,14 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert result.shape[0] == expected_rows
     torch.testing.assert_close(recorder.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2))
     if dsa_cp:
-        torch.testing.assert_close(recorder.args[0], torch.cat((hidden + 3, hidden + 3)))
+        assert recorder.args[0] is k_hidden
+        strided = torch.empty(128, 6, dtype=k_hidden.dtype)[:, ::2]
+        strided.copy_(k_hidden)
+        backend.forward(hidden, normalized_q_c, strided, metadata)
+        assert recorder.args[0].is_contiguous()
+        torch.testing.assert_close(recorder.args[0], k_hidden)
+        with pytest.raises(ValueError, match="complete TP-aligned hidden"):
+            backend.forward(hidden, normalized_q_c, k_hidden[:64], metadata)
     else:
         torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
     torch.testing.assert_close(backend._key_weight, backend.wk_weights_proj.weight[:2])

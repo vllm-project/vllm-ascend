@@ -583,7 +583,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if indexer_metadata.query_metadata is None and context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
-        k_hidden = k_hidden_states[:num_tokens]
+        if indexer_metadata.query_metadata is not None:
+            if k_hidden_states.shape[0] != indexer_metadata.positions.shape[0]:
+                raise ValueError("DSA-CP CANN pooling requires the complete TP-aligned hidden input.")
+            k_hidden = k_hidden_states.contiguous()
+        else:
+            k_hidden = k_hidden_states[:num_tokens]
         if self._key_weight is None:
             self.process_weights_after_loading()
         assert self._key_weight is not None
@@ -598,8 +603,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
-        if indexer_metadata.query_metadata is not None:
-            k_hidden = get_tp_group().all_gather(k_hidden, dim=0)
         return self._forward_cann(
             k_hidden,
             q_values,
