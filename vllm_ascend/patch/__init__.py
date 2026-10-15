@@ -846,7 +846,7 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, VL encoder disaggregation,
+#       V2-ready (VL encoder disaggregation,
 #       draft_window_size, enable_reduce_sample, enable_dsa_cp, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)

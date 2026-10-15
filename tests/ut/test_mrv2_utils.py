@@ -72,6 +72,8 @@ def test_environment_override_wins(monkeypatch, env_value):
             kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
         ),
         SimpleNamespace(additional_config={"enable_kvpp": True}),
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
+        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(additional_config={"enable_reduce_sample": False}),
         SimpleNamespace(additional_config={"enable_reduce_sample": "false"}),
         SimpleNamespace(additional_config={"enable_dsa_cp": False}),
@@ -102,6 +104,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "gemma4-hf-config",
         "mooncake-pd",
         "kvpp",
+        "pooling-runner",
+        "pooling-model",
         "reduce-sample-disabled",
         "reduce-sample-string-false",
         "dsa-cp-disabled",
@@ -128,8 +132,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
-        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
-        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
@@ -152,8 +154,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     ],
     ids=[
         "dflash2-graph",
-        "pooling-runner",
-        "pooling-model",
         "encoder-decoder",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
