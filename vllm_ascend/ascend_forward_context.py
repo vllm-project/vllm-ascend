@@ -154,6 +154,8 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -300,12 +302,39 @@ def _select_capacity_and_expert_density_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+
+    # attn_metadata can be a dict (v2/multi-modal) or a metadata object (v1).
+    # Extract the first metadata object to check num_prefills for prefill detection.
+    _attn_meta = None
+    if attn_metadata is not None:
+        if isinstance(attn_metadata, dict):
+            _attn_meta = list(attn_metadata.values())[0] if attn_metadata else None
+        else:
+            _attn_meta = attn_metadata
+    is_prefill = _attn_meta is not None and getattr(_attn_meta, "num_prefills", 0) > 0
+
+    # MegaMoe has high host-side tiling overhead (~16ms/call). Only use it for
+    # prefill batches where the communication savings outweigh the overhead.
+    # Very small prefills (<=64 tokens) fall through to ALLGATHER/MC2.
+    _MEGAMOE_PREFILL_TOKEN_THRESHOLD = 64
+    if (
+        use_cann_megamoe(vllm_config)
+        and get_ascend_config().enable_fused_mc2 == 1
+        and (is_prefill or in_profile_run)
+        and (in_profile_run or (num_tokens is not None and num_tokens > _MEGAMOE_PREFILL_TOKEN_THRESHOLD))
+    ):
+        return MoECommType.FUSED_MC2
+
+    if num_experts > 512:
+        return MoECommType.ALLGATHER
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
@@ -321,6 +350,8 @@ def _select_fused_or_capacity_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -339,6 +370,8 @@ def _select_capacity_and_world_size_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
@@ -375,6 +408,8 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -411,6 +446,8 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
+            attn_metadata,
+            in_profile_run,
         )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
