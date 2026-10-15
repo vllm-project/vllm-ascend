@@ -14,11 +14,11 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 4
-    dp_size_local: 4
+    dp_size: 2
+    dp_size_local: 2
     dp_rank_start: 0
     tp_size: 1
-    cp_size: 4
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -89,12 +89,11 @@ templates:
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "8192"
+      - "16384"
       - --max-num-seqs
       - "16"
-      - --no-disable-hybrid-kv-cache-manager
       - --speculative-config
-      - '{"num_speculative_tokens": 5, "method": "dspark", "enforce_eager": true}'
+      - '{"num_speculative_tokens": 5, "method": "dspark"}'
       - --trust-remote-code
       - --block-size
       - "128"
@@ -120,7 +119,7 @@ templates:
       - --additional-config
       - '{"enable_cpu_binding": true, "enable_fused_mc2": 1}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 
   - node_index: 1
     envs:
@@ -153,7 +152,6 @@ templates:
       - --block-size
       - "128"
       - --no-enable-prefix-caching
-      - --no-disable-hybrid-kv-cache-manager
       - --trust-remote-code
       - --tokenizer-mode
       - "deepseek_v41"
@@ -175,7 +173,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
