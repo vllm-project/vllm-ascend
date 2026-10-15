@@ -1201,6 +1201,8 @@ This section builds on [Section 5.3](#53-prefill-decode-disaggregation). The A3 
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
 - By default the Prefill node performs pool lookup, load, and write.
 
+The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload.
+
 For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3, pay attention to these pooling-only requirements:**
@@ -1208,11 +1210,11 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Item | Normal PD (5.3) | Pooled PD (this section) |
 | ---- | --------------- | ------------------------ |
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
-| Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
-| `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `32GB`; 950DT keeps P=`128GB`, D=`0` |
+| Mooncake Master | Not required | Start `mooncake_master --enable_offload=true` before Decode / Prefill |
+| `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `15GB`; 950DT P and D use `64GB`; enable SSD offload on all nodes |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
-| Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
+| Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf` and the local SSD offload directory; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
@@ -1226,7 +1228,21 @@ Mount the host HCCN config into every container that participates in pooling:
 
 On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3 for Ascend direct KV transfer.
 
-Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. A3 uses the identical `32GB` configuration on P and both D nodes, so workers on all three nodes contribute pool capacity. `global_segment_size` is allocated per worker rank; `32GB` is not the aggregate capacity of one node. A non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is set, it overrides the JSON value; unset it or set it to `32GB` for this A3 example.
+Use a local SSD directory on each Prefill and Decode host. The examples use `/nvme/mooncake_offload`; replace it with a directory on the actual SSD mount. Create it before starting the container:
+
+```bash
+mkdir -p /nvme/mooncake_offload
+```
+
+Add the corresponding bind mount to every model container:
+
+```bash
+-v /nvme/mooncake_offload:/nvme/mooncake_offload
+```
+
+Set `ssd_offload_path` to the absolute directory visible inside the container and make it writable by the vLLM process. The same path refers to separate local SSD storage on each host. The backend creates per-rank subdirectories beneath it. The installed Mooncake package must support the `enable_ssd_offload` and `ssd_offload_path` arguments in `MooncakeDistributedStore.setup()`; use the dependencies in the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+
+Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. `global_segment_size` is allocated per worker rank, not per node; a non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is already exported, update it to the intended size or unset it before startup because it overrides the JSON value.
 
 A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` with the actual Master IP):
 
@@ -1236,45 +1252,52 @@ A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` wi
   "protocol": "ascend",
   "device_name": "",
   "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
-  "global_segment_size": "32GB",
+  "global_segment_size": "15GB",
   "preferred_segment": false,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
 
-950DT Prefill `mooncake.json`:
+The A3 example uses `15GB` per worker rank on P and both D nodes. Adjust this value to each machine's available allocatable memory and fragmentation after reserving memory for vLLM and other processes. Allow additional space for the SSD I/O buffer and allocation headroom, and account for all contributing worker ranks on the node.
+
+950DT Prefill `mooncake.json` (replace `<MOONCAKE_MASTER_IP>`):
 
 ```json
 {
   "metadata_server": "P2PHANDSHAKE",
   "protocol": "ascend",
   "device_name": "",
-  "master_server_address": "xxxx:50088",
-  "global_segment_size": "128GB",
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "64GB",
   "preferred_segment": false,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
 
-950DT Decode `mooncake.json` (same Master and `tenant_id`, no donated segment; A3 D uses the `32GB` JSON above):
+950DT Decode `mooncake.json` (same Master and `tenant_id`; both P and D contribute memory and enable SSD offload):
 
 ```json
 {
   "metadata_server": "P2PHANDSHAKE",
   "protocol": "ascend",
   "device_name": "",
-  "master_server_address": "xxxx:50088",
-  "global_segment_size": 0,
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "64GB",
   "preferred_segment": true,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
+
+The 950DT examples use `64GB` per worker rank on both P and D. Adjust the size to the actual available memory and fragmentation on each machine rather than treating `64GB` as a fixed requirement. Budget for all worker ranks on the node, SSD I/O buffers, and other allocations; reduce the segment size if the machine cannot register the requested memory.
 
 #### 5.4.2 Environment Variables
 
@@ -1289,7 +1312,11 @@ if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
 fi
 export MOONCAKE_CONFIG_PATH=./mooncake.json
 export PYTHONHASHSEED=0
+# SSD I/O buffer per worker: 1GB, aligned for A3 fabric memory.
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 ```
+
+The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB` value above is an aligned starting point; size it for the KV read/write batches and include it in the per-rank memory budget. Set per-rank SSD capacity limits according to the actual disk capacity and number of contributing workers, as described in [Mooncake SSD Offload Parameter Tuning](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#mooncake-ssd-offload-parameter-tuning).
 
 | Hardware | Dependencies | Required pooling exports | Notes |
 | -------- | ------------- | ------------------------ | ----- |
@@ -1328,7 +1355,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
+    # Pooling extras: all three A3 nodes use the 15GB mooncake.json in Section 5.4.1.
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1346,6 +1373,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -1427,7 +1455,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
+    # Pooling extras: all three A3 nodes use the 15GB mooncake.json in Section 5.4.1.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
@@ -1444,6 +1472,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -1506,7 +1535,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "950DT products"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/`, `/etc/hccn.conf`, and the local SSD directory from Section 5.4.1. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `64GB` on both roles, with SSD offload enabled). Set `master_server_address` to the same reachable Mooncake Master on both nodes.
 
     1. Prefill node
 
@@ -1543,6 +1572,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1641,6 +1671,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1726,7 +1757,7 @@ Proxy (:8009)
     --eviction_high_watermark_ratio 0.9 \
     --eviction_ratio 0.1 \
     --default_kv_lease_ttl 11000 \
-    --enable_offload=false \
+    --enable_offload=true \
     --client_ttl=120
     ```
 
@@ -1827,11 +1858,12 @@ Proxy (:8009)
 
 #### 5.4.5 Verification
 
-1. Confirm Mooncake Master port `50088` is reachable and every node uses the same Master address and `tenant_id`. For A3, confirm P and both D nodes load `global_segment_size="32GB"` and that worker logs show successful segment registration.
+1. Confirm Mooncake Master port `50088` is reachable, Master runs with `--enable_offload=true`, and every node uses the same Master address and `tenant_id`. For A3, confirm P and both D nodes load `global_segment_size="15GB"`; for 950DT, confirm P and D both load `"64GB"`. Check worker logs for successful segment registration.
 2. Confirm every Decode engine port is ready, then every Prefill engine port. A3 has nine APIs (one P plus eight D); 950DT has four (two P plus two D).
 3. Send requests only to the proxy on port `8009`.
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
+6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
