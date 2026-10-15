@@ -189,14 +189,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         weight = layer.weight
         weight_scale = layer.weight_scale
-        if weight.dim() == 2:
+        if not getattr(layer, "_mxfp8_gmm_nz_layout", False):
+            # Post-processing already adds the group dimension for NZ.
+            # ND weights only need a view for this single-group call.
             weight = weight.unsqueeze(0)
             weight_scale = weight_scale.unsqueeze(0)
-        elif weight.dim() == 3 and weight.shape[0] == 1:
-            if weight_scale.dim() != 4 or weight_scale.shape[0] != 1:
-                raise RuntimeError("MXFP8 single-group NZ weight requires a matching [1, K/64, N, 2] scale")
-        else:
-            raise RuntimeError(f"Unsupported MXFP8 single-group weight rank: {weight.dim()}")
         group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
         return torch_npu.npu_grouped_matmul(
             x=[quantized_x],
