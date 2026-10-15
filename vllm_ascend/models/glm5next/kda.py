@@ -5,7 +5,7 @@
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
@@ -36,6 +36,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+
+
+def get_kda_state_dtype(model_dtype: torch.dtype, cache_config: CacheConfig) -> tuple[torch.dtype, torch.dtype]:
+    ssm_dtype = cache_config.mamba_ssm_cache_dtype
+    # KDA keeps FP32 state by default, unlike GDN's activation-dtype default.
+    if ssm_dtype == "auto":
+        ssm_dtype = "float32"
+    if ssm_dtype not in ("float32", "bfloat16"):
+        raise ValueError("GLM KDA recurrent state supports only auto, float32, and bfloat16.")
+    return MambaStateDtypeCalculator.gated_delta_net_state_dtype(model_dtype, cache_config.mamba_cache_dtype, ssm_dtype)
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -115,7 +125,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        return get_kda_state_dtype(self.model_config.dtype, self.cache_config)
 
     def get_state_shape(
         self,
