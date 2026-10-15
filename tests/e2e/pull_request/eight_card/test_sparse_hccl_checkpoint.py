@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Real Qwen3 MoE loader oracle for checkpoint sparse HCCL (3/5/9 NPUs).
+"""Real Qwen3 MoE loader oracle for checkpoint sparse HCCL (3/5 NPUs).
 
 The checkpoint is deliberately small and synthetic. This checks native TP/EP
 mapping and generation equivalence, not pretrained-model accuracy/performance.

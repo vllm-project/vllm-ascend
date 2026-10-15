@@ -101,7 +101,7 @@ rank mapping, lifecycle, and teardown. The real-model E2E uses a deterministic
 synthetic, one-layer Qwen3 MoE checkpoint with eight experts:
 
 ```bash
-pytest -s tests/e2e/pull_request/rlhf/test_sparse_hccl_checkpoint.py
+pytest -s tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py
 ```
 
 It compares every runtime parameter hash on every worker against native dense

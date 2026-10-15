@@ -108,8 +108,7 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
-  # Sparse HCCL hardware cases use a separate trainer and at most five NPUs.
-  tests/e2e/pull_request/rlhf/:
+  tests/e2e/pull_request/eight_card:
     default: a3-8
   tests/e2e/pull_request/one_card:
     default: a2-1
