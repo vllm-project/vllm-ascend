@@ -731,6 +731,17 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
             return None
+        # DSA-CP can leave a rank with only padded queries. Its replicated
+        # caches still need the updates above, but CANN's TND no-work path
+        # clears batch_size times the output storage. Avoid that call in
+        # eager/piecewise execution using the existing host-side token count.
+        # FULL capture must retain selection: replay can have live queries.
+        if query_metadata.num_actual_tokens == 0 and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            if self.topk_indices_buffer is not None:
+                output = self.topk_indices_buffer[:num_tokens]
+                output.fill_(-1)
+                return output[:, :output_width].unsqueeze(1)
+            return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         query = q_values.to(indexer_cache.dtype)
         indices, _ = self._pool_key_indexer(

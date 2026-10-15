@@ -366,8 +366,24 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
-@pytest.mark.parametrize("dsa_cp", [False, True])
-def test_cann_indexer_writes_caches_before_optional_selection(compute_topk, dsa_cp):
+@pytest.mark.parametrize(
+    "dsa_cp,actual_query_tokens,runtime_mode",
+    [
+        (False, 8, CUDAGraphMode.NONE),
+        (True, 4, CUDAGraphMode.NONE),
+        (True, 3, CUDAGraphMode.NONE),
+        (True, 0, CUDAGraphMode.NONE),
+        (True, 0, CUDAGraphMode.PIECEWISE),
+        (True, 0, CUDAGraphMode.FULL),
+    ],
+)
+@pytest.mark.parametrize("reuse_output", [False, True])
+def test_cann_indexer_writes_caches_before_optional_selection(
+    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output
+):
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+    )
     op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(op)
     op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
@@ -376,7 +392,9 @@ def test_cann_indexer_writes_caches_before_optional_selection(compute_topk, dsa_
     op._norm_weight_f32 = op._norm_bias_f32 = None
     op.k_norm = SimpleNamespace(eps=1e-6)
     op.index_kpool_compress_ape = torch.empty(4, 2)
-    op.topk_indices_buffer = None
+    # Non-contiguous rows and extra columns exercise a shared output buffer.
+    storage = torch.full((20, 22), 77, dtype=torch.int32)
+    op.topk_indices_buffer = storage[::2, :11] if reuse_output else None
     pooled = torch.empty(2, 2, dtype=torch.bfloat16)
     state = torch.empty(5, 4, 4)
     query_rows = 4 if dsa_cp else 8
@@ -402,9 +420,9 @@ def test_cann_indexer_writes_caches_before_optional_selection(compute_topk, dsa_
     if dsa_cp:
         metadata.query_metadata = AscendIndexerKPoolQueryMetadata(
             positions=metadata.positions[4:],
-            cum_query_lens=torch.tensor([0, 4], dtype=torch.int64),
-            num_actual_tokens=4,
-            seq_lens=torch.tensor([0, 1], dtype=torch.int64),
+            cum_query_lens=torch.tensor([0, actual_query_tokens], dtype=torch.int64),
+            num_actual_tokens=actual_query_tokens,
+            seq_lens=torch.tensor([0, int(actual_query_tokens > 0)], dtype=torch.int64),
             pool_tail=torch.zeros(2, dtype=torch.int64),
         )
     query_metadata = metadata.query_metadata or metadata
@@ -412,23 +430,38 @@ def test_cann_indexer_writes_caches_before_optional_selection(compute_topk, dsa_
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
     cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
     tail = torch.empty(2, 4, 4)
-    result = op._forward_cann(
-        torch.empty(8, 3, dtype=torch.bfloat16),
-        torch.empty(query_rows, 1, 2, dtype=torch.bfloat16),
-        torch.empty(query_rows, 1, dtype=torch.bfloat16),
-        cache,
-        tail,
-        metadata,
-        tail_metadata,
-        compute_topk=compute_topk,
-    )
+    with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
+        result = op._forward_cann(
+            torch.empty(8, 3, dtype=torch.bfloat16),
+            torch.empty(query_rows, 1, 2, dtype=torch.bfloat16),
+            torch.empty(query_rows, 1, dtype=torch.bfloat16),
+            cache,
+            tail,
+            metadata,
+            tail_metadata,
+            compute_topk=compute_topk,
+        )
     names = [call[0] for call in calls.mock_calls]
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
     assert op._key_pool.call_args.args[1:3] == (op._key_weight, op._gate_weight)
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
     assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
     assert op._write_keypool_caches.call_args.args[4] is pooled
-    if compute_topk:
+    skip_empty_query = actual_query_tokens == 0 and runtime_mode != CUDAGraphMode.FULL
+    if compute_topk and skip_empty_query:
+        assert result.shape == (query_rows, 1, 7)
+        assert result.dtype == torch.int32
+        assert torch.all(result == -1)
+        assert names[3:] == []
+        op._pool_key_indexer.assert_not_called()
+        op._pack_keypool_indices.assert_not_called()
+        if reuse_output:
+            assert result.data_ptr() == storage.data_ptr()
+            assert torch.all(op.topk_indices_buffer[:query_rows] == -1)
+            assert torch.all(op.topk_indices_buffer[query_rows:] == 77)
+            assert torch.all(storage[1::2] == 77)
+            assert torch.all(storage[:, 11:] == 77)
+    elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
         assert op._pool_key_indexer.call_args.args[1] is cache
