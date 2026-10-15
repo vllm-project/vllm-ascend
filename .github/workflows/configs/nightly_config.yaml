@@ -198,11 +198,11 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: MiniMax-M3-BF16-A3.yaml
         config_base_path: tests/e2e/cases/models/configs/MiniMax
-      - name: mrv2-pcp-dcp-mla
+      - name: Kimi-K2.6-W4A8-MRV2-PCP-DCP
         os: linux-aarch64-a3-800i-16
         config_file_path: Kimi-K2.6-W4A8-MRV2-PCP-DCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
-      - name: mrv2-pcp-sfa-dspark
+      - name: GLM-5.2-W4A8C8-DSpark-MRV2-PCP
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8C8-DSpark-MRV2-PCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
@@ -273,7 +273,7 @@ a3-560t:
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3-32B-QuaRot-eagle3.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
-      - name: mrv2-pcp-dcp-gqa
+      - name: Qwen3-32B-QuaRot-eagle3-MRV2-PCP-DCP
         os: linux-aarch64-a3-800i-8
         config_file_path: Qwen3-32B-QuaRot-eagle3-MRV2-PCP-DCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
