@@ -179,7 +179,7 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
 
         For more Triton Ascend installation guidance, see [Triton-Ascend > FAQ](https://github.com/Ascend/triton-ascend/blob/main/docs/en/FAQ.md#1-installation-and-environment-configuration).
 
-    When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
+    When installing another version of `vllm-ascend`, check that revision's `requirements/runtime.txt` (or `requirements.txt` for older revisions) for the corresponding `triton-ascend` version.
 
 === "Atlas 300I DUO / Atlas 200I Pro"
 

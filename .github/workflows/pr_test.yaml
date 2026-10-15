@@ -142,6 +142,7 @@ jobs:
           predicate-quantifier: some-with-excludes
           filters: |
             lint_tracker:
+              - 'requirements/**'
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
@@ -149,6 +150,8 @@ jobs:
             # category is the single source of truth for "does this PR need
             # NPU tests" and is consumed by every downstream job.
             src:
+              - 'requirements/runtime.txt'
+              - 'MANIFEST.in'
               - 'vllm_ascend/**'
               - 'setup.py'
               - 'csrc/**'

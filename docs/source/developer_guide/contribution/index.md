@@ -54,7 +54,7 @@ cd vllm-ascend
 pip install -r requirements-dev.txt
 # For non-Linux:
 cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
-cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
+cat requirements/runtime.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
 # Run ci:
 bash format.sh ci
