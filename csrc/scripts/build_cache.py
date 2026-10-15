@@ -1013,43 +1013,9 @@ def _file_lock_or_error(path: Path, *, shared: bool = False, timeout_seconds: fl
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _prune_operator_versions(cache_root: Path, operator_root: Path, max_versions: int) -> None:
-    """Called only with the exclusive build lock, after successful builds."""
-    if max_versions <= 0:
-        return
-    try:
-        # Only operate on the canonical custom_operator/<soc>/<operator> tree.
-        relative = operator_root.relative_to(cache_root)
-        if len(relative.parts) != 3 or relative.parts[0] != "custom_operator":
-            raise RuntimeError("unsafe operator cache root")
-        if operator_root.resolve() != operator_root:
-            raise RuntimeError("operator cache cleanup refuses symlinked directories")
-        versions = sorted(
-            (
-                path
-                for path in operator_root.iterdir()
-                if re.fullmatch(r"[0-9a-f]{64}", path.name) and path.is_dir() and not path.is_symlink()
-            ),
-            key=lambda path: (path.stat().st_mtime_ns, path.name),
-            reverse=True,
-        )
-        for version in versions[max_versions:]:
-            if version.resolve() != version:
-                continue
-            # Mark even a partial deletion for the next shared snapshot save.
-            (cache_root / UPDATED_MARKER).touch()
-            shutil.rmtree(version)
-            print(f"[build-cache] PRUNED operator={operator_root.name} hash={version.name}", flush=True)
-            _emit_event("cache_prune", operator=operator_root.name, operator_text_hash=version.name)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[build-cache] WARNING operator cache cleanup skipped; build result kept: {exc}", flush=True)
-        _emit_event("warning", component="prune", message=str(exc))
-
-
-def prune(cache_root: str | Path, max_versions: int | str = DEFAULT_MAX_OPERATOR_VERSIONS) -> int:
+def prune(cache_root: str | Path, max_versions: int = DEFAULT_MAX_OPERATOR_VERSIONS) -> int:
     """Best-effort post-build maintenance; never wait for an active build."""
     try:
-        max_versions = int(max_versions)
         cache_root = Path(cache_root).expanduser().resolve()
         if max_versions <= 0 or not cache_root.is_dir():
             return 0
@@ -1058,27 +1024,28 @@ def prune(cache_root: str | Path, max_versions: int | str = DEFAULT_MAX_OPERATOR
                 print("[build-cache] PRUNE skipped: cache busy or unavailable", flush=True)
                 return 0
             for operator_root in (cache_root / "custom_operator").glob("*/*"):
-                if operator_root.is_dir():
-                    _prune_operator_versions(cache_root, operator_root, max_versions)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                if not operator_root.is_dir() or operator_root.resolve() != operator_root:
+                    continue
+                versions = sorted(
+                    (
+                        path
+                        for path in operator_root.iterdir()
+                        if re.fullmatch(r"[0-9a-f]{64}", path.name) and path.is_dir() and not path.is_symlink()
+                    ),
+                    key=lambda path: (path.stat().st_mtime_ns, path.name),
+                    reverse=True,
+                )
+                for version in versions[max_versions:]:
+                    if version.resolve() != version:
+                        continue
+                    # Mark even partial compaction for the next snapshot save.
+                    (cache_root / UPDATED_MARKER).touch()
+                    shutil.rmtree(version)
+                    print(f"[build-cache] PRUNED operator={operator_root.name} hash={version.name}", flush=True)
+                    _emit_event("cache_prune", operator=operator_root.name, operator_text_hash=version.name)
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"[build-cache] WARNING cleanup skipped; build result kept: {exc}", flush=True)
     return 0
-
-
-@contextlib.contextmanager
-def build_session(cache_root: str | Path, max_versions: int | str = DEFAULT_MAX_OPERATOR_VERSIONS):
-    """Pin the cache for the entire native build; prune only on success."""
-    try:
-        cache_root = Path(cache_root).expanduser().resolve()
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[build-cache] WARNING build guard skipped; compiling normally: {exc}", flush=True)
-        yield
-        return
-    with _file_lock_or_error(cache_root / BUILD_LOCK, shared=True, timeout_seconds=0) as lock_error:
-        yield
-    # An exception from the build propagates past this point, without pruning.
-    if lock_error is None:
-        prune(cache_root, max_versions)
 
 
 def _expected_artifact_model(domain: str) -> int:
@@ -1579,6 +1546,16 @@ def run(args: argparse.Namespace) -> int:
         "soc": args.soc,
     }
 
+    def build_outputs() -> tuple[int, float, list[Path]]:
+        if args.domain == "custom_operator":
+            _reset_private_output(output_dir)
+            before: dict[str, tuple] = {}
+        else:
+            before = _snapshot(output_dir)
+        returncode, elapsed = _run_build_command(args, command)
+        paths = _collect_artifacts(output_dir, before, args.artifact_include) if returncode == 0 else []
+        return returncode, elapsed, paths
+
     def publish_custom(artifacts: Sequence[dict]) -> None:
         """Publish one custom action's private stage into shared op output."""
         assert publish_dir is not None
@@ -1622,21 +1599,10 @@ def run(args: argparse.Namespace) -> int:
             )
             _emit_event("cache_result", status="BYPASS", reason=reason, **event_fields)
 
-            if args.domain == "custom_operator":
-                _reset_private_output(output_dir)
-                returncode, _ = _run_build_command(args, command)
-                if returncode != 0:
-                    return returncode
-                paths = _collect_artifacts(output_dir, {}, args.artifact_include)
+            returncode, _, paths = build_outputs()
+            if returncode == 0 and args.domain == "custom_operator":
                 publish_custom(_describe_artifacts(output_dir, paths))
-                return 0
-
-            before = _snapshot(output_dir)
-            returncode, _ = _run_build_command(args, command)
-            if returncode != 0:
-                return returncode
-            _collect_artifacts(output_dir, before, args.artifact_include)
-            return 0
+            return returncode
 
         # --------------------------------------------------------------
         # 4B. HIT: validate the exact entry, restore it, then publish custom
@@ -1672,9 +1638,6 @@ def run(args: argparse.Namespace) -> int:
                     message=str(exc),
                     **event_fields,
                 )
-                if args.domain == "custom_operator":
-                    _reset_private_output(output_dir)
-
         # --------------------------------------------------------------
         # 4C. MISS: authoritative source build -> collect artifacts ->
         #     publish custom outputs -> best-effort persist a new entry.
@@ -1685,17 +1648,10 @@ def run(args: argparse.Namespace) -> int:
         )
         _emit_event("cache_result", status="MISS", key=final_key, **event_fields)
 
-        if args.domain == "custom_operator":
-            _reset_private_output(output_dir)
-            before: dict[str, tuple] = {}
-        else:
-            before = _snapshot(output_dir)
-
-        returncode, elapsed = _run_build_command(args, command)
+        returncode, elapsed, paths = build_outputs()
         if returncode != 0:
             return returncode
 
-        paths = _collect_artifacts(output_dir, before, args.artifact_include)
         artifacts = _describe_artifacts(output_dir, paths)
         if args.domain == "custom_operator":
             # Publication affects build correctness; cache persistence below does not.

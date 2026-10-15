@@ -77,16 +77,34 @@ CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
 # Keep this csrc-relative default aligned with the CMake adapter and Docker
 # restore/export paths; those paths must refer to the same cache directory.
 BUILD_CACHE_DIR="${VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache}"
-# Source-hash slots per SOC/operator (2 by default; <=0 disables cleanup).
-# setup.py applies this only after the complete native build/install succeeds,
-# not here: this script finishes before the remaining extension build.
-export VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS="${VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS:-2}"
+# Local source-hash slots per SOC/operator; <=0 disables cleanup.
+BUILD_CACHE_MAX_OPERATOR_VERSIONS=2
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
 ########################################################################################################################
 # 预定义函数
 ########################################################################################################################
+
+function cleanup_build_cache() {
+    local build_status="$1"
+    flock -u "$BUILD_CACHE_LOCK_FD" || return 0
+    if [[ "$build_status" -eq 0 ]]; then
+        python3 "$CURRENT_DIR/scripts/build_cache.py" prune \
+            --cache-root "$BUILD_CACHE_DIR" \
+            --max-operator-versions "$BUILD_CACHE_MAX_OPERATOR_VERSIONS" || true
+    fi
+}
+
+function setup_build_cache_cleanup() {
+    if mkdir -p "$BUILD_CACHE_DIR" &&
+        { exec {BUILD_CACHE_LOCK_FD}>"$BUILD_CACHE_DIR/.build.lock"; } &&
+        flock -sn "$BUILD_CACHE_LOCK_FD"; then
+        trap 'cleanup_build_cache "$?"' EXIT
+    else
+        echo "[build-cache] WARNING cleanup disabled: cache guard unavailable"
+    fi
+}
 
 function help_info() {
     local specific_help="$1"
@@ -1181,6 +1199,7 @@ while [[ $# -gt 0 ]]; do
 done
 BUILD_CACHE_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "${BUILD_CACHE_DIR}")
 export VLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
+setup_build_cache_cleanup
 set_ut_mode
 
 if [ -n "${vendor_name}" ];then

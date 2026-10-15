@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import ast
-import contextlib
 import hashlib
 import importlib.util
 import json
 import os
-import runpy
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import regex as re
@@ -233,6 +229,9 @@ def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
     assert "[build-cache] MISS" in first.stdout
     assert "[build-cache] SAVED" in first.stdout
     assert counter.read_text() == "1"
+    marker = cache_root / ".updated"
+    assert marker.is_file()
+    marker.unlink()
 
     _fresh_dir(output)
 
@@ -247,6 +246,7 @@ def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
     _assert_success(second)
     assert "[build-cache] HIT" in second.stdout
     assert counter.read_text() == "1"
+    assert not marker.exists()
     assert (output / "kernel.o").read_text(encoding="utf-8") == "artifact-1"
 
 
@@ -694,7 +694,8 @@ def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
     assert changed_recipe_hash != stable_hash_a
 
 
-def test_recipe_change_invalidates_cache(tmp_path: Path):
+@pytest.mark.parametrize("changed_field", ["recipe_values", "environment_values"])
+def test_semantic_configuration_change_invalidates_cache(tmp_path: Path, changed_field: str):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
@@ -709,7 +710,7 @@ def test_recipe_change_invalidates_cache(tmp_path: Path):
         output_dir=output,
         builder=builder,
         counter=counter,
-        recipe_values=["optimization=-O2"],
+        **{changed_field: ["setting=before"]},
     )
     _assert_success(first)
     key_a = _extract_key(first)
@@ -723,44 +724,7 @@ def test_recipe_change_invalidates_cache(tmp_path: Path):
         output_dir=output,
         builder=builder,
         counter=counter,
-        recipe_values=["optimization=-O0"],
-    )
-    _assert_success(second)
-    assert "[build-cache] MISS" in second.stdout
-    assert _extract_key(second) != key_a
-    assert counter.read_text() == "2"
-
-
-def test_compiler_environment_change_invalidates_cache(tmp_path: Path):
-    source, prepared = _make_operator_inputs(tmp_path)
-    output = tmp_path / "output"
-    output.mkdir()
-    cache_root = tmp_path / "cache"
-    counter = tmp_path / "counter"
-    builder = _write_builder(tmp_path)
-
-    first = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-        environment_values=["toolkit=9.1.0"],
-    )
-    _assert_success(first)
-    key_a = _extract_key(first)
-
-    _fresh_dir(output)
-
-    second = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-        environment_values=["toolkit=9.2.0"],
+        **{changed_field: ["setting=after"]},
     )
     _assert_success(second)
     assert "[build-cache] MISS" in second.stdout
@@ -1916,41 +1880,6 @@ def test_restore_action_skips_l1_when_snapshot_key_fails():
     assert "snapshot-key" not in action
 
 
-def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
-    source, prepared = _make_operator_inputs(tmp_path)
-    output = tmp_path / "output"
-    output.mkdir()
-    cache_root = tmp_path / "cache"
-    counter = tmp_path / "counter"
-    builder = _write_builder(tmp_path)
-
-    cold = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-    )
-    _assert_success(cold)
-    marker = cache_root / ".updated"
-    assert marker.is_file()
-
-    marker.unlink()
-    _fresh_dir(output)
-    warm = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-    )
-    _assert_success(warm)
-    assert "[build-cache] HIT" in warm.stdout
-    assert not marker.exists()
-
-
 @pytest.mark.parametrize("trigger", ["HIT", "SAVED"])
 def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str):
     engine = _load_engine("build_cache_version_limit_test")
@@ -1983,19 +1912,23 @@ def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str
     # Either reuse the oldest version or build a third source version.
     index = 0 if trigger == "HIT" else 2
     (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
-    with engine.build_session(cache_root):
+    with engine._file_lock_or_error(cache_root / engine.BUILD_LOCK, shared=True):
         warm = _run_cache(**options, action="a", artifact_name="a.o")
         _assert_success(warm)
         assert f"[build-cache] {trigger}" in warm.stdout
         assert "[build-cache] PRUNED" not in warm.stdout
         assert all(version.is_dir() for version in versions)
         assert len(list(versions[0].parent.glob("[0-9a-f]" * 64))) == 3
-        # A concurrent cleanup must also defer until this entire build finishes.
-        deferred = run_command([sys.executable, str(ENGINE), "prune", "--cache-root", str(cache_root)])
-        _assert_success(deferred)
-        assert "PRUNE skipped" in deferred.stdout
+        if trigger == "HIT":
+            # Test concurrent cleanup once; its lock is independent of HIT/MISS.
+            start = time.monotonic()
+            deferred = run_command([sys.executable, str(ENGINE), "prune", "--cache-root", str(cache_root)])
+            _assert_success(deferred)
+            assert "PRUNE skipped" in deferred.stdout
+            assert time.monotonic() - start < 2
         assert all(version.is_dir() for version in versions)
         marker.unlink()
+    engine.prune(cache_root)
     assert counter.read_text() == ("6" if trigger == "HIT" else "5")
     assert versions[0].exists() == (trigger == "HIT")
     assert versions[-1].is_dir()
@@ -2019,7 +1952,7 @@ def _seed_operator_versions(operator_root: Path, count: int = 3) -> list[Path]:
     return versions
 
 
-@pytest.mark.parametrize("fault", ["busy", "delete_error", "symlink"])
+@pytest.mark.parametrize("fault", ["delete_error", "symlink"])
 def test_operator_version_cleanup_isolated_and_fail_open(tmp_path: Path, monkeypatch, fault: str):
     engine = _load_engine("build_cache_version_cleanup_test")
     cache_root = tmp_path / "cache"
@@ -2039,122 +1972,47 @@ def test_operator_version_cleanup_isolated_and_fail_open(tmp_path: Path, monkeyp
         shutil.rmtree(versions[0])
         versions[0].symlink_to(other_operator, target_is_directory=True)
 
-    lock_scope = (
-        engine._file_lock_or_error(cache_root / engine.BUILD_LOCK, shared=True)
-        if fault == "busy"
-        else contextlib.nullcontext(None)
-    )
-    with lock_scope as error:
-        assert error is None
-        start = time.monotonic()
-        assert engine.main(["prune", "--cache-root", str(cache_root)]) == 0
-        assert time.monotonic() - start < 2
+    assert engine.main(["prune", "--cache-root", str(cache_root)]) == 0
     assert all(version.is_dir() for version in versions)
     assert other_operator.is_dir()
-    if fault == "busy":
-        # Once the entire competing build is gone, maintenance converges to two.
-        engine.prune(cache_root)
-        assert not versions[0].exists()
-        assert versions[1].is_dir() and versions[2].is_dir()
 
 
 @pytest.mark.parametrize(
-    ("failure_stage", "slot_setting", "retained"),
+    ("build_status", "limit", "retained", "broken_lock"),
     [
-        (None, None, 2),
-        (None, "", 2),
-        (None, "1", 1),
-        (None, "3", 3),
-        (None, "0", 3),
-        (None, "-1", 3),
-        (None, "invalid", 3),
-        ("aclnn", None, 3),
-        ("extensions", None, 3),
-        ("disabled", None, 3),
-        ("cache_lock", None, 3),
-        ("cache_path", None, 3),
+        (0, "2", 2, False),
+        (7, "2", 3, False),
+        (0, "0", 3, False),
+        (0, "1", 1, False),
+        (0, "3", 3, False),
+        (0, "invalid", 3, False),
+        (0, "2", 3, True),
     ],
 )
-def test_project_build_prunes_only_after_all_native_stages_succeed(
-    tmp_path: Path, monkeypatch, failure_stage, slot_setting, retained
-):
-    engine = _load_engine("build_cache_project_session_test")
+def test_csrc_build_cleanup_runs_only_after_success(tmp_path: Path, build_status, limit, retained, broken_lock):
     cache_root = tmp_path / "custom-cache"
-    events = []
     versions = _seed_operator_versions(cache_root / "custom_operator" / "a3" / "op")
-    variable = "VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS"
-    if slot_setting is None:
-        monkeypatch.delenv(variable, raising=False)
-    else:
-        monkeypatch.setenv(variable, slot_setting)
-    env_values = runpy.run_path(str(REPO_ROOT / "vllm_ascend" / "envs.py"))["env_variables"]
-    configured_slots = env_values[variable]()
-    assert configured_slots == (slot_setting or "2")
-    # Check the shell entrypoint advertises the same default and preserves overrides.
     build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
-    declaration = next(line for line in build_script.splitlines() if line.startswith(f"export {variable}="))
-    shell = run_command(["bash", "-c", f'{declaration}; printf "%s" "${variable}"'])
-    _assert_success(shell)
-    assert shell.stdout == configured_slots
-    if failure_stage == "cache_lock":
-        (cache_root / engine.BUILD_LOCK).mkdir()
-    elif failure_stage == "cache_path":
-        original_resolve = Path.resolve
-
-        def fail_cache_resolve(path, *args, **kwargs):
-            if path == cache_root:
-                raise OSError("injected cache path failure")
-            return original_resolve(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "resolve", fail_cache_resolve)
-    # Execute the real setup.py hook without importing setuptools, torch or NPU
-    # packages. Native compilation is stubbed; the real build-session guard runs.
-    tree = ast.parse((REPO_ROOT / "setup.py").read_text(encoding="utf-8"))
-    build_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "cmake_build_ext")
-    build_class.body = [node for node in build_class.body if isinstance(node, ast.FunctionDef) and node.name == "run"]
-
-    class BuildBase:
-        def run_command(self, name):
-            assert name == "build_aclnn"
-            events.append("aclnn")
-            if failure_stage == "aclnn":
-                raise RuntimeError("injected native build failure")
-
-        def run(self):
-            events.append("extensions")
-            if failure_stage == "extensions":
-                raise RuntimeError("injected native build failure")
-
-    original_prune = engine.prune
-
-    def record_prune(root, max_versions):
-        assert root == cache_root
-        assert max_versions == configured_slots
-        events.append("prune")
-        return original_prune(root, max_versions)
-
-    monkeypatch.setattr(engine, "prune", record_prune)
-    namespace = {
-        "build_ext": BuildBase,
-        "ROOT_DIR": str(REPO_ROOT),
-        "envs": SimpleNamespace(
-            COMPILE_CUSTOM_KERNELS=failure_stage != "disabled",
-            VLLM_ASCEND_BUILD_CACHE_DIR=str(cache_root),
-            VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS=configured_slots,
-        ),
-        "os": os,
-        "load_module_from_path": lambda name, path: engine,
-    }
-    exec(compile(ast.Module(body=[build_class], type_ignores=[]), "setup.py", "exec"), namespace)
-    build = namespace["cmake_build_ext"]()
-    if failure_stage in {"aclnn", "extensions"}:
-        with pytest.raises(RuntimeError, match="injected native build failure"):
-            build.run()
-        assert "prune" not in events
-    else:
-        build.run()
-        expected = ["extensions"] if failure_stage == "disabled" else ["aclnn", "extensions"]
-        assert events == (expected + ["prune"] if failure_stage is None else expected)
+    helpers = build_script[
+        build_script.index("function cleanup_build_cache()") : build_script.index("function help_info()")
+    ]
+    if broken_lock:
+        (cache_root / ".build.lock").mkdir()
+    script = (
+        helpers
+        + """
+CURRENT_DIR=$1
+BUILD_CACHE_DIR=$2
+BUILD_CACHE_MAX_OPERATOR_VERSIONS=$3
+setup_build_cache_cleanup
+test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3
+exit "$4"
+"""
+    )
+    result = run_command(
+        ["bash", "-e", "-c", script, "cleanup-test", str(REPO_ROOT / "csrc"), str(cache_root), limit, str(build_status)]
+    )
+    assert result.returncode == build_status, result.stdout + result.stderr
     assert sum(version.is_dir() for version in versions) == retained
     assert versions[-1].is_dir()
 

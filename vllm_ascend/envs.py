@@ -49,14 +49,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
-    # Existing local csrc action-cache directory override. Default: None uses
-    # <source>/csrc/build_cache. Valid values are directory paths; not sensitive.
-    "VLLM_ASCEND_BUILD_CACHE_DIR": lambda: os.getenv("VLLM_ASCEND_BUILD_CACHE_DIR"),
-    # Source-hash versions retained per SOC/operator after a successful native
-    # build. Default: 2; positive integers retain N, <=0 disables cleanup.
-    # Not sensitive. Parsing is deferred so invalid values cannot fail a build.
-    "VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS": lambda: os.getenv("VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS")
-    or "2",
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
