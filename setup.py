@@ -306,7 +306,7 @@ class cmake_build_ext(build_ext):
         try:
             pip_show = subprocess.check_output([sys.executable, "-m", "pip", "show", "torch-npu"], text=True)
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to run 'pip show torch-npu': {e}")
+            raise RuntimeError(f"Failed to run 'pip show torch-npu': {e}") from e
 
         torch_npu_path = None
         for line in pip_show.splitlines():
