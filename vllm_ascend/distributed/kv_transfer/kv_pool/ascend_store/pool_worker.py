@@ -83,6 +83,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    SharedBlockData,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -2537,30 +2538,56 @@ class KVPoolWorker:
                         task.cached_process_tokens = cached
 
     def _build_shared_load_data(self) -> None:
-        """Build shared block data once and attach to all layer load tasks.
-
-        In multi-group mode, shared data is built per-group because each
-        group has different block_ranges (different effective_block_size).
-        """
+        """Share load metadata, preserving layer-specific selections for reuse."""
         if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             return
-        for group_id in range(self.num_kv_cache_groups):
-            first_task = None
-            for layer_id in range(self.num_layers):
-                for task in self.layer_load_tasks[layer_id]:
-                    if task.group_id == group_id:
-                        first_task = task
-                        break
-                if first_task:
-                    break
-            if first_task is None:
-                continue
-            shared = self.kv_recv_thread.build_shared_data(first_task)
-            if shared is not None:
+        if not self.layerwise_offload:
+            # Ordinary layerwise storage has the same load range per group.
+            # Preserve its single-build path without selection snapshots.
+            for group_id in range(self.num_kv_cache_groups):
+                first_task = None
                 for layer_id in range(self.num_layers):
                     for task in self.layer_load_tasks[layer_id]:
                         if task.group_id == group_id:
-                            task.shared_block_data = shared
+                            first_task = task
+                            break
+                    if first_task:
+                        break
+                if first_task is None:
+                    continue
+                shared = self.kv_recv_thread.build_shared_data(first_task)
+                if shared is not None:
+                    for layer_id in range(self.num_layers):
+                        for task in self.layer_load_tasks[layer_id]:
+                            if task.group_id == group_id:
+                                task.shared_block_data = shared
+            return
+        for group_id in range(self.num_kv_cache_groups):
+            shared_by_ranges: dict[
+                tuple[bool, tuple[tuple[int, int, int, int | None], ...]], SharedBlockData | None
+            ] = {}
+            for layer_id in range(self.num_layers):
+                for task in self.layer_load_tasks[layer_id]:
+                    if task.group_id != group_id:
+                        continue
+                    # Independent layers retain local prefix KV, while reused
+                    # layers must restore it, including any partial block.
+                    # Request identity also matters: different requests can
+                    # select the same logical range but different blocks/GVAs.
+                    ranges = tuple(
+                        (id(r.request), r.start_block, r.end_block, r.partial_block_index) for r in task.block_ranges
+                    )
+                    key = (task.use_key_major_ranges, ranges)
+                    if key not in shared_by_ranges:
+                        shared = self.kv_recv_thread.build_shared_data(task)
+                        if shared is not None:
+                            # The builder reuses scratch arrays on the next
+                            # call; retain each selection's own snapshot.
+                            shared.block_ids_arr = shared.block_ids_arr.copy()
+                            if shared.block_gvas_arr is not None:
+                                shared.block_gvas_arr = shared.block_gvas_arr.copy()
+                        shared_by_ranges[key] = shared
+                    task.shared_block_data = shared_by_ranges[key]
 
     def _compute_reachable_store_masks(
         self,
