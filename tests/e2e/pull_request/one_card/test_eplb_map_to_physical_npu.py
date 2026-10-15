@@ -7,7 +7,7 @@ import torch
 from vllm_ascend.ops.fused_moe.eplb import map_to_physical_for_ascend, record_expert_tokens
 
 
-@pytest.mark.parametrize("tokens", [1, 2, 8, 32, 39, 40, 41, 64, 65, 128, 256, 512, 65536])
+@pytest.mark.parametrize("tokens", [1, 2, 4, 8, 16, 32, 39, 40, 41, 64, 65, 128, 256, 512, 2559, 2560, 2561, 65536])
 @pytest.mark.parametrize("experts,topk", [(128, 8), (896, 16)])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_map_balanced_token_ranges(tokens, experts, topk, dtype):

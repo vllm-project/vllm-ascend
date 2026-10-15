@@ -18,13 +18,15 @@ Each program owns a balanced, contiguous token range. The grid is
 `min(T, vector_core_num)`, independent of tile size. Quotient/remainder
 partitioning gives every token exactly one owner; ownership differs by at most
 one token between programs. Each program processes its flattened assignments
-in bounded tiles of at most 512 elements.
+in fixed tiles of 512 elements, masking the tail of its owned range. Tile size
+does not change with token count, avoiding shape-derived tile specializations.
 
 Logical IDs retain their input integer width rather than being unconditionally
 widened to INT64. Invalid logical IDs produce `-1`, as in the existing NPU map.
 Routing-table contents remain device-side state and can change during graph
-replay. Token count and grid count are not value-specialized; TopK and the
-power-of-two tile size describe the intended compile-time variants.
+replay. Token count and grid count are not value-specialized; TopK remains a
+compile-time parameter, while the mapping tile is constant. Dtypes and backend
+argument specialization can still produce distinct compiled variants.
 
 ## Recording
 

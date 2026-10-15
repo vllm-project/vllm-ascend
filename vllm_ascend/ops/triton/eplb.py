@@ -6,7 +6,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-MAX_MAPPING_ASSIGNMENTS_PER_TILE = 512
+MAPPING_ASSIGNMENTS_PER_TILE = 512
 
 
 @triton.jit(do_not_specialize=["tokens", "num_grids"])
@@ -87,10 +87,6 @@ def map_to_physical_triton(
     init_device_properties_triton()
     tokens, topk = topk_ids.shape
     num_grids = min(tokens, get_vectorcore_num())
-    block_size = min(
-        MAX_MAPPING_ASSIGNMENTS_PER_TILE,
-        max(2, triton.next_power_of_2(triton.cdiv(tokens, num_grids) * topk)),
-    )
     _map_to_physical_kernel[(num_grids,)](
         topk_ids,
         expert_replica_routing_table,
@@ -100,7 +96,8 @@ def map_to_physical_triton(
         num_grids,
         expert_replica_routing_table.shape[0],
         TOPK=topk,
-        BLOCK_SIZE=block_size,
+        # Keep the constexpr tile fixed across token counts; mask each range's tail.
+        BLOCK_SIZE=MAPPING_ASSIGNMENTS_PER_TILE,
     )
     return physical_ids
 
