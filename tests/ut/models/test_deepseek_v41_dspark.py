@@ -27,7 +27,7 @@ from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkSWACache,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, DeepseekV41Model
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):

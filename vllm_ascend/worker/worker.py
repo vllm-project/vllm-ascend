@@ -134,7 +134,7 @@ class _V1ModelRunnerFactory:
     """Import the V1 model runner only when one is actually constructed."""
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
         return NPUModelRunner(*args, **kwargs)
 

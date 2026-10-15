@@ -26,7 +26,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
 
 MAIN = "model.layers.1.attn"

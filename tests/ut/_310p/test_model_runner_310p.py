@@ -112,7 +112,7 @@ def test_graph_dispatch_does_not_treat_later_prefill_chunk_as_decode() -> None:
     runner.speculative_config = None
 
     with patch(
-        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._determine_batch_execution_and_padding",
+        "vllm_ascend.worker.v1.model_runner.NPUModelRunner._determine_batch_execution_and_padding",
         return_value="dispatch-result",
     ) as parent_dispatch:
         result = runner._determine_batch_execution_and_padding(
