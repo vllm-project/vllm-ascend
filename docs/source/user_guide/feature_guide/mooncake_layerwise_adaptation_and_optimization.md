@@ -129,13 +129,10 @@ whole-key put path and passes:
 
 This prevents layerwise transfer from bypassing the existing local-first and same-node placement policies.
 
-### 4.3 Transfer Throttling for Range Calls
+### 4.3 Range Transfers
 
-- `layerwise_max_transfer_blocks` limits the number of key/block rows in a single range API call.
-- `layerwise_max_transfer_bytes` splits an oversized contiguous segment into smaller ranges.
-
-PutStart, GetStart, GetEnd, and scheduler `exists` queries are also batched according to the block limit. This avoids
-oversized Python/C++ argument lists and transient metadata spikes for long prompts.
+Each layer submits all active keys and their complete contiguous segments in one range API call per cache group.
+Session operations and scheduler readability queries submit all requested keys in one batch.
 
 ### 4.4 Fail Fast During Startup
 
@@ -195,9 +192,7 @@ python -m vllm.entrypoints.openai.api_server \
     "kv_connector_extra_config": {
       "backend": "mooncake",
       "use_layerwise": true,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
+      "layerwise_prefetch_layers": 2
     }
   }'
 ```
@@ -253,7 +248,7 @@ logging overhead.
      long prompts with low hit rates.
 
 5. **Dynamic batching based on total bytes and backend feedback**
-   - The current block and segment-byte limits are static.
+   - Each call currently submits all active keys and complete segments without transfer limits.
    - Jointly limit the total ranges and bytes per call, and adjust them automatically according to queue latency,
      return codes, and bandwidth.
 

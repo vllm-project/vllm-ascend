@@ -164,9 +164,7 @@ vllm serve /path/to/hybrid-model \
     "kv_connector_extra_config": {
       "backend": "mooncake",
       "use_layerwise": true,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
+      "layerwise_prefetch_layers": 2
     }
   }'
 ```
