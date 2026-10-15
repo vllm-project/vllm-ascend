@@ -62,9 +62,9 @@ msgid "### 4.1 Image Availability"
 msgstr "### 4.1 镜像可用性"
 
 msgid ""
-"If you need a prebuilt image, contact Huawei engineers to obtain the "
+"If you need a prebuilt image, please submit an ISSUE to obtain the "
 "appropriate image and software stack for your target hardware."
-msgstr "如果您需要预构建镜像，请联系华为工程师获取适用于您目标硬件的镜像和软件栈。"
+msgstr "如果您需要预构建镜像，请提交ISSUE获取适用于您目标硬件的镜像和软件栈。"
 
 msgid ""
 "After the environment is prepared, verify that the NPU devices are visible:"
