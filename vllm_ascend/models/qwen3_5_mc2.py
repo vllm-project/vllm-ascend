@@ -64,25 +64,49 @@ from vllm_ascend.models.qwen3_5_vl import (
 
 _ascend_tp_group = None
 _ascend_hcomm = None
+_mc2_warmup_done = False
+
+
+def _fetch_hcomm():
+    """Fetch the HCCL communicator name (idempotent, cached)."""
+    global _ascend_hcomm
+    if _ascend_hcomm is None:
+        rank = torch.distributed.get_rank(group=_ascend_tp_group)
+        _ascend_hcomm = _ascend_tp_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
+    return _ascend_hcomm
+
+
+def _mm_all_reduce_warmup():
+    """One tiny fused call to pre-allocate CANN comm resources.
+
+    npu_mm_all_reduce_base does a synchronous memcpy on its FIRST call to
+    set up internal communication resources (EE1016 prohibits this under
+    ACL graph capture). A single tiny eager call before capture completes
+    the allocation, so the operator is capture-safe from then on.
+
+    Must be called with all TP ranks in lockstep (same mechanism as the
+    stock allreduce path).
+    """
+    global _mc2_warmup_done
+    if _mc2_warmup_done:
+        return
+    hcomm = _fetch_hcomm()
+    # Minimal shapes: 16x16 matmul on each rank is enough to trigger the
+    # comm-resource allocation without measurable cost.
+    dummy_x = torch.zeros(16, 16, dtype=torch.bfloat16, device="npu")
+    dummy_w = torch.zeros(16, 16, dtype=torch.bfloat16, device="npu")
+    torch_npu.npu_mm_all_reduce_base(dummy_x, dummy_w, hcomm, bias=None)
+    _mc2_warmup_done = True
+    logger.info("MC2: warmup call completed (comm resources allocated, graph-capture safe)")
 
 
 def _mm_all_reduce_base_impl(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-    # Capture guard must live here (not in outer Python): dynamo specializes
-    # outer guards away at compile time, so only this impl runs during ACL
-    # capture. The MC2 comm-resource alloc does a sync memcpy, prohibited
-    # under capture modes GLOBAL/MAX (EE1016).
-    if torch.npu.is_current_stream_capturing():
+    # The MC2 comm-resource allocation was done during the __init__ warmup
+    # call, so the operator is safe under ACL graph capture. Only fall back
+    # if the warmup somehow did not run (e.g., the mixin was not installed).
+    if not _mc2_warmup_done:
         return tensor_model_parallel_all_reduce(torch.matmul(x1, x2))
-    global _ascend_hcomm
-    if _ascend_hcomm is None:
-        # Fetch lazily at the first eager call, where the TP ranks run in
-        # lockstep (same mechanism as the stock allreduce path). Fetching at
-        # model-init time triggered the TP group's HCCL comm creation
-        # (hcclCommInitRootInfoConfig) while the ranks were skewed across
-        # model construction, failing with EI0015 RootInfoDetect.
-        rank = torch.distributed.get_rank(group=_ascend_tp_group)
-        _ascend_hcomm = _ascend_tp_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
-    return torch_npu.npu_mm_all_reduce_base(x1, x2, _ascend_hcomm, bias=None)
+    return torch_npu.npu_mm_all_reduce_base(x1, x2, _fetch_hcomm(), bias=None)
 
 
 def _mm_all_reduce_base_fake(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
@@ -111,23 +135,20 @@ def _mm_all_reduce_quant_impl(
     npu_mm_all_reduce_base natively supports quantized operands through the
     antiquant_scale / antiquant_offset (weight dequant) and pertoken_scale
     (activation dequant) parameters; antiquant_group_size selects per-channel
-    (0) vs per-block (MXFP8=128) scaling.
+    (0) vs per-block (MXFP8=128) scaling. Comm resources were pre-allocated
+    during the __init__ warmup call, so this is graph-capture safe.
     """
-    if torch.npu.is_current_stream_capturing():
+    if not _mc2_warmup_done:
         return tensor_model_parallel_all_reduce(
             torch.matmul(
                 x1.to(pertoken_scale.dtype) * pertoken_scale,
                 x2.to(antiquant_scale.dtype) * antiquant_scale,
             )
         )
-    global _ascend_hcomm
-    if _ascend_hcomm is None:
-        rank = torch.distributed.get_rank(group=_ascend_tp_group)
-        _ascend_hcomm = _ascend_tp_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
     return torch_npu.npu_mm_all_reduce_base(
         x1,
         x2,
-        _ascend_hcomm,
+        _fetch_hcomm(),
         bias=None,
         antiquant_scale=antiquant_scale,
         antiquant_offset=antiquant_offset if antiquant_offset.numel() > 0 else None,
@@ -282,6 +303,17 @@ class _AscendMC2Mixin:
             )
         else:
             logger.info("MC2: installed on %d/%d row-parallel linears", installed, total)
+
+        # Pre-allocate CANN comm resources with a tiny eager call so the
+        # fused op is graph-capture safe: npu_mm_all_reduce_base does a sync
+        # memcpy on its FIRST invocation (EE1016 under capture). All TP ranks
+        # run __init__ in lockstep, so this is the safe place to warm it up.
+        try:
+            _mm_all_reduce_warmup()
+        except Exception as e:
+            # Do not fail model init if the warmup hits an environment issue;
+            # the capture guard in the op impl will just fall back to stock.
+            logger.warning("MC2: warmup call failed (%s); graph capture will use the stock path", e)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
