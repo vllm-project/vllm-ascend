@@ -32,6 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
+| `DeepSeek-V4-Flash-0731` | 950DT products (96GB × 8); the example in Section 5.2.3 uses four NPUs for Prefill and four NPUs for Decode | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -50,6 +51,43 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 **Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
+
+=== "950DT products"
+
+    Start the Docker container on each node. Replace the image tag and model
+    volume with values from your environment.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:<tested-tag>
+    export NAME=deepseek-v4-flash
+
+    docker run --rm \
+        --name $NAME \
+        --net=host \
+        --privileged=true \
+        --shm-size=512g \
+        --device /dev/davinci_manager \
+        --device /dev/hisi_hdc \
+        --device /dev/ummu \
+        --device /dev/uburma \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hixlep:/etc/hixlep \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /path/to/model:/models \
+        -it $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -364,7 +402,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+For standard PD disaggregation, we recommend using [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). For a 950DT deployment with a MemCache-backed external KV Cache Pool, see Section 5.2.3 below.
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -373,7 +411,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
+The following sections describe standard PD separation deployment on Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8), followed by a 950DT deployment with a MemCache-backed external KV Cache Pool.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
@@ -1100,7 +1138,56 @@ After the PD separation service is fully started, send a request through the pro
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
-#### 5.2.3 Ultra-Long Sequence Deployment
+#### 5.2.3 950DT Series PD Separation Deployment with MemCache KV Cache Pool
+
+This example deploys DeepSeek-V4-Flash on two 950DT nodes with the following topology:
+
+- Prefill: DP1 × TP1 × PCP4
+- Decode: DP4 × TP1 × PCP1
+- P-to-D KV transfer: `MooncakeConnectorV2`
+- External KV Cache Pool: `AscendStoreConnector` with the MemCache backend
+
+Compared with the standard PD deployment above, both Prefill and Decode use
+`MultiConnector` to combine live P-to-D KV transfer with external KV reuse.
+
+##### 5.2.3.1 Prerequisites
+
+Install and configure MemCache by following the
+[KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+
+Both Prefill and Decode must set `MMC_LOCAL_CONFIG_PATH`, and their
+`mmc-local.conf` files must connect to the same MetaService and ConfigStore.
+Start only one MetaService on the Prefill node.
+
+##### 5.2.3.2 Prefill Script
+
+```bash
+# 在这里放清理后的带池化 P 脚本
+
+##### 5.2.3.3 Decode Script
+# 在这里放清理后的带池化 D 脚本
+
+##### 5.2.3.4 Start and Verify the Services
+MemCache MetaService
+        ↓
+All Decode ranks
+        ↓
+Prefill
+        ↓
+PD proxy
+
+After all services are ready:
+1. Confirm the MetaService, ConfigStore, and Metrics ports are reachable.
+2. Confirm every Prefill and Decode endpoint returns /v1/models.
+3. Send a real generation request through the PD proxy and confirm that the
+   response contains non-empty choices.
+4. Send two requests with the same sufficiently long prefix.
+5. Confirm that the first request stores external KV data and that
+   external_prefix_cache_hits_total increases after the second request.
+6. Confirm that Decode logs still show successful P-to-D KV transfer.
+
+#### 5.2.4 Ultra-Long Sequence Deployment
+Start the services in the following order:
 
 For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
 
