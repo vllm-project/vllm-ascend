@@ -225,6 +225,9 @@ jobs:
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
+        env:
+          # Only this Layerwise E2E needs the native session/range APIs.
+          MOONCAKE_WHEEL: ${{ contains(matrix.group.tests, 'tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py') && 'mooncake-transfer-engine-npu==0.3.13.post1' || 'mooncake-transfer-engine-npu==0.3.11.post1' }}
         run: |
           set -euxo pipefail
 
@@ -237,9 +240,15 @@ jobs:
 
           pip install --no-cache-dir --no-deps \
             -i https://mirrors.aliyun.com/pypi/simple/ \
-            mooncake-transfer-engine-npu==0.3.11.post1
+            "$MOONCAKE_WHEEL"
 
           pip show mooncake-transfer-engine-npu || true
+
+      - name: Validate Mooncake Layerwise SDK
+        if: ${{ matrix.group.npu_type != 'cpu' && contains(matrix.group.tests, 'tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py') }}
+        timeout-minutes: 3
+        run: |
+          python3 .github/workflows/scripts/check_mooncake_layerwise.py --expected-version 0.3.13.post1
 
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
