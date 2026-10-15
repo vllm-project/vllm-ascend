@@ -4,7 +4,6 @@
 
 import logging
 import math
-import warnings
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from functools import cache
@@ -13,12 +12,15 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
     PackedChunk,
     PackedIpcChunk,
 )
+from vllm.distributed.weight_transfer.packed_tensor import (
+    pack_tensors as vllm_pack_tensors,
+)
 
-DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
-DEFAULT_PACKED_NUM_BUFFERS = 2
 logger = logging.getLogger(__name__)
 
 # A failed stream cannot prove that its asynchronous readers have stopped.
@@ -44,7 +46,11 @@ def unpack_tensor(
     dtypes: list[torch.dtype],
     tensor_sizes: list[int],
 ) -> list[tuple[str, torch.Tensor]]:
-    """Clone packed byte slices into independently owned typed tensors."""
+    """Clone packed byte slices into independently owned typed tensors.
+
+    Unlike upstream's view-only unpacker, this must support scalar shapes and
+    unaligned mixed-dtype slices before the shared buffer can be reused.
+    """
     if not (len(names) == len(shapes) == len(dtypes) == len(tensor_sizes)):
         raise ValueError(
             "packed metadata lengths disagree: "
@@ -83,60 +89,36 @@ def pack_tensors(
     """
     if buffer_size_bytes <= 0:
         raise ValueError(f"buffer_size_bytes must be positive, got {buffer_size_bytes}")
-    tensors = tensor_list if tensor_list is not None else []
-    names: list[str] = []
-    shapes: list[list[int]] = []
-    dtypes: list[torch.dtype] = []
-    tensor_sizes: list[int] = []
-    total_bytes = current_size
 
-    while True:
-        try:
-            name, original = next(iterator)
-        except StopIteration:
-            break
+    def materialize(item: tuple[str, torch.Tensor]) -> torch.Tensor:
+        return _materialize_tensor(item, post_iter_func)
 
-        tensor = post_iter_func((name, original)).contiguous()
-        if tensor.dtype != original.dtype:
-            raise ValueError(
-                f"tensor {name!r} materialized with dtype {tensor.dtype} but metadata requires {original.dtype}"
-            )
-        if tensor.numel() != original.numel():
-            raise ValueError(
-                f"tensor {name!r} materialized with {tensor.numel()} elements but metadata requires {original.numel()}"
-            )
-        flat = tensor.reshape(-1).view(torch.uint8)
-        expected = math.prod(original.shape) * original.dtype.itemsize
-        if flat.numel() != expected:
-            raise ValueError(
-                f"tensor {name!r} materialized as {flat.numel()} bytes but metadata requires {expected} bytes"
-            )
-        tensors.append(flat)
-        names.append(name)
-        shapes.append(list(original.shape))
-        dtypes.append(original.dtype)
-        tensor_sizes.append(flat.numel())
-        total_bytes += flat.numel()
-
-        if flat.numel() > buffer_size_bytes:
-            warnings.warn(
-                f"Tensor {name!r} has size {flat.numel()} bytes, which exceeds "
-                f"buffer_size_bytes={buffer_size_bytes}; sending it as one chunk.",
-                stacklevel=2,
-            )
-        if total_bytes > buffer_size_bytes:
-            break
-
-    if not tensors:
-        return None
-    packed = torch.cat(tensors, dim=0)
-    return PackedChunk(
-        packed_tensor=packed,
-        names=names,
-        shapes=shapes,
-        dtypes=dtypes,
-        tensor_sizes=tensor_sizes,
+    return vllm_pack_tensors(
+        iterator,
+        materialize,
+        buffer_size_bytes,
+        tensor_list=tensor_list,
+        current_size=current_size,
     )
+
+
+def _materialize_tensor(
+    item: tuple[str, torch.Tensor],
+    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
+) -> torch.Tensor:
+    name, original = item
+    tensor = post_iter_func(item)
+    if tensor.dtype != original.dtype:
+        raise ValueError(
+            f"tensor {name!r} materialized with dtype {tensor.dtype} but metadata requires {original.dtype}"
+        )
+    if tensor.numel() != original.numel():
+        raise ValueError(
+            f"tensor {name!r} materialized with {tensor.numel()} elements but metadata requires {original.numel()}"
+        )
+    # Upstream views the dtype before flattening; flatten scalars first while
+    # leaving the original tensor in the iterator for shape metadata.
+    return tensor.contiguous().reshape(-1)
 
 
 def packed_hccl_broadcast_producer(
@@ -334,23 +316,7 @@ def packed_ipc_producer(
         has_tensors = False
 
         for name, original in iterator:
-            flat_tensor = post_iter_func((name, original)).contiguous()
-            if flat_tensor.dtype != original.dtype:
-                raise ValueError(
-                    f"tensor {name!r} materialized with dtype {flat_tensor.dtype} "
-                    f"but metadata requires {original.dtype}"
-                )
-            if flat_tensor.numel() != original.numel():
-                raise ValueError(
-                    f"tensor {name!r} materialized with {flat_tensor.numel()} elements "
-                    f"but metadata requires {original.numel()}"
-                )
-            flat = flat_tensor.reshape(-1).view(torch.uint8)
-            expected = math.prod(original.shape) * original.dtype.itemsize
-            if flat.numel() != expected:
-                raise ValueError(
-                    f"tensor {name!r} materialized as {flat.numel()} bytes but metadata requires {expected} bytes"
-                )
+            flat = _materialize_tensor((name, original), post_iter_func).view(torch.uint8)
             if flat.numel() > buffer_size_bytes:
                 raise ValueError(
                     f"Tensor {name!r} has size {flat.numel()} bytes, which exceeds "

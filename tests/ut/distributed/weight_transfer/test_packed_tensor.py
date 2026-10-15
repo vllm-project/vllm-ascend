@@ -94,7 +94,8 @@ def _stub_torch_npu():
     original_empty = torch.empty
 
     def _fake_empty(*args, **kwargs):
-        if kwargs.get("device") == "npu":
+        device = kwargs.get("device")
+        if device is not None and torch.device(device).type == "npu":
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
@@ -990,6 +991,29 @@ def test_pack_tensors_rejects_post_iter_dtype_change():
             lambda item: item[1].to(torch.int32),
             buffer_size_bytes=64,
         )
+
+
+@pytest.mark.parametrize("buffer_size_bytes", [8, 64])
+def test_pack_tensors_roundtrip_mixed_scalar_empty_and_non_contiguous(buffer_size_bytes):
+    """Upstream packing must preserve the compatibility layer's byte layout."""
+    originals = [
+        ("byte", torch.tensor([7], dtype=torch.uint8)),
+        ("scalar", torch.tensor(42, dtype=torch.int64)),
+        ("empty", torch.empty(0, 2, dtype=torch.float32)),
+        ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
+    ]
+    iterator = iter(originals)
+    restored = []
+    while (chunk := pack_tensors(iterator, lambda item: item[1], buffer_size_bytes)) is not None:
+        restored.extend(unpack_tensor(chunk.packed_tensor, chunk.names, chunk.shapes, chunk.dtypes, chunk.tensor_sizes))
+        # Loading weights may retain these tensors after the packed slot is reused.
+        chunk.packed_tensor.zero_()
+
+    assert [name for name, _ in restored] == [name for name, _ in originals]
+    for (_, actual), (_, expected) in zip(restored, originals):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize(
