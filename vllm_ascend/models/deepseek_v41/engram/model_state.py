@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
@@ -85,6 +86,8 @@ class EngramModelState(AscendModelState):
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
         self._replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self._replay_groups: tuple[int, torch.Tensor] | None = None
+        layers = getattr(model, "decoder_replay_layers", None)
+        self.decoder_replay = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
@@ -103,6 +106,9 @@ class EngramModelState(AscendModelState):
     def add_request(self, req_index: int, new_req_data) -> None:
         super().add_request(req_index, new_req_data)
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
+        if self.decoder_replay is not None:
+            params = new_req_data.sampling_params
+            self.decoder_replay.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement
@@ -176,7 +182,7 @@ class EngramModelState(AscendModelState):
         # padded, graph-shaped buffer above.
         if model_specific_attn_metadata is None and replay_np.any():
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        return super().prepare_attn(
+        attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -187,6 +193,13 @@ class EngramModelState(AscendModelState):
             ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
+        if self.decoder_replay is not None:
+            self.decoder_replay.prepare(
+                DecoderReplayInputs(input_batch, block_tables, slot_mappings, attn_groups, replay_start),
+                cudagraph_mode,
+                for_capture=for_capture,
+            )
+        return attn_metadata
 
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
         model_inputs: dict[str, Any] = {}

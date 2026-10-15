@@ -135,8 +135,8 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
 ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
 
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
