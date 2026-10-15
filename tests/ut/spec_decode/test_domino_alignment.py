@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU regression tests for checkpoint alignment, with only vLLM dependencies mocked."""
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +18,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 
 def _load_file(name, path):
     spec = importlib.util.spec_from_file_location(name, _ROOT / path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -29,6 +32,7 @@ def domino_modules(monkeypatch):
         def __init__(self, vllm_config, device, runner=None):
             self.speculative_config = vllm_config.speculative_config
             self.num_speculative_tokens = 4
+            self.base_result = None
 
         def load_model(self, model):
             self.model = model
@@ -41,7 +45,7 @@ def domino_modules(monkeypatch):
             super().__init__()
             self.config = vllm_config
 
-    dependencies = {
+    dependencies: dict[str, dict[str, Any]] = {
         "vllm.logger": {"logger": Mock()},
         "vllm.config": {"VllmConfig": object},
         "vllm_ascend.utils": {"lmhead_tp_enable": lambda: False},
@@ -165,3 +169,70 @@ def test_unvalidated_alignment_cannot_propose(domino_modules):
     proposer.base_result = (2, torch.tensor([1]), object(), None)
     with pytest.raises(RuntimeError, match="validated boolean"):
         _prepare(proposer, torch.tensor([3]))
+
+
+@pytest.mark.parametrize("enable_reduce_sample", [False, True])
+@pytest.mark.parametrize("is_domino", [False, True])
+@pytest.mark.parametrize("k", [1, 4, 15])
+def test_merged_draft_sampling_dispatch(domino_modules, monkeypatch, enable_reduce_sample, is_domino, k):
+    """Execute the real base drafting method without importing NPU-only modules.
+
+    The method is compiled unchanged from its AST; only device/model dependencies
+    are mocked. This catches bypassing Domino's sampling hook in the parent call
+    path, which directly testing compute_draft_token_ids cannot detect.
+    """
+    proposer_cls, _, _ = domino_modules
+    source = ast.parse((_ROOT / "vllm_ascend/spec_decode/llm_base_proposer.py").read_text())
+    base = next(
+        node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "AscendSpecDecodeBaseProposer"
+    )
+    method = next(node for node in base.body if isinstance(node, ast.FunctionDef) and node.name == "_run_merged_draft")
+    namespace = {
+        "torch": torch,
+        "nn": nn,
+        "lmhead_tp_enable": lambda: False,
+        "get_ascend_config": lambda: SimpleNamespace(enable_reduce_sample=enable_reduce_sample),
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "llm_base_proposer.py", "exec"), namespace)
+
+    proposer = object.__new__(proposer_cls) if is_domino else SimpleNamespace(requires_custom_draft_sampling=False)
+    batch_size = 2
+    hidden = torch.randn(batch_size * k, 8)
+    logits = torch.zeros(batch_size * k, 5)
+    logits[:, 0] = 1
+    corrected = torch.ones(batch_size * k, dtype=torch.long)
+    fused = Mock(return_value=corrected)
+    monkeypatch.setitem(proposer_cls.compute_draft_token_ids.__globals__, "domino_correct_fused", fused)
+    proposer.model = Mock(return_value=hidden)
+    proposer.model.compute_logits.return_value = logits
+    if not is_domino:
+        proposer.compute_draft_token_ids = Mock(return_value=logits.argmax(dim=-1))
+    proposer.num_speculative_tokens = k
+    proposer.domino_candidate_topk = 64
+    proposer._domino_bonus_buf = torch.tensor([2, 3])
+    proposer.method = "dflash"
+    proposer.parallel_drafting = True
+    proposer._share_mtp_indices = False
+    proposer.input_ids = torch.zeros(batch_size * k, dtype=torch.long)
+    proposer._get_positions = lambda count: torch.arange(count)
+    proposer.model_returns_tuple = lambda: False
+    proposer.build_model_inputs_first_pass = Mock()
+    proposer._context_slot_mapping_buffers = None
+
+    result = namespace["_run_merged_draft"](
+        proposer, batch_size * k, batch_size, torch.arange(batch_size * k), None, None, None, batch_size * k
+    )
+    expected = corrected if is_domino else logits.argmax(dim=-1)
+    assert torch.equal(result, expected.view(batch_size, k))
+    assert proposer.model.compute_logits.call_count == (0 if is_domino or enable_reduce_sample else 1)
+    assert fused.call_count == (1 if is_domino else 0)
+    if is_domino:
+        assert torch.equal(fused.call_args.kwargs["hidden_states"], hidden)
+        assert fused.call_args.kwargs["bonus_token_ids"] is proposer._domino_bonus_buf
+        assert fused.call_args.kwargs["candidate_topk"] == 64
+
+
+def test_fused_correction_requires_bonus_buffer(domino_modules):
+    _, _, correction = domino_modules
+    with pytest.raises(ValueError, match="bonus-token buffer"):
+        correction.domino_correct_fused(torch.empty(4, 8), 4, object(), None)

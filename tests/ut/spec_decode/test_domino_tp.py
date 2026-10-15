@@ -86,7 +86,7 @@ def test_global_logits_and_rollout(domino_modules, monkeypatch, candidate_topk, 
             assert torch.equal(logits, local_logits[rank])
             return torch.cat(local_logits, dim=dim)
 
-        distributed.tensor_model_parallel_all_gather = gather
+        monkeypatch.setattr(distributed, "tensor_model_parallel_all_gather", gather, raising=False)
         monkeypatch.setitem(sys.modules, "vllm.distributed", distributed)
         actual = correction._domino_base_logits(model, hidden)
         torch.testing.assert_close(actual, transform(reference.lm_head(hidden)))

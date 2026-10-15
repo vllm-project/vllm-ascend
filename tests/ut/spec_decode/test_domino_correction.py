@@ -28,8 +28,8 @@ def _load_domino_correct():
         return domino_correct
     except Exception:
         spec = importlib.util.spec_from_file_location("vllm_ascend_domino_correction", _MODULE_PATH)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
         spec.loader.exec_module(module)
         return module.domino_correct
 
@@ -288,7 +288,7 @@ def test_domino_correct_prefix_ge_k(deterministic):
     assert torch.equal(got, expected)
 
 
-def test_domino_correct_fp16_gru(deterministic):
+def test_domino_correct_fp16_gru(deterministic, monkeypatch):
     """The correction works with an fp16 GRU (NPU casts prefix_gru to fp16)."""
     domino_correct = _load_domino_correct()
     k = 4
@@ -312,7 +312,7 @@ def test_domino_correct_fp16_gru(deterministic):
             gru_hidden = gru_hidden.to(model.prefix_gru.weight_ih_l0.dtype)
         return real_run(embeds, gru_hidden)
 
-    model._run_prefix_gru = cast_run
+    monkeypatch.setattr(model, "_run_prefix_gru", cast_run)
 
     with torch.no_grad():
         got = domino_correct(hidden, k, model, bonus)

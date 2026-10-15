@@ -257,7 +257,13 @@ def domino_correct_fused(
     GRU reads gi from the lookup table in-kernel, eliminating standalone token
     copy and gi-gather kernels. The GRU bypasses Ascend's fp16-only
     DynamicGRUV2 (bf16-safe). The z-branch and gi lookup table are precomputed.
+
+    The fused path requires the fixed bonus-token buffer used during graph
+    capture and replay; unlike the eager reference, it cannot omit this buffer.
     """
+    if bonus_token_ids is None:
+        raise ValueError("Fused Domino correction requires a bonus-token buffer.")
+
     import torch.nn.functional as F
 
     # Lazy import so this module stays importable on CPU (UT) without triton.
