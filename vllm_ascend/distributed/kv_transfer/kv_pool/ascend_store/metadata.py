@@ -218,6 +218,20 @@ def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
     return f"c{compress_ratio}"
 
 
+def infer_cache_family_ratio(cache_family: str | None) -> int:
+    """Return the compress ratio encoded by a cache-family name.
+
+    ``c128`` is 128. Families without a numeric ratio, including ``default``
+    and ``mixed``, are treated as 1.
+    """
+    if not cache_family or cache_family in {"default", "mixed", "c1"}:
+        return 1
+    if cache_family.startswith("c") and cache_family[1:].isdigit():
+        ratio = int(cache_family[1:])
+        return ratio if ratio > 1 else 1
+    return 1
+
+
 def _get_layer_compress_ratio(
     layer_name: str,
     compress_ratios: Sequence[int] | None,

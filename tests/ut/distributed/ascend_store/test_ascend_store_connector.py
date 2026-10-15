@@ -59,11 +59,12 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.get_number_of_workers.return_value = 5
         self.assertEqual(ev.get_number_of_workers(), 5)
 
-        common = [MagicMock()]
-        ev._aggregator.get_common_events.return_value = common
+        first = MagicMock()
+        second = MagicMock()
+        ev._aggregator.get_all_events.return_value = [first, second, first]
         self.assertIs(ev.aggregate(), ev)
         ev._aggregator.clear_events.assert_called_once()
-        ev._aggregator.add_events.assert_called_once_with(common)
+        ev._aggregator.add_events.assert_called_once_with([first, second])
         ev._aggregator.reset_workers.assert_called_once()
 
 
