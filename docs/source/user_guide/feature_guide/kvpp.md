@@ -34,7 +34,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
 | Eager mode | ✅ Supported | Use `--enforce-eager`. |
-| Graph mode | ❌ Not supported | KVPP currently requires eager mode. |
+| Graph mode | ✅ PIECEWISE only | Use eager execution or `PIECEWISE`; full graph modes are not supported. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
 | PP | ✅ Supported | Each PP stage allocates and broadcasts its caches independently. |
@@ -42,14 +42,15 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| Variable-step MTP and other speculative decoding methods | ❌ Not supported | Only fixed-step MTP is supported. |
+| MTP and DSpark | ✅ Supported | Draft caches are allocated independently and excluded from KVPP layer partitioning. |
+| Dynamic speculative decoding | Model-dependent | KVPP validation does not restrict the speculative method or token count, including DSpark adaptive verification and dynamic lengths. The model, proposer, and runner must support the configuration; draft layers cannot share target KV caches. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
-| PCP + P/D disaggregation + KVPP | ❌ Not supported | `MooncakeConnectorV2` does not yet support PCP. |
-| PCP + KV pooling + KVPP | ❌ Not supported | PCP and KV pooling are individually supported with KVPP, but the three-way combination is not supported. |
+| PCP + P/D disaggregation + KVPP | ✅ Supported | Use Model Runner V2 and `MooncakeConnectorV2`; enable PCP and KVPP only on the prefill producer. The connector does not allow PP > 1 together with PCP > 1. |
+| PCP + KV pooling + KVPP | ✅ Supported | Requires Model Runner V2 and the Memcache whole-block pooling configuration below; owner shards span PCP × TP. |
+| MultiConnector | ✅ Supported | Combine `MooncakeConnectorV2` and `AscendStoreConnector`; each child connector must satisfy its type and role restrictions. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
 - ❌ **Not supported**: The combination is not currently supported.
@@ -68,6 +69,8 @@ vllm serve <model-path> \
 Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
+
+For PIECEWISE execution, omit `--enforce-eager` and set `--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`. Other model and backend graph-mode restrictions still apply.
 
 ### Combining Features
 
@@ -92,14 +95,14 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
+MTP and DSpark can be combined with KVPP. Draft caches remain independently allocated and are excluded from KVPP layer partitioning. KVPP does not impose a fixed speculative length; follow the model, proposer, and runner requirements for speculative decoding. Draft layers that share target KV caches are rejected. In particular, a speculative mode requiring FULL graphs (such as DSpark adaptive verification) cannot be combined with KVPP while KVPP supports only eager/PIECEWISE execution.
 
 ## Configuration Parameters
 
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
-| `--enforce-eager` | Not enabled | Required for KVPP; graph execution is not currently supported. |
+| `--enforce-eager` | Not enabled | Selects eager execution. Without it, explicitly select `PIECEWISE` graph mode. |
 
 KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
 
@@ -166,7 +169,7 @@ Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascen
 
 The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false`, `load_async=true`, and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
 
-Each TP rank saves one complete object per token block containing its persistent target layers and its own MTP caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
+Each cache-owner rank (PCP × TP) saves one complete object per token block containing its persistent target layers and its own draft caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
 
 ## Performance
 
