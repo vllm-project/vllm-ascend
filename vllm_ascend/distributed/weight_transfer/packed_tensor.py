@@ -19,6 +19,20 @@ DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
 
+def _unpack_tensor(
+    packed_tensor: torch.Tensor,
+    names: list[str],
+    shapes: list[list[int]],
+    dtypes: list[torch.dtype],
+    tensor_sizes: list[int],
+) -> list[tuple[str, torch.Tensor]]:
+    """Reuse upstream unpacking while supporting scalar shapes on older vLLM."""
+    # Older upstream versions call view(*shape), which fails for shape=[].
+    # Unpack scalars as one-element vectors, then restore their original shape.
+    unpacked = unpack_tensor(packed_tensor, names, [shape or [1] for shape in shapes], dtypes, tensor_sizes)
+    return [(name, tensor.view(shape)) for (name, tensor), shape in zip(unpacked, shapes)]
+
+
 def packed_broadcast_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     group: Any,
@@ -67,7 +81,7 @@ def packed_broadcast_producer(
                     done = True
                     break
                 # Apply post processing and convert to linearized uint8 tensor
-                tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
+                tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
                 packing_tensor_list[buffer_idx].append(tensor)
                 packing_tensor_sizes[buffer_idx] += tensor.numel()
                 if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -114,21 +128,6 @@ def packed_broadcast_consumer(
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
     """
-
-    def unpack_tensor(
-        packed_tensor: torch.Tensor,
-        names: list[str],
-        shapes: list[list[int]],
-        dtypes: list[torch.dtype],
-        tensor_sizes: list[int],
-    ) -> list[tuple[str, torch.Tensor]]:
-        """Unpack a packed uint8 tensor into a list of typed tensors."""
-        unpacked_tensors = packed_tensor.split(tensor_sizes)
-        unpacked_list = [
-            (name, tensor.contiguous().view(dtype).view(*shape))
-            for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
-        ]
-        return unpacked_list
 
     target_packed_tensor_size = buffer_size_bytes
 
@@ -181,7 +180,7 @@ def packed_broadcast_consumer(
         with torch.npu.stream(streams[buffer_idx]):
             names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
             post_unpack_func(
-                unpack_tensor(
+                _unpack_tensor(
                     packed_tensors[buffer_idx],
                     list(names),
                     list(shapes),
@@ -335,4 +334,4 @@ def packed_npu_ipc_consumer(
     packed = packed[:content_size]
 
     dtypes = [getattr(torch, dn) for dn in dtype_names]
-    return [(name, tensor.clone()) for name, tensor in unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)]
+    return [(name, tensor.clone()) for name, tensor in _unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)]

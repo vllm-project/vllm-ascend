@@ -931,6 +931,39 @@ def test_packed_npu_ipc_roundtrip_shapes(shape):
     assert torch.equal(received[0][1], original)
 
 
+@pytest.mark.parametrize("shape", [[], [0], [1], [2, 2]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.int64])
+def test_packed_broadcast_roundtrip_shapes(shape, dtype):
+    """HCCL packing preserves scalar, empty and non-scalar tensor metadata."""
+    original = torch.ones(shape, dtype=dtype)
+    payloads: list[torch.Tensor] = []
+    producer_group = _make_group_mock()
+    producer_group.broadcast.side_effect = lambda tensor, **kwargs: payloads.append(tensor.clone())
+    packed_broadcast_producer(
+        iterator=iter([("w", original)]),
+        group=producer_group,
+        src=0,
+        post_iter_func=lambda item: item[1],
+        buffer_size_bytes=16,
+    )
+    assert len(payloads) == 1
+    consumer_group = _make_group_mock()
+    consumer_group.broadcast.side_effect = lambda tensor, **kwargs: tensor.copy_(payloads[0])
+    received: list[tuple[str, torch.Tensor]] = []
+    packed_broadcast_consumer(
+        iterator=iter([("w", (shape, dtype))]),
+        group=consumer_group,
+        src=0,
+        post_unpack_func=received.extend,
+        buffer_size_bytes=16,
+    )
+    assert len(received) == 1
+    assert received[0][0] == "w"
+    assert received[0][1].shape == original.shape
+    assert received[0][1].dtype == dtype
+    assert torch.equal(received[0][1], original)
+
+
 def test_packed_importer_reuses_mapping_but_not_weight_storage():
     """One buffer export is rebuilt once; each chunk retains its own bytes."""
     buffer = torch.tensor([1.0, 2.0]).view(torch.uint8)
