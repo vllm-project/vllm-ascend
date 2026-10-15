@@ -28,7 +28,10 @@ endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 if(NOT SOC_VERSION)
-    message(FATAL_ERROR "SOC_VERSION is not set. Pass -DSOC_VERSION=<soc>, e.g. ascend910b1 / ascend310p1 / ascend950...")
+    set(SOC_VERSION "$ENV{SOC_VERSION}")
+endif()
+if(NOT SOC_VERSION)
+    message(FATAL_ERROR "SOC_VERSION is not set. Pass -DSOC_VERSION=<soc> (or set the SOC_VERSION environment variable), e.g. ascend910b1 / ascend310p1 / ascend950...")
 endif()
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
 
