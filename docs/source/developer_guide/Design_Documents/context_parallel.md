@@ -167,14 +167,12 @@ With PCP+DCP, the compact block-table plan is derived from the global request vi
 
 DSA-CP requires ModelRunner V1; set `VLLM_USE_V2_MODEL_RUNNER=0` before enabling `enable_dsa_cp`.
 
-SFA DSA-CP execution intentionally reuses the normal TP-sharded `o_proj`. This applies both to a mixed-role instance and to a PD-disaggregated P node; it is not a standalone user-facing `o_proj` TP switch. The runtime path supports two layouts:
+SFA DSA-CP adapts the output projection to the attention output layout while retaining TP-sharded weights:
 
-- **Decode-only batches** keep the decode TP path. SFA outputs are exchanged with an all-to-all in the TP group, then the original TP-sharded `o_proj` runs normally.
-- **Prefill or mixed batches**, including batches on a PD-disaggregated P node, produce SFA outputs that are not directly compatible with the TP-sharded `o_proj` input layout. Before `o_proj` forward, each rank all-gathers the TP-sharded `o_proj` weight and all input-sharded quantization parameters into temporary full-weight buffers. The full-weight `o_proj` forward runs once for that batch, and the module is then restored to the TP parameter aliases.
+- **Decode-only batches** exchange attention outputs across TP ranks to reuse the standard TP projection.
+- **Prefill or mixed batches** temporarily gather the projection weights so each rank can project its local tokens. This also applies to a prefill node in P/D disaggregation.
 
-The storage invariant is that the original TP-sharded `o_proj` parameter remains the only persistent source of truth. `o_proj_tp_*` tensors are aliases of the original parameter storage. `o_proj_full_*` tensors are reusable communication buffers for prefill/mixed full-gather execution only. They must not become a second persistent copy of the TP weight.
-
-This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches on both mixed-role and P-only instances, and avoids a persistent full-weight copy on every TP rank.
+Weights remain persistently TP-sharded; full-weight views are temporary. This supports token-parallel prefill while preserving the decode projection strategy and limiting persistent weight memory.
 
 ### DSA and DSA V4.1 PCP
 
