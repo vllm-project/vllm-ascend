@@ -340,6 +340,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.empty(1, 128, 192, dtype=torch.float8_e4m3fn), requires_grad=False)
         layer.weight_scale = nn.Parameter(torch.empty(1, 2, 192, 2, dtype=torch.uint8), requires_grad=False)
+        layer._mxfp8_gmm_nz_layout = True
 
         actual = self.scheme.apply_single_group_gmm(layer, (quantized, pertoken_scale))
 
