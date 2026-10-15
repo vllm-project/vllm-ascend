@@ -27,21 +27,21 @@ from vllm_ascend.ops.triton.triton_utils import (
 @triton.jit
 def _apply_grammar_bitmask_kernel_impl(
     logits_ptr,
-    logits_stride,
+    logits_stride: tl.constexpr,
     logits_indices_ptr,
     cu_num_logits_ptr,
     bitmask_ptr,
-    bitmask_stride,
-    vocab_size,
+    bitmask_stride: tl.constexpr,
+    vocab_size: tl.constexpr,
     num_masks,
-    NUM_PROGRAMS: tl.constexpr,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Apply masks with mask-major scheduling to reuse request metadata."""
     pid = tl.program_id(0)
-    masks_per_program = tl.cdiv(num_masks, NUM_PROGRAMS)
+    num_programs = tl.num_programs(0)
+    masks_per_program = tl.cdiv(num_masks, num_programs)
     start_mask = pid * masks_per_program
     end_mask = tl.minimum(start_mask + masks_per_program, num_masks)
     bit_mask = tl.full((32,), 1, tl.int32) << tl.arange(0, 32)
@@ -112,7 +112,6 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 bitmask_stride,
                 vocab_size,
                 num_masks,
-                NUM_PROGRAMS=num_programs,
                 NUM_VOCAB_BLOCKS=num_vocab_blocks,
                 MASK_STRIDE=MASK_STRIDE,
                 BLOCK_SIZE=BLOCK_SIZE,

@@ -9,6 +9,7 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/model_runner_v2/test_grammar_bitmask_boundaries.py: 120
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
