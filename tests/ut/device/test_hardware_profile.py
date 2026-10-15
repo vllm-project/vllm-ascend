@@ -56,7 +56,6 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.NPU_TOP_K_TOP_P,
-        HardwareCapability.QSA_LIGHTNING_INDEXER,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
@@ -66,10 +65,6 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
-        HardwareCapability.QSA_E3_EXPAND,
-        HardwareCapability.QSA_GBSA_ATTENTION,
-        HardwareCapability.QSA_LIGHTNING_INDEXER,
-        HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES,
     },
     AscendDeviceType._310P: frozenset(
         {
@@ -115,9 +110,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
-            HardwareCapability.QSA_GBSA_ATTENTION,
-            HardwareCapability.QSA_LIGHTNING_INDEXER,
-            HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,

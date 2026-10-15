@@ -50,8 +50,6 @@ def qsa_select_paged_tokens_lightning(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
-    *,
-    use_e3: bool = False,
 ) -> torch.Tensor:
     """Select compressed groups with BF16 LightningIndexer.
 
@@ -63,7 +61,6 @@ def qsa_select_paged_tokens_lightning(
     The upstream 2051-column output ABI is preserved while the compact
     515-column group selection occupies its prefix.
     """
-    del use_e3  # Compact GBSA/Triton consumers no longer need token expansion.
     _validate_request_boundaries(
         query,
         query_start_loc,

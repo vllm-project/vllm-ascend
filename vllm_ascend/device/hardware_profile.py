@@ -146,14 +146,6 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
-    # Use the A3 ``qsa_expand_e3`` custom operator to expand QSA selected indices.
-    QSA_E3_EXPAND = auto()
-    # Use the native Generic Block Sparse Attention custom operator for QSA.
-    QSA_GBSA_ATTENTION = auto()
-    # Use the native ``npu_lightning_indexer`` operator for QSA top-k selection.
-    QSA_LIGHTNING_INDEXER = auto()
-    # The native QSA Lightning selector accepts the complete A3 runtime shape set.
-    QSA_LIGHTNING_INDEXER_FULL_SHAPES = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A3/CANN 9.1 path only.
@@ -316,7 +308,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_STANDARD_CAPABILITIES
             | {
                 HardwareCapability.NPU_TOP_K_TOP_P,
-                HardwareCapability.QSA_LIGHTNING_INDEXER,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(
@@ -335,10 +326,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
-                HardwareCapability.QSA_E3_EXPAND,
-                HardwareCapability.QSA_GBSA_ATTENTION,
-                HardwareCapability.QSA_LIGHTNING_INDEXER,
-                HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES,
             },
         ),
         AscendDeviceType._310P: HardwareProfile(
@@ -401,7 +388,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
-                    HardwareCapability.QSA_LIGHTNING_INDEXER,
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
@@ -409,8 +395,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
-                    HardwareCapability.QSA_GBSA_ATTENTION,
-                    HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,

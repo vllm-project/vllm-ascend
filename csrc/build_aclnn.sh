@@ -150,7 +150,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "qsa_expand_e3"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention_vllm"
         "generic_block_sparse_attention"
