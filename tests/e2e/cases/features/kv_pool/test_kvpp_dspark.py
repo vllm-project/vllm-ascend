@@ -18,7 +18,6 @@ pytestmark = pytest.mark.e2e_model(MODEL)
 @pytest.mark.parametrize(
     "model_runner_v2",
     [
-        pytest.param("0", id="v1", marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")),
         pytest.param("1", id="v2"),
     ],
 )
