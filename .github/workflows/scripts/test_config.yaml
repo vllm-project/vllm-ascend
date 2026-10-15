@@ -20,9 +20,8 @@
 # - ``runner_mapping:``  regex patterns mapping test paths to logical
 #                        partitions (patterns are evaluated longest first,
 #                        most specific wins). Each entry has a ``default``
-#                        partition (or list of partitions for multiple devices)
-#                        and an optional ``310p`` override for files whose name
-#                        contains ``_310p``.
+#                        partition and an optional ``310p`` override for
+#                        files whose name contains ``_310p``.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
@@ -105,22 +104,19 @@ accuracy_tests:
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
-# Each entry has a ``default`` partition or list of partitions and an optional
-# ``310p`` override for files whose name contains ``_310p``.
+# Each entry has a ``default`` partition and an optional ``310p`` override
+# for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/nightly/single_node/ops/singlecard_ops/(ascendc|triton)/a2a3/:
-    default: [ops-a2-1, ops-a3-1]
+    default: ops-a3-1
   tests/e2e/nightly/single_node/ops/singlecard_ops/(ascendc|triton)/a5/:
     default: ops-a5-1
   # Preserve the two existing 310P files without creating backend/310p dirs.
   tests/e2e/nightly/single_node/ops/singlecard_ops/(test_causal_conv1d_310|test_recurrent_gated_delta_rule_310)\.py$:
     default: 310p-1
-  # These local kernels/host helpers require the A3 build or offload path.
-  tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_(attn_res_fwd|gmm_dequant_situ_quant_msd|copy_sfa_offload_metadata|lim_mtp_index_reuse|sparse_kv_offload)\.py$:
-    default: ops-a3-1
   tests/e2e/nightly/single_node/ops/singlecard_ops/:
-    default: ops-a2-1
+    default: ops-a3-1
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
@@ -137,9 +133,6 @@ runner_mapping:
 partition:
   # Singlecard targets use one assigned device in run_selected_tests.sh,
   # while matrix num_npus retains the runner's allocation.
-  ops-a2-1:
-    runner_label: linux-aarch64-a2b3-1
-    count: 12
   ops-a3-1:
     runner_label: linux-aarch64-a3-800i-2
     count: 2
