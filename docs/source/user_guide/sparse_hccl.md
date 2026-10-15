@@ -17,10 +17,11 @@ tensor in input order.
 Start inference with `--weight-transfer-config '{"backend":"sparse_hccl"}'`
 and `--additional-config '{"weight_nz_mode":0}'`. One trainer sender joins rank 0;
 all inference workers join with `rank_offset=1`. The transfer group size is
-`1 + TP * PP * DP`, including all pipeline stages and DP replicas. TP4/DP1/EP4
-and TP2/PP2/EP2 need five devices; TP4/DP2/EP8 needs nine. Every participant must
-use a distinct device. All ranks consume every broadcast before the upstream
-`is_pp_missing_parameter` ownership helper selects patches for each stage.
+`1 + TP * PP * DP`, including all pipeline stages and DP replicas. TP4/EP4,
+TP2/DP2/EP4, and TP2/PP2/EP2 need five devices; TP1/PP2/EP1 needs three.
+Every participant must use a distinct device. All ranks consume every broadcast
+before the upstream `is_pp_missing_parameter` ownership helper selects patches
+for each stage.
 
 Only unquantized floating-point weights and static expert placement
 (EPLB disabled), and ND tensor storage are supported. Fused MC2 expert lists
@@ -98,7 +99,7 @@ does not call finish after a failed transfer.
 
 `tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py` covers validation,
 rank mapping, lifecycle, and teardown. The real-model E2E uses a deterministic
-synthetic, one-layer Qwen3 MoE checkpoint with eight experts:
+synthetic Qwen3 MoE checkpoint with eight experts and one layer per pipeline stage:
 
 ```bash
 pytest -s tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py
@@ -107,5 +108,7 @@ pytest -s tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py
 It compares every runtime parameter hash on every worker against native dense
 checkpoint loading, then compares greedy generation. It covers attention
 projections, router, every expert's gate/up/down projection, embeddings, LM head,
-and norms in TP4/EP4 and TP4/DP2/EP8. These tests check mapping correctness;
-they do not establish pretrained-model accuracy or production performance.
+and norms in TP4/EP4, TP2/DP2/EP4, TP1/PP2/EP1, and TP2/PP2/EP2. The PP cases
+use two layers to verify updates across both pipeline stages. These tests check
+mapping correctness; they do not establish pretrained-model accuracy or
+production performance.
