@@ -138,6 +138,7 @@ def _configure_backend(
                 "GenericBlockSparseAttn",  # minimax-m3 910C
                 "QuantBatchMatmulV3",  # glm5.2 910C
                 "TransposeQuantBatchMatMul",  # dsv4 950
+                "QuantLightningIndexer",  # glm5.2 950
             ]
             logger.info_once(
                 "Skipping static kernel compilation for incompatible ops: %s.",
