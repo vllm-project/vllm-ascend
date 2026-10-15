@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from contextlib import nullcontext
+
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
@@ -26,6 +28,9 @@ from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorSca
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.expert_offload.config import ExpertOffloadConfig
+from vllm_ascend.expert_offload.expert_offload_manager import LayerOffloadBinding
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
@@ -274,6 +279,16 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_method = scheme
         self.tid2eid = tid2eid
+        self.expert_offload_config = ExpertOffloadConfig()
+
+    def configure_expert_offload(self, config: ExpertOffloadConfig) -> None:
+        if config.enabled:
+            if self.quant_method.quant_type != QuantType.W4A8MXFP:
+                raise ValueError("expert offload PR01 requires W4A8 MXFP routed expert weights")
+            # The upstream loader otherwise moves the complete CPU expert
+            # Parameters to the NPU before calling our bounded post-processing.
+            self.requires_device_loading = False
+        self.expert_offload_config = config
 
     @property
     def is_monolithic(self) -> bool:
@@ -285,6 +300,25 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         return None
 
     def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        offload_config = self.expert_offload_config
+        if offload_config.enabled:
+            offload_config.validate_layer(num_experts, layer.top_k)
+        with torch.device("cpu") if offload_config.enabled else nullcontext():
+            self._create_weights(
+                layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
+            )
+        if offload_config.enabled:
+            layer._expert_offload_binding = LayerOffloadBinding(layer, self.quant_method, offload_config)
+
+    def _create_weights(
         self,
         layer: torch.nn.Module,
         num_experts: int,
@@ -339,6 +373,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         return self.quant_method.get_eplb_weight_views(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        binding = getattr(layer, "_expert_offload_binding", None)
+        if binding is not None:
+            binding.process_weights_after_loading(layer)
+            return
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 

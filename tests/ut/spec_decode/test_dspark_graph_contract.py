@@ -52,6 +52,7 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
         assert active_context == [draft_config]
         self._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
         self.attn_groups = [[SimpleNamespace(backend=_BackendA)]]
+        self.draft_kv_cache_group_ids = [0]
 
     def get_layers(config, layer_type, names):
         assert active_context == [draft_config]
@@ -63,7 +64,14 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: draft_config))
     vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     speculator = _speculator(vllm_config=vllm_config, draft_attn_layer_names={"draft.2", "draft.0"})
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["draft.2", "target.0", "draft.0"])])
+    cache = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=["draft.2", "target.0", "draft.0"],
+                kv_cache_spec=SimpleNamespace(block_size=128),
+            )
+        ]
+    )
 
     speculator.set_attn(None, cache, None, None, None)
 

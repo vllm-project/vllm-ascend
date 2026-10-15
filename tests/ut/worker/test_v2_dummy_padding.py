@@ -26,6 +26,7 @@ def buffers():
 @pytest.fixture
 def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.expert_offload_manager = None
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.input_buffers = buffers
     runner.debugger = None

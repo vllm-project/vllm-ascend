@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import Any
 
@@ -147,6 +147,9 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
+    _capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]]
+    _candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]]
+
     def __init__(  # type: ignore[misc]
         self,
         vllm_config: VllmConfig,
@@ -172,6 +175,22 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
+        offload = getattr(model_runner, "expert_offload_manager", None)
+        if offload is not None:
+            from vllm_ascend.expert_offload.graph import supports_descriptor
+
+            bindings = tuple(offload.bindings.values())
+            # Use the actual padded descriptors for capture and dispatch alike.
+            self._capture_descs = {
+                mode: [desc for desc in descs if supports_descriptor(bindings, desc)]
+                for mode, descs in self._capture_descs.items()
+            }
+            self._candidates = {
+                key: [desc for desc in descs if supports_descriptor(bindings, desc)]
+                for key, descs in self._candidates.items()
+            }
+            if offload.graph_load_stream is None and super().needs_capture():
+                offload.graph_load_stream = torch.npu.Stream(device=device)
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
@@ -179,6 +198,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
+
+    def _capture_stream(self, desc: BatchExecutionDescriptor):
+        stream = super()._capture_stream(desc)
+        offload = getattr(self.model_runner, "expert_offload_manager", None)
+        if offload is not None:
+            # torch_cuda_wrapper replaces set_stream, so upstream's cached CUDA
+            # current_stream can differ from the active NPU capture stream.
+            stream = torch.npu.current_stream(self.device)
+            offload.subscribe_graph_stream(stream)
+        return stream
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -207,10 +236,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 ):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                ret = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                ret = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            offload = getattr(self.model_runner, "expert_offload_manager", None)
+            if offload is not None:
+                # Submit attention updates before fencing their external events.
+                torch.npu.current_stream(self.device).synchronize()
+                offload.check_graph_errors()
+            return ret
         finally:
             if metadata is not None:
                 metadata.finish_replay()
@@ -288,7 +323,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         try:
-            with communicator_switch():
+            offload = getattr(self.model_runner, "expert_offload_manager", None)
+            with communicator_switch(), offload.graph_capture() if offload is not None else nullcontext():
                 return super().capture(
                     model,
                     model_state,

@@ -86,6 +86,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -140,6 +141,9 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.expert_offload_manager = (
+            ExpertOffloadManager() if self.ascend_config.expert_offload_config.enabled else None
+        )
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -278,14 +282,40 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        manager = self.expert_offload_manager
+        if manager is not None and load_dummy_weights:
+            raise ValueError("expert offload PR01 does not support dummy checkpoint loading")
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
+        try:
+            super().load_model(load_dummy_weights, *args, **kwargs)
+            if manager is not None:
+                allocated_before = torch.npu.memory_allocated(self.device)
+                draft_model = getattr(self.speculator, "model", None)
+                manager.finalize_loading(self.model, draft_model)
+                if self.speculator is not None:
+                    self.speculator.expert_offload_manager = manager
+                # The parent profiler finishes before the shared pool is
+                # allocated. Include it in the persistent model-memory budget.
+                self.model_memory_usage += torch.npu.memory_allocated(self.device) - allocated_before
+        except Exception:
+            if manager is not None:
+                manager.close()
+            raise
         self.pd_dspark_aux_layer_ids = aux_layers
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
+
+    def shutdown(self) -> None:
+        try:
+            if self.expert_offload_manager is not None:
+                self.expert_offload_manager.close()
+        finally:
+            parent_shutdown = getattr(super(), "shutdown", None)
+            if parent_shutdown is not None:
+                parent_shutdown()
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -588,6 +618,9 @@ class NPUModelRunner(GPUModelRunner):
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
         forward_failed = True
+        offload_manager = self.expert_offload_manager
+        if offload_manager is not None:
+            offload_manager.begin_execution(is_profile=is_profile or dummy_run)
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -601,6 +634,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
+                if offload_manager is not None:
+                    offload_manager.finish_execution(failed=forward_failed)
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
@@ -760,6 +795,8 @@ class NPUModelRunner(GPUModelRunner):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
                 batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
                 uniform_token_count = self._pd_uniform_decode_token_count(batch_state)
+        if self.expert_offload_manager is not None and batch_state is not None:
+            self.expert_offload_manager.has_prefill = batch_state.has_prefill
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
