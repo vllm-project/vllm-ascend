@@ -74,6 +74,14 @@ Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missi
 paths are reported in the workflow log. System and credential directories
 cannot be selected.
 
+Nightly jobs can also upload configured paths without `--log-path`. Set them in
+`.github/workflows/configs/log_download_defaults.json`, grouped by each test
+case's node count (`"1"`, `"2"`, and so on). Each group maps `node0`, `node1`,
+etc. to lists of files or directories. For example, a two-node case can use
+`{"2":{"node0":["logs/leader.log"],"node1":["/tmp/worker-logs"]}}`.
+The checked-in config starts empty. A `--log-path` request adds paths to the
+configured paths for that run.
+
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
 **Common test case names (A2):**

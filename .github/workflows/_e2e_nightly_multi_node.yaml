@@ -261,11 +261,15 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
           OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-          DOWNLOAD_SPEC: ${{ inputs.download_path }}
+          REQUESTED_PATHS: ${{ inputs.download_path }}
         run: |
           set -euo pipefail
 
           size="${{ inputs.size }}"
+          DOWNLOAD_SPEC=$(python3 .github/workflows/scripts/resolve_download_paths.py \
+            --config .github/workflows/configs/log_download_defaults.json \
+            --size "$size" --request "$REQUESTED_PATHS")
+          echo "DOWNLOAD_SPEC=$DOWNLOAD_SPEC" >> "$GITHUB_ENV"
           if [ -n "$DOWNLOAD_SPEC" ]; then
             python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" --list --node-count "$size" > /dev/null
           fi
@@ -605,9 +609,8 @@ jobs:
 
       - name: Post process
         if: always()
-        env:
-          DOWNLOAD_PATH: ${{ inputs.download_path }}
         run: |
+          DOWNLOAD_PATH="${DOWNLOAD_SPEC:-}"
           # Archive once after the test finishes, before deleting running pods.
           # The exit trap covers pods that exit earlier.
           if [ -n "$DOWNLOAD_PATH" ]; then
@@ -657,14 +660,15 @@ jobs:
           done
 
       - name: Collect requested paths from test pods
-        if: ${{ always() && inputs.download_path != '' }}
+        if: always()
         id: collect_download
         continue-on-error: true
         env:
-          DOWNLOAD_PATH: ${{ inputs.download_path }}
           ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
         run: |
-          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
+          set -e
+          [ -n "${DOWNLOAD_SPEC:-}" ] || exit 0
+          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
           mkdir -p /tmp/download-artifact
           for attempt in $(seq 1 12); do
             pending=0
@@ -704,7 +708,7 @@ jobs:
           echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
 
       - name: Upload requested paths
-        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        if: ${{ always() && steps.collect_download.outputs.name != '' }}
         id: upload_download
         continue-on-error: true
         uses: actions/upload-artifact@v7
