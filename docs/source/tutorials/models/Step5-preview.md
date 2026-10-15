@@ -39,10 +39,10 @@ The features below are the ones enabled by the verified deployment commands in [
 
 | Model | Weight |
 | --- | --- |
-| Step-5-Preview | [Hugging Face](https://huggingface.co/StepFun/) |
-| Step-5-Preview-w8a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/) |
+| Step-5-Preview | [Hugging Face](https://huggingface.co/StepFun/Step-5-Preview) |
+| Step-5-Preview-w8a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
-This document uses the quantized [Step-5-Preview-w8a8](https://www.modelscope.cn/models/Eco-Tech/) weights, which are about 600 GB. Download the weights to the local disk.
+This document uses the quantized [Step-5-Preview-w8a8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -71,7 +71,7 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 #### Download Docker Image
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:
+docker pull quay.io/ascend/vllm-ascend:step5-a5
 ```
 
 After a successful download, check the existing images:
@@ -80,7 +80,7 @@ After a successful download, check the existing images:
 docker images | grep 
 ```
 
-The output should contain the downloaded `quay.io/ascend/vllm-ascend:`.
+The output should contain the downloaded `quay.io/ascend/vllm-ascend:step5-a5`.
 
 #### Create Docker Container
 
@@ -134,7 +134,7 @@ docker exec -it ${CONTAINER_NAME} bash
 
 !!! note
 
-    Step 5 Preview is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
+    Step 5 Preview is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
 ## 5 Online Service Deployment
 
@@ -262,7 +262,7 @@ INFO:     [IP]:[PORT] - "POST /v1/chat/completions HTTP/1.1" 200 OK
 The expected result is as follows:
 
 ```text
-{"id":"chatcmpl-84c57a059e1d510c","object":"chat.completion","created":1787890448,"model":"step","choices":[{"index":0,"message":{"role":"assistant","content":"Okay, I'm the user asking \"Who are you?\" and I need to respond according to my identity and behavioral guidelines. First, my identity is Hunyuan, a large model developed by Tencent. The user's question directly asks about my identity, so I should clearly state who I am without extra information. Based on the core constraints, when the question involves identity confirmation, I need to clearly explain my identity and developer. Also, the user didn't mention any other functions or context, so keeping it concise is fine. Check if there's anything that needs clarification, like whether the user wants to know about features, but the current question is simply an identity inquiry, so a direct answer is enough. Make sure the response meets the format requirements, no markdown, and keep it natural and conversational.</think:opensource>I am Hunyuan, a large model developed by Tencent.","refusal":null,"annotations":null,"audio":null,"function_call":null,"reasoning":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":"vllm-0.23.0-tp16-dp2-ep-36628cea","usage":{"prompt_tokens":25,"total_tokens":201,"completion_tokens":176,"prompt_tokens_details":null,"completion_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null}
+{"id":"chatcmpl-841116b5d418bc5e","object":"chat.completion","created":1792032337,"model":"step","choices":[{"index":0,"message":{"role":"assistant","content":"Hmm, the user is asking a straightforward question about my identity. This is a common first interaction, so I should give a clear and concise introduction. \n\nI need to state my name, my developer, and my primary function. It’s also good to mention my capabilities briefly to set expectations. Since the user didn’t specify a language, I’ll respond in English as the query is in English. \n\nI’ll keep it friendly but professional, ending with an offer to help to encourage further interaction. No need for extra details unless the user asks follow-ups.</think>Hello! I’m Step, a large language model developed by **StepFun** (also known as 阶跃星辰). I’m designed to understand and generate natural language, as well as perform multi‑modal reasoning—meaning I can work with text, images, and other types of inputs.  \n\nMy main abilities include:  \n- **Knowledge Q&A** – providing factual and explanatory answers  \n- **Logical reasoning** – solving math, code, and analytical problems  \n- **Creative writing** – helping with stories, ideas, and content  \n- **Document & image analysis** – understanding and interpreting visual or textual information  \n\nI’m here to be helpful, honest, and respectful, while keeping your privacy in mind. If you have any questions or tasks, just let me know—I’m happy to assist! 😊","refusal":null,"annotations":null,"audio":null,"function_call":null,"reasoning":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":"vllm-0.1.dev1+g5d7f9124d-tp4-dp4-ep-d6653654","usage":{"prompt_tokens":15,"total_tokens":303,"completion_tokens":288,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}
 ```
 
 ## 7 Accuracy Evaluation
