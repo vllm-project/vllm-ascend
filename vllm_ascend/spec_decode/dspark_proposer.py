@@ -186,6 +186,11 @@ class AscendDSparkProposer(AscendDflashProposer):
             for attn_group in self.draft_attn_groups:
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
+                    # Register the exact per-request query count first so the
+                    # buffer quota and the triton capacity grid agree: anchor
+                    # sampling drafts spec queries per request, the non-anchor
+                    # path drafts spec+1.
+                    builder.set_dspark_num_query_per_req(self.num_query_per_req)
                     builder.enable_dspark_device_metadata(self.max_query_tokens)
                 else:
                     from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
