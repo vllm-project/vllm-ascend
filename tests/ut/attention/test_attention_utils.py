@@ -56,8 +56,8 @@ def test_get_flashmla_ops_returns_none_when_ops_submodule_is_missing(monkeypatch
 
 def test_get_flashmla_ops_requires_both_callable_apis(monkeypatch):
     ops = SimpleNamespace(
-        flash_mla_with_kvcache=MagicMock(),
-        flash_mla_with_kvcache_metadata=None,
+        flash_mla=MagicMock(),
+        flash_mla_metadata=None,
     )
     import_module = MagicMock(return_value=ops)
     monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
@@ -70,8 +70,8 @@ def test_get_flashmla_ops_returns_both_callable_apis(monkeypatch):
     attention_op = MagicMock()
     metadata_op = MagicMock()
     ops = SimpleNamespace(
-        flash_mla_with_kvcache=attention_op,
-        flash_mla_with_kvcache_metadata=metadata_op,
+        flash_mla=attention_op,
+        flash_mla_metadata=metadata_op,
     )
     import_module = MagicMock(return_value=ops)
     monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)

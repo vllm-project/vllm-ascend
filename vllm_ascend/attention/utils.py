@@ -56,8 +56,8 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
             return None
         raise
 
-    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
-    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    attention_op = getattr(ops, "flash_mla", None)
+    metadata_op = getattr(ops, "flash_mla_metadata", None)
     if callable(attention_op) and callable(metadata_op):
         return attention_op, metadata_op
     return None
