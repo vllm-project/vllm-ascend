@@ -22,7 +22,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
 
 ## How to use
 
@@ -49,12 +48,17 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
-| `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
+| `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
+| `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
+| `runtime_config_hot_reload`         | bool | `false` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
+| `runtime_config`                    | dict | `None`  | Startup overlay merged into runtime config defaults (detectors, dump quota, report flags). |
+| `runtime_report_dir`                | str  | `None`  | Override report root directory. Default: `<cwd>/runtime/report`. |
+| `runtime_dump_dir`                 | str  | `None`  | Seed KV dump root (`dump.dump_dir`). Default derived from report root. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
@@ -62,7 +66,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
-| `c8_enable_reshape_optim`           | bool | `True`  | Whether to use the StoreKVBlock operator to accelerate LightningIndexer C8 cache writes. When enabled, the optimization takes effect only when SFA and LightningIndexer C8 are active on a PD prefill (P) node. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
@@ -71,12 +74,12 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled. Enabling it automatically enables FlashComm.|
-| `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. The legacy `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is kept for compatibility. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
-| `enable_pcp_o_proj_weight_sharding`        | bool | `False` | Whether SFA-PCP shards the O-proj weight across the PCP group at load time and switches between PCP-local and gathered weight views at runtime. This option does not affect DSA-CP, whose original policy remains fixed: prefill gathers the full O-proj weight and decode uses the local weight. This option must be set when the server starts. |
-| `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with fine-grained TP for these modules. |
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable DSA-CP for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. Supported only with Model Runner V1 and requires sequence parallelism. Enabling it automatically enables FlashComm. Setting this option to `true` with Model Runner V2 raises a configuration error; use [PCP](../feature_guide/context_parallel.md#prefill-context-parallel) instead. |
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
+| `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
+| `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
@@ -85,8 +88,34 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
-> [!WARNING]
-> With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict. See [issue #15896](https://github.com/vllm-project/vllm-ascend/issues/15896) for details.
+<span id="runtime_guard"></span>**runtime_guard**
+
+Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM-Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
+| `runtime_config_hot_reload` | bool | `false` | Enable hot-reload (startup-only; not a JSON field). `false` = static config after startup. |
+| `runtime_config` | dict | `None` | Startup overlay: `defaults ← runtime_config`. Bootstrap overwrites the JSON file with this effective config. Hot-reload re-reads the JSON file only. |
+| `runtime_report_dir` | str | `None` | Report and KV dump root. Default `<cwd>/runtime/report`. |
+| `runtime_dump_dir` | str | `None` | Seed `dump.dump_dir` at startup; JSON hot-reload of `dump.dump_dir` wins afterwards. |
+
+Example (online):
+
+```bash
+vllm serve Qwen/Qwen3-8B --additional-config '{
+  "runtime_config_path": "/data/runtime/config/runtime_config.json",
+  "runtime_config_hot_reload": true,
+  "runtime_config": {
+    "detector": {
+      "token_repeat": { "enabled": true, "on_trigger": ["report", "dump_kv"] }
+    },
+    "dump": { "auto_max_times": 3 }
+  }
+}'
+```
+
+Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`.
 
 **xlite_graph_config**
 
@@ -99,10 +128,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of lm_head.    |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of embedding. |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of mlp.       |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -319,10 +348,10 @@ An example of additional configuration is as follows:
 ```python
 {
     "finegrained_tp_config": {
-        "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,
-        "embedding_tensor_parallel_size": 8,
         "mlp_tensor_parallel_size": 8,
+        "lmhead_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,

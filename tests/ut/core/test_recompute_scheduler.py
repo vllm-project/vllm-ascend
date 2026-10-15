@@ -358,7 +358,7 @@ def test_schedule_waits_for_encoder_cache_on_running_and_resumed_requests(resume
     assert request.num_computed_tokens == original_computed
     assert request.request_id not in output.num_scheduled_tokens
     if resume_with_retained_kv:
-        assert request in scheduler.skipped_waiting
+        assert request in scheduler.kv_holding_waiting
         assert request.status == RequestStatus.PREEMPTED
     else:
         assert request in scheduler.running

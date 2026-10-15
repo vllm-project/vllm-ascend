@@ -15,6 +15,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
     AscendIndexerKPoolTailBackend,
+    AscendIndexerKPoolTailMetadataBuilder,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -32,6 +33,11 @@ from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
     get_kpool_tail_ring_capacity,
 )
+
+
+@pytest.fixture(autouse=True)
+def default_dsa_cp_disabled(monkeypatch):
+    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: False)
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -124,7 +130,7 @@ def test_tail_manager_retains_one_private_block_until_free():
     pool = BlockPool(12, True, 4)
     manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
     initially_free = pool.get_num_free_blocks()
-    assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000) == 1
+    assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000, prefill_end=1000) == 1
     a = manager.allocate_new_blocks("a", 1000, 1000)
     b = manager.allocate_new_blocks("b", 3, 3)
     assert len(a) == len(b) == 1
@@ -133,7 +139,9 @@ def test_tail_manager_retains_one_private_block_until_free():
         assert manager.allocate_new_blocks("a", tokens, tokens) == []
         manager.remove_skipped_blocks("a", tokens)
         assert manager.req_to_blocks["a"] == a
-        assert manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens) == 0
+        assert (
+            manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens, prefill_end=1000) == 0
+        )
     request = SimpleNamespace(request_id="a")
     manager.cache_blocks(request, 131072)
     manager.cache_blocks(request, 131072, replay_boundary=16)
@@ -226,6 +234,65 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     assert refreshed.block_table.data_ptr() == address
     torch.testing.assert_close(refreshed.block_table, common.block_table_tensor[:1])
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
+
+
+def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatch):
+    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: True)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.indexer_kpool.get_tp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=256),
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+        model_version="glm5_next",
+    )
+    tail_spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+    tail_builder = AscendIndexerKPoolTailMetadataBuilder(
+        tail_spec, ["layer.indexer.tail_cache"], config, torch.device("cpu")
+    )
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_input_tokens=5,
+        num_actual_tokens=5,
+        query_start_loc=torch.tensor([0, 4, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([4, 1], dtype=torch.int32),
+        _seq_lens_cpu=None,
+        seq_lens_cpu=None,
+        positions=torch.tensor([0, 1, 2, 3, 0]),
+        slot_mapping=torch.tensor([0, 1, 2, 3, 128]),
+        block_table_tensor=torch.tensor([[0], [1]], dtype=torch.int32),
+    )
+    metadata = builder.build(0, common)
+    tail = tail_builder.build(0, common)
+    assert metadata.positions.tolist() == [0, 1, 2, 3, 0, 0]
+    assert metadata.slot_mapping.tolist() == [-1, -1, -1, 0, -1, -1]
+    assert metadata.cum_query_lens.tolist() == [4, 5]
+    query = metadata.query_metadata
+    assert query.num_actual_tokens == 2
+    assert query.positions.tolist() == [3, 0, 0]
+    assert query.cum_query_lens.tolist() == [1, 2]
+    assert tail.slot_mapping.tolist() == [0, 1, 2, 3, 128, -1]
+    refreshed = builder.build(0, common).query_metadata
+    assert refreshed.cum_query_lens.data_ptr() == query.cum_query_lens.data_ptr()
+    assert refreshed.positions.data_ptr() == query.positions.data_ptr()
+    assert tail_builder.build(0, common).slot_mapping.data_ptr() == tail.slot_mapping.data_ptr()
 
 
 def test_model_cache_layers_publish_source_compatible_specs():

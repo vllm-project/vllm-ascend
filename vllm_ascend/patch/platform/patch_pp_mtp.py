@@ -226,12 +226,7 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        next_spec_token_ids = spec_token_ids[req_index]
-        if scheduler.structured_output_manager.should_advance(request):
-            metadata = request.structured_output_request
-            assert metadata is not None and metadata.grammar is not None
-            next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
-        request.spec_token_ids = next_spec_token_ids
+        request.spec_token_ids = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
 
 
 def _patch_scheduler_update_from_output() -> None:
@@ -311,7 +306,9 @@ def _patch_model_config_validation() -> None:
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
         is_mtp_drafter = model_type in mtp_model_types
-        is_dspark_drafter = any(arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in architectures)
+        is_dspark_drafter = any(
+            arch in {"DSparkDraftModel", "K3DSparkModel", "Qwen3DSparkModel"} for arch in architectures
+        )
         if (
             getattr(self, "runner", None) == "draft"
             and (is_eagle_drafter or is_mtp_drafter or is_dspark_drafter)

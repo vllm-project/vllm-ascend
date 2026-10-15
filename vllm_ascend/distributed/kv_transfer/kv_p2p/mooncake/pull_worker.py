@@ -12,6 +12,7 @@ import msgspec
 import torch
 import zmq
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -137,7 +138,7 @@ class MooncakePullRecvingThread(threading.Thread):
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
         self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
-        self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
         assert self.local_metadata is not None
@@ -151,14 +152,17 @@ class MooncakePullRecvingThread(threading.Thread):
         if requests:
             self.request_queue.put((remote_engine_id, requests))
 
-    def get_and_clear_finished_requests(self) -> set[str]:
-        """Drain requests whose transfer attempt has completed."""
-        finished: set[str] = set()
+    def get_and_clear_finished_requests(self) -> KVConnectorTransferResults:
+        """Drain completion and failure together for each finished request."""
+        results = KVConnectorTransferResults()
         while True:
             try:
-                finished.add(self.finished_requests.get_nowait())
+                request_id, failed = self.finished_requests.get_nowait()
             except queue.Empty:
-                return finished
+                return results
+            results.finished_recving.add(request_id)
+            if failed:
+                results.failed_recving.add(request_id)
 
     def get_and_clear_invalid_block_ids(self) -> set[int]:
         """Drain local block IDs affected by failed pull attempts."""
@@ -173,6 +177,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event.set()
         while True:
             remote_engine_id, requests = self.request_queue.get()
+            failed_request_ids: set[str] = set()
             request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
                 remote_host, remote_port = self._get_remote_endpoint(request_endpoints)
@@ -185,18 +190,20 @@ class MooncakePullRecvingThread(threading.Thread):
                 for request_id in failed_request_ids:
                     self._mark_request_failed(requests[request_id])
             except Exception as exc:
+                failed_request_ids = set(requests)
                 if self.can_report_invalid_block_ids:
                     for request_metadata in requests.values():
                         self._mark_request_failed(request_metadata)
                 logger.exception(
-                    "Mooncake pull failed for remote engine %s at %s: %s",
+                    "Mooncake pull failed for remote engine %s at %s, marking batch requests failed: %s; error=%s",
                     remote_engine_id,
                     sorted(request_endpoints),
+                    sorted(failed_request_ids),
                     exc,
                 )
             finally:
                 for request_id in requests:
-                    self.finished_requests.put(request_id)
+                    self.finished_requests.put((request_id, request_id in failed_request_ids))
                 self.request_queue.task_done()
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
@@ -592,14 +599,7 @@ class MooncakePullRecvingThread(threading.Thread):
                     remote_tp_rank,
                     sorted(request_ids),
                 )
-                if self.can_report_invalid_block_ids:
-                    failed_request_ids.update(request_ids)
-                else:
-                    logger.warning(
-                        "Ignoring Mooncake transfer failure for hybrid KV cache requests %s because "
-                        "vLLM invalid block reporting currently supports only one KV cache group",
-                        sorted(request_ids),
-                    )
+                failed_request_ids.update(request_ids)
 
         if submission_error is not None:
             raise submission_error
@@ -1590,12 +1590,13 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             for remote_engine_id, requests in request_groups.items():
                 self._recving_thread.add_requests(remote_engine_id, requests)
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
-        """Return requests with completed receive and send operations."""
-        finished_recving = (
-            self._recving_thread.get_and_clear_finished_requests() if self._recving_thread is not None else set()
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Return completed receives, including their failure status."""
+        return (
+            self._recving_thread.get_and_clear_finished_requests()
+            if self._recving_thread is not None
+            else KVConnectorTransferResults()
         )
-        return set(), finished_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return local block IDs whose pull operations failed."""

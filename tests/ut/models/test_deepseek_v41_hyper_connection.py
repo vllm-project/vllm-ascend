@@ -153,7 +153,8 @@ def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
     layer.post_attention_layernorm = norm
 
     with (
-        patch("vllm_ascend.models.deepseek_v41.model.enable_custom_op", return_value=True),
+        patch("vllm_ascend.utils.enable_custom_op", return_value=True),
+        patch("vllm_ascend.device.device_op.get_current_hardware_profile") as profile,
         patch.object(
             torch.ops._C_ascend,
             "npu_rms_norm_cast",
@@ -161,6 +162,7 @@ def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
             return_value=(normalized, normalized_fp32),
         ) as op,
     ):
+        profile.return_value.supports.return_value = True
         actual, actual_fp32 = layer.rms_norm_cast(x)
 
     assert actual is normalized

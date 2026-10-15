@@ -1,3 +1,4 @@
+import ctypes
 import inspect
 import math
 import os
@@ -854,15 +855,25 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(queued["num_computed_tokens"], 0)
 
     def test_mark_and_is_failed(self):
-        self.thread._mark_failed_recv_request("req1", [[10, 20]])
-        self.assertTrue(self.thread._is_failed_recv_request("req1"))
-        self.assertIn(10, self.thread.invalid_block_ids)
-        self.assertIn(20, self.thread.invalid_block_ids)
+        for request_level in (False, True):
+            with self.subTest(request_level=request_level):
+                self.thread.use_request_level_recv_errors = request_level
+                self.thread._mark_failed_recv_request("req1", [[10, 20]])
+                self.assertTrue(self.thread._is_failed_recv_request("req1"))
+                self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), set() if request_level else {10, 20})
 
-    def test_clear_failed_recv_request(self):
-        self.thread._mark_failed_recv_request("req2", [[30]])
-        self.thread._clear_failed_recv_request("req2")
-        self.assertFalse(self.thread._is_failed_recv_request("req2"))
+    def test_get_and_clear_failed_recv_requests(self):
+        for request_level in (False, True):
+            with self.subTest(request_level=request_level):
+                self.thread.use_request_level_recv_errors = request_level
+                self.thread._mark_failed_recv_request("req2", [[30]])
+                self.assertEqual(self.thread.get_and_clear_failed_recv_requests(set()), set())
+                self.assertTrue(self.thread._is_failed_recv_request("req2"))
+                self.assertEqual(
+                    self.thread.get_and_clear_failed_recv_requests({"req2"}), {"req2"} if request_level else set()
+                )
+                self.assertFalse(self.thread._is_failed_recv_request("req2"))
+                self.assertEqual(self.thread.get_and_clear_failed_recv_requests({"req2"}), set())
 
     def test_get_and_clear_invalid_block_ids(self):
         self.thread.invalid_block_ids = {1, 2, 3}
@@ -1397,6 +1408,35 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[2], [0x3000 + 3 * 4096, 0x3000 + 4 * 4096])
         self.assertEqual(call_args[3], [1024, 1024])
         mock_get_meta.assert_not_called()
+
+    def test_transfer_combined_attention_views_preserves_unselected_blocks(self):
+        # Match MRv1's block-major allocation, with different P/D block counts.
+        remote = torch.arange(6 * 2 * 4, dtype=torch.float32, device="cpu").view(6, 2, 2, 1, 2).permute(1, 0, 2, 3, 4)
+        local = torch.full((5, 2, 2, 1, 2), -1.0, dtype=torch.float32, device="cpu").permute(1, 0, 2, 3, 4)
+        local_views = MooncakeConnectorWorker._as_kv_cache_tuple(local)
+        remote_views = MooncakeConnectorWorker._as_kv_cache_tuple(remote)
+        self.assertEqual(len(local_views), 2)
+        self.assertEqual(len(remote_views), 2)
+        self.thread.kv_caches_base_addr["local_engine"][5555] = [[view.data_ptr() for view in local_views]]
+        self.thread.kv_caches_base_addr["remote_engine"][6666] = [[view.data_ptr() for view in remote_views]]
+        self.thread.block_len_per_addr = [[view[0].numel() * view.element_size() for view in local_views]]
+        self.thread.block_stride_per_addr = [[view.stride(0) * view.element_size() for view in local_views]]
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [
+            [view.stride(0) * view.element_size() for view in remote_views]
+        ]
+        self.thread.block_size_scale = [[1, 1]]
+        req = dict(self.test_req, local_block_ids=[[1, 2, 4]], remote_block_ids=[[2, 3, 5]])
+        self.thread._transfer_kv_cache_all_groups(req)
+
+        _, local_addrs, remote_addrs, lengths = self.engine.batch_transfer_sync_read.call_args.args
+        self.assertEqual(local_addrs, [local[kv, block].data_ptr() for kv in range(2) for block in (1, 2, 4)])
+        self.assertEqual(remote_addrs, [remote[kv, block].data_ptr() for kv in range(2) for block in (2, 3, 5)])
+        self.assertEqual(lengths, [16] * 6)
+        # Replay the actual transfer descriptors against CPU memory.
+        for local_addr, remote_addr, length in zip(local_addrs, remote_addrs, lengths):
+            ctypes.memmove(local_addr, remote_addr, length)
+        torch.testing.assert_close(local[:, [1, 2, 4]], remote[:, [2, 3, 5]])
+        self.assertTrue(torch.all(local[:, [0, 3]] == -1))
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_replicated_indexer_when_regular_kv_shard_is_empty(self, mock_get_meta):
@@ -2206,17 +2246,27 @@ def test_worker_role_drains_only_its_completion_and_error_channel(role):
     worker.kv_recv_thread = receiver
     sender.get_and_clear_finished_requests.side_effect = [{"sent"}, set()]
     receiver.get_and_clear_finished_requests.side_effect = [{"received"}, set()]
+    receiver.get_and_clear_failed_recv_requests.side_effect = [{"received"}, set()]
     receiver.get_and_clear_invalid_block_ids.side_effect = [{7}, set()]
 
-    assert worker.get_finished() == (({"sent"}, set()) if role == "kv_producer" else (set(), {"received"}))
+    results = worker.get_transfer_results()
+    assert (results.finished_sending, results.finished_recving) == (
+        ({"sent"}, set()) if role == "kv_producer" else (set(), {"received"})
+    )
+    assert results.failed_recving == (set() if role == "kv_producer" else {"received"})
     assert worker.get_finished() == (set(), set())
     assert worker.get_block_ids_with_load_errors() == (set() if role == "kv_producer" else {7})
     assert worker.get_block_ids_with_load_errors() == set()
     if role == "kv_producer":
         receiver.get_and_clear_finished_requests.assert_not_called()
+        receiver.get_and_clear_failed_recv_requests.assert_not_called()
         receiver.get_and_clear_invalid_block_ids.assert_not_called()
     else:
         sender.get_and_clear_finished_requests.assert_not_called()
+        assert [call.args[0] for call in receiver.get_and_clear_failed_recv_requests.call_args_list] == [
+            {"received"},
+            set(),
+        ]
 
 
 def test_tracker_completion_is_consumed_by_only_one_reader():
@@ -2502,6 +2552,19 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
 
 
 class TestHelperFunctions(unittest.TestCase):
+    def test_kv_cache_normalization_keeps_existing_state_and_kv_layouts(self):
+        # A leading size of two alone does not identify a combined K/V cache.
+        single_caches = [torch.empty(2, 4, 1, 2), torch.empty(2, 3, 5), torch.empty(2, 8)]
+        for cache in single_caches:
+            views = MooncakeConnectorWorker._as_kv_cache_tuple(cache)
+            self.assertEqual(len(views), 1)
+            self.assertIs(views[0], cache)
+        for caches in (single_caches[:2], tuple(single_caches[:2])):
+            views = MooncakeConnectorWorker._as_kv_cache_tuple(caches)
+            self.assertEqual(len(views), 2)
+            for view, cache in zip(views, caches):
+                self.assertIs(view, cache)
+
     def test_group_concurrent_contiguous(self):
         src: list[int] = [1, 2, 3, 5, 6]
         dst: list[int] = [10, 11, 12, 14, 15]
@@ -3225,6 +3288,31 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(len(worker.kv_caches), 1)
         self.assertIsNotNone(worker.kv_send_thread)
         self.assertIsNone(worker.kv_recv_thread)
+
+    def test_register_combined_attention_cache_preserves_views_and_kernel_scale(self):
+        for num_blocks in (2, 5):
+            for scale in (1, 3):
+                for block_major in (False, True):
+                    with self.subTest(num_blocks=num_blocks, scale=scale, block_major=block_major):
+                        kernel_blocks = num_blocks * scale
+                        if block_major:
+                            cache = torch.empty(kernel_blocks, 2, 16, 1, 2, dtype=torch.float32).permute(1, 0, 2, 3, 4)
+                        else:
+                            cache = torch.empty(2, kernel_blocks, 16, 1, 2, dtype=torch.float32)
+                        worker = MooncakeConnectorWorker(
+                            self.vllm_config, self.engine_id, MockKVCacheConfig(num_blocks=num_blocks)
+                        )
+                        worker.register_kv_caches({"model.layers.0.self_attn": cache})
+                        metadata = worker.xfer_handshake_metadata
+                        self.assertEqual(metadata.block_size_scale, [[scale, scale]])
+                        self.assertEqual(metadata.block_lens, [[128, 128]])
+                        self.assertEqual(metadata.block_strides, [[256, 256] if block_major else [128, 128]])
+                        self.assertEqual(metadata.kv_caches_base_addr, [[cache[0].data_ptr(), cache[1].data_ptr()]])
+                        views = worker._as_kv_cache_tuple(cache)
+                        for index, view in enumerate(views):
+                            self.assertEqual(view.stride(), cache[index].stride())
+                            self.assertEqual(view.untyped_storage().data_ptr(), cache.untyped_storage().data_ptr())
+                            self.assertEqual(view.is_contiguous(), not block_major)
 
     def test_missing_parallel_fields_reject_before_backend_creation(self):
         module = sys.modules[MooncakeConnectorWorker.__module__]

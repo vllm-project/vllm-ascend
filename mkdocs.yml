@@ -143,6 +143,7 @@ extra_css:
 extra_javascript:
   - javascripts/mathjax.js
   - javascripts/tabbed-toc.js
+  - javascripts/table-fullscreen.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
@@ -212,6 +213,7 @@ nav:
         - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
         - tutorials/models/SigLIP2.md
+        - tutorials/models/Step-5-Preview.md
         - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
@@ -267,6 +269,10 @@ nav:
     - faqs.md
   - User Guide:
     - user_guide/index.md
+    - Deployment Guide:
+        - user_guide/deployment_guide/index.md
+        - user_guide/deployment_guide/using_mindie_motor.md
+        - user_guide/deployment_guide/using_volcano_kthena.md
     - Features and Models:
         - user_guide/support_matrix/index.md
         - user_guide/support_matrix/supported_models.md
@@ -276,6 +282,7 @@ nav:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
+        - user_guide/configuration/runtime_config.md
         - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
@@ -284,18 +291,20 @@ nav:
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/runtime_guard.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
-        - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/kv_cache_pool_ascend_store.md
         - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
         - user_guide/feature_guide/mooncake_hybrid_attention.md
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kvpp.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
+        - user_guide/feature_guide/encoder_cache_cpu_offload.md
         - user_guide/feature_guide/preempt_offload_connector.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
@@ -312,10 +321,6 @@ nav:
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
         - user_guide/feature_guide/rl.md
-    - Deployment Guide:
-        - user_guide/deployment_guide/index.md
-        - user_guide/deployment_guide/using_volcano_kthena.md
-        - user_guide/deployment_guide/using_mindie_motor.md
     - user_guide/release_notes.md
   - Developer Guide:
     - developer_guide/index.md
@@ -328,6 +333,7 @@ nav:
         - developer_guide/contribution/e2e_ci_test.md
     - Design Documents:
         - developer_guide/Design_Documents/index.md
+        - developer_guide/Design_Documents/persistent_csrc_build_cache.md
         - developer_guide/Design_Documents/patch.md
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
@@ -338,6 +344,7 @@ nav:
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/kvpp.md
+        - developer_guide/Design_Documents/non_contiguous_kv_cache.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md
         - developer_guide/Design_Documents/context_parallel.md
         - developer_guide/Design_Documents/balance_schedule_refactor.md

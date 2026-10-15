@@ -85,7 +85,7 @@ Reviewers must verify:
 
 **Test Coverage Guidelines:**
 
-- New features: Tests must cover happy path and failure modes
+- New features: Tests must cover happy path, failure modes, and boundary / edge-case scenarios (e.g., empty input, single/zero element, min/max values, off-by-one, sequence-length limits, overflow)
 - Bug fixes: Tests must include a regression test for the bug
 - Performance-critical code: Include benchmarks and performance regression tests
 
@@ -360,6 +360,7 @@ Before merging, verify:
 ### Testing
 
 - [ ] New tests added for new functionality (`tests/ut/` or `tests/e2e/`)
+- [ ] **Boundary / edge-case scenarios reviewed and covered** (e.g., empty input, single/zero element, min/max values, off-by-one, sequence-length limits, overflow). If the change involves boundary conditions, corresponding unit tests have been added
 - [ ] Existing tests pass
 - [ ] NPU-specific tests verified on actual hardware
 - [ ] Performance benchmarks included where applicable

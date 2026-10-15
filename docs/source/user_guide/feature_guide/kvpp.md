@@ -121,11 +121,44 @@ Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consume
 
 Each worker uses a handshake port derived from `kv_port` and its parallel rank. Choose non-overlapping port ranges when both nodes run on one host.
 
+### Combining Connectors
+
+Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector`.
+KVPP validates the type and role of each child connector.
+Set the P/D connector to `kv_producer` and enable KVPP only on the prefill node;
+child roles are configured independently of the wrapper role.
+The pooling backend still requires its own SDK and service configuration.
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {
+        "kv_connector": "MooncakeConnectorV2",
+        "kv_role": "kv_producer",
+        "kv_port": 37000
+      },
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "kv_producer",
+        "kv_connector_extra_config": {
+          "backend": "memcache",
+          "lookup_rpc_port": "0",
+          "use_layerwise": false
+        }
+      }
+    ]
+  }
+}
+```
+
 ### Memcache Pooling
 
 KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
 
-Configure the memcache SDK and MetaService as described in [KV Pool](kv_pool.md), then add:
+Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
 
 ```bash
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'

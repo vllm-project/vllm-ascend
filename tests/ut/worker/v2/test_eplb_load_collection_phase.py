@@ -9,8 +9,9 @@ import torch
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
-from vllm_ascend.distributed.eplb.state import AscendEplbState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
     is_eplb_load_collection_phase_matched,
@@ -44,9 +45,12 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
     def _make_controller(load_collection_phase="all", log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=True,
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
                 policy=policy,
+                communicator="torch_gloo",
             ),
         )
         controller = AscendEPLBController(
@@ -85,6 +89,15 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         mapping = torch.zeros((1, 1), dtype=torch.int32)
         state = MagicMock()
 
+        if not vllm_version_is("0.31.0"):
+            controller.state = state
+            with patch.object(AscendEplbState, "from_mapping") as from_mapping:
+                controller.setup_from_mapping(model_config, mapping)
+            state.update_mapping.assert_called_once_with(model_config, mapping)
+            from_mapping.assert_not_called()
+            self.assertIs(controller.state, state)
+            return
+
         with (
             patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
             patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
@@ -102,6 +115,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
+    @unittest.skipUnless(vllm_version_is("0.31.0"), "verified main updates the existing mapping state")
     def test_setup_from_mapping_accepts_release_upstream_contract(self):
         controller = self._make_controller()
         model = MagicMock()
@@ -152,6 +166,9 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
     @staticmethod
     def _make_state(*, rearrangement_step=1):
         state = object.__new__(AscendEplbState)
+        state._hixl_session = None
+        state._close_error = None
+        state._suspended = False
         state.parallel_config = SimpleNamespace(
             enable_elastic_ep=False,
             eplb_config=SimpleNamespace(log_balancedness_interval=1),
@@ -231,11 +248,11 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.distributed.eplb.state.get_ep_group",
+                "vllm_ascend.distributed.eplb.eplb_state.get_ep_group",
                 return_value=ep_group,
             ),
             patch(
-                "vllm_ascend.distributed.eplb.state.all_reduce",
+                "vllm_ascend.distributed.eplb.eplb_state.all_reduce",
                 side_effect=set_remote_fresh_load,
             ) as sync_fresh_load,
         ):

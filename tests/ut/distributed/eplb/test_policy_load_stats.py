@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
-from vllm_ascend.distributed.eplb import state as state_module
+from vllm_ascend.distributed.eplb import eplb_state as state_module
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 def _custom_policy():
@@ -30,6 +30,8 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     upstream_step = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
     state.policy = _custom_policy()
     state.model_states = {"model": _model_state()}
     state.expert_load_window_size = 2

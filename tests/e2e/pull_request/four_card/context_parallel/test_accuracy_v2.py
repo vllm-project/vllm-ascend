@@ -215,8 +215,30 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
     },
 )
 
+DSV3_2_SFA_PCP_CPP_CASE = InferenceCase(
+    model=DSV3_2_MODEL,
+    prompts=ACCURACY_PROMPTS,
+    max_tokens=5,
+    runner_kwargs={
+        **DSV3_2_SFA_PCP_CASE.runner_kwargs,
+        # ProfilingChunk requires PP > 1. Keep this in the four-card suite with
+        # TP1 x PP2 x PCP2 while preserving the baseline SFA/PCP graph setup.
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 2,
+        "additional_config": {
+            "scheduler_config": {
+                "profiling_chunk_config": {
+                    "enabled": True,
+                    "smooth_factor": 1.0,
+                    "min_chunk": 1024,
+                }
+            }
+        },
+    },
+)
+
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
-    name="dsv3_2_sfa_pcp_dcp_replicated_indexer_mrv2_tp2_pcp2_dcp4",
+    name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=DSV3_2_SFA_DCP_GOLDENS,
@@ -235,11 +257,16 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
         "cp_kv_cache_interleave_size": 128,
         "block_size": 128,
         "quantization": "ascend",
-        "compilation_config": FULL_DECODE_GRAPH,
+        # MTP5 verifies six target tokens per request; capture 1-4 requests.
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [6, 12, 18, 24],
+        },
         "additional_config": {
             "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
         },
+        "speculative_config": {"method": "mtp", "num_speculative_tokens": 5},
     },
 )
 
@@ -300,6 +327,31 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
+    feature="sfa_pcp,profiling",
+    parallel="EP,PCP,PP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_cpp_model_runner_v2_graph() -> None:
+    """Guard MRV2 CPP startup profiling followed by SFA PCP inference."""
+    _run_inference_case(DSV3_2_SFA_PCP_CPP_CASE)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
     feature="sfa_pcp,chunked_prefill,prefix_caching",
     parallel="DP,EP,PCP",
     deploy="pd_mix",
@@ -350,7 +402,7 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="sfa_pcp",
+    feature="sfa_pcp,mtp",
     parallel="TP,EP,PCP,DCP",
     deploy="pd_mix",
     hardware="A3",
@@ -369,7 +421,7 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
-    """Guard MRV2 SFA PCP+DCP full-decode-only graph accuracy."""
+    """Guard MRV2 SFA PCP+DCP+MTP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
 
 

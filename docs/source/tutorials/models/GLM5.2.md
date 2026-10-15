@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
@@ -39,7 +45,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ## 4 Installation
 
 - You can use our official docker image to run GLM-5.2 directly.
-- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
+- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html)
 
 === "A3 series"
 
@@ -214,9 +220,8 @@ The parameters are explained as follows:
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -262,9 +267,8 @@ The parameters are explained as follows:
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -361,7 +365,7 @@ The parameters are explained as follows:
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
-In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) for the Mooncake configuration.
 
 ##### 5.1.3.1 Deployment on 4 Atlas 800 A3
 
@@ -761,6 +765,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--enforce-eager`: The prefill side runs in eager mode (the `FULL_DECODE_ONLY` graph capture is used on the decode side instead).
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
 - `fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
 
 **Decode node-specific configurations (d0/d1):**
 
@@ -1274,7 +1279,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1338,7 +1343,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \

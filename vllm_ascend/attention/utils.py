@@ -2,6 +2,8 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib import import_module
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -13,7 +15,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
@@ -25,6 +27,40 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
+# MLA models keep the FIA-compatible component-major cache layout on A5.
+# N1 is the post-TP local head count, not the global model configuration.
+MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+@lru_cache(maxsize=1)
+def _has_flashmla_module() -> bool:
+    """Whether the CANN ops-transformer distribution is discoverable."""
+    return find_spec("cann_ops_transformer") is not None
+
+
+def get_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two FlashMLA APIs in the active CANN operator package.
+
+    An absent package or API permits FIA selection before KV cache allocation.
+    Import failures inside an installed package remain errors rather than
+    silently selecting a different cache layout.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
+    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
 
 
 class PreprocessType(enum.Enum):
@@ -99,6 +135,20 @@ def get_sfa_qsfa_packed_head_dim(
         )
     scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
+
+
+def get_tq_packed_bytes(kv_lora_rank: int) -> int:
+    """Bytes of the int4-packed nope half of one TurboQuant 4-bit latent slot."""
+    return kv_lora_rank // 2
+
+
+def get_tq_fused_slot_bytes(kv_lora_rank: int, qk_rope_head_dim: int) -> int:
+    """Bytes of one fused TQ4 slot: int4 nope + bf16 rope + fp16 scale."""
+    return (
+        get_tq_packed_bytes(kv_lora_rank)
+        + qk_rope_head_dim * get_dtype_size(torch.bfloat16)
+        + get_dtype_size(torch.float16)
+    )
 
 
 @dataclass
@@ -177,7 +227,8 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    """Check any configured PA shape for KV allocation when runtime_shape is None."""
     if vllm_config.speculative_config is not None:
         return False
     if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
@@ -193,7 +244,23 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
     if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
-    return runtime_shape in get_ascend_config().pa_shape_list
+    pa_shape_list = get_ascend_config().pa_shape_list
+    return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
+
+
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    impl = getattr(layer, "impl", None)
+    return (
+        type(impl) is AscendAttentionBackendImpl
+        and impl.sliding_window is None
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and using_paged_attention(None, vllm_config, spec.head_size)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -262,16 +329,13 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Decode Context Parallelism (DCP) operations.
     context_parallel_metadata: AscendDCPMetadata | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
     req_topk_buffer_slots: torch.Tensor | None = None
-    req_topk_buffer_generations: torch.Tensor | None = None
+    req_topk_buffer_active: torch.Tensor | None = None
     copy_sfa_draft_index: int | None = None
     copy_sfa_restore_tails: bool = False
     offload_dummy: bool = False
@@ -284,6 +348,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
+    # Per-request replay start: 0 for every request that is not replaying, else
+    # where that request's replayed run begins. A backend clamps a replaying
+    # request's sliding-window lower bound to it: below that point the window's
+    # KV is not being rebuilt -- the replayed positions are padded on the
+    # cacheable groups -- and only the shared prefix is there. ``None`` means
+    # the same as all zeros; dummy/profiling/capture batches do not fill it.
+    replay_start: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -336,13 +408,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
-            req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
+            req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
+            replay_start=_slice_reqs(self.replay_start),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )

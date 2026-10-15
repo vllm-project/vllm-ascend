@@ -85,27 +85,33 @@ def _configure_backend(
     vllm_config: VllmConfig,
     process_kwargs_options: Callable | None = None,
 ) -> None:
-    if ascend_compilation_config.enable_static_kernel:
-        # npugraph_ex's static_kernel requires LOCAL_WORLD_SIZE to determine the
-        # physical node topology for creating per-node Gloo groups, which
-        # coordinate static kernel compilation and .run package installation.
-        # vLLM does not set this env var by default (unlike torchrun), so we
-        # compute it from parallel config:
-        #   local_world_size: processes per node for one DP replica
-        #   data_parallel_size_local: number of DP replicas on this node
-        #   actual_local_world_size: total processes on this physical machine
-        if "LOCAL_WORLD_SIZE" not in os.environ:
-            actual_local_world_size = (
-                vllm_config.parallel_config.local_world_size * vllm_config.parallel_config.data_parallel_size_local
-            )
-            os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
-            logger.info_once(
-                "Setting LOCAL_WORLD_SIZE=%d for static kernel (local_world_size=%d * data_parallel_size_local=%d).",
-                actual_local_world_size,
-                vllm_config.parallel_config.local_world_size,
-                vllm_config.parallel_config.data_parallel_size_local,
-                scope="global",
-            )
+    if ascend_compilation_config.enable_static_kernel and "LOCAL_WORLD_SIZE" not in os.environ:
+        # External DP config counts one replica; runtime topology includes all local ranks.
+        # shortcut: uniform workers and contiguous node ranks; revisit for other layouts.
+        parallel_config = vllm_config.parallel_config
+        actual_local_world_size = parallel_config.local_world_size * parallel_config.data_parallel_size_local
+        topology_source = "parallel_config"
+        if parallel_config.data_parallel_external_lb:
+            from vllm.distributed.parallel_state import get_node_count
+
+            runtime_world_size = torch.distributed.get_world_size()
+            node_count = get_node_count()
+            if runtime_world_size != parallel_config.world_size_across_dp:
+                raise RuntimeError("External DP static compilation requires the full DP worker world")
+            actual_local_world_size, remainder = divmod(runtime_world_size, node_count)
+            if remainder:
+                raise RuntimeError("Static compilation requires worker world size divisible by node count")
+            topology_source = f"runtime_world_size={runtime_world_size}, node_count={node_count}"
+        os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
+        logger.info_once(
+            "Setting LOCAL_WORLD_SIZE=%d for static kernel "
+            "(source=%s, local_world_size=%d, data_parallel_size_local=%d).",
+            actual_local_world_size,
+            topology_source,
+            parallel_config.local_world_size,
+            parallel_config.data_parallel_size_local,
+            scope="global",
+        )
 
     if process_kwargs_options is not None:
         # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.

@@ -191,8 +191,8 @@ def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor)
     ascend_ops = getattr(torch.ops, "_C_ascend", None)
     if q.device.type != "npu" or ascend_ops is None:
         raise RuntimeError("310P chunk_gated_delta_rule requires NPU AscendC kernels.")
-    if not (hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h") and hasattr(ascend_ops, "chunk_fwd_o_vllm")):
-        raise RuntimeError("Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o_vllm.")
+    if not (hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h_vllm") and hasattr(ascend_ops, "chunk_fwd_o_vllm")):
+        raise RuntimeError("Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h_vllm/chunk_fwd_o_vllm.")
     if q.dtype != torch.float16 or k.dtype != q.dtype or v.dtype != q.dtype:
         raise TypeError(f"q/k/v must share float16 dtype on 310P, got {q.dtype}, {k.dtype}, {v.dtype}.")
     if v.shape[-1] < 128 or v.shape[-1] % 128 != 0:
@@ -549,7 +549,7 @@ def chunk_gated_delta_rule_310(
         state = initial_state
     state_kernel = state.transpose(-1, -2).contiguous()
 
-    h, v_new, final_state_kernel = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state_kernel = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k_kernel,
         w_kernel,
         u_kernel,

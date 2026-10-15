@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import AttentionConfig
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -27,19 +28,52 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
-        attention_config=AttentionConfig(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, pipeline_parallel_size=1),
     )
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )
     spec.vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
     spec.num_query_per_req = 5
-    spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
+    spec.input_buffers = SimpleNamespace(
+        positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
+    )
     return spec
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
+    spec = make_speculator()
+    spec.replicated_pcp = replicated_pcp
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 20
+    batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
+    target_sync = SimpleNamespace(num_reqs=2 if replicated_pcp else 4)
+    monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
+
+    def parent_propose(self, *args, **kwargs):
+        sync = args[11]
+        if sync is not None:
+            # Execute the actual upstream capacity check, not a duplicate of it.
+            self._build_uniform_batch_dp_sync(sync, batch.num_reqs, self.num_query_per_req)
+        assert (sync is None) == replicated_pcp
+        return "draft"
+
+    if not replicated_pcp:
+        # The helper replaces the real DP state after checking capacity.
+        target_sync = DPSyncState(
+            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
+        )
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
+    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
 
 
 def make_target():
@@ -86,8 +120,9 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(block_size=128),
     )
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec = init_speculator(config, torch.device("cpu"))
@@ -227,20 +262,26 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args: tuple[Any, ...] = (
+    forward_args: tuple[Any, ...] = (
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
         [],
         object(),
         128,
-        False,
-        "capture",
     )
+    args = (*forward_args, False, "capture")
+    expected_kwargs = {
+        "causal": False,
+        "precompute_context_kv": "capture",
+        "progress_bar_desc": "Capturing CUDA graphs",
+    }
 
-    def capture(self, *received):
+    def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == args
+        assert received == forward_args
+        # The Ascend wrapper forwards the trailing options as keywords.
+        assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:
@@ -250,6 +291,40 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
     with pytest.raises(RuntimeError, match="capture failed") if fail else nullcontext():
         manager.capture(*args)
     assert events == ["enter communicator", "enter model", "capture", "exit model", "exit communicator"]
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
+    spec = make_speculator()
+    spec.use_dcp = use_dcp
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 20
+    input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True, True, True]))
+    captured: dict[str, Any] = {}
+    prepared_lengths = torch.tensor([12, 0, 0, 0], dtype=torch.int32)
+    prepared_flags = torch.zeros(4, dtype=torch.bool)
+    prepare = MagicMock(return_value=(prepared_lengths, prepared_flags))
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
+    monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
+
+    @contextmanager
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+        captured.update(is_prefilling=is_prefilling, seq_lens_cpu=seq_lens_cpu)
+        yield
+
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
+    monkeypatch.setattr(DSparkSpeculator, "propose", lambda self, *args, **kwargs: "draft")
+    result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
+
+    assert result == "draft"
+    if use_dcp:
+        prepare.assert_called_once_with(1, 4, 5)
+        assert captured["seq_lens_cpu"] is prepared_lengths
+        assert captured["is_prefilling"] is prepared_flags
+    else:
+        prepare.assert_not_called()
+        assert captured["seq_lens_cpu"] is None
+        assert captured["is_prefilling"].tolist() == [True] * 4
 
 
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
@@ -270,7 +345,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
     @contextmanager
     def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
-        assert seq_lens_cpu is None
+        if architecture == "MLA":
+            assert seq_lens_cpu.tolist() == [5, 0]
+        else:
+            assert seq_lens_cpu is None
         assert parallel_config is spec.vllm_config.parallel_config
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield

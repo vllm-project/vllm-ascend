@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.parallel_state import (
@@ -58,6 +59,44 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
+    """Whether NoPE and RoPE are component-major views of one MLA slot.
+
+    The supported geometry is ``[all NoPE][all RoPE][padding]`` inside each
+    physical slot.  Both views share one storage and first-axis stride, while
+    each component remains internally contiguous.  This is deliberately
+    different from a token-interleaved parent page, where NoPE and RoPE are
+    sliced along the trailing dimension of every token.
+    """
+    # Require the two-view MLA cache contract.
+    if not isinstance(spec, MLAAttentionSpec) or len(caches) != 2:
+        return False
+
+    nope, rope = caches
+    if nope.dtype != rope.dtype:
+        return False
+    # Both views must share one storage.
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        return False
+    # Their first-axis layout must match.
+    if nope.shape[0] != rope.shape[0] or nope.stride(0) != rope.stride(0):
+        return False
+
+    # Component-major views are 4-D and internally contiguous apart from the
+    # first-axis page stride.  A generic packed K/scale page or a token-
+    # interleaved parent does not satisfy both component strides.
+    if nope.ndim != 4 or rope.ndim != 4:
+        return False
+    # All axes other than the first axis must be contiguous.
+    if nope.stride(1) != nope.shape[2] * nope.shape[3]:
+        return False
+    if rope.stride(1) != rope.shape[2] * rope.shape[3]:
+        return False
+
+    nope_block_elems = nope.shape[1] * nope.shape[2] * nope.shape[3]
+    return rope.storage_offset() - nope.storage_offset() == nope_block_elems
 
 
 class MooncakeBaseConnectorWorker:
@@ -259,6 +298,19 @@ class MooncakeBaseConnectorWorker:
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
+                if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
+                    # MooncakeV2 is layout-agnostic: it only needs the raw
+                    # block's base address, length, and stride.  Publish the
+                    # complete physical slot as a flat byte descriptor instead
+                    # of the larger NoPE view's semantic shape.
+                    page_base_addr, page_stride, _, block_size_scale = shared_page_metadata
+                    element_size = caches[0].element_size()
+                    shared_page_metadata = (
+                        page_base_addr,
+                        page_stride,
+                        (page_stride // element_size,),
+                        block_size_scale,
+                    )
                 if shared_page_metadata is not None:
                     page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
                     base_addrs.append(page_base_addr)
@@ -338,7 +390,12 @@ class MooncakeBaseConnectorWorker:
         )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        """Return requests with completed receive and send operations."""
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Return completed transfers and receive failures together."""
         raise NotImplementedError
 
     def get_block_ids_with_load_errors(self) -> set[int]:
