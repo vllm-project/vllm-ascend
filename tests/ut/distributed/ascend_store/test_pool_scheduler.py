@@ -249,6 +249,65 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_max_tokens_zero_request_leaks_load_specs(self, mock_client_cls):
+        """Reproduce the max_tokens=0 metadata leak (CVE-2026-93436 pattern).
+
+        A max_tokens=0 request registers a load spec during pool lookup,
+        reaches update_state_after_alloc with num_external_tokens=0, and
+        finishes without ever being rescheduled. load specs are only popped
+        when a request is scheduled again (_process_new_request /
+        _process_preempted_cached_request / _process_async_load_request), and
+        build_connector_meta's finished cleanup pops every other per-request
+        dict (_request_trackers / _unfinished_requests /
+        _unfinished_request_ids) but never load_specs, so every such request
+        permanently grows the dict. Observing the dict length after each
+        finished request gives a deterministic, O(1) leak signal instead of
+        waiting for RSS to creep up.
+
+        Once the fix lands (pop load_specs for finished requests), flip the
+        final assertion to expect 0 and drop the per-iteration accumulation
+        check.
+        """
+        config = self._make_config(block_size=16)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = 32
+
+        num_requests = 1000
+        for i in range(num_requests):
+            req_id = f"r{i}"
+            request = MagicMock()
+            request.prompt_token_ids = list(range(64))
+            request.num_tokens = 64
+            request.request_id = req_id
+            request.block_hashes = [b"h"] * 4
+
+            need, _ = scheduler.get_num_new_matched_tokens(request, 0)
+            self.assertEqual(need, 32)
+
+            scheduler.update_state_after_alloc(request, MagicMock(), 0)
+
+            sched_output = MagicMock()
+            sched_output.finished_req_ids = {req_id}
+            sched_output.preempted_req_ids = set()
+            sched_output.scheduled_new_reqs = []
+            sched_output.num_scheduled_tokens = {}
+            sched_output.scheduled_cached_reqs = MagicMock()
+            sched_output.scheduled_cached_reqs.req_ids = []
+            scheduler.build_connector_meta(sched_output)
+
+            self.assertEqual(len(scheduler.load_specs), i + 1)
+
+        self.assertEqual(len(scheduler._unfinished_requests), 0)
+        self.assertEqual(len(scheduler._unfinished_request_ids), 0)
+        self.assertEqual(len(scheduler._request_trackers), 0)
+        self.assertEqual(
+            len(scheduler.load_specs),
+            num_requests,
+            f"{len(scheduler.load_specs)} load specs retained after "
+            f"{num_requests} finished max_tokens=0 requests",
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_request_finished_consumer_no_put(self, mock_client_cls):
         config = self._make_config(kv_role="kv_consumer")
         scheduler = KVPoolScheduler(config, use_layerwise=False)
