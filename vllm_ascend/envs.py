@@ -74,8 +74,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to anbale dynamic EPLB
-    "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable dynamic EPLB. Accepts "true"/"1" (case-insensitive);
+    # any other value (including unset) is treated as disabled. This
+    # configuration is not sensitive.
+    "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1"),
+    # When set to "true", record the expert map for EPLB. The raw string value
+    # is returned unchanged: some call sites compare against the exact string
+    # "true" while others also accept "1", and unifying them here would change
+    # behavior. This configuration is not sensitive.
+    "EXPERT_MAP_RECORD": lambda: os.getenv("EXPERT_MAP_RECORD", "false"),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
@@ -87,6 +94,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to explicitly enable FlashComm1. Accepts "1"/"true"
+    # (case-insensitive). Default: 0 (disabled). This configuration is not
+    # sensitive.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: (
+        os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+    ),
+    # Opt-in switch to defer the last layer's save drain out of the forward
+    # critical path in the layerwise KVPool load path. Default: 0 (disabled).
+    # This configuration is not sensitive.
+    "VLLM_ASCEND_LW_DEFER_LAST_SAVE": lambda: os.getenv("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1",
+    # Use dot(k, q) with [N, D] K load in the MiniMax M3 decode index-score
+    # kernel. Default: 0 (disabled). This configuration is not sensitive.
+    "VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ": lambda: os.getenv("VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ", "0") == "1",
 }
 
 # end-env-vars-definition
