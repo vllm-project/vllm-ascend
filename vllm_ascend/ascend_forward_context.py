@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.logger import logger
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -86,15 +87,26 @@ def get_mrv2_in_profile_run() -> bool:
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
-    return (
-        is_mega_moe_supported()
-        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
-        and get_ascend_config().enable_fused_mc2 == 1
+    mega_moe_available = is_mega_moe_supported()
+    can_megamoe = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
+    fused_mc2_enabled = get_ascend_config().enable_fused_mc2 == 1
+    supported = (
+        mega_moe_available
+        and can_megamoe
+        and fused_mc2_enabled
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
     )
+    logger.info_once(
+        "use_cann_megamoe=%s (mega_moe_available=%s, hw_supports_megamoe=%s, enable_fused_mc2=%s)",
+        supported,
+        mega_moe_available,
+        can_megamoe,
+        fused_mc2_enabled,
+    )
+    return supported
 
 
 @contextmanager
@@ -331,6 +343,12 @@ def _select_capacity_and_expert_density_moe_comm_method(
         and (is_prefill or in_profile_run)
         and (in_profile_run or (num_tokens is not None and num_tokens > _MEGAMOE_PREFILL_TOKEN_THRESHOLD))
     ):
+        logger.info_once(
+            "A2 MegaMoe fused prefill selected (num_tokens=%s, is_prefill=%s, in_profile_run=%s)",
+            num_tokens,
+            is_prefill,
+            in_profile_run,
+        )
         return MoECommType.FUSED_MC2
 
     if num_experts > 512:
