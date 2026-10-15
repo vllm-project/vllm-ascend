@@ -123,7 +123,7 @@ class LayerwiseRangeProbe:
                         assert offset + size <= previous or previous + snapshot.numel() <= offset, "Overlapping ranges"
                     self.stored[key][offset] = (layer, view.to("cpu", copy=True))
             result = self.original_copy_store(keys, addresses, sizes, offsets)
-            self._successful(keys, result)
+            self._copied_all_bytes(keys, sizes, result)
             return result
 
     def commit(self, keys: Sequence[str]) -> Any:
@@ -190,7 +190,7 @@ class LayerwiseRangeProbe:
             if any(view.device.type != "cpu" for view in destination_views):
                 torch.npu.synchronize()
             result = self.original_copy_load(keys, addresses, sizes, offsets)
-            self._successful(keys, result)
+            self._copied_all_bytes(keys, sizes, result)
             for key, pointers, starts in zip(keys, addresses, offsets, strict=True):
                 self.loaded[key].update(zip(starts, pointers, strict=True))
             return result
@@ -272,3 +272,11 @@ class LayerwiseRangeProbe:
     @staticmethod
     def _successful(keys: Sequence[str], results: Sequence[int]) -> None:
         assert tuple(results) == (0,) * len(keys), f"KeyRange operation failed: {results}"
+
+    @staticmethod
+    def _copied_all_bytes(keys: Sequence[str], sizes: Sequence[Sequence[int]], results: Sequence[int]) -> None:
+        # Range copies return bytes per key; session operations return zero on success.
+        expected = tuple(sum(lengths) for lengths in sizes)
+        assert len(expected) == len(keys) and tuple(results) == expected, (
+            f"KeyRange copy byte counts mismatch: expected={expected}, actual={results}"
+        )
