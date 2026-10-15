@@ -28,6 +28,16 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# LiLiCorr: worker/patch_lilicorr.py replaces LiLiCorrLatticeAttention.forward
+# with NPU tensor attention that preserves the learned per-head additive bias
+# and uses fp32 scores/softmax. It is loaded only by the LiLiCorr speculator.
+# It also replaces the upstream DFlashGroupedConv._convolve with NPU tensor
+# operations, preserving quantized projections and handling short query blocks.
+# Remove this patch when upstream lattice attention has a backend-dispatchable
+# implementation supporting arbitrary learned biases on Ascend.
+# Platform patch_use_v2_model_runner.py selects V2 for LiLiCorr when the runner
+# override is unset and rejects explicit V1 selection via feature validation.
+#
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
@@ -851,11 +861,12 @@
 #       compatibility checks. On Ascend the NPU v2 runner is not yet
 #       compatible with all upstream-defaulted models and features, so
 #       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       property to honor VLLM_USE_V2_MODEL_RUNNER, with automatic V2
+#       selection for LiLiCorr drafts that require the V2 candidate sampler.
 #    How:
 #       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to True for LiLiCorr and
+#       False for other models when unset).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
