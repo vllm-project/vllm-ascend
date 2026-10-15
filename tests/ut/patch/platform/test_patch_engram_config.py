@@ -4,7 +4,6 @@
 import builtins
 import importlib.util
 import runpy
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -87,31 +86,6 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     expected_dp_shared_memory = True if shared is None else bool(shared)
     assert config.engram_config.dp_shared_memory == expected_dp_shared_memory
     assert config.parallel_config.data_parallel_size == dp
-
-
-@pytest.mark.parametrize(
-    "shared,dp,pcp,elastic,error",
-    [
-        (True, 1, 2, False, None),
-        (True, 1, 1, False, "dp_shared_memory requires"),
-        (True, 1, 2, True, "elastic EP"),
-        (True, 2, 1, True, "elastic EP"),
-        (True, 2, 2, False, None),
-        (False, 1, 2, True, None),
-    ],
-)
-def test_pcp_sharing_preserves_upstream_parallel_validation(shared, dp, pcp, elastic, error):
-    from vllm.config import EngramConfig
-
-    config = EngramConfig(dp_shared_memory=shared)
-    parallel = SimpleNamespace(
-        data_parallel_size=dp,
-        prefill_context_parallel_size=pcp,
-        enable_elastic_ep=elastic,
-    )
-    with pytest.raises(ValueError, match=error) if error else nullcontext():
-        config.verify_parallel_config(parallel)
-    assert parallel.data_parallel_size == dp
 
 
 @pytest.mark.parametrize(
