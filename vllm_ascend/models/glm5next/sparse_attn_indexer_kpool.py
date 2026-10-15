@@ -136,7 +136,7 @@ class SparseAttnIndexerKpool(nn.Module):
         indices = glm5_next_lightning_indexer_triton(
             q_values,
             indexer_cache,
-            weights.to(q_values.dtype),
+            weights,
             query_lens,
             indexer_metadata.seq_lens,
             indexer_metadata.block_table,
