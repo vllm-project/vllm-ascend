@@ -402,7 +402,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-For standard PD disaggregation, we recommend using [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). For a 950DT deployment with a MemCache-backed external KV Cache Pool, see Section 5.2.3 below.
+For standard PD disaggregation, we recommend using [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Section 5.2.3 provides the standard 950DT deployment, while Section 5.3 extends it with a MemCache-backed external KV Cache Pool.
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -411,7 +411,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe standard PD separation deployment on Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8), followed by a 950DT deployment with a MemCache-backed external KV Cache Pool.
+The following sections describe standard PD separation deployment on Atlas 800 A3 (128GB × 8), Atlas 800 A2 (64GB × 8), and 950DT (96GB × 8). Section 5.3 adds a MemCache-backed external KV Cache Pool to the 950DT topology.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
@@ -1126,7 +1126,7 @@ Key Parameter Descriptions:
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
-- `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
+- `MooncakeHybridConnector` and `MooncakeConnectorV2` transfer KV Cache from Prefill to Decode. The 950DT example in Section 5.2.3 uses `MooncakeConnectorV2`.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables the fused MoE computation (MC2) optimization, which consolidates shared expert and routed expert computation into fused kernels to reduce launch overhead and improve MoE inference throughput.
@@ -1187,7 +1187,6 @@ After all services are ready:
 6. Confirm that Decode logs still show successful P-to-D KV transfer.
 
 #### 5.2.4 Ultra-Long Sequence Deployment
-Start the services in the following order:
 
 For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
 
