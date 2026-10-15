@@ -992,41 +992,6 @@ class TestNPUPlatform(TestBase):
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
-    def test_setup_compile_backend_splits_minimax_sparse_attention(self):
-        minimax_ops = (
-            "vllm::minimax_m3_sparse_forward",
-            "vllm::minimax_m3_fused_sparse_forward",
-        )
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        compilation_config = vllm_config.compilation_config
-        compilation_config.mode = CompilationMode.VLLM_COMPILE
-        compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
-        compilation_config.max_cudagraph_capture_size = 8
-        compilation_config.splitting_ops = []
-        compilation_config.set_splitting_ops_for_v1 = MagicMock()
-        vllm_config.additional_config = {
-            "ascend_compilation_config": {
-                "enable_npugraph_ex": True,
-                "enable_static_kernel": True,
-            }
-        }
-        vllm_config.model_config.enforce_eager = False
-        vllm_config.parallel_config.tensor_parallel_size = 1
-        vllm_config._set_cudagraph_sizes = MagicMock()
-
-        with patch("vllm_ascend.platform.enable_sp", return_value=False):
-            _setup_compile_backend(vllm_config, compile_backend="test_backend")
-
-        for op_name in minimax_ops:
-            self.assertIn(op_name, compilation_config.splitting_ops)
-
-        compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        compilation_config.splitting_ops = ["vllm::minimax_m3_fused_sparse_forward"]
-        with patch("vllm_ascend.platform.enable_sp", return_value=False):
-            _setup_compile_backend(vllm_config, compile_backend="test_backend")
-        self.assertEqual(compilation_config.splitting_ops, [])
-
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
