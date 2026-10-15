@@ -693,7 +693,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             raise ValueError("Video timestamps and processed temporal patches must have the same length.")
         merge_size = (video_kwargs or {}).get("merge_size") or hf_processor.video_processor.merge_size
         tokens_per_frame = grid_h * grid_w // merge_size**2
-        frame_token = self._get_video_frame_embed_token_id(hf_processor)
+        frame_token = hf_processor.image_token_id
         tokenizer = self.get_tokenizer()
         placeholder = [config.video_start_token_id]
         for timestamp in timestamps:
@@ -792,7 +792,7 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
             grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
             placeholder = self.info._construct_video_placeholder(video, metadata, grid_thw, video_kwargs=video_kwargs)
             return PromptUpdateDetails.select_token_id(
-                placeholder, embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor)
+                placeholder, embed_token_id=hf_processor.image_token_id
             )
 
         return [
