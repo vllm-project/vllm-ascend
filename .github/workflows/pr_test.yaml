@@ -173,7 +173,6 @@ jobs:
               # affects load-balanced partitioning, not which tests are
               # recommended, so timing-only PRs keep ready-precise.
             ci_pipeline:
-              - 'tests/e2e/nightly/single_node/ops/conftest.py'
               - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'
               - '.github/workflows/_selected_tests_upstream.yaml'
