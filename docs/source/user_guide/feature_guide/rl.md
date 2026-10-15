@@ -221,23 +221,17 @@ With `merge=False`, verl passes the PEFT configuration to the vLLM rollout in
 the direct/naive update path and selects the synchronized adapter for
 generation. The base weights must be available before adapter-only updates.
 Check [LoRA Adapters](./lora.md) for Ascend runtime restrictions; model
-inference support alone does not establish adapter support. The standalone HTTP
-example below demonstrates the same adapter replacement idea through the
-runtime LoRA API.
+inference support alone does not establish adapter support.
 
-For the disaggregated checkpoint-engine path, the referenced verl revision
-sends the tensor stream without the PEFT configuration. Therefore,
-`merge=False` with `nccl`/HCCL checkpoint-engine synchronization requires a
-separate integration validation and must not be treated as supported by the
-LoRA inference tests alone.
+The checkpoint-engine path sends only the tensor stream, so `merge=False`
+through the `nccl`/HCCL engine needs separate integration validation.
 
 With `merge=True`, the trainer exports merged weights and verl disables its
 rollout adapter mode. The rollout engine uses its full-weight update path;
-there is no need to add `--enable-lora` or manually load an adapter. This is the
-recommended path for the disaggregated `nccl`/HCCL checkpoint-engine flow in
-the referenced verl revision. The trainer must support merging and exporting
-every target module, and rollout must support updating the resulting weights,
-including packed or sharded MoE layouts.
+there is no need to add `--enable-lora` or manually load an adapter. This is
+the recommended checkpoint-engine path. The trainer must support merging and
+exporting every target module, and rollout must support updating the resulting
+weights, including packed or sharded MoE layouts.
 
 For merged synchronization through verl's HCCL checkpoint engine, add this
 override to the training command:
@@ -248,12 +242,10 @@ actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
 
 On Ascend, verl registers its
 [HCCL checkpoint engine](https://github.com/verl-project/verl/blob/2bc6ac46043e31855cea194236ff7548c91817c8/verl/checkpoint_engine/hccl_checkpoint_engine.py)
-under `nccl`. This is a verl option. The standalone vLLM-Ascend server examples
-above use `--weight-transfer-config '{"backend": "hccl"}'` instead. Although
-the backend and merge setting are separate configuration fields, their
-compatibility depends on the synchronization path. Use `merge=True` for the
-documented HCCL full-weight flow; validate any separate-adapter HCCL flow
-against the selected verl revision before deployment.
+under `nccl`. This is a verl option, independent of the standalone
+`--weight-transfer-config` used by the server examples above. Combine it with
+`merge=True`; validate `merge=False` against the selected verl revision before
+deployment.
 
 #### Standalone adapter-update example
 
@@ -273,12 +265,10 @@ or verl's checkpoint-engine transport.
 
 Before recording a deployment as validated, capture the model and adapter,
 verl/vLLM/vLLM-Ascend revisions, NPU type, training backend, target modules,
-TP/EP, and graph mode. Exercise repeated updates, compare outputs with a
-reference using the same policy weights, and verify rollback. Coordinate
-requests and weight updates through the integration's lifecycle so each rollout
-uses the intended policy version; handle caches derived from previous weights
-before serving the next version. Do not assume that changing an adapter in place
-is safe for in-flight requests merely because loading succeeds.
+TP/EP, and graph mode. Then exercise repeated updates, compare outputs against
+a reference with the same policy weights, and verify rollback. Route requests
+and updates through the integration's lifecycle, and clear caches derived from
+previous weights before serving the next version.
 
 ### Pause and resume generation
 
