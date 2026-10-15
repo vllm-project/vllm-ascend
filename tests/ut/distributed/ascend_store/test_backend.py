@@ -479,6 +479,36 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertEqual(setup_kwargs["global_segment_size"], 0)
                 self.assertEqual(setup_kwargs["local_buffer_size"], 0)
 
+    def test_scheduler_client_skips_ssd_offload(self):
+        for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+            with (
+                self.subTest(use_fabric_mem=use_fabric_mem, use_store_independent_te=use_store_independent_te),
+                tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path,
+            ):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(
+                        tenant_id="tenant-a",
+                        enable_ssd_offload=True,
+                        ssd_offload_path=ssd_path,
+                    ),
+                    use_fabric_mem=use_fabric_mem,
+                    contribute_memory=False,
+                )
+                backend._use_store_independent_te = use_store_independent_te
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                self.assertIs(self._setup_store(backend, store), store)
+
+                store.setup.assert_called_once()
+                setup_kwargs = store.setup.call_args.kwargs
+                self.assertNotIn("enable_ssd_offload", setup_kwargs)
+                self.assertNotIn("ssd_offload_path", setup_kwargs)
+                self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
+                self.assertEqual(setup_kwargs["global_segment_size"], 0)
+                self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+                self.assertEqual(os.listdir(ssd_path), [])
+
     def test_non_default_tenant_preserves_setup_type_error(self):
         setup_error = TypeError("setup(): incompatible function arguments")
         backend = self._make_backend(
@@ -547,10 +577,13 @@ class TestMooncakeBackendMethods(unittest.TestCase):
                     else:
                         method.return_value = result
                     with patch(module) as logger:
-                        getattr(backend, operation)(["k1"], [[100]], [[10]])
+                        transfer_result = getattr(backend, operation)(["k1"], [[100]], [[10]])
                     method.assert_called_once()
                     if result != [0]:
                         logger.error.assert_called()
+                    if operation == "put":
+                        expected = [True] if result == [0] else [False] if result == [-1] else False
+                        self.assertEqual(transfer_result, expected)
 
     def test_register_buffer(self):
         b = self._make_backend()
@@ -975,7 +1008,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_put(self):
         b = self._make_backend()
-        b.put(["k1"], [[100]], [[10]])
+        self.assertTrue(b.put(["k1"], [[100]], [[10]]))
         b.store.mset_d2h_from_multi_buffers.assert_called_once_with(["k1"], [[100]], [[10]], b._ds_set_param)
 
     def test_put_exception(self):
@@ -984,7 +1017,8 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.logger"
         ) as mock_logger:
-            b.put(["k1"], [[100]], [[10]])
+            result = b.put(["k1"], [[100]], [[10]])
+        self.assertFalse(result)
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
@@ -1374,6 +1408,29 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_is_readable(["k1", "k2", "k3"]), [True, False, False])
 
+    def test_batch_is_readable_treats_absent_key_as_miss(self):
+        b = self._make_backend()
+        readable = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0x1000])
+        writing = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [readable, None, writing]
+
+        self.assertEqual(b.batch_is_readable(["hit", "missing", "writing"]), [True, False, False])
+        b.store.batch_get_key_info.assert_called_once_with(["hit", "missing", "writing"])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_batch_is_readable_rejects_malformed_non_null_metadata(self):
+        for info in (
+            object(),
+            SimpleNamespace(size=lambda: "invalid", gva_list=lambda: [0x1000]),
+            SimpleNamespace(size=lambda: 64, gva_list=lambda: ["invalid"]),
+        ):
+            with self.subTest(info=info):
+                b = self._make_backend()
+                b.store.batch_get_key_info.return_value = [None, info]
+
+                with self.assertRaises(backend_base.BatchResultShapeError):
+                    b.batch_is_readable(["missing", "malformed"])
+
     def test_batch_is_readable_rejects_misaligned_metadata(self):
         b = self._make_backend()
         b.store.batch_get_key_info.return_value = []
@@ -1522,13 +1579,13 @@ class TestMemcacheBackendMethods(unittest.TestCase):
     def test_put(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [0]
-        b.put(["k1"], [[100]], [[10]])
+        self.assertEqual(b.put(["k1"], [[100]], [[10]]), [True])
         b.store.batch_put_from_layers.assert_called_once()
 
     def test_put_error(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
-        b.put(["k1"], [[100]], [[10]])
+        self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
 
     def test_put_exception(self):
         b = self._make_backend()
@@ -1536,7 +1593,8 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
         ) as mock_logger:
-            b.put(["k1"], [[100]], [[10]])
+            result = b.put(["k1"], [[100]], [[10]])
+        self.assertFalse(result)
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)

@@ -30,11 +30,13 @@ from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -54,6 +56,8 @@ class AscendPCPAttentionContext:
     global_block_table_num_blocks: torch.Tensor | None = None
     # Original batch row for each local request, in upstream segment order.
     local_to_global_req_indices: tuple[int, ...] | None = None
+    # Actual local tokens in the unpartitioned batch, excluding padding.
+    local_token_indices: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -61,10 +65,13 @@ class AscendPCPManager(PCPManager):
 
     vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig | None = None
+    _hidden_restore_idx: torch.Tensor | None
     _global_batch_slot_mappings: torch.Tensor | None
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
     _sampling_hidden_restored: bool = False
+    # The runner's global input buffers, which back global graph metadata.
+    global_input_buffers: AscendInputBuffers | None = None
 
     def __init__(
         self,
@@ -90,7 +97,6 @@ class AscendPCPManager(PCPManager):
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
         )
-
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
         if block_tables is not None:
@@ -115,6 +121,9 @@ class AscendPCPManager(PCPManager):
             # normally reserves one additional FIA padding slot, but PCP never
             # uses that slot; expose the exact upstream-sized view here.
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+            # Restore indices cover the global graph extent, which can exceed
+            # the scheduled tokens that upstream assigns to rank segments.
+            self._hidden_restore_idx_buffer = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
 
         # Whether the runner already restored the target hidden states to the
         # global PCP layout for the current sampling step (replicated PCP
@@ -218,42 +227,46 @@ class AscendPCPManager(PCPManager):
         supports_mm_inputs: bool,
     ) -> None:
         """Validate the graph-safe Ascend MRV2 PCP configuration."""
-        parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-        pcp_size = parallel_config.prefill_context_parallel_size
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size <= 1:
             return
 
         if model_config.is_encoder_decoder:
             raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
                 )
-            if speculative_config.draft_sample_method != "greedy":
-                raise NotImplementedError(
-                    "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
-                )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 PCP+DP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if is_sparse_mla and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            raise NotImplementedError("MRV2 PCP does not support FULL CUDA graphs.")
+
+    def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
+        """Global request capacity of a sharded FULL decode graph, if any.
+
+        Dispatch sizes the graph for the largest rank-local batch, while the
+        global batch keeps every request for cache updates and sampling.
+        """
+        if not self.is_decode_sharded or batch_desc.cg_mode != CUDAGraphMode.FULL:
+            return None
+        # FULL graphs are dispatched only for uniform decode batches.
+        assert batch_desc.num_reqs is not None and batch_desc.uniform_token_count is not None
+        return self._get_global_graph_num_reqs(batch_desc.num_reqs, batch_desc.uniform_token_count)
+
+    def _get_global_graph_num_reqs(self, num_local_reqs: int, query_len: int) -> int:
+        assert self.global_input_buffers is not None
+        return min(
+            num_local_reqs * self.pcp_world_size,
+            self.global_input_buffers.max_num_reqs,
+            self.global_input_buffers.max_num_tokens // query_len,
+        )
 
     def _full_decode_requests_are_token_sized(self, global_batch: AscendInputBatch) -> bool:
         """Whether a FULL_DECODE_ONLY graph replays exactly one token per padded request.
@@ -271,93 +284,30 @@ class AscendPCPManager(PCPManager):
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
-        padded_num_tokens: int | None = None,
-        padded_num_reqs: int | None = None,
+        batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        global_batch = input_batch
-        # padded_num_reqs is accepted for the upstream maybe_partition_pcp_batch
-        # signature but not forwarded: request-shaped padding is done below.
-        local_batch = super().partition_batch(
-            global_batch,
-            padded_num_tokens=padded_num_tokens,
-        )
+        local_batch = super().partition_batch(input_batch, batch_desc)
         assert isinstance(local_batch, AscendInputBatch)
+        # A sharded decode graph is sized per rank, so upstream can pad the
+        # local requests. Replicated decode graphs are padded below instead.
+        padded_num_reqs = batch_desc.num_reqs if batch_desc.cg_mode == CUDAGraphMode.FULL else None
+        return self._finalize_partition(input_batch, local_batch, padded_num_reqs)
 
-        # PCP builds the local layout from actual tokens, but a FULL decode
-        # graph replays a fixed padded layout on every rank.
-        graph_num_tokens = global_batch.num_tokens_after_padding
-        is_decode_only = not bool(global_batch.is_prefilling_np.any())
-        # FULL_DECODE_ONLY graphs capture one token for every padded request.
-        # Other graph modes may pad tokens without padding request metadata.
-        is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
-        graph_num_reqs = (
-            global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
-        )
-        # The base PCP manager may already honor ``padded_num_tokens`` while
-        # leaving request-shaped metadata at the actual request count. Pad when
-        # either extent is still short so the runtime metadata matches the fixed
-        # graph capture layout.
-        needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
-        needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
-        if not self.is_decode_sharded and is_decode_only and (needs_token_padding or needs_request_padding):
-            assert self._input_buffers is not None
-            input_buffers = self._input_buffers
-            actual_tokens = local_batch.num_tokens
-            actual_reqs = local_batch.num_reqs
-            if graph_num_tokens > input_buffers.max_num_tokens:
-                raise RuntimeError(
-                    "PCP graph token count exceeds the local input buffer: "
-                    f"{graph_num_tokens} > {input_buffers.max_num_tokens}."
-                )
-            if graph_num_reqs > input_buffers.max_num_reqs:
-                raise RuntimeError(
-                    "PCP graph request count exceeds the local input buffer: "
-                    f"{graph_num_reqs} > {input_buffers.max_num_reqs}."
-                )
-            input_buffers.input_ids[actual_tokens:graph_num_tokens].zero_()
-            input_buffers.positions[actual_tokens:graph_num_tokens].zero_()
-            input_buffers.is_padding[actual_tokens:graph_num_tokens].fill_(True)
-            input_buffers.seq_lens[actual_reqs:graph_num_reqs].zero_()
-
-            # Decode requests are replicated on every PCP rank, so the global
-            # FULL-graph query layout is also the authoritative rank-local
-            # layout, including any FIA dummy request.
-            graph_query_start_loc_np = global_batch.query_start_loc_np[: graph_num_reqs + 1]
-            async_copy_to_gpu(
-                graph_query_start_loc_np,
-                out=input_buffers.query_start_loc[: graph_num_reqs + 1],
-            )
-
-            # Graph padding has no RankSegment, so _build_batch_layout does
-            # not initialize the corresponding hidden restore indices.
-            assert self._hidden_restore_idx is not None
-            self._hidden_restore_idx[global_batch.num_tokens : graph_num_tokens].zero_()
-            if local_batch.dcp_local_seq_lens is not None:
-                input_buffers.dcp_local_seq_lens[actual_reqs:graph_num_reqs].zero_()
-            dcp_local_seq_lens = (
-                input_buffers.dcp_local_seq_lens[:graph_num_reqs]
-                if local_batch.dcp_local_seq_lens is not None
-                else None
-            )
-            seq_lens_cpu_upper_bound = torch.zeros(
-                graph_num_reqs,
-                dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
-            )
-            seq_lens_cpu_upper_bound[:actual_reqs].copy_(local_batch.seq_lens_cpu_upper_bound[:actual_reqs])
-            local_batch = replace(  # type: ignore[call-arg]
-                local_batch,
-                num_reqs_after_padding=graph_num_reqs,
-                num_tokens_after_padding=graph_num_tokens,
-                query_start_loc=input_buffers.query_start_loc[: graph_num_reqs + 1],
-                query_start_loc_np=graph_query_start_loc_np,
-                seq_lens=input_buffers.seq_lens[:graph_num_reqs],
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                dcp_local_seq_lens=dcp_local_seq_lens,
-                input_ids=input_buffers.input_ids[:graph_num_tokens],
-                positions=input_buffers.positions[:graph_num_tokens],
-                is_padding=input_buffers.is_padding[:graph_num_tokens],
-            )
+    def _finalize_partition(
+        self,
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+        padded_num_reqs: int | None,
+    ) -> AscendInputBatch:
+        """Refresh Ascend-only local metadata after upstream PCP partitioning."""
+        local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
+        local_batch.is_cpp_profile = getattr(global_batch, "is_cpp_profile", False)
+        self._pad_hidden_restore_idx(global_batch)
+        if not self.is_decode_sharded:
+            local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
+        elif padded_num_reqs is not None:
+            self._pad_uniform_query_start_loc(global_batch, local_batch)
 
         actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         if local_batch.num_tokens == 0:
@@ -373,9 +323,9 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = seq_lens_np[: local_batch.num_reqs_after_padding]
         else:
             local_batch.seq_lens_np = actual_seq_lens_np
-        # Decode requests are replicated unchanged by PCP. Preserve the global
-        # attention state computed before upstream clears local draft metadata.
-        if is_decode_only:
+        # Preserve the global attention state for decode-only batches, including
+        # empty ranks, before upstream clears local draft metadata.
+        if not bool(global_batch.is_prefilling_np.any()):
             return local_batch
 
         local_batch.attn_state = build_attn_state(
@@ -387,6 +337,127 @@ class AscendPCPManager(PCPManager):
             kv_cache_config=self.kv_cache_config,
         )
         return local_batch
+
+    def prepare_inputs_to_capture(
+        self,
+        input_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+        if not getattr(input_batch, "is_cpp_profile", False):
+            staged = super().prepare_inputs_to_capture(input_batch)
+            assert isinstance(staged, AscendInputBatch)
+            return staged
+
+        # The parent implementation only copies a dummy into PCP-local buffers.
+        # CPP instead supplies a global prompt, so use the real prefill splitter
+        # before those buffers are overwritten with the rank-local layout.
+        return self.partition_batch(
+            input_batch,
+            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
+        )
+
+    def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
+        """Extend restore indices to the global padded extent.
+
+        Rows past the scheduled tokens restore gathered row 0 and are zeroed
+        by ``restore_hidden_states``.
+        """
+        assert self._hidden_restore_idx is not None
+        num_tokens = global_batch.num_tokens
+        restore_idx = self._hidden_restore_idx_buffer[: global_batch.num_tokens_after_padding]
+        restore_idx[:num_tokens].copy_(self._hidden_restore_idx[:num_tokens])
+        restore_idx[num_tokens:].zero_()
+        self._hidden_restore_idx = restore_idx
+
+    @staticmethod
+    def _pad_uniform_query_start_loc(global_batch: AscendInputBatch, local_batch: AscendInputBatch) -> None:
+        """Give every row of a uniform FULL graph the captured query width.
+
+        FIA needs query offsets that cover the whole padded input, including
+        padding rows and the placeholder of an empty rank. Their sequence
+        lengths and slots stay invalid.
+        """
+        num_reqs = local_batch.num_reqs_after_padding
+        query_len = local_batch.num_tokens_after_padding // num_reqs
+        if np.any(global_batch.num_scheduled_tokens != query_len):
+            return
+        local_batch.query_start_loc_np[:] = np.arange(num_reqs + 1, dtype=np.int32) * query_len
+        async_copy_to_gpu(local_batch.query_start_loc_np, out=local_batch.query_start_loc)
+
+    def _pad_replicated_decode_graph(
+        self,
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Pad a replicated decode batch to the fixed FULL-graph layout."""
+        graph_num_tokens = global_batch.num_tokens_after_padding
+        is_decode_only = not bool(global_batch.is_prefilling_np.any())
+        # FULL_DECODE_ONLY graphs capture one token for every padded request.
+        # Other graph modes may pad tokens without padding request metadata.
+        is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
+        graph_num_reqs = (
+            global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
+        )
+        # The base PCP manager may already honor ``padded_num_tokens`` while
+        # leaving request-shaped metadata at the actual request count. Pad when
+        # either extent is still short so the runtime metadata matches the fixed
+        # graph capture layout.
+        needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
+        needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
+        if not is_decode_only or not (needs_token_padding or needs_request_padding):
+            return local_batch
+
+        assert self._input_buffers is not None
+        input_buffers = self._input_buffers
+        actual_tokens = local_batch.num_tokens
+        actual_reqs = local_batch.num_reqs
+        if graph_num_tokens > input_buffers.max_num_tokens:
+            raise RuntimeError(
+                "PCP graph token count exceeds the local input buffer: "
+                f"{graph_num_tokens} > {input_buffers.max_num_tokens}."
+            )
+        if graph_num_reqs > input_buffers.max_num_reqs:
+            raise RuntimeError(
+                "PCP graph request count exceeds the local input buffer: "
+                f"{graph_num_reqs} > {input_buffers.max_num_reqs}."
+            )
+        input_buffers.input_ids[actual_tokens:graph_num_tokens].zero_()
+        input_buffers.positions[actual_tokens:graph_num_tokens].zero_()
+        input_buffers.is_padding[actual_tokens:graph_num_tokens].fill_(True)
+        input_buffers.seq_lens[actual_reqs:graph_num_reqs].zero_()
+
+        # Decode requests are replicated on every PCP rank, so the global
+        # FULL-graph query layout is also the authoritative rank-local
+        # layout, including any FIA dummy request.
+        graph_query_start_loc_np = global_batch.query_start_loc_np[: graph_num_reqs + 1]
+        async_copy_to_gpu(
+            graph_query_start_loc_np,
+            out=input_buffers.query_start_loc[: graph_num_reqs + 1],
+        )
+
+        if local_batch.dcp_local_seq_lens is not None:
+            input_buffers.dcp_local_seq_lens[actual_reqs:graph_num_reqs].zero_()
+        dcp_local_seq_lens = (
+            input_buffers.dcp_local_seq_lens[:graph_num_reqs] if local_batch.dcp_local_seq_lens is not None else None
+        )
+        seq_lens_cpu_upper_bound = torch.zeros(
+            graph_num_reqs,
+            dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
+        )
+        seq_lens_cpu_upper_bound[:actual_reqs].copy_(local_batch.seq_lens_cpu_upper_bound[:actual_reqs])
+        return replace(  # type: ignore[call-arg]
+            local_batch,
+            num_reqs_after_padding=graph_num_reqs,
+            num_tokens_after_padding=graph_num_tokens,
+            query_start_loc=input_buffers.query_start_loc[: graph_num_reqs + 1],
+            query_start_loc_np=graph_query_start_loc_np,
+            seq_lens=input_buffers.seq_lens[:graph_num_reqs],
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+            input_ids=input_buffers.input_ids[:graph_num_tokens],
+            positions=input_buffers.positions[:graph_num_tokens],
+            is_padding=input_buffers.is_padding[:graph_num_tokens],
+        )
 
     def prepare_draft_prefill(self, input_batch: InputBatch, input_ids: torch.Tensor) -> None:
         """Keep the replicated PCP draft on the global batch.
@@ -400,7 +471,19 @@ class AscendPCPManager(PCPManager):
         return
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Restore active tokens and zero any fixed-graph padding rows."""
+        """Restore tokens to the global PCP layout, following the batch length.
+
+        Output-length contract: the returned tensor matches the global batch
+        layout, i.e. ``num_tokens_after_padding`` rows when the batch is padded
+        for FULL graph replay and the compact ``num_tokens`` rows otherwise.
+        Downstream consumers (sampling, replicated drafters) index restored
+        states with the global batch layout, so padding rows must be present
+        for padded batches; they read as zeros. ``_pad_hidden_restore_idx``
+        extends the restore indices to the padded extent, so the parent is
+        expected to return exactly that length; anything else raises.
+        Fixed-K speculative decode sharding restores to the unpadded global
+        batch instead, returning the compact ``num_tokens`` rows.
+        """
         if not self.is_last_pp_rank:
             return hidden_states
 
@@ -410,37 +493,69 @@ class AscendPCPManager(PCPManager):
 
         num_tokens = self._global_batch.num_tokens
         num_tokens_after_padding = self._global_batch.num_tokens_after_padding
-        if num_tokens == num_tokens_after_padding:
-            return restored_hidden_states
         if restored_hidden_states.shape[0] != num_tokens_after_padding:
             raise RuntimeError(
                 "PCP restored hidden-state length does not match the global "
                 "graph layout: "
                 f"{restored_hidden_states.shape[0]} != {num_tokens_after_padding}."
             )
+        if num_tokens == num_tokens_after_padding:
+            return restored_hidden_states
 
-        restored_hidden_states[num_tokens:num_tokens_after_padding].zero_()
+        restored_hidden_states[num_tokens:].zero_()
+        if self._restore_unpadded_global_batch():
+            restored_hidden_states = restored_hidden_states[:num_tokens]
         return restored_hidden_states
+
+    def _restore_unpadded_global_batch(self) -> bool:
+        """Sampling and replicated drafting consume scheduled global tokens.
+
+        Target graph padding stays private to target attention/capture views.
+        The draft chooses its own execution padding after restoration.
+        """
+        return (
+            getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
+            and self.is_decode_sharded
+            and self._global_batch is not None
+            and not self._global_batch.is_dummy
+        )
+
+    def _expose_unpadded_global_batch(self, global_batch: InputBatch) -> InputBatch:
+        """Expose real request boundaries and token extent at restoration."""
+        # Preserve the target's batch; expose real request boundaries and
+        # token extent at the global restoration boundary.
+        return replace(
+            global_batch,
+            num_tokens_after_padding=global_batch.num_tokens,
+            query_start_loc=global_batch.query_start_loc[: global_batch.num_reqs + 1],
+            query_start_loc_np=global_batch.query_start_loc_np[: global_batch.num_reqs + 1],
+        )
 
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, InputBatch]:
+        aux_hidden_states: list[torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None, InputBatch]:
         """Return the global batch and, when already global, skip re-gathering.
 
-        On vLLM main the Ascend runner restores the target hidden states to the
-        global PCP layout before sampling (draft_hidden_states is captured
-        before the upstream restore), so a second all-gather here would reorder
-        them. Consume the runner's explicit pre-restore marker instead of
-        inferring the layout from the tensor length: under piecewise/FULL
-        graphs each rank pads its local batch to the same global padded length,
-        so a length match does not distinguish local from restored layouts.
+        vLLM main (#57980) threads aux_hidden_states through this hook and
+        returns them alongside the global batch.
         """
         assert self._global_batch is not None
         if self._sampling_hidden_restored:
             self._sampling_hidden_restored = False
-            return hidden_states, self._global_batch
-        return super().restore_for_sampling(hidden_states)
+            global_batch = self._global_batch
+        else:
+            hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
+                hidden_states, aux_hidden_states
+            )
+        if self._restore_unpadded_global_batch():
+            global_batch = self._expose_unpadded_global_batch(global_batch)
+            num_tokens = global_batch.num_tokens
+            hidden_states = hidden_states[:num_tokens]
+            if aux_hidden_states is not None:
+                aux_hidden_states = [states[:num_tokens] for states in aux_hidden_states]
+        return hidden_states, aux_hidden_states, global_batch
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
         """Restore a model-owned rank-local buffer to the global PCP layout."""
@@ -479,12 +594,14 @@ class AscendPCPManager(PCPManager):
         input of each PCP rank to graph_num_tokens. Preserve that rank-major
         layout when expanding the slot mapping:
         [rank 0 rows | rank 0 padding | rank 1 rows | rank 1 padding | ...].
+
+        Sharded decode already uses the rank-local graph stride upstream.
         """
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding
         is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
-        if not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
+        if self.is_decode_sharded or not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
             return slot_mappings
 
         assert self._gathered_kv_slot_mappings is not None
@@ -511,6 +628,37 @@ class AscendPCPManager(PCPManager):
             graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
         return graph_slot_mappings
 
+    def _build_sharded_dummy_attention_context(
+        self,
+        input_batch: AscendInputBatch,
+        query_len: int,
+    ) -> AscendPCPAttentionContext:
+        """Mirror the global view that prepare_inputs builds for a uniform graph.
+
+        ``make_dummy`` spreads tokens evenly, so a dummy batch is uniform
+        exactly when its tokens divide by its requests.
+        """
+        assert self.global_input_buffers is not None
+        assert self._block_tables is not None
+        assert self._global_batch_slot_mappings is not None
+        num_reqs = self._get_global_graph_num_reqs(input_batch.num_reqs_after_padding, query_len)
+        num_tokens = num_reqs * query_len
+        global_batch = AscendInputBatch.make_dummy(
+            num_reqs,
+            num_tokens,
+            self.global_input_buffers,
+            max_query_len=query_len,
+        )
+        # make_dummy refreshes the shared RoPE tables from the global
+        # positions, but the model consumes the rank-local ones.
+        update_cos_sin(input_batch.positions)
+        return AscendPCPAttentionContext(
+            global_batch=global_batch,
+            global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
+            global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
+            hidden_restore_idx=torch.arange(num_tokens, device=self.device),
+        )
+
     def build_attention_context(
         self,
         input_batch: AscendInputBatch | None = None,
@@ -518,12 +666,15 @@ class AscendPCPManager(PCPManager):
         slot_mappings: torch.Tensor | None = None,
     ) -> AscendPCPAttentionContext:
         """Build PCP context for the current real, capture, or idle DP batch."""
-        if input_batch is not None and input_batch.is_dummy:
+        if input_batch is not None and input_batch.is_dummy and not input_batch.is_cpp_profile:
             # Both capture and runtime dummy batches bypass partition_batch().
             # Saved layout state may be absent or belong to a previous request.
             assert block_tables is not None
             assert slot_mappings is not None
             num_tokens = input_batch.num_tokens_after_padding
+            query_len, remainder = divmod(num_tokens, input_batch.num_reqs_after_padding)
+            if self.is_decode_sharded and remainder == 0:
+                return self._build_sharded_dummy_attention_context(input_batch, query_len)
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
@@ -538,6 +689,9 @@ class AscendPCPManager(PCPManager):
         global_batch = self._global_batch
         hidden_restore_idx = self._hidden_restore_idx
         assert global_batch is not None
+        local_batch = self._local_batch if input_batch is None else input_batch
+        assert local_batch is not None
+        assert self._local_gather_idx is not None
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
@@ -547,8 +701,6 @@ class AscendPCPManager(PCPManager):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)
-            local_batch = self._local_batch if input_batch is None else input_batch
-            assert local_batch is not None
             global_rows = {
                 int(state): row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])
             }
@@ -558,6 +710,7 @@ class AscendPCPManager(PCPManager):
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             local_to_global_req_indices=local_to_global_req_indices,
+            local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(
                 global_batch.idx_mapping,
                 global_batch.num_reqs_after_padding,

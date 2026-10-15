@@ -28,6 +28,9 @@ if [ ! -f "$BISECT_ARGS_HELPER" ]; then
 fi
 # shellcheck source=../../nightly/scripts/bisect_args.sh
 source "$BISECT_ARGS_HELPER"
+DOWNLOAD_ARCHIVE_HELPER="${SCRIPT_DIR}/download_archive.sh"
+# shellcheck source=download_archive.sh
+source "$DOWNLOAD_ARCHIVE_HELPER"
 
 # The CANN install directory varies between release (cann-9.1.0) and daily
 # (e.g. cann-2026.08.03) images, so discover it dynamically instead of
@@ -139,31 +142,6 @@ check_and_config() {
     pip config set global.trusted-host mirrors.huaweicloud.com
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
     pip config set global.timeout 120
-}
-
-install_extra_components() {
-    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
-        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
-        return 1
-    fi
-    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
-        echo "Failed to download custom_ops wheel"
-        return 1
-    fi
-    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-
-    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-
-    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    echo "====> Extra components installation completed"
 }
 
 checkout_src() {
@@ -553,6 +531,14 @@ finish_run() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ] && [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         echo "AOP_RUN_FINISHED:${LOG_PREFIX}:${rc}"
     fi
+    backup_requested_directory || true
+    return "$rc"
+}
+
+finish_without_aop() {
+    local rc=$?
+    backup_ascend_logs || true
+    backup_requested_directory || true
     return "$rc"
 }
 
@@ -560,7 +546,7 @@ main() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         trap finish_run EXIT
     else
-        trap backup_ascend_logs EXIT
+        trap finish_without_aop EXIT
     fi
     check_npu_info
     clear_logs
@@ -572,9 +558,6 @@ main() {
     fi
     show_vllm_info
     show_triton_ascend_info
-    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
-        install_extra_components
-    fi
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }

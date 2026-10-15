@@ -6,6 +6,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -1174,15 +1175,10 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
     return std::make_tuple(y_out, scale_out);
 }
 
-void kv_compress_epilog_meta(
-    at::Tensor& kv_compress_cache,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_group_size,
-    int64_t quant_mode,
-    bool round_scale_flag,
-    int64_t layout)
-{
+void kv_compress_epilog_v2_meta(at::Tensor &cache, const at::Tensor &x,
+                            const at::Tensor &slotMapping,
+                            int64_t quantGroupSize, std::string quantMode,
+                            bool roundScale, double xScale) {
     return;
 }
 
@@ -1402,34 +1398,6 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     return {y, scale};
 }
 
-at::Tensor npu_lightning_indexer_quant_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table, int64_t query_quant_mode, int64_t key_quant_mode,
-    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
-{
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-
-    const int DIM_0 = 0;
-    const int DIM_1 = 1;
-    const int DIM_2 = 2;
-
-    c10::SymDimVector output_size;
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
-    if (query_layout_str == "BSND") {
-        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
-    } else {
-        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
-    }
-    at::Tensor lightning_indexer_quant_output = at::empty_symint(output_size, query.options().dtype(at::kInt));
-
-    return lightning_indexer_quant_output;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
     const at::Tensor &q2k,
     const at::Tensor &cu_seqlens,
@@ -1500,7 +1468,7 @@ void npu_scatter_nd_update_sk_meta(
 }
 
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm_meta(
     const at::Tensor & k,
     const at::Tensor & w,
     const at::Tensor & u,
@@ -1580,7 +1548,7 @@ at::Tensor chunk_fwd_o_vllm_meta(
     return o;
 }
 
-at::Tensor kda_gate_cumsum_meta(
+at::Tensor kda_gate_cumsum_vllm_meta(
     const at::Tensor &g,
     int64_t chunk_size,
     const c10::optional<at::Tensor> &A_log,
@@ -1616,27 +1584,6 @@ at::Tensor kda_layout_swap12_meta(
     return at::empty_symint(y_sizes, x.options());
 }
 
-void store_kv_block_metadata(
-    const at::Tensor &slot_mapping_npu,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
- {
-    return;
- }
-
-void store_kv_block(
-    const at::Tensor &key_in,
-    const at::Tensor &key_cache_in,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
-{
-    return;
-
-}
 std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -1836,12 +1783,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
     // npu_recurrent_gated_delta_rule_310
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
-    // chunk_gated_delta_rule_fwd_h
-    ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
+    // chunk_gated_delta_rule_fwd_h_vllm
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum
-    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_gate_cumsum_vllm
+    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
 }
@@ -1931,7 +1878,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_pre_v3", &vllm_ascend::meta::npu_hc_pre_v3_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
-    ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
+    ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
              &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
@@ -1939,19 +1886,14 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
-    // Lightning indexer quant
-    ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // chunk_gated_delta_rule_fwd_h
-    ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
+    // chunk_gated_delta_rule_fwd_h_vllm
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum
-    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_gate_cumsum_vllm
+    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
-     // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
-    ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
 }
 }
 #endif

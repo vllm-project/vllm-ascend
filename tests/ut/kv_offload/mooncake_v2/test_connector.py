@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole, KVConnectorTransferResults
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
@@ -59,6 +59,10 @@ def test_facade_delegates_scheduler_methods() -> None:
 def test_facade_delegates_worker_methods_and_metadata() -> None:
     connector = make_facade()
     connector.connector_worker.get_finished.return_value = ({"sent"}, {"received"})
+    results = KVConnectorTransferResults(
+        finished_sending={"sent"}, finished_recving={"received", "failed"}, failed_recving={"failed"}
+    )
+    connector.connector_worker.get_transfer_results.return_value = results
     connector.connector_worker.get_block_ids_with_load_errors.return_value = {10}
     connector.connector_worker.xfer_handshake_metadata = MagicMock()
     connector._connector_metadata.requests["request"] = MagicMock()
@@ -67,6 +71,8 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
     connector.start_load_kv(MagicMock())
 
     assert connector.get_finished(set()) == ({"sent"}, {"received"})
+    assert connector.get_transfer_results(set()) is results
+    connector.connector_worker.get_transfer_results.assert_called_once_with()
     assert connector.get_block_ids_with_load_errors() == {10}
     assert connector.get_handshake_metadata() is connector.connector_worker.xfer_handshake_metadata
     connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)

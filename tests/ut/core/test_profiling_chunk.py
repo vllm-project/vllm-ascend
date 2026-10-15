@@ -214,13 +214,23 @@ class TestChunkSizePredictor(TestBase):
         data = []
         for i in range(10):
             c, h = 1000 + i * 100, i * 500
-            data.append([(c + h) * c, c + h, 1, 1e-9 * (c + h) * c + 0.001 * (c + h) + 0.5])
+            data.append([(c + h) * c, c, 1, 1e-9 * (c + h) * c + 0.001 * c + 0.5])
         self.assertTrue(predictor.fit_chunk(data))
         predictor.with_history_ready = True
 
         result = predictor.predict_with_history(1000, 8192, 128)
         self.assertIsNotNone(result)
         self.assertEqual(result % 128, 0)
+
+    def test_fit_chunk_constrains_negative_coefficients(self):
+        predictor = ChunkSizePredictor()
+        # The unconstrained solution is a=0, b=-1, c=11.
+        data = [[c * c, c, 1, 11 - c] for c in range(1, 6)]
+
+        self.assertTrue(predictor.fit_chunk(data))
+        self.assertGreaterEqual(predictor.quadratic_chunk_a, 0.0)
+        self.assertGreaterEqual(predictor.linear_chunk_b, 0.0)
+        self.assertGreaterEqual(predictor.constant_chunk_c, 0.0)
 
 
 # ===================================================================
@@ -665,8 +675,8 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler3.encoder_cache_manager.allocate = MagicMock()
         scheduler3.is_encoder_decoder = True
         scheduler3._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        scheduler3._try_promote_blocked_waiting_request = MagicMock(return_value=False)
-        scheduler3.max_num_running_reqs = 2
+        scheduler3._handle_blocked_waiting_request = MagicMock(return_value=False)
+        scheduler3.max_num_active_reqs = 2
 
         edge_reqs = create_requests(num_requests=4, num_tokens=40, max_tokens=16)
         edge_reqs[2].lora_request = MagicMock(lora_int_id=1)
@@ -689,7 +699,7 @@ class TestProfilingChunkScheduler(TestBase):
 
         scheduler5 = self.create_scheduler()
         self._mark_ready(scheduler5)
-        scheduler5.max_num_running_reqs = 0
+        scheduler5.max_num_active_reqs = 0
         scheduler5.add_request(create_requests(num_requests=1, num_tokens=20)[0])
         scheduler5.schedule()
 
@@ -864,6 +874,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
 
     def test_decode_placeholders_accumulate_without_update_from_output(self):
         scheduler = self.create_scheduler()
+        scheduler.max_num_scheduled_tokens = 128
         self._mark_ready(scheduler, predicted_chunk=64)
         decode_request = create_requests(num_requests=1, num_tokens=10, request_id_prefix="decode-")[0]
         prefill_request = create_requests(num_requests=1, num_tokens=2000, request_id_prefix="prefill-")[0]
@@ -872,7 +883,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
 
         first_output = scheduler.schedule()
         self.assertEqual(first_output.num_scheduled_tokens["decode-0"], 10)
-        self.assertEqual(first_output.num_scheduled_tokens["prefill-0"], 64)
+        self.assertEqual(first_output.num_scheduled_tokens["prefill-0"], 118)
         # decode-0 finished its prefill in one chunk: placeholder accounting applies.
         self.assertFalse(decode_request.is_prefill_chunk)
         self.assertEqual(decode_request.num_output_placeholders, 1)
@@ -903,6 +914,8 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         predicted_chunk = 64
         sync_scheduler = self._mark_ready(self.create_scheduler(async_scheduling=False), predicted_chunk)
         async_scheduler = self._mark_ready(self.create_scheduler(async_scheduling=True), predicted_chunk)
+        sync_scheduler.max_num_scheduled_tokens = 128
+        async_scheduler.max_num_scheduled_tokens = 128
         sync_request = create_requests(num_requests=1, num_tokens=200, request_id_prefix="sync-")[0]
         async_request = create_requests(num_requests=1, num_tokens=200, request_id_prefix="async-")[0]
         sync_scheduler.add_request(sync_request)
@@ -911,17 +924,21 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         # First chunk from the WAITING loop.
         sync_first = sync_scheduler.schedule()
         async_first = async_scheduler.schedule()
-        self.assertEqual(sync_first.num_scheduled_tokens["sync-0"], predicted_chunk)
-        self.assertEqual(async_first.num_scheduled_tokens["async-0"], predicted_chunk)
+        self.assertEqual(sync_first.num_scheduled_tokens["sync-0"], 128)
+        self.assertEqual(async_first.num_scheduled_tokens["async-0"], 128)
+        sync_scheduler.profiling_chunk_manager.predict_chunk_size.assert_not_called()
+        async_scheduler.profiling_chunk_manager.predict_chunk_size.assert_not_called()
 
         # Continuation chunk from the RUNNING loop. Both schedulers have
-        # advanced num_computed_tokens to 64 by now; the sync one consumes
+        # advanced num_computed_tokens to 128 by now; the sync one consumes
         # its first output first, mirroring the synchronous engine loop.
         sync_scheduler.update_from_output(sync_first, make_output(sync_scheduler))
         sync_second = sync_scheduler.schedule()
         async_second = async_scheduler.schedule()
         self.assertEqual(sync_second.num_scheduled_tokens["sync-0"], predicted_chunk)
         self.assertEqual(async_second.num_scheduled_tokens["async-0"], predicted_chunk)
+        sync_scheduler.profiling_chunk_manager.predict_chunk_size.assert_called_once()
+        async_scheduler.profiling_chunk_manager.predict_chunk_size.assert_called_once()
         self.assertEqual(async_request.num_output_placeholders, 0)
 
     def test_max_tokens_oversampling_guard_skips_decode(self):

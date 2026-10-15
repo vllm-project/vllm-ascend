@@ -26,7 +26,7 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 
-from ..base import AscendLinearScheme, WeightSwitchGatherSpec, WeightSwitchRepeatSpec
+from ..base import AscendLinearScheme, PreparedLinearInput, WeightSwitchGatherSpec, WeightSwitchRepeatSpec
 from ..registry import register_scheme
 
 
@@ -86,14 +86,31 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2 or x.dtype == torch.int8:
+            return None
+        quantized_x = torch.ops.vllm.quantize(
+            x,
+            layer.aclnn_input_scale,
+            layer.aclnn_input_scale_reciprocal,
+            layer.aclnn_input_offset,
+        )
+        return PreparedLinearInput(quantized_x, None, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        if x.dtype != torch.int8:
+        if isinstance(x, PreparedLinearInput):
+            x = x.quantized
+        elif x.dtype != torch.int8:
             # quant
             x = torch.ops.vllm.quantize(
                 x,

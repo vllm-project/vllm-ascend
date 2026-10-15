@@ -35,18 +35,18 @@ def test_query_gather_restores_only_distinct_tp_heads(tp_size, pcp_size, logical
 @pytest.mark.parametrize("tp_size,pcp_size,tp_rank,dcp_rank", [(1, 2, 0, 1), (4, 2, 2, 6), (2, 4, 1, 7)])
 def test_current_attention_selects_tp_local_heads(tp_size, pcp_size, tp_rank, dcp_rank):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
-    impl.num_heads = 2
+    num_heads = 2
     impl.dcp_size = tp_size * pcp_size
     impl.dcp_rank = dcp_rank
     impl.pcp_group = SimpleNamespace(world_size=pcp_size)
     impl.tp_group = SimpleNamespace(rank_in_group=tp_rank)
     q_nope = torch.arange(2 * tp_size * 3).float().view(1, 2 * tp_size, 3)
     q_pe = q_nope[..., :2]
-    actual_nope, actual_pe = impl._local_decode_query(q_nope, q_pe)
-    start = tp_rank * impl.num_heads
+    actual_nope, actual_pe = impl._local_decode_query(q_nope, q_pe, num_heads=num_heads)
+    start = tp_rank * num_heads
     torch.testing.assert_close(actual_nope, q_nope[:, start : start + 2])
     torch.testing.assert_close(actual_pe, q_pe[:, start : start + 2])
-    assert actual_nope.shape[1] == impl.num_heads
+    assert actual_nope.shape[1] == num_heads
 
 
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 2), (4, 2), (2, 4)])
@@ -72,13 +72,13 @@ def test_local_decode_query_supports_one_gqa_query():
     from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin
 
     impl = DCPImplMixin.__new__(DCPImplMixin)
-    impl.num_heads = 2
+    num_heads = 2
     impl.dcp_size = 8
     impl.dcp_rank = 5
     impl.pcp_group = SimpleNamespace(world_size=2)
     impl.tp_group = SimpleNamespace(rank_in_group=2)
     query = torch.arange(24).float().view(1, 8, 3)
-    (local_query,) = impl._local_decode_query(query)
+    (local_query,) = impl._local_decode_query(query, num_heads=num_heads)
     torch.testing.assert_close(local_query, query[:, 4:6])
 
 

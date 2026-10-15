@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -108,6 +109,54 @@ class TestNPUWorker(TestBase):
         self.assertEqual((num_layers, num_slots), (6, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
+    def test_engram_group_initialization_preserves_target_config(self):
+        from vllm.config import get_current_vllm_config, set_current_vllm_config
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        for pcp_size, has_engram, fails in ((1, True, False), (2, False, False), (2, True, False), (2, True, True)):
+            with self.subTest(pcp_size=pcp_size, has_engram=has_engram, fails=fails):
+                engram_config = SimpleNamespace(dp_shared_memory=False) if has_engram else None
+                config = SimpleNamespace(engram_config=engram_config)
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.vllm_config = config
+                worker.parallel_config = SimpleNamespace(
+                    world_size=8,
+                    tensor_parallel_size=1,
+                    pipeline_parallel_size=1,
+                    prefill_context_parallel_size=pcp_size,
+                    decode_context_parallel_size=1,
+                )
+                worker.rank = worker.local_rank = 0
+                worker.distributed_init_method = "tcp://localhost:12345"
+
+                def initialize_groups(
+                    *args, pcp_size=pcp_size, engram_config=engram_config, config=config, fails=fails
+                ):
+                    active = get_current_vllm_config()
+                    expected = None if pcp_size > 1 else engram_config
+                    self.assertIs(active.engram_config, expected)
+                    self.assertIs(config.engram_config, engram_config)
+                    if fails:
+                        raise RuntimeError("group initialization failed")
+
+                with (
+                    set_current_vllm_config(config),
+                    patch("vllm_ascend.worker.worker.init_batch_invariance"),
+                    patch("vllm_ascend.worker.worker.init_distributed_environment"),
+                    patch("vllm_ascend.worker.worker.ensure_model_parallel_initialized", side_effect=initialize_groups),
+                    patch("vllm_ascend.worker.worker.init_ascend_model_parallel") as ascend_init,
+                    patch("vllm_ascend.worker.worker.ensure_ec_transfer_initialized"),
+                ):
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "group initialization failed"):
+                            worker._init_worker_distributed_environment()
+                        ascend_init.assert_not_called()
+                    else:
+                        worker._init_worker_distributed_environment()
+                        ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
+                    self.assertIs(get_current_vllm_config(), config)
+
     def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
@@ -155,6 +204,32 @@ class TestNPUWorker(TestBase):
         expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
         self.assertEqual((num_layers, num_slots), (7, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+
+    def test_layer_reuse_budget_keeps_dspark_pages_persistent(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 6
+        target = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.int8)
+        draft = MLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+        draft_names = {f"draft.model.layers.{layer}.self_attn.attn" for layer in range(5)}
+        specs = {
+            **{f"model.layers.{layer}.self_attn.attn": target for layer in range(6)},
+            **{name: draft for name in draft_names},
+        }
+
+        _, _, factor = worker._get_layerwise_kv_cache_memory_info(
+            specs, {"layerwise_num_shared_buffers": 2}, excluded_layer_names=draft_names
+        )
+
+        logical = 6 * target.page_size_bytes + 5 * draft.page_size_bytes
+        physical = 3 * target.page_size_bytes + 5 * draft.page_size_bytes
+        self.assertEqual(factor, logical / physical)
+        # The planner must advertise exactly the bytes its target scratch and
+        # five persistent draft allocations will consume, not target-only reuse.
+        self.assertEqual(logical / factor, physical)
 
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
@@ -260,6 +335,7 @@ class TestNPUWorker(TestBase):
             # allocation or its corresponding budget calculation.
             kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
         for supports_standardized_backing, expected_budget in (
@@ -307,6 +383,7 @@ class TestNPUWorker(TestBase):
             ),
             kv_transfer_config=None,
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(
             return_value={
                 "encoder_attn": spec,
@@ -486,10 +563,13 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_sleep_uses_rl_extra_cleanup(self, mock_get_config, mock_allocator_class, mock_mem_get_info):
+    def test_sleep_uses_rl_extra_cleanup(
+        self, mock_get_config, mock_allocator_class, mock_mem_get_info, mock_synchronize_device
+    ):
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_get_config.return_value = SimpleNamespace(
@@ -506,10 +586,14 @@ class TestNPUWorker(TestBase):
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
         mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
         self.assertEqual(mock_mem_get_info.call_count, 2)
+        # sleep() brackets the transition: one barrier before the baseline memory
+        # snapshot, one after the optional RL extra cleanup and before the unmap.
+        self.assertEqual(mock_synchronize_device.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
         mock_config.rl_config.enabled = True
@@ -547,12 +631,16 @@ class TestNPUWorker(TestBase):
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
+            mock_synchronize_device.assert_called_once_with()
+
             worker.wake_up(tags=["kv_cache"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+            self.assertEqual(mock_synchronize_device.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_get_config.return_value = SimpleNamespace(
@@ -573,6 +661,38 @@ class TestNPUWorker(TestBase):
         worker.wake_up(tags=["kv_cache"])
 
         mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
+        mock_synchronize_device.assert_called_once_with()
+
+    def test_synchronize_device_waits_for_npu_work(self):
+        """The barrier must delegate to the NPU synchronize primitive.
+
+        ``torch.npu`` is swapped out whole rather than patching its nested
+        ``synchronize``: on some torch_npu builds ``torch.npu`` resolves to a
+        lazily built proxy, so a nested patch never reaches the call site and the
+        assertion silently sees zero calls.
+        """
+        from vllm_ascend.worker.worker import NPUWorker
+
+        calls: list[str] = []
+        fake_npu = SimpleNamespace(synchronize=lambda: calls.append("sync"))
+
+        worker = NPUWorker.__new__(NPUWorker)
+        with patch.object(torch, "npu", fake_npu, create=True):
+            worker.synchronize_device()
+
+        self.assertEqual(calls, ["sync"])
+
+    def test_synchronize_device_is_defined_on_the_npu_worker(self):
+        """Ascend must carry the barrier itself on vLLM releases without it.
+
+        vLLM #52914 added ``WorkerBase.synchronize_device``, but ``wake_up`` calls
+        the barrier unconditionally while vLLM releases predating #52914 (v0.28.0
+        among them) define no ``WorkerBase.synchronize_device``, so the wake path
+        cannot be left to inheritance.
+        """
+        from vllm_ascend.worker.worker import NPUWorker
+
+        self.assertIn("synchronize_device", NPUWorker.__dict__)
 
     @staticmethod
     def _make_unquantized_moe_model():
@@ -587,9 +707,12 @@ class TestNPUWorker(TestBase):
         routed_experts.w2_weight.weight_loader = MagicMock()
         return model
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_does_not_transpose_moe_weights(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_does_not_transpose_moe_weights(
+        self, mock_get_config, mock_allocator_class, mock_synchronize_device
+    ):
         """Level-2 reload uses reload_weights; wake_up must not transpose MoE layout."""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -631,6 +754,7 @@ class TestNPUWorker(TestBase):
             self.assertIs(routed_experts.w13_weight.weight_loader, w13_loader)
             self.assertIs(routed_experts.w2_weight.weight_loader, w2_loader)
         mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+        mock_synchronize_device.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
@@ -662,8 +786,8 @@ class TestNPUWorker(TestBase):
         mock_mem_get_info.return_value = (1000, 2000)
         profile = get_hardware_profile(AscendDeviceType.A2)
         mock_get_device_type.return_value = MagicMock(wraps=profile)
-        mock_get_device_type.return_value.supports.side_effect = (
-            lambda capability: capability == HardwareCapability.LOCAL_KV_COMM_RESOURCE or profile.supports(capability)
+        mock_get_device_type.return_value.supports.side_effect = lambda capability: (
+            capability == HardwareCapability.LOCAL_KV_COMM_RESOURCE or profile.supports(capability)
         )
 
         # Mock MemorySnapshot
@@ -2225,15 +2349,51 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    @patch("vllm.distributed.kv_transfer.ensure_kv_transfer_shutdown", create=True)
-    def test_shutdown_releases_engine(self, _mock_kv_shutdown):
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_releases_engine(self, mock_kv_shutdown, mock_ec_shutdown):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker.profiler = None
 
         worker.shutdown()
 
+        mock_kv_shutdown.assert_called_once_with()
+        mock_ec_shutdown.assert_called_once_with()
         engine.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_closes_eplb_before_releasing_resources(self, _mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = None
+        state = MagicMock(spec=AscendEplbState)
+        worker.model_runner.eplb_state = state
+        cleanup = MagicMock()
+        cleanup.attach_mock(state.close, "close_eplb")
+        cleanup.attach_mock(engine.shutdown, "shutdown_engine")
+        cleanup.attach_mock(worker.model_runner.shutdown, "shutdown_runner")
+
+        worker.shutdown()
+
+        self.assertEqual([call[0] for call in cleanup.mock_calls], ["close_eplb", "shutdown_engine", "shutdown_runner"])
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_failed_eplb_close_blocks_resource_release(self, mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = MagicMock()
+        state = MagicMock(spec=AscendEplbState)
+        state.close.side_effect = SystemExit("EPLB cleanup failed")
+        worker.model_runner.eplb_state = state
+
+        with self.assertRaises(SystemExit):
+            worker.shutdown()
+
+        mock_kv_shutdown.assert_not_called()
+        worker.profiler.shutdown.assert_not_called()
+        engine.shutdown.assert_not_called()
+        worker.model_runner.shutdown.assert_not_called()
 
 
 class TestKVPPWorkerBudget(TestBase):

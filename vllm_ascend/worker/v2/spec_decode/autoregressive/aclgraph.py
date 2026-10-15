@@ -117,6 +117,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
+                    # vLLM #58275 makes mixed FULL graphs capture prefill kernels
+                    # by bounding the dummy query length to the capture
+                    # descriptor.
+                    max_query_len=desc.max_query_len or desc.uniform_token_count,
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(

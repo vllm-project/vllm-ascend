@@ -8,6 +8,41 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    def test_get_encoder_cudagraph_stats_is_serializable(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            manager = MagicMock()
+            manager.is_captured.return_value = True
+            manager.get_cumulative_stats.return_value = {
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            }
+            worker.model_runner = SimpleNamespace(
+                model_state=SimpleNamespace(
+                    encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+                ),
+            )
+
+            stats = worker.get_encoder_cudagraph_stats()
+
+        self.assertEqual(
+            stats,
+            {
+                "manager": type(manager).__name__,
+                "captured": True,
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            },
+        )
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
@@ -92,7 +127,7 @@ class TestNPUWorkerV2(TestBase):
 
     @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
     @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_restores_runner_state(
+    def test_profile_prefill_latency_v2_delegates_cpp_state(
         self,
         mock_get_pp_group,
         mock_synchronize,
@@ -108,28 +143,24 @@ class TestNPUWorkerV2(TestBase):
             model_runner.max_num_reqs = 8
             worker.model_runner = model_runner
 
-            def check_temporary_state(**kwargs):
-                self.assertEqual(model_runner.max_num_reqs, 1)
-
-            model_runner._dummy_run.side_effect = check_temporary_state
             mock_get_pp_group.return_value.is_first_rank = True
 
             with patch("time.perf_counter", side_effect=[10.0, 10.25]):
                 latency_ms = worker.profile_prefill_latency(512)
 
             self.assertEqual(latency_ms, 250.0)
-            self.assertEqual(model_runner.max_num_reqs, 8)
             model_runner._dummy_run.assert_called_once_with(
                 num_tokens=512,
                 force_attention=True,
                 is_profile=False,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                profile_cpp=True,
             )
             self.assertEqual(mock_synchronize.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
     @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_restores_state_on_error(
+    def test_profile_prefill_latency_v2_propagates_dummy_error(
         self,
         mock_get_pp_group,
         mock_synchronize,
@@ -151,7 +182,6 @@ class TestNPUWorkerV2(TestBase):
             with self.assertRaisesRegex(RuntimeError, "dummy failure"):
                 worker.profile_prefill_latency(512)
 
-            self.assertEqual(model_runner.max_num_reqs, 8)
             self.assertEqual(mock_synchronize.call_count, 1)
 
     def test_sample_tokens_v2_attaches_execution_time(self):

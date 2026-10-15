@@ -19,6 +19,15 @@ from torch import nn
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _keep_definition(item, allowed):
+    if getattr(item, "name", None) in allowed:
+        return True
+    if isinstance(item, ast.If):
+        # Keep requested definitions nested in class-scope conditionals.
+        return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
+    return False
+
+
 def load_definitions(path, names, namespace, *, bases=None, methods=None):
     tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
@@ -27,7 +36,7 @@ def load_definitions(path, names, namespace, *, bases=None, methods=None):
         if isinstance(node, ast.ClassDef):
             node.bases = [ast.Name(id=bases[node.name], ctx=ast.Load())]
             node.decorator_list = []
-            node.body = [item for item in node.body if getattr(item, "name", None) in methods[node.name]]
+            node.body = [item for item in node.body if _keep_definition(item, methods[node.name])]
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(ROOT / path), "exec", flags=__future__.annotations.compiler_flag), namespace)
 
@@ -61,6 +70,7 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
             pipeline_parallel_size=pp,
             data_parallel_size=dp,
             enable_expert_parallel=ep,
+            enable_eplb=False,
             use_sequence_parallel_moe=dp > 1 and tp > 1 and ep,
         ),
     )
@@ -529,7 +539,6 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
 
 
 @pytest.mark.parametrize("architecture", ["KimiK3ForCausalLM", "DeepseekV4ForCausalLM"])
-@pytest.mark.parametrize("legacy_transport", [False, True])
 @pytest.mark.parametrize(
     "use_pp,num_speculative_steps,owns_speculator,prefill_chunk",
     [
@@ -544,7 +553,7 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
     ],
 )
 def test_host_positions_after_rejection_or_chunk(
-    architecture, legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
+    architecture, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
 ):
     events = []
 
@@ -561,7 +570,8 @@ def test_host_positions_after_rejection_or_chunk(
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner}
+    namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
+    load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41"}, namespace)
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},
@@ -571,10 +581,13 @@ def test_host_positions_after_rejection_or_chunk(
     )
     runner = namespace["NPUModelRunner"]()
     runner.speculator = object() if owns_speculator else None
-    runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
+    runner.is_last_pp_rank = not use_pp
+    runner.model_state = object()
     runner.num_speculative_steps = num_speculative_steps
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(
+        architecture=architecture, hf_config=SimpleNamespace(architectures=[architecture])
+    )
     initialize_pp_cpu_count_sync(runner)
     runner.req_states = SimpleNamespace(
         req_id_to_index={"r": 0},

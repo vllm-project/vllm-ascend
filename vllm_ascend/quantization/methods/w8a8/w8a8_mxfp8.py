@@ -37,6 +37,7 @@ from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -81,14 +82,49 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
+    def _quantize_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        return torch_npu.npu_dynamic_mx_quant(
+            x,
+            dst_type=torch.float8_e4m3fn,
+            scale_alg=self.dynamic_mx_quant_scale_alg,
+        )
+
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        """Move MX quant before the router wait while keeping QMM after it.
+
+        Shared-expert inputs are two-dimensional. Higher-dimensional inputs
+        keep the original wrapper so its output reshape remains unchanged.
+        """
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = self._quantize_input(layer, x)
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        if isinstance(x, tuple):
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            original_shape = quantized_x.shape
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
             quantized_x, pertoken_scale = x
             original_shape = quantized_x.shape
             output_dtype = torch.bfloat16
@@ -97,14 +133,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
-            prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
-            if prefix_padding or suffix_padding:
-                x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                x,
-                dst_type=torch.float8_e4m3fn,
-                scale_alg=self.dynamic_mx_quant_scale_alg,
-            )
+            quantized_x, pertoken_scale = self._quantize_input(layer, x)
             output_dtype = x.dtype
 
         if bias is not None and bias.dtype != torch.float32:
@@ -397,11 +426,14 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
 
+            # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
             layer.cann_mega_moe_w13_weight_scale_list = [
-                w13_weight_scale.clone() for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
             ]
             layer.cann_mega_moe_w2_weight_scale_list = [
-                w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
             ]
 
             tensor_names = (
@@ -577,7 +609,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
-    scales are reorganize as blocksize 32 * 1 in process_weights_after_loading
+    Checkpoint block scales are expanded to the per-output, per-32 layout
+    consumed by ``npu_quant_matmul``. Both the original 128x128 export and
+    newer 32x32 DeepSeek V4.1 exports are supported.
     """
 
     model_dtype = None
@@ -614,7 +648,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         else:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
             layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
-        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
+        if self.block_size % self.group_size != 0:
+            raise ValueError(
+                "MXFP8 weight block size must be divisible by the "
+                f"runtime group size, got block_size={self.block_size}, "
+                f"group_size={self.group_size}"
+            )
+        input_repeat = self.block_size // self.group_size
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)

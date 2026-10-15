@@ -18,7 +18,7 @@
 import os
 from functools import lru_cache
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -28,11 +28,19 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
+
+if TYPE_CHECKING:
+    from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
+
+ACL_HOST_REG_MAPPED = 0x2
+ACL_HOST_REG_PINNED = 0x10000000
+INT64_MAX = torch.iinfo(torch.int64).max
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -41,6 +49,48 @@ else:
 
 
 class BaseDeviceAdaptor:
+    @staticmethod
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
+        """Return the packed-cache ABI implementation, or use standard caches."""
+        return None
+
+    @staticmethod
+    def host_register_flags() -> int:
+        """ACL host registration flags for the standard runtime ABI."""
+        # PINNED prevents paging while MAPPED exposes the host allocation to
+        # NPU kernels. Both flags are required by the standard runtime path.
+        # TODO: unify flags when supported CANN runtimes accept the same ABI.
+        return ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
+
+    @staticmethod
+    def rms_norm_cast(x, weight, epsilon):
+        """Return fused rounded/FP32 outputs, or None for the normal RMSNorm path."""
+        from vllm_ascend.utils import enable_custom_op
+
+        if get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST) and enable_custom_op():
+            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
+            if op is not None:
+                return op(x, weight, epsilon)
+        return None
+
+    @staticmethod
+    def apply_partial_rotary_inplace(x, cos, sin, *, start, end, inverse=False):
+        """Adapt rank and inverse-RoPE arguments without copying the destination."""
+        work = x.unsqueeze(-2) if x.ndim == 2 else x
+        work = work.unsqueeze(1) if work.ndim == 3 else work
+        supports_negate_sin = get_current_hardware_profile().supports(
+            HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN
+        )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            work,
+            cos,
+            -sin if inverse and not supports_negate_sin else sin,
+            rotary_mode="interleave",
+            partial_slice=[start, end],
+            **({"negate_sin": inverse} if supports_negate_sin else {}),
+        )
+        return x
+
     @classmethod
     def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
         """Dispatch a cache scatter with the original operator's arguments.
@@ -397,6 +447,8 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -433,7 +485,7 @@ class BaseDeviceAdaptor:
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
                 query=q_li.view(q_li_shape_ori),
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
@@ -448,6 +500,8 @@ class BaseDeviceAdaptor:
                 layout_key="PA_BSND",
                 sparse_count=2048,
                 sparse_mode=3,
+                pre_tokens=INT64_MAX,
+                next_tokens=INT64_MAX,
             )
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -552,27 +606,50 @@ class BaseDeviceAdaptor:
         # torch.cat allocates a fresh contiguous output, so no extra
         # .contiguous() pass is needed here.
         query = torch.cat([ql_nope, q_pe], dim=-1)
-        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-            query=query,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=sparse_mode,
-            attention_mode=2,
-            quant_scale_repo_mode=1,
-            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-            key_quant_mode=2,
-            value_quant_mode=2,
-            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
-            return_softmax_lse=return_lse,
-        )
+        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1])
+        if return_lse or qk_rope_head_dim == 0:
+            return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+                return_softmax_lse=return_lse,
+            )
+        else:
+            return torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+            )
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -814,8 +891,8 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
-        q = l2norm_fwd(q).contiguous()
-        k = l2norm_fwd(k).contiguous()
+        q = l2norm_fwd(q.contiguous()).contiguous()
+        k = l2norm_fwd(k.contiguous()).contiguous()
         v = v.contiguous()
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
@@ -974,6 +1051,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         ops = import_module("cann_ops_transformer.ops")
         return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
 
+    @staticmethod
+    def host_register_flags() -> int:
+        # A5 runtime rejects the redundant PINNED hint with error 107000.
+        # MAPPED works for both malloc-host allocations and shared mappings.
+        return ACL_HOST_REG_MAPPED
+
+    @staticmethod
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
+        from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
+
+        return MixedQuantPackedCacheOps
+
     @classmethod
     def reshape_and_cache(
         cls,
@@ -1036,12 +1125,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
+        if return_lse or getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
             # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
             # (csrc/attention/kv_quant_sparse_flash_attention_vllm). The torch_npu
             # built-in aclnn op has no RoPE0 contract: it sizes its outputs from
             # rope_head_dim=64 and faults while registering them. Route RoPE0 to
-            # the custom operator and keep RoPE64 on the built-in one.
+            # the custom operator. LSE requests also require the custom operator;
+            # keep RoPE64 without LSE on the built-in one.
             return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention_vllm(
                 sfa_impl,
                 ql_nope,
@@ -1415,6 +1505,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -1702,6 +1794,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     layout_key="PA_BSND",
                     sparse_count=2048,
                     sparse_mode=3,
+                    pre_tokens=INT64_MAX,
+                    next_tokens=INT64_MAX,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -1806,9 +1900,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
+        # Conv1d head-first output is exposed as BSND views by GDN. Recover
+        # its contiguous BNSD storage instead of copying all three tensors.
+        # A token slice in a mixed batch may break contiguity; retain BSND
+        # packing for that case. Gates and output remain sequence-major.
+        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
+        if all(x.is_contiguous() for x in head_first_qkv):
+            q, k, v = head_first_qkv
+            layout = "BNSD"
+        else:
+            q, k, v = (x.contiguous() for x in (q, k, v))
+            layout = "BSND"
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
@@ -1833,7 +1935,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
-            layout="BSND",
+            layout=layout,
             use_exp2=True,
             use_qk_l2norm_in_kernel=True,
             allow_neg_eigval=False,
@@ -1966,6 +2068,21 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
         idx[dim] = mask
         tensor[tuple(idx)] = value
         return tensor
+
+    @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

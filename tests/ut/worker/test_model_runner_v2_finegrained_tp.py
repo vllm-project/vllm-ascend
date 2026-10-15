@@ -33,9 +33,15 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     a bare MagicMock.
     """
     runner = object.__new__(NPUModelRunner)
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.vllm_config = MagicMock()
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    # Dump contract from the production initializer; helpers no-op on None.
+    runner.debugger = None
+    runner._debugger_started = False
     # Extra fields for the execute_model-path tests below.
     runner.device = torch.device("cpu")
     runner.is_last_pp_rank = True
@@ -264,6 +270,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     with (
         patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
         return runner.execute_model(MagicMock(), dummy_run=dummy_run, is_profile=is_profile)

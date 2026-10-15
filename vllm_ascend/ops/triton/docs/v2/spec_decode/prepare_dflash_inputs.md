@@ -3,13 +3,13 @@
 ## Description
 
 - **Function**: Prepares the metadata and fixed-capacity buffers required by DFlash speculative decoding on Ascend NPU. For each request, the operator converts the current target-model token span into draft-model context KV positions/slots, constructs the next DFlash query tokens and query slots, builds sampling mappings, copies per-request sampling state, and pads graph-visible buffers.
-- **Supported vLLM ABI**: vLLM 0.30.0 `prepare_dflash_inputs`, including
+- **Supported vLLM ABI**: vLLM 0.31.0 `prepare_dflash_inputs`, including
   `cp_rank`, `cp_size`, and `cp_interleave` for rank-local DCP KV slots.
 - **Implementation**:
     - `vllm_ascend/ops/triton/v2/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
     - `vllm_ascend/worker/v2/spec_decode/dflash/speculator.py` provides the
-      vLLM 0.30.0 `prepare_dflash_inputs` wrapper.
+      vLLM 0.31.0 `prepare_dflash_inputs` wrapper.
 - **Formula**:
     - Request context range:
       `ctx_start = query_start_loc[req]`,
@@ -97,7 +97,7 @@
 ## Constraints
 
 - The operator is inference-only and requires Ascend NPU Triton execution.
-- The optimized kernel implements the vLLM 0.30.0 DFlash ABI and the same
+- The optimized kernel implements the vLLM 0.31.0 DFlash ABI and the same
   rank-local DCP slot mapping as main's scalar implementation.
 - Multimodal inputs (including M-RoPE positions) are not supported by this optimized path. It derives KV slots from scalar token positions; multimodal inputs require the target slot mapping and linear token indices (see [#9340](https://github.com/vllm-project/vllm-ascend/pull/9340)).
 - `input_batch.num_reqs > 0` and `input_batch.num_reqs <= max_num_reqs`.
@@ -118,7 +118,7 @@
 
 ## Upstream Compatibility
 
-The worker wrapper preserves the vLLM 0.30.0 positional signature and forwards
+The worker wrapper preserves the vLLM 0.31.0 positional signature and forwards
 DFlash and DCP inputs to the optimized 2-D launcher. The Ascend speculator
 binds `kv_cache_block_size` from `self.vllm_config.cache_config.block_size`
 when setting attention and passes it as a keyword-only argument. Multimodal
