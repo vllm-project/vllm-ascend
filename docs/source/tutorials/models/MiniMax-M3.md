@@ -283,9 +283,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
+    export IFNAME="${NETWORK_INTERFACE}"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
     export GLOO_SOCKET_IFNAME="$IFNAME"
@@ -320,9 +321,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
+    export IFNAME="${NETWORK_INTERFACE}"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
     export GLOO_SOCKET_IFNAME="$IFNAME"
@@ -360,9 +362,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
+    export IFNAME="${NETWORK_INTERFACE}"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
     export GLOO_SOCKET_IFNAME="$IFNAME"
@@ -398,9 +401,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
+    export IFNAME="${NETWORK_INTERFACE}"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
     export GLOO_SOCKET_IFNAME="$IFNAME"
@@ -619,20 +623,19 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -701,15 +704,14 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -879,20 +881,20 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
-    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -957,18 +959,19 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
-    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
@@ -1283,22 +1286,22 @@ A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` wi
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
 ```bash
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH=./mooncake.json
 # Optional: only if Mooncake is installed in a non-standard path (same as Section 5.3).
 if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
     export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
 fi
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+export PYTHONHASHSEED=0
 ```
 
 | Hardware | Dependencies | Required pooling exports | Notes |
 | -------- | ------------- | ------------------------ | ----- |
-| 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ACL_OP_INIT_MODE=1` and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
+| 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
 | 800I/T A3 (RoCE) or 800I/T A2 | A2: HDK >= 25.5 recommended | `export HCCL_INTRA_ROCE_ENABLE=1`, plus `HCCL_IF_IP` / socket IFNAME, and `nr_hugepages=200000` | Use the RoCE path from the KV Cache Pool guide. |
 | 950PR/DT (Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
 
@@ -1317,8 +1320,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy
 
-    export VLLM_SERVER_DEV_MODE=1
-
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
@@ -1335,26 +1336,24 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
+    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
-
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
-    export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -1420,8 +1419,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export VLLM_SERVER_DEV_MODE=1
-
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
@@ -1438,25 +1435,23 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
-
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
-    export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -1543,20 +1538,19 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Runtime environment and pooling extras (Device UB).
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1642,20 +1636,19 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Runtime environment and pooling extras (Device UB).
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
-
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1916,24 +1909,16 @@ export LOG_PATH=./minimax-m3-1m-a3.log
 
 source "${CANN_PATH}/set_env.sh"
 
-export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
 export VLLM_PP_LAYER_PARTITION="15,15,15,15"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export HCCL_SOCKET_IFNAME=$NIC_NAME
-export GLOO_SOCKET_IFNAME=$NIC_NAME
-export TP_SOCKET_IFNAME=$NIC_NAME
+export VLLM_USE_V2_MODEL_RUNNER=1
 export HCCL_BUFFSIZE=256
 export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_CONNECT_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=7200
-export TASK_QUEUE_ENABLE=1
+export HCCL_SOCKET_IFNAME=$NIC_NAME
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export GLOO_SOCKET_IFNAME=$NIC_NAME
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 
 vllm serve "$MODEL_PATH" \
     --host 0.0.0.0 \
@@ -1985,12 +1970,12 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
     export CANN_PATH=/usr/local/Ascend/cann-9.1.0
     export LOG_PATH=./minimax-m3-1m-950dt-tp8.log
 
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
@@ -2040,12 +2025,12 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
     export CANN_PATH=/usr/local/Ascend/cann-9.1.0
     export LOG_PATH=./minimax-m3-1m-950dt-tp4pp2.log
 
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
