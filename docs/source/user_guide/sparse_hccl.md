@@ -1,9 +1,5 @@
 # Checkpoint-coordinate sparse HCCL updates
 
-The backend reuses vLLM's public sparse transfer and checkpoint-patch APIs.
-The compatibility target for this implementation is vLLM
-[`8cc9aa5ad350f6f80cf3bebb298d410803ff75a9`](https://github.com/vllm-project/vllm/commit/8cc9aa5ad350f6f80cf3bebb298d410803ff75a9).
-
 The `sparse_hccl` weight-transfer backend sends replacement values and flat
 `int32` indices in checkpoint coordinates. Every inference worker receives the
 same patches. The model's native `load_weights()` handles tensor-parallel
@@ -38,14 +34,9 @@ need separate validation before use.
 
 ## Trainer API
 
-For a runnable trainer adapted from upstream `examples/rl/rlhf_sparse_nccl.py`,
-see [the sparse HCCL example](../../../examples/rl/rlhf_sparse_hccl.py).
-Its usage includes a TP2/PP2 server and a separate trainer NPU. Both start from
-the same checkpoint; do not use dummy weights as the sparse-update baseline.
-The example patches experts in the first and last layers to exercise PP stage
-selection, and converts both fused and per-expert Hugging Face storage into
-checkpoint coordinates. Run `python examples/rl/rlhf_sparse_hccl.py --help`
-from the repository root for the server and trainer commands.
+See [the sparse HCCL example](../../../examples/rl/rlhf_sparse_hccl.py)
+for a runnable trainer and TP2/PP2 server commands. Both must start from the
+same checkpoint. Run `python examples/rl/rlhf_sparse_hccl.py --help` for usage.
 
 ```python
 import torch

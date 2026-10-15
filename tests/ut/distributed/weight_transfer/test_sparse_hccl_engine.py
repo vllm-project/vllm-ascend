@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sparse HCCL validation, rank calculation, and lifecycle tests."""
 
+import importlib.util
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -275,3 +277,56 @@ def test_prepare_moves_cpu_views_to_communicator_device():
 def test_source_is_rejected():
     with pytest.raises(ValueError, match="WeightSource"):
         SparseHCCLTrainerWeightTransferEngine(client=MagicMock(), source=MagicMock())
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_example_patches_both_pipeline_ends_and_experts(fused):
+    path = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_sparse_hccl.py"
+    spec = importlib.util.spec_from_file_location("sparse_hccl_example", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(
+        model_type="qwen3_moe", num_experts=4, moe_intermediate_size=4, hidden_size=3, num_hidden_layers=4
+    )
+    weights = {}
+    for layer in (0, 3):
+        prefix = f"model.layers.{layer}.mlp.experts"
+        if fused:
+            weights[f"{prefix}.gate_up_proj"] = torch.arange(4 * 8 * 3, dtype=torch.float32).reshape(4, 8, 3)
+        else:
+            for expert in (0, 2):
+                weights[f"{prefix}.{expert}.gate_proj.weight"] = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+
+    def get_parameter(name):
+        if name not in weights:
+            raise AttributeError(name)
+        return weights[name]
+
+    model.get_parameter = get_parameter
+    before = {name: value.clone() for name, value in weights.items()}
+    patches = module.make_patches(model)
+    assert len(patches) == 4
+    for weight_patch in patches:
+        assert weight_patch.full_shape == (4, 3)
+        assert weight_patch.indices.dtype == torch.int32
+        assert torch.equal(weight_patch.indices, torch.arange(6, dtype=torch.int32))
+        prefix = weight_patch.name.rsplit(".", 3)[0]
+        expert = int(weight_patch.name.split(".")[-3])
+        if fused:
+            reference = before[f"{prefix}.gate_up_proj"][expert, :4].clone()
+            actual = weights[f"{prefix}.gate_up_proj"][expert, :4]
+            assert torch.equal(
+                weights[f"{prefix}.gate_up_proj"][expert, 4:], before[f"{prefix}.gate_up_proj"][expert, 4:]
+            )
+        else:
+            reference = before[weight_patch.name].clone()
+            actual = weights[weight_patch.name]
+        reference.flatten().index_copy_(0, weight_patch.indices.long(), weight_patch.values)
+        assert torch.equal(actual, reference)
+        assert torch.equal(
+            weight_patch.values,
+            before[f"{prefix}.gate_up_proj"][expert, :2].flip(0).flatten()
+            if fused
+            else before[weight_patch.name][:2].flip(0).flatten(),
+        )
