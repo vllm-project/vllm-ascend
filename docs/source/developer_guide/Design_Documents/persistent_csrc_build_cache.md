@@ -377,6 +377,40 @@ path, which the restore helper resolves to an absolute directory for builds.
 Deleting the local directory causes a cold build;
 it does not change the compiled source or CI's persistent snapshot.
 
+After a successful source-package native build, the tool keeps two
+`operator_text_hash` versions per SOC/operator, retaining every action inside
+each version. HITs and saves only refresh recency: they never delete versions.
+A third version can coexist during the build. `setup.py` calls cleanup only
+after both ACLNN installation and the extension build/install have succeeded;
+failed builds leave the old versions intact. This success boundary is native
+build/install, not a later pip installation or wheel-publication step.
+
+`VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS` configures this retention limit
+alongside `VLLM_ASCEND_BUILD_CACHE_DIR`; its default is `2`. Positive integers
+retain that many source-hash versions per SOC/operator; nonpositive values
+disable cleanup. Invalid values skip cleanup with a warning, not a build failure.
+For example, use
+`VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS=3 uv pip install -e .`
+to retain three versions. `csrc/build.sh` lists this setting beside the cache
+directory, but does not prune at its own exit, before the extension build finishes.
+
+A shared build lock pins the cache across the entire native build, not just
+individual compiler actions. Cleanup tries the exclusive lock without waiting;
+if another build is active, it defers until a later successful build. Cleanup
+failures never fail a successful build. `.updated` records pruning even after a
+HIT-only build, allowing trusted producers to save a compacted snapshot.
+Published build outputs and the stable build lock are never removed.
+
+Standalone action or CMake users can explicitly run
+`python3 csrc/scripts/build_cache.py prune --cache-root csrc/build_cache` after a
+successful complete build. `--max-operator-versions N` changes the default of 2;
+nonpositive values disable pruning. Schema 4 and action identity are unchanged.
+
+This bounds operator source-version history, not disk bytes, third-party
+entries, action-key variants within a retained version, or historical OBS
+snapshot counts. Do not concurrently maintain a cache directory used by older
+engines without the shared build-lock protocol.
+
 ### Central producer
 
 The reusable producer restores L1, performs the ordinary source build, verifies

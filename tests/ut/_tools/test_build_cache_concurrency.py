@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from .build_cache_test_utils import build_cache_command, run_command
 
 
@@ -154,17 +156,24 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
     assert any(e["event"] == "cache_result" and e["status"] == "BYPASS" for e in events)
 
 
-def test_publish_lock_timeout_fails_fast(tmp_path: Path):
+@pytest.mark.parametrize("lock_kind", ["publish", "action"])
+def test_publication_lock_timeout_fails_fast(tmp_path: Path, lock_kind: str):
     _, _, _, _, _, state, _, counter, command = _seed_one(tmp_path)
     event_log = tmp_path / "events.jsonl"
-    lock = _hold_lock(state / ".publish.lock")
+    if lock_kind == "publish":
+        lock_path = state / ".publish.lock"
+    else:
+        action_identity = "test_unit/TestOperator-0"
+        action_hash = hashlib.sha256(action_identity.encode("utf-8")).hexdigest()
+        lock_path = state / ".action_locks" / f"{action_hash}.lock"
+    lock = _hold_lock(lock_path)
     try:
         start = time.monotonic()
         failed = run_command(
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": "0.2",
+                f"VLLM_ASCEND_BUILD_CACHE_{lock_kind.upper()}_LOCK_TIMEOUT_SECONDS": "0.2",
             },
         )
         elapsed = time.monotonic() - start
@@ -172,33 +181,7 @@ def test_publish_lock_timeout_fails_fast(tmp_path: Path):
         lock.close()
 
     assert failed.returncode == 75, failed.stdout + failed.stderr
-    assert "[build-cache] ERROR lock timeout kind=publish" in failed.stdout
-    assert elapsed < 2.0
-    assert counter.read_text() == "1"
-
-
-def test_action_lock_timeout_fails_fast(tmp_path: Path):
-    _, _, _, _, _, state, _, counter, command = _seed_one(tmp_path)
-    action_identity = "test_unit/TestOperator-0"
-    action_hash = hashlib.sha256(action_identity.encode("utf-8")).hexdigest()
-    action_lock = state / ".action_locks" / f"{action_hash}.lock"
-    event_log = tmp_path / "events.jsonl"
-    lock = _hold_lock(action_lock)
-    try:
-        start = time.monotonic()
-        failed = run_command(
-            command,
-            {
-                "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": "0.2",
-            },
-        )
-        elapsed = time.monotonic() - start
-    finally:
-        lock.close()
-
-    assert failed.returncode == 75, failed.stdout + failed.stderr
-    assert "[build-cache] ERROR lock timeout kind=action" in failed.stdout
+    assert f"[build-cache] ERROR lock timeout kind={lock_kind}" in failed.stdout
     assert elapsed < 2.0
     assert counter.read_text() == "1"
 

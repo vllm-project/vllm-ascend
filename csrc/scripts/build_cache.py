@@ -44,6 +44,8 @@ DEFAULT_ENTRY_LOCK_TIMEOUT_SECONDS = 60.0
 DEFAULT_ACTION_LOCK_TIMEOUT_SECONDS = 120.0
 DEFAULT_PUBLISH_LOCK_TIMEOUT_SECONDS = 120.0
 DEFAULT_GENERIC_LOCK_TIMEOUT_SECONDS = 120.0
+DEFAULT_MAX_OPERATOR_VERSIONS = 2
+BUILD_LOCK = ".build.lock"
 DEFAULT_EXCLUDES = (
     ".git",
     ".git/**",
@@ -179,6 +181,7 @@ def _acquire_timed_lock(
     *,
     kind: str,
     timeout_seconds: float,
+    shared: bool = False,
 ) -> float:
     start = time.monotonic()
     next_wait_event = LOCK_WAIT_EVENT_SECONDS
@@ -187,7 +190,7 @@ def _acquire_timed_lock(
         try:
             fcntl.flock(
                 stream.fileno(),
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
+                (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB,
             )
             waited = time.monotonic() - start
             if waited >= LOCK_WAIT_EVENT_SECONDS:
@@ -371,6 +374,11 @@ def _hash_prepared_inputs(
     records: list[tuple[str, str]] = []
     manifest: list[dict] = []
 
+    def record_content(logical_path: str, content_hash: str, kind: str = "file") -> None:
+        # Keep key records and their diagnostic manifest in agreement.
+        records.append((logical_path, content_hash))
+        manifest.append({"path": logical_path, "kind": kind, "sha256": content_hash})
+
     for input_index, raw_path in enumerate(paths):
         label = f"input[{input_index}]"
 
@@ -387,10 +395,7 @@ def _hash_prepared_inputs(
             raise FileNotFoundError(f"prepared input does not exist: {path}")
 
         if path.is_file():
-            file_hash = _hash_prepared_file(path, normalize_paths)
-            logical_path = f"{label}/{path.name}"
-            records.append((logical_path, file_hash))
-            manifest.append({"path": logical_path, "kind": "file", "sha256": file_hash})
+            record_content(f"{label}/{path.name}", _hash_prepared_file(path, normalize_paths))
             continue
 
         for child in sorted(
@@ -409,33 +414,16 @@ def _hash_prepared_inputs(
                 resolved = child.resolve(strict=True)
                 content_path = f"{logical_path}/content"
                 if resolved.is_file():
-                    content_hash = _hash_prepared_file(resolved, normalize_paths)
-                    records.append((content_path, content_hash))
-                    manifest.append(
-                        {
-                            "path": content_path,
-                            "kind": "file",
-                            "sha256": content_hash,
-                        }
-                    )
+                    record_content(content_path, _hash_prepared_file(resolved, normalize_paths))
                 elif resolved.is_dir():
                     content_hash, _ = _hash_prepared_inputs(
                         [resolved],
                         excludes,
                         normalize_paths,
                     )
-                    records.append((content_path, content_hash))
-                    manifest.append(
-                        {
-                            "path": content_path,
-                            "kind": "directory",
-                            "sha256": content_hash,
-                        }
-                    )
+                    record_content(content_path, content_hash, "directory")
             elif child.is_file():
-                file_hash = _hash_prepared_file(child, normalize_paths)
-                records.append((logical_path, file_hash))
-                manifest.append({"path": logical_path, "kind": "file", "sha256": file_hash})
+                record_content(logical_path, _hash_prepared_file(child, normalize_paths))
 
     return _canonical_hash(records), manifest
 
@@ -999,7 +987,7 @@ def _file_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _file_lock_or_error(path: Path):
+def _file_lock_or_error(path: Path, *, shared: bool = False, timeout_seconds: float | None = None):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         stream = path.open("a+")
@@ -1013,7 +1001,8 @@ def _file_lock_or_error(path: Path):
                 stream,
                 path,
                 kind="entry",
-                timeout_seconds=_lock_timeout_seconds("entry"),
+                timeout_seconds=_lock_timeout_seconds("entry") if timeout_seconds is None else timeout_seconds,
+                shared=shared,
             )
         except (OSError, _LockTimeoutError) as exc:
             yield exc
@@ -1022,6 +1011,74 @@ def _file_lock_or_error(path: Path):
             yield None
         finally:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _prune_operator_versions(cache_root: Path, operator_root: Path, max_versions: int) -> None:
+    """Called only with the exclusive build lock, after successful builds."""
+    if max_versions <= 0:
+        return
+    try:
+        # Only operate on the canonical custom_operator/<soc>/<operator> tree.
+        relative = operator_root.relative_to(cache_root)
+        if len(relative.parts) != 3 or relative.parts[0] != "custom_operator":
+            raise RuntimeError("unsafe operator cache root")
+        if operator_root.resolve() != operator_root:
+            raise RuntimeError("operator cache cleanup refuses symlinked directories")
+        versions = sorted(
+            (
+                path
+                for path in operator_root.iterdir()
+                if re.fullmatch(r"[0-9a-f]{64}", path.name) and path.is_dir() and not path.is_symlink()
+            ),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+        for version in versions[max_versions:]:
+            if version.resolve() != version:
+                continue
+            # Mark even a partial deletion for the next shared snapshot save.
+            (cache_root / UPDATED_MARKER).touch()
+            shutil.rmtree(version)
+            print(f"[build-cache] PRUNED operator={operator_root.name} hash={version.name}", flush=True)
+            _emit_event("cache_prune", operator=operator_root.name, operator_text_hash=version.name)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[build-cache] WARNING operator cache cleanup skipped; build result kept: {exc}", flush=True)
+        _emit_event("warning", component="prune", message=str(exc))
+
+
+def prune(cache_root: str | Path, max_versions: int | str = DEFAULT_MAX_OPERATOR_VERSIONS) -> int:
+    """Best-effort post-build maintenance; never wait for an active build."""
+    try:
+        max_versions = int(max_versions)
+        cache_root = Path(cache_root).expanduser().resolve()
+        if max_versions <= 0 or not cache_root.is_dir():
+            return 0
+        with _file_lock_or_error(cache_root / BUILD_LOCK, timeout_seconds=0) as lock_error:
+            if lock_error is not None:
+                print("[build-cache] PRUNE skipped: cache busy or unavailable", flush=True)
+                return 0
+            for operator_root in (cache_root / "custom_operator").glob("*/*"):
+                if operator_root.is_dir():
+                    _prune_operator_versions(cache_root, operator_root, max_versions)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[build-cache] WARNING cleanup skipped; build result kept: {exc}", flush=True)
+    return 0
+
+
+@contextlib.contextmanager
+def build_session(cache_root: str | Path, max_versions: int | str = DEFAULT_MAX_OPERATOR_VERSIONS):
+    """Pin the cache for the entire native build; prune only on success."""
+    try:
+        cache_root = Path(cache_root).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[build-cache] WARNING build guard skipped; compiling normally: {exc}", flush=True)
+        yield
+        return
+    with _file_lock_or_error(cache_root / BUILD_LOCK, shared=True, timeout_seconds=0) as lock_error:
+        yield
+    # An exception from the build propagates past this point, without pruning.
+    if lock_error is None:
+        prune(cache_root, max_versions)
 
 
 def _expected_artifact_model(domain: str) -> int:
@@ -1535,7 +1592,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     # ------------------------------------------------------------------
-    # 3. Lock order: action lock (custom only) -> entry lock.
+    # 3. Lock order: action lock (custom only) -> build shared lock -> entry.
     #    Entry-lock failure is fail-open; action/publish failures remain hard.
     # ------------------------------------------------------------------
     action_lock: Path | None = None
@@ -1546,7 +1603,13 @@ def run(args: argparse.Namespace) -> int:
         action_lock = publish_state_dir / ".action_locks" / f"{action_lock_name}.lock"
 
     action_scope = _file_lock(action_lock) if action_lock is not None else contextlib.nullcontext()
-    with action_scope, _file_lock_or_error(entry_lock) as lock_error:
+    operator_version = entry.parent.parent if args.domain == "custom_operator" else None
+    with (
+        action_scope,
+        _file_lock_or_error(cache_root / BUILD_LOCK, shared=True, timeout_seconds=0) as build_error,
+        _file_lock_or_error(entry_lock) as entry_error,
+    ):
+        lock_error = build_error or entry_error
         # --------------------------------------------------------------
         # 4A. BYPASS: cache entry cannot be safely locked.
         #     Build normally, but do not read/write this cache entry.
@@ -1592,6 +1655,9 @@ def run(args: argparse.Namespace) -> int:
                     flush=True,
                 )
                 _emit_event("cache_result", status="HIT", key=final_key, **event_fields)
+                if operator_version is not None:
+                    with contextlib.suppress(OSError):
+                        os.utime(operator_version, None)
                 return 0
             except (OSError, RuntimeError) as exc:
                 print(
@@ -1665,6 +1731,9 @@ def run(args: argparse.Namespace) -> int:
                 build_seconds=round(elapsed, 6),
                 **event_fields,
             )
+            if operator_version is not None:
+                with contextlib.suppress(OSError):
+                    os.utime(operator_version, None)
         except (OSError, RuntimeError) as exc:
             print(
                 f"[build-cache] WARNING save failed; build result kept "
@@ -1727,6 +1796,10 @@ def build_parser() -> argparse.ArgumentParser:
     key_parser.add_argument("--csrc-hash", required=True)
     key_parser.add_argument("--unique-suffix", required=True)
 
+    prune_parser = subparsers.add_parser("prune", help="Prune operator versions after a successful build.")
+    prune_parser.add_argument("--cache-root", required=True)
+    prune_parser.add_argument("--max-operator-versions", type=int, default=DEFAULT_MAX_OPERATOR_VERSIONS)
+
     return parser
 
 
@@ -1735,6 +1808,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.subcommand == "snapshot-key":
         return snapshot_key(args)
+    if args.subcommand == "prune":
+        return prune(args.cache_root, args.max_operator_versions)
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     try:
