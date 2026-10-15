@@ -9,7 +9,7 @@ from tools.check_wheel_dependencies import check_wheel_dependencies, read_requir
 
 
 class WheelDependenciesTest(unittest.TestCase):
-    def check_metadata(self, dependencies, requirements="torch-npu==2.10.0.post4\nnumpy\n"):
+    def check_metadata(self, dependencies, requirements="torch-npu==2.10.0.post4\nnumpy\n", extra_metadata=()):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "requirements.txt").write_text(requirements, encoding="utf-8")
@@ -20,10 +20,24 @@ class WheelDependenciesTest(unittest.TestCase):
                     "Metadata-Version: 2.1\nName: vllm_ascend\nVersion: 0.0.0\n"
                     + "".join(f"Requires-Dist: {dependency}\n" for dependency in dependencies),
                 )
+                for name in extra_metadata:
+                    archive.writestr(name, "Name: embedded\nRequires-Dist: unrelated\n")
             check_wheel_dependencies(wheel, root / "requirements.txt")
 
     def test_normalized_names_and_whitespace(self):
         self.check_metadata(["torch_npu == 2.10.0.post4", "numpy"])
+
+    def test_nested_metadata_is_ignored(self):
+        self.check_metadata(
+            ["torch-npu==2.10.0.post4", "numpy"],
+            extra_metadata=("tests/fixtures/embedded-1.0.dist-info/METADATA",),
+        )
+
+    def test_multiple_root_metadata_files_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.check_metadata(
+                ["torch-npu==2.10.0.post4", "numpy"], extra_metadata=("embedded-1.0.dist-info/METADATA",)
+            )
 
     def test_missing_dependency(self):
         with self.assertRaisesRegex(ValueError, "Missing"):

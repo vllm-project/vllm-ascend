@@ -41,7 +41,9 @@ def read_requirements(path, root):
 def check_wheel_dependencies(wheel, requirements):
     expected = Counter(read_requirements(requirements, requirements.parent))
     with zipfile.ZipFile(wheel) as archive:
-        metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        metadata_files = [
+            name for name in archive.namelist() if name.count("/") == 1 and name.endswith(".dist-info/METADATA")
+        ]
         if len(metadata_files) != 1:
             raise ValueError("Expected exactly one wheel METADATA file")
         metadata = BytesParser().parsebytes(archive.read(metadata_files[0]))
