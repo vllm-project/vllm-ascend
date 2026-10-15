@@ -1,14 +1,18 @@
 # Context Parallel
 
-The context parallel features include Decode Context Parallel (DCP) and DSA-CP.
+The context parallel features include Prefill Context Parallel (PCP), Decode Context Parallel (DCP), and DSA-CP.
 
-Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
+Prefill Context Parallel is supported with ModelRunner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). It splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
 
-Prefill Context Parallel is not supported by vLLM Ascend. This document describes only DCP and the separate DSA-CP sparse-attention path.
+Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
+
+This document focuses on DCP and DSA-CP.
 
 ## KV-cache layout
 
-DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose default value is `1`.
+DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose declared default is `1`.
+
+SFA+DCP uses `block_size` as the effective interleave size; when KV transfer is enabled, set it explicitly to `block_size` to avoid a configuration error.
 
 For a DCP size of `dcp_size`, a virtual block contains `block_size * dcp_size` tokens. For token `x`:
 
@@ -71,29 +75,25 @@ retain DCP's memory benefit:
   KV cache.
 - Decode-only batches retain the DCP SFA Q-gather and result-merge path.
 
-This mode is selected automatically for SFA sparse models when
-`prefill_context_parallel_size=1` and `decode_context_parallel_size>1`. It
-requires `decode_context_parallel_size == tensor_parallel_size`.
+This mode is selected automatically for sparse SFA models when DCP is enabled (`decode_context_parallel_size>1`).
 
-For a GLM-5.2 DSA-CP deployment, enable sequence parallelism and DSA-CP and keep the CP
-interleave size equal to the KV-cache block size.
-Enabling DSA-CP automatically enables FlashComm as the all2all backend:
+For a GLM-5.2 DCP deployment, keep `cp_kv_cache_interleave_size` equal to the KV-cache block size:
 
 ```bash
-
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size <N> \
   --block-size <B> \
-  --cp-kv-cache-interleave-size <B> \
-  --additional-config '{"enable_dsa_cp": true}'
+  --cp-kv-cache-interleave-size <B>
 ```
 
 The replicated indexer increases indexer-cache memory in proportion to the
 DCP world size; the SFA KV cache itself remains sharded.
 
 ### SFA DSA-CP `o_proj` Path
+
+DSA-CP requires ModelRunner V1; set `VLLM_USE_V2_MODEL_RUNNER=0` before enabling `enable_dsa_cp`.
 
 SFA DSA-CP execution intentionally reuses the normal TP-sharded `o_proj`.
 This applies both to a mixed-role instance and to a PD-disaggregated P node; it is not a standalone user-facing `o_proj` TP switch.

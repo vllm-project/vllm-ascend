@@ -63,8 +63,8 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-ARG FLA_VERSION="26.9.1+deva4a7958"
-ARG FLA_RELEASE_TAG="v26.9.1-beta2"
+ARG FLA_VERSION="26.9.1+dev36e67d2"
+ARG FLA_RELEASE_TAG="v26.9.1-20261012-120905"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -112,11 +112,13 @@ ENV SOC_VERSION=$SOC_VERSION \
     MAX_JOBS=$MAX_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL} ${PYTORCH_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ \
+        --extra-index-url ${ASCEND_INDEX_URL} \
+        --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
@@ -128,10 +130,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="014ccd0cce4f21f4b030341a42e6be3065c2e6a436e7595e629de9d5c0547c48" ;; \
+            FLA_SHA256="dfb7da6ec83808f421b34c0d1fb51e3007b6a11a174a58d5f94769befb493b90" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="2f7eef7be3cafdda698f533063dea67bf581fd6837488304c0f5f1a5e67a2fd8" ;; \
+            FLA_SHA256="985cabe51af74a584b04becf56056f1c95a6b78cebce3f8c08a2fc37a8e58b43" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"; \
