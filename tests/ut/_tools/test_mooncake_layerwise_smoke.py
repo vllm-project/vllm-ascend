@@ -21,6 +21,7 @@ LAYERWISE_TEST = "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.
 @pytest.fixture
 def smoke():
     spec = importlib.util.spec_from_file_location("check_mooncake_layerwise", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -28,7 +29,7 @@ def smoke():
 
 @pytest.fixture
 def store():
-    objects = {}
+    objects: dict[str, bytearray] = {}
     client = Mock()
     client.setup.return_value = 0
     client.register_buffer.return_value = 0
