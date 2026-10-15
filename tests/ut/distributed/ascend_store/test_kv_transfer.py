@@ -232,7 +232,7 @@ class TestKVTransferThread(unittest.TestCase):
 
 
 class TestGVALayerTransferFailures(unittest.TestCase):
-    def _make_sending_thread(self):
+    def _make_sending_thread(self, raise_on_transfer_failure=True):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -261,6 +261,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
             layer_save_finished_events=[save_finished],
             sync_save_events=[MagicMock()],
             group_builders=[builder],
+            raise_on_transfer_failure=raise_on_transfer_failure,
         )
         task = LayerTransferTask(
             layer_id=0,
@@ -296,9 +297,32 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
         store.batch_write_finish.assert_called_once_with(["k0"], [0])
 
+    def test_gva_save_failure_policy(self):
+        for strict in (False, True):
+            for copy_result, finish_result in ((-1, 0), (0, 1)):
+                with self.subTest(strict=strict, copy_result=copy_result, finish_result=finish_result):
+                    thread, store, save_finished, task = self._make_sending_thread(strict)
+                    store.store.batch_copy.return_value = copy_result
+                    store.batch_write_finish.return_value = [finish_result]
+
+                    if strict:
+                        with self.assertRaises(RuntimeError):
+                            thread._handle_request([task])
+                        self.assertFalse(save_finished.is_set())
+                        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+                    else:
+                        thread._handle_request([task])
+                        store.batch_write_finish.assert_called_once_with(["k0"], [copy_result])
+                        self.assertTrue(save_finished.is_set())
+                        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                        self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+                        thread.raise_if_failed()
+
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+    def _make_thread(
+        self, external_slot_release_waiter=None, save_failure_checker=None, raise_on_transfer_failure=True
+    ):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -332,8 +356,40 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
+            raise_on_transfer_failure=raise_on_transfer_failure,
         )
         return thread, load_finished, save_finished, sync_events
+
+    def test_gva_load_failure_policy(self):
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                thread, load_finished, _, _ = self._make_thread(raise_on_transfer_failure=strict)
+                thread.m_store.store.batch_copy.return_value = -1
+                request = ReqMeta("r1", block_ids=[7, 8], block_hashes=[])
+                task = LayerTransferTask(
+                    layer_id=1,
+                    block_ranges=[LayerBlockRange(request, 0, 2)],
+                    shared_block_data=SharedBlockData(
+                        block_ids_arr=np.asarray([7, 8]),
+                        block_gvas_arr=np.asarray([100, 200]),
+                        req_ids=["r1"],
+                        is_last_chunks=[False],
+                    ),
+                )
+                load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
+                thread.request_queue.put(load_task)
+
+                if strict:
+                    with self.assertRaises(RuntimeError):
+                        thread._handle_request(load_task)
+                    self.assertFalse(load_finished[1].is_set())
+                    self.assertEqual(thread._invalid_block_ids, set())
+                else:
+                    thread._handle_request(load_task)
+                    self.assertEqual(thread._invalid_block_ids, {7, 8})
+                    self.assertTrue(load_finished[1].is_set())
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                    thread.raise_if_failed()
 
     def test_handle_request_does_not_clear_worker_owned_tasks(self):
         thread, _, _, _ = self._make_thread()
