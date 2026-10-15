@@ -72,7 +72,7 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
                 projected = torch.randn(flat_x.shape[0], 16, dtype=x.dtype)
                 mock_npu.npu_quant_matmul.return_value = projected
                 bias = torch.randn(16, dtype=x.dtype)
-                output = self.scheme.apply(MagicMock(), x, bias)
+                output = self.scheme.apply(MagicMock(spec=["weight", "weight_scale"]), x, bias)
                 quant_input = mock_npu.npu_dynamic_mx_quant.call_args.args[0]
                 self.assertTrue(torch.equal(quant_input, flat_x))
                 matmul_bias = mock_npu.npu_quant_matmul.call_args.kwargs["bias"]
@@ -162,6 +162,40 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         mock_npu.npu_dynamic_mx_quant.assert_not_called()
         with self.assertRaisesRegex(ValueError, "TP group padding"):
             self.scheme.apply(layer, (torch.zeros(2, 1076, dtype=torch.float8_e4m3fn), scale))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_tp_padding_is_delegated_and_independent_of_weight_layout(self, mock_npu):
+        class LinearWrapper(torch.nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+
+            def __getattr__(self, name):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self.inner, name)
+
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_row_layer(4304, 4, 3)
+        self.scheme.process_weights_after_loading(layer)
+        # Simulate an alternate storage view; input validation must use the
+        # logical partition width rather than infer it from weight storage.
+        layer.weight.data = layer.weight.data.reshape(35, 16, 8)
+        wrapped = LinearWrapper(layer)
+        x = torch.randn(2, 1076, dtype=torch.bfloat16)
+        quantized = torch.zeros(2, 1120, dtype=torch.float8_e4m3fn)
+        scale = torch.zeros(2, 18, 2, dtype=torch.uint8)
+        mock_npu.npu_dynamic_mx_quant.return_value = (quantized, scale)
+        mock_npu.npu_quant_matmul.return_value = torch.zeros(2, 8, dtype=x.dtype)
+        prepared = self.scheme.prepare_input_for_overlap(wrapped, x)
+        torch.testing.assert_close(
+            mock_npu.npu_dynamic_mx_quant.call_args.args[0], torch.nn.functional.pad(x, (28, 16))
+        )
+        self.scheme.apply(wrapped, prepared)
+        self.scheme.apply(wrapped, x)
+        with self.assertRaisesRegex(ValueError, "TP group padding"):
+            self.scheme.apply(wrapped, (torch.zeros(2, 1076, dtype=torch.float8_e4m3fn), scale))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_weight_switch_rejects_padded_input_shards(self, mock_npu):
@@ -286,6 +320,7 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
     def test_apply_with_prequantized_input(self, mock_npu):
         mock_npu.npu_quant_matmul.return_value = torch.randn(32, 128)
         layer = MagicMock()
+        layer.mxfp4_tp_padding = (0, 0)
         layer.weight = MagicMock(data=torch.randint(0, 255, (128, 128), dtype=torch.uint8))
         layer.weight_scale = MagicMock(data=torch.randint(0, 255, (4, 128, 2), dtype=torch.uint8))
         quantized_x = torch.randint(0, 255, (32, 128), dtype=torch.uint8)
@@ -303,6 +338,7 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         )
         mock_npu.npu_quant_matmul.return_value = torch.randn(32, 128)
         layer = MagicMock()
+        layer.mxfp4_tp_padding = (0, 0)
         layer.weight = MagicMock(data=torch.randint(0, 255, (128, 128), dtype=torch.uint8))
         layer.weight_scale = MagicMock(data=torch.randint(0, 255, (4, 128, 2), dtype=torch.uint8))
         x = torch.randn(32, 256, dtype=torch.bfloat16)
