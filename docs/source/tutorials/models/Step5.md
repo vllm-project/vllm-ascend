@@ -144,7 +144,7 @@ DP=4 cross-machine deployment with TP=4 per dp rank extends the context to 96k. 
 
 Run the following command on node 0:
 
-···
+```bash
 local_ip="${NODE0_IP}"
 node0_ip="${NODE0_IP}"
 
