@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
+from tokenizers import Tokenizer  # type: ignore[import-untyped]
+from tokenizers.models import WordLevel  # type: ignore[import-untyped]
 from transformers import PreTrainedTokenizerFast
 from transformers.video_utils import VideoMetadata
 
