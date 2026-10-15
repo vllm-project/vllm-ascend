@@ -45,7 +45,6 @@ DEFAULT_ACTION_LOCK_TIMEOUT_SECONDS = 120.0
 DEFAULT_PUBLISH_LOCK_TIMEOUT_SECONDS = 120.0
 DEFAULT_GENERIC_LOCK_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_OPERATOR_VERSIONS = 2
-BUILD_LOCK = ".build.lock"
 DEFAULT_EXCLUDES = (
     ".git",
     ".git/**",
@@ -181,17 +180,13 @@ def _acquire_timed_lock(
     *,
     kind: str,
     timeout_seconds: float,
-    shared: bool = False,
 ) -> float:
     start = time.monotonic()
     next_wait_event = LOCK_WAIT_EVENT_SECONDS
 
     while True:
         try:
-            fcntl.flock(
-                stream.fileno(),
-                (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB,
-            )
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             waited = time.monotonic() - start
             if waited >= LOCK_WAIT_EVENT_SECONDS:
                 _emit_event(
@@ -987,7 +982,7 @@ def _file_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _file_lock_or_error(path: Path, *, shared: bool = False, timeout_seconds: float | None = None):
+def _file_lock_or_error(path: Path):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         stream = path.open("a+")
@@ -1001,8 +996,7 @@ def _file_lock_or_error(path: Path, *, shared: bool = False, timeout_seconds: fl
                 stream,
                 path,
                 kind="entry",
-                timeout_seconds=_lock_timeout_seconds("entry") if timeout_seconds is None else timeout_seconds,
-                shared=shared,
+                timeout_seconds=_lock_timeout_seconds("entry"),
             )
         except (OSError, _LockTimeoutError) as exc:
             yield exc
@@ -1014,35 +1008,31 @@ def _file_lock_or_error(path: Path, *, shared: bool = False, timeout_seconds: fl
 
 
 def prune(cache_root: str | Path, max_versions: int = DEFAULT_MAX_OPERATOR_VERSIONS) -> int:
-    """Best-effort post-build maintenance; never wait for an active build."""
+    """Best-effort cleanup after all builds using this cache have finished."""
     try:
         cache_root = Path(cache_root).expanduser().resolve()
         if max_versions <= 0 or not cache_root.is_dir():
             return 0
-        with _file_lock_or_error(cache_root / BUILD_LOCK, timeout_seconds=0) as lock_error:
-            if lock_error is not None:
-                print("[build-cache] PRUNE skipped: cache busy or unavailable", flush=True)
-                return 0
-            for operator_root in (cache_root / "custom_operator").glob("*/*"):
-                if not operator_root.is_dir() or operator_root.resolve() != operator_root:
+        for operator_root in (cache_root / "custom_operator").glob("*/*"):
+            if not operator_root.is_dir() or operator_root.resolve() != operator_root:
+                continue
+            versions = sorted(
+                (
+                    path
+                    for path in operator_root.iterdir()
+                    if re.fullmatch(r"[0-9a-f]{64}", path.name) and path.is_dir() and not path.is_symlink()
+                ),
+                key=lambda path: (path.stat().st_mtime_ns, path.name),
+                reverse=True,
+            )
+            for version in versions[max_versions:]:
+                if version.resolve() != version:
                     continue
-                versions = sorted(
-                    (
-                        path
-                        for path in operator_root.iterdir()
-                        if re.fullmatch(r"[0-9a-f]{64}", path.name) and path.is_dir() and not path.is_symlink()
-                    ),
-                    key=lambda path: (path.stat().st_mtime_ns, path.name),
-                    reverse=True,
-                )
-                for version in versions[max_versions:]:
-                    if version.resolve() != version:
-                        continue
-                    # Mark even partial compaction for the next snapshot save.
-                    (cache_root / UPDATED_MARKER).touch()
-                    shutil.rmtree(version)
-                    print(f"[build-cache] PRUNED operator={operator_root.name} hash={version.name}", flush=True)
-                    _emit_event("cache_prune", operator=operator_root.name, operator_text_hash=version.name)
+                # Mark even partial compaction for the next snapshot save.
+                (cache_root / UPDATED_MARKER).touch()
+                shutil.rmtree(version)
+                print(f"[build-cache] PRUNED operator={operator_root.name} hash={version.name}", flush=True)
+                _emit_event("cache_prune", operator=operator_root.name, operator_text_hash=version.name)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[build-cache] WARNING cleanup skipped; build result kept: {exc}", flush=True)
     return 0
@@ -1569,7 +1559,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     # ------------------------------------------------------------------
-    # 3. Lock order: action lock (custom only) -> build shared lock -> entry.
+    # 3. Lock order: action lock (custom only) -> entry.
     #    Entry-lock failure is fail-open; action/publish failures remain hard.
     # ------------------------------------------------------------------
     action_lock: Path | None = None
@@ -1583,10 +1573,7 @@ def run(args: argparse.Namespace) -> int:
     operator_version = entry.parent.parent if args.domain == "custom_operator" else None
     with (
         action_scope,
-        _file_lock_or_error(cache_root / BUILD_LOCK, shared=True, timeout_seconds=0) as build_error,
-        (
-            contextlib.nullcontext(build_error) if build_error is not None else _file_lock_or_error(entry_lock)
-        ) as lock_error,
+        _file_lock_or_error(entry_lock) as lock_error,
     ):
         # --------------------------------------------------------------
         # 4A. BYPASS: cache entry cannot be safely locked.

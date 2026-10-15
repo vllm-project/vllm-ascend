@@ -86,26 +86,6 @@ dotted_line="-------------------------------------------------------------------
 # 预定义函数
 ########################################################################################################################
 
-function cleanup_build_cache() {
-    local build_status="$1"
-    flock -u "$BUILD_CACHE_LOCK_FD" || return 0
-    if [[ "$build_status" -eq 0 ]]; then
-        python3 "$CURRENT_DIR/scripts/build_cache.py" prune \
-            --cache-root "$BUILD_CACHE_DIR" \
-            --max-operator-versions "$BUILD_CACHE_MAX_OPERATOR_VERSIONS" || true
-    fi
-}
-
-function setup_build_cache_cleanup() {
-    if mkdir -p "$BUILD_CACHE_DIR" &&
-        { exec {BUILD_CACHE_LOCK_FD}>"$BUILD_CACHE_DIR/.build.lock"; } &&
-        flock -sn "$BUILD_CACHE_LOCK_FD"; then
-        trap 'cleanup_build_cache "$?"' EXIT
-    else
-        echo "[build-cache] WARNING cleanup disabled: cache guard unavailable"
-    fi
-}
-
 function help_info() {
     local specific_help="$1"
 
@@ -1199,7 +1179,6 @@ while [[ $# -gt 0 ]]; do
 done
 BUILD_CACHE_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "${BUILD_CACHE_DIR}")
 export VLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
-setup_build_cache_cleanup
 set_ut_mode
 
 if [ -n "${vendor_name}" ];then
@@ -1666,4 +1645,10 @@ else
         build ${BUILD}
     fi
 fi
+
+# Prune only after all foreground csrc build commands have succeeded.
+# Do not share this cache directory with another concurrent build or prune.
+python3 "$CURRENT_DIR/scripts/build_cache.py" prune \
+    --cache-root "$BUILD_CACHE_DIR" \
+    --max-operator-versions "$BUILD_CACHE_MAX_OPERATOR_VERSIONS" || true
 } | awk '{print strftime("[%Y-%m-%d %H:%M:%S]"), $0}'
