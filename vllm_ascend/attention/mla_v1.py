@@ -2230,10 +2230,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             **branch,
         )
         if scatter_history:
-            # PROLOG accepts a strided page axis, but the component's trailing
-            # axes must be dense. FlashMLA token-fused slices have token stride
-            # 576, so write bounded scratch rows then scatter into the original
-            # cache. The workspace never escapes this call as current KV.
+            # Keep this integration's dense writer workspace until token-fused
+            # component view strides are verified with the deployed PROLOG version.
+            # Scatter with the original slots into rank-owned history; this
+            # workspace is not the complete current KV.
             DeviceOperator.reshape_and_cache(
                 key=writer_cache[0].flatten(0, 1)[:num_tokens],
                 value=writer_cache[1].flatten(0, 1)[:num_tokens],

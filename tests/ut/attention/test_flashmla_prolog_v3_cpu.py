@@ -388,7 +388,8 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
 
     def strict_prolog(**kwargs):
         nope, rope = kwargs["kv_cache"], kwargs["kr_cache"]
-        # Match the device failure contract: only the outer page may be strided.
+        # Check the writer layout chosen by this integration; the mock does
+        # not establish which strides the deployed PROLOG version supports.
         for cache in (nope, rope):
             assert cache.stride(1) == cache.shape[2] * cache.shape[3]
             assert cache.stride(2) == cache.shape[3]
