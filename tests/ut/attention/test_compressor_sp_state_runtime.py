@@ -121,6 +121,10 @@ class TestGatherHandleJoin:
 
 class TestStateRuntimeRegistry:
     def _patch_stream(self, monkeypatch):
+        # The state PG path defaults to ON and calls world-collective
+        # dist.new_group; these runtime-logic tests run without a process
+        # group, so pin the legacy reuse-TP-group branch.
+        monkeypatch.setattr(envs, "VLLM_ASCEND_COMPRESSOR_SP_STATE_PG", 0, raising=False)
         monkeypatch.setattr(
             dsa_cp.torch_npu.npu, "Stream", lambda: object(), raising=False
         )
@@ -149,6 +153,7 @@ class TestStateRuntimeRegistry:
 
 class TestDrainLifecycle:
     def _runtime(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ASCEND_COMPRESSOR_SP_STATE_PG", 0, raising=False)
         monkeypatch.setattr(
             dsa_cp.torch_npu.npu, "Stream", lambda: object(), raising=False
         )

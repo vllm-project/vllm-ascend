@@ -544,6 +544,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.req_qli_metadata = (
             torch.zeros(1024, dtype=torch.int32, device=self.device) if self.needs_qli_metadata else None
         )
+        # Scratch buffers sliced per batch by _build_qli_metadata; allocated
+        # unconditionally (mirrors upstream) so slicing never races a lazy alloc.
+        self.qli_seqused_k = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+        self.qli_cmp_residual_k = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -1116,12 +1120,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Main attention and ordinary/SWA groups consume SAS metadata.
         sas_metadata = None
         if self.needs_sas_metadata:
-            local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
             sas_metadata = self._build_sas_metadata(
                 num_heads=self.model_config.hf_config.num_attention_heads,
                 query_start_loc=local_query_start_loc,
                 seq_lens=local_seq_lens,
-                seq_lens_q=local_seq_lens_q,
                 max_query_len=max_local_query_len,
                 max_seq_lens=max_local_seq_lens,
                 index_topk=self.model_config.hf_config.index_topk,
@@ -1132,8 +1134,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         # Only the LI compressed-output group consumes QLI metadata.
         qli_metadata = None
+        qli_cu_seqlens_q = None
+        qli_seqused_k = None
+        qli_cmp_residual_k = None
         if self.needs_qli_metadata:
-            qli_metadata = self._build_qli_metadata(
+            qli_cu_seqlens_q, qli_seqused_k, qli_cmp_residual_k, qli_metadata = self._build_qli_metadata(
                 query_start_loc=local_query_start_loc,
                 seq_lens=local_seq_lens,
                 max_seqlen_q=max_local_query_len,
@@ -1228,7 +1233,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_cu_seqlens_q=qli_cu_seqlens_q,
             qli_seqused_k=qli_seqused_k,
             qli_cmp_residual_k=qli_cmp_residual_k,
-            device_local_metadata_group_id=local_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
@@ -1249,9 +1253,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             # start_pos is produced by the first local-metadata task.
             self._device_metadata_tasks = (
-                self._device_metadata_tasks[0],
-                compressor_task,
-                *self._device_metadata_tasks[1:],
+                (self._device_metadata_tasks[0], compressor_task, *self._device_metadata_tasks[1:])
+                if self._device_metadata_tasks
+                else (compressor_task,)
             )
         return req_metadata
 
@@ -1484,9 +1488,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
-                actual_seq_lengths_query=query_start_loc[1:].clone(),
-                actual_seq_lengths_key=seq_lens.clone(),
+            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,
@@ -2262,7 +2264,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 q,
                 ori_kv=swa_kv_cache,
                 ori_block_table=swa_metadata.req_metadata.block_table,
-                metadata=sas_metadata,
+                metadata=swa_metadata.req_metadata.sas_metadata,
                 **common_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
@@ -2419,9 +2421,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         q, q_scale = DeviceOperator.indexer_quantize_query(q)
 
         assert indexer_output_metadata.req_metadata is not None
-        qli_metadata = indexer_output_metadata.req_metadata.qli_metadata
-        block_table = indexer_output_metadata.req_metadata.block_table
-        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+        req_metadata = indexer_output_metadata.req_metadata
+        qli_metadata = req_metadata.qli_metadata
+        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2429,10 +2431,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
             topk=self.index_topk,
             quant_mode=2,
-            cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
-            seqused_k=dsa_meta.qli_seqused_k,
-            cmp_residual_k=dsa_meta.qli_cmp_residual_k,
-            block_table=dsa_meta.block_table,
+            cu_seqlens_q=req_metadata.qli_cu_seqlens_q,
+            seqused_k=req_metadata.qli_seqused_k,
+            cmp_residual_k=req_metadata.qli_cmp_residual_k,
+            block_table=req_metadata.block_table,
             metadata=qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",

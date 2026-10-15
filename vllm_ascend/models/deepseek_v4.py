@@ -94,6 +94,9 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
 )
 
+# Set once npu_rms_norm_cast proves unavailable (op or aclnn backend missing).
+_rms_norm_cast_broken = False
+
 
 def _get_ascend_dsa_backend():
     # Keep this lazy to avoid vLLM model-inspection circular imports.
@@ -1034,12 +1037,19 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        if enable_custom_op():
-            return torch.ops._C_ascend.npu_rms_norm_cast(
-                hidden_states,
-                self.post_attention_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-            )
+        # Some vllm_ascend_C builds do not ship the fused npu_rms_norm_cast op,
+        # and some CANN builds register it without its aclnn backend; in both
+        # cases fall back to the plain RMSNorm + upcast path instead of crashing.
+        global _rms_norm_cast_broken
+        if enable_custom_op() and not _rms_norm_cast_broken:
+            try:
+                return torch.ops._C_ascend.npu_rms_norm_cast(
+                    hidden_states,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.variance_epsilon,
+                )
+            except (AttributeError, RuntimeError):
+                _rms_norm_cast_broken = True
         hidden_states = self.post_attention_layernorm(hidden_states)
         return hidden_states, hidden_states.float()
 
