@@ -3019,6 +3019,53 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     )
 
 
+def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
+    """Gates without weight_fp32 (no forced fp32 conversion) route through
+    the gate's own forward, letting AscendGateLinear self-manage precision."""
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    # vllm#51838 wiring: internal-router models pass hidden_states as the
+    # router_logits placeholder.
+    router_logits = hidden_states
+    gate_logits = torch.randn(2, 3, dtype=torch.float32)
+    routed_out = torch.randn(2, 4)
+    # spec restricts attribute access to the real class surface: a bare
+    # MagicMock auto-creates weight_fp32, which would flip the runner into
+    # the forced-fp32 branch.
+    gate = MagicMock(spec=AscendGateLinear, return_value=(gate_logits, None))
+
+    runner._gate = gate
+    runner.gate = gate
+    runner.ascend_shared_experts = None
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(
+        fused_moe_module.F,
+        "linear",
+        MagicMock(side_effect=AssertionError("fp32 F.linear path must not run")),
+    )
+
+    result = runner._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input=None,
+        input_ids=None,
+    )
+
+    assert result is routed_out
+    gate.assert_called_once()
+    # mock's argument equality is unreliable for torch tensors on some
+    # Python versions (tensor.__eq__ returns a Tensor, not a bool);
+    # compare by identity instead.
+    assert gate.call_args[0][0] is hidden_states
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=gate_logits,
+        input_ids=None,
+    )
+
+
 def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
