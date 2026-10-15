@@ -158,6 +158,50 @@ def _token_fused_cache(blocks: int = 4):
     return nope, rope
 
 
+def _load_cache_rows_on_cpu(cache_k, cache_v, slots):
+    packed = cache_k.new_zeros((slots.numel(), cache_k.shape[-1] + cache_v.shape[-1]))
+    for row, slot in enumerate(slots.reshape(-1).tolist()):
+        if slot >= 0:
+            block, offset = divmod(slot, cache_k.shape[1])
+            packed[row, : cache_k.shape[-1]] = cache_k[block, offset, 0]
+            packed[row, cache_k.shape[-1] :] = cache_v[block, offset, 0]
+    return packed
+
+
+@pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
+@pytest.mark.parametrize("slots", [[], [0], [129, -1, 0, 129, 3]])
+def test_current_kv_gather_materializes_only_selected_rows(cache_factory, slots):
+    cache_k, cache_v = cache_factory()
+    slot_tensor = torch.tensor(slots, dtype=torch.int64)
+    packed = _load_cache_rows_on_cpu(cache_k, cache_v, slot_tensor)
+    original_getitem = torch.Tensor.__getitem__
+    original_contiguous = torch.Tensor.contiguous
+
+    def check_getitem(tensor, index):
+        if tensor is cache_k or tensor is cache_v:
+            raise AssertionError("Do not index the entire strided cache.")
+        return original_getitem(tensor, index)
+
+    def check_contiguous(tensor, *args, **kwargs):
+        if tensor is cache_k or tensor is cache_v:
+            raise AssertionError("Do not materialize the entire strided cache.")
+        return original_contiguous(tensor, *args, **kwargs)
+
+    with (
+        patch.object(mla_v1, "load_mla_cache_rows_by_slots", return_value=packed) as mock_reader,
+        patch.object(torch.Tensor, "__getitem__", check_getitem),
+        patch.object(torch.Tensor, "contiguous", check_contiguous),
+    ):
+        nope, rope = AscendMLAImpl._gather_current_kv_from_cache((cache_k, cache_v), slot_tensor)
+
+    mock_reader.assert_called_once_with(cache_k, cache_v, slot_tensor)
+    assert nope.shape == (len(slots), 1, NOPE_DIM)
+    assert rope.shape == (len(slots), 1, ROPE_DIM)
+    assert nope.is_contiguous() and rope.is_contiguous()
+    torch.testing.assert_close(nope[:, 0], packed[:, :NOPE_DIM])
+    torch.testing.assert_close(rope[:, 0], packed[:, NOPE_DIM:])
+
+
 @pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
 def test_strided_mla_caches_require_prolog_v3(cache_factory):
     impl = _make_impl()
@@ -471,9 +515,12 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
     assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
-def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
+@pytest.mark.parametrize("num_decode", [0, 2])
+@pytest.mark.parametrize("padding", [0, 3])
+def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding):
     impl = _make_impl()
-    total_tokens = 5
+    num_prefill = 3
+    total_tokens = num_decode + num_prefill + padding
     qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
     impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
     impl.q_a_layernorm = MagicMock(side_effect=lambda tensor: tensor)
@@ -485,17 +532,16 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     nope.fill_(1.0)
     rope.fill_(2.0)
 
-    num_decode = 2
-    num_prefill = 3
-    hidden = torch.randn(num_decode + num_prefill, 128)
+    hidden = torch.randn(total_tokens, 128)
     decode_cos = torch.randn(num_decode, ROPE_DIM)
     decode_sin = torch.randn(num_decode, ROPE_DIM)
-    prefill_cos = torch.randn(num_prefill, ROPE_DIM)
-    prefill_sin = torch.randn(num_prefill, ROPE_DIM)
+    prefill_cos = torch.randn(num_prefill + padding, 1, 1, ROPE_DIM)
+    prefill_sin = torch.randn(num_prefill + padding, 1, 1, ROPE_DIM)
+    original_cos, original_sin = prefill_cos.clone(), prefill_sin.clone()
     metadata = SimpleNamespace(
         num_decode_tokens=num_decode,
         num_actual_tokens=num_decode + num_prefill,
-        slot_mapping=torch.tensor([0, 1, 129, 130, 131]),
+        slot_mapping=torch.tensor([0, 1][:num_decode] + [129, 130, 131] + [-1] * padding),
         decode=SimpleNamespace(cos=decode_cos, sin=decode_sin),
         prefill=SimpleNamespace(cos=prefill_cos, sin=prefill_sin),
     )
@@ -517,17 +563,30 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     with (
         patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
         patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
+        patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
     ):
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
-    assert mock_prolog.call_count == 2
+    assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
-    assert decode is not None
+    assert (decode is not None) == bool(num_decode)
     assert prefill is not None
     assert prefill.q_nope.shape == (num_prefill, impl.num_heads, impl.qk_nope_head_dim)
     assert prefill.q_pe.shape == (num_prefill, impl.num_heads, ROPE_DIM)
     assert prefill.k_pe.shape == (num_prefill, impl.num_heads, ROPE_DIM)
     assert torch.all(prefill.k_pe == 2.0)
+    impl.rope_single.assert_called_once()
+    rope_input, rope_cos, rope_sin = impl.rope_single.call_args.args
+    assert rope_input.shape[0] == num_prefill
+    torch.testing.assert_close(rope_cos, original_cos[:num_prefill])
+    torch.testing.assert_close(rope_sin, original_sin[:num_prefill])
+    prefill_kwargs = mock_prolog.call_args_list[-1].kwargs
+    assert prefill_kwargs["token_x"].shape[0] == num_prefill
+    torch.testing.assert_close(prefill_kwargs["rope_cos"], original_cos[:num_prefill].reshape(num_prefill, ROPE_DIM))
+    torch.testing.assert_close(prefill_kwargs["rope_sin"], original_sin[:num_prefill].reshape(num_prefill, ROPE_DIM))
+    assert metadata.prefill.cos is prefill_cos and metadata.prefill.sin is prefill_sin
+    torch.testing.assert_close(metadata.prefill.cos, original_cos)
+    torch.testing.assert_close(metadata.prefill.sin, original_sin)
 
 
 @pytest.mark.parametrize(
@@ -973,7 +1032,10 @@ def test_mla_preprocess_prolog_v3_keeps_prefill_query_unquantized_for_fa_quant()
             None,
         )
 
-    with patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog:
+    with (
+        patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
+        patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
+    ):
         impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
     assert mock_prolog.call_count == 2
