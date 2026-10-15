@@ -60,7 +60,7 @@ During engine initialization, the system profiles actual model performance:
 3. **Fitting**: Fit the quadratic model using least squares
 4. **Target Setting**: Calculate target per-chunk latency based on `base_chunk_size`
 
-In PP mode, all workers execute forward passes to stay synchronized, but only the first PP rank's timing results are used for scheduling decisions.
+In PP mode, all workers execute forward passes to stay synchronized, but scheduling consumes timing results only from the designated output rank, which is the first rank of the final PP stage.
 
 ### Runtime Phase: Dynamic Prediction
 
@@ -79,8 +79,8 @@ $$x = \frac{-(2aL + b) + \sqrt{(2aL + b)^2 + 4aT}}{2a}$$
 The result goes through post-processing:
 
 1. **Smoothing**: Blend predicted chunk size with `base_chunk_size` using `smooth_factor`
-2. **Alignment**: Round down to multiple of `page_size` (minimum 64)
-3. **Constraints**: Not exceeding `max_model_len - history_len` and `max_num_scheduled_tokens`
+2. **Alignment**: Round up to a multiple of `max(page_size, 64)`
+3. **Constraints**: Cap the aligned prediction by the remaining request length and the scheduler token budget
 
 ### Online Calibration
 

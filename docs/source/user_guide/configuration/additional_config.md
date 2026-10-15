@@ -167,7 +167,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
+| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
@@ -223,7 +223,7 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **scheduler_config.short_request_first_config**
 
-ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
+ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It can be combined with profiling-chunk scheduling, but it does not support batch-job-aware or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
