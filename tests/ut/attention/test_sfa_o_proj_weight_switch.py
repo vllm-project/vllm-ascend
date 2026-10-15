@@ -159,9 +159,10 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
             )
         )
 
-        local_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
+        local_hidden_states, full_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
 
         torch.testing.assert_close(local_hidden_states, hidden_states[3:6])
+        self.assertIs(full_hidden_states, hidden_states)
 
     def test_prepare_native_hidden_states_pads_unaligned_token_state(self):
         impl = self._make_impl()
@@ -174,10 +175,12 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
             )
         )
 
-        local_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
+        local_hidden_states, full_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
 
         torch.testing.assert_close(local_hidden_states[:2], hidden_states[3:5])
         torch.testing.assert_close(local_hidden_states[2], torch.zeros(4, dtype=hidden_states.dtype))
+        torch.testing.assert_close(full_hidden_states[:5], hidden_states)
+        self.assertEqual(local_hidden_states.data_ptr(), full_hidden_states[3:].data_ptr())
 
     def test_enable_o_proj_switch_rejects_unsupported_method(self):
         impl = self._make_impl(_UnsupportedOProjLinearMethod())
@@ -219,7 +222,9 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         attn_output = MagicMock()
         impl._v_up_proj = MagicMock(return_value=attn_output)
         impl.o_proj = MagicMock()
-        impl._prepare_native_hidden_states = MagicMock(side_effect=lambda hidden_states, _: hidden_states)
+        impl._prepare_native_hidden_states = MagicMock(
+            side_effect=lambda hidden_states, _: (hidden_states, hidden_states)
+        )
 
         hidden_states = torch.empty(2, 1)
         output = torch.full((2, 1), 123.0)

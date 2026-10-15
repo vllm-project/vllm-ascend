@@ -1128,7 +1128,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
                 self.impl._get_parallel_forward_context = lambda *_args: context
-                self.impl._prepare_native_hidden_states = lambda x, _: x
+                self.impl._prepare_native_hidden_states = lambda x, _: (x, x)
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(

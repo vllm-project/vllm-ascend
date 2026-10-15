@@ -957,7 +957,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     forward_context = SimpleNamespace(attn_metadata={"indexer.k_cache": own_metadata} if expect_indexer else {})
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=slots)
     impl._get_parallel_forward_context = MagicMock(return_value=context)
-    impl._prepare_native_hidden_states = MagicMock(return_value=hidden_states)
+    impl._prepare_native_hidden_states = MagicMock(return_value=(hidden_states, hidden_states))
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(2, 8),))
     impl.q_a_layernorm = MagicMock(side_effect=lambda x: x)
     impl.exec_kv = MagicMock(return_value=(hidden_states, hidden_states))

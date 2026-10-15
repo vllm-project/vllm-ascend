@@ -476,13 +476,20 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
+            spec_rows = (
+                max(
+                    [
+                        max_num_reqs * (spec_token_num + 1),
+                        *(vllm_config.compilation_config.cudagraph_capture_sizes or []),
+                    ]
+                )
+                + 1
+            )
             self.dsa_cp_spec_actual_seq_lengths_query = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
             self.dsa_cp_spec_actual_seq_lengths_key = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
 
     def _prepare_parallel_metadata(
@@ -570,7 +577,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         context = metadata.dsa_cp_context
         assert context is not None
         assert metadata.positions is not None
-        positions = nn.functional.pad(metadata.positions, (0, context.num_tokens_pad - metadata.positions.shape[0]))
+        positions = metadata.positions
+        if context.num_tokens_pad != positions.shape[0]:
+            positions = nn.functional.pad(positions, (0, context.num_tokens_pad - positions.shape[0]))
         # Preserve the global metadata for KV writes and output restoration.
         # Only the NoPE operator consumes this token-local view.
         local_metadata = replace(
@@ -645,7 +654,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self,
         hidden_states: torch.Tensor,
         attn_metadata: M,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         context = getattr(attn_metadata, "dsa_cp_context", None)
         assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
         actual_tokens = hidden_states.shape[0]
@@ -656,7 +665,8 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             )
         if actual_tokens < context.num_tokens_pad:
             hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
-        return hidden_states[context.local_start : context.local_end_with_pad]
+        # CANN pooling consumes the replicated input; queries stay token-local.
+        return hidden_states[context.local_start : context.local_end_with_pad], hidden_states
 
     def _get_parallel_forward_context(
         self,
