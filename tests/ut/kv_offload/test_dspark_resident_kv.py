@@ -62,7 +62,9 @@ def _prefill_runner(
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.debugger = None
-    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
+    runner.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL, static_forward_context={}
+    )
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -71,7 +73,10 @@ def _prefill_runner(
         speculative_config=speculative,
         cache_config=SimpleNamespace(enable_prefix_caching=prefix),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=cp, decode_context_parallel_size=1),
+        compilation_config=runner.compilation_config,
     )
+    runner.model_memory_usage = 0
+    runner.get_kv_cache_spec = Mock(return_value={})
     runner.model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(num_hidden_layers=78), enforce_eager=eager, dtype=torch.bfloat16
     )
