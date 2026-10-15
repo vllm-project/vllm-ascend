@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
@@ -39,6 +40,28 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+
+
+@pytest.mark.parametrize("num_heads,kv_lora_rank", [(64, 512), (128, 512), (128, 768)])
+def test_v_up_proj_uses_direct_transpose_batchmatmul(num_heads, kv_lora_rank):
+    batch_size, v_head_dim = 2, 16
+    x = torch.randn(batch_size, num_heads * kv_lora_rank)
+    weight = torch.randn(num_heads, kv_lora_rank, v_head_dim)
+    impl = SimpleNamespace(local_num_heads=num_heads, kv_lora_rank=kv_lora_rank, v_head_dim=v_head_dim, W_UV=weight)
+
+    def fused_bmm(x1, x2, *, perm_x1, perm_y):
+        assert perm_x1 == (1, 0, 2)
+        assert perm_y == (1, 0, 2)
+        assert x1.shape == (batch_size, num_heads, kv_lora_rank)
+        assert x1.data_ptr() == x.data_ptr()
+        return torch.bmm(x1.transpose(0, 1), x2).transpose(0, 1)
+
+    with patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm) as fused:
+        result = AscendSFAImpl._v_up_proj(impl, x)
+
+    expected = torch.bmm(x.view(batch_size, num_heads, kv_lora_rank).transpose(0, 1), weight)
+    torch.testing.assert_close(result, expected.transpose(0, 1).reshape(batch_size, num_heads * v_head_dim))
+    fused.assert_called_once()
 
 
 class TestAscendSFABackend(TestBase):
