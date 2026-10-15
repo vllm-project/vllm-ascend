@@ -61,6 +61,26 @@ class AscendIndexerKPoolMetadata:
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
     query_metadata: AscendIndexerKPoolQueryMetadata | None = None
+    pool_seq_len_upper_bound: int | None = None
+
+
+@dataclass(frozen=True)
+class KPoolIndexerGraphParams:
+    """Use the host length mirror without synchronizing device metadata."""
+
+    layer_name: str
+    token_offset: int = 0
+    context_index: int | None = None
+
+    def resolve(self, context: dict[str, Any]) -> dict[str, int]:
+        metadata = context[self.layer_name]
+        lengths = metadata.seq_lens_cpu
+        # Rejection can invalidate exact draft lengths. Use the conservative
+        # per-step bound, or retain full capacity when no host bound exists.
+        if lengths is None:
+            upper_bound = getattr(metadata, "pool_seq_len_upper_bound", None)
+            return {"max_pool_seq_len": -1 if upper_bound is None else upper_bound}
+        return {"max_pool_seq_len": int(lengths.max()) if lengths.numel() else 0}
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -99,6 +119,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
+        self._num_speculative_tokens = getattr(
+            getattr(vllm_config, "speculative_config", None), "num_speculative_tokens", 0
+        )
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the SFA "
@@ -239,6 +262,16 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = None
         if seq_lens_cpu is not None:
             seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
+        pool_seq_len_upper_bound = None
+        if seq_lens_cpu is None:
+            upper_bound = getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None)
+            if upper_bound is not None and upper_bound[:num_reqs].numel():
+                # MTP resets exact host lengths after rejection. The target's
+                # optimistic mirror still bounds the start of drafting; add
+                # the entire lookahead so every subsequent step stays covered.
+                pool_seq_len_upper_bound = (
+                    int(upper_bound[:num_reqs].max()) + self._num_speculative_tokens
+                ) // self.compress_ratio
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
@@ -252,6 +285,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             query_metadata=self._build_query_metadata(common_attn_metadata, positions),
+            pool_seq_len_upper_bound=pool_seq_len_upper_bound,
         )
 
     def build_for_graph_capture(
@@ -571,6 +605,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
         positions = indexer_metadata.positions[: k.shape[0]]
+        graph_params = None
+        if context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            draft_metadata = getattr(context, "draft_attn_metadatas", None)
+            context_index = (
+                next(i for i, step in enumerate(draft_metadata) if step[self.k_cache.prefix] is indexer_metadata)
+                if draft_metadata
+                else None
+            )
+            graph_params = KPoolIndexerGraphParams(self.k_cache.prefix, context_index=context_index)
         result = self.indexer_op(
             k,
             q_values,
@@ -596,5 +639,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             # dispatch. Keep paged reads independent of the live query count.
             allow_cache_packing=context.cudagraph_runtime_mode != CUDAGraphMode.FULL,
             query_metadata=indexer_metadata.query_metadata,
+            graph_params=graph_params,
         )
         return result

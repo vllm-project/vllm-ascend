@@ -385,6 +385,54 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
     assert metadata.num_actual_tokens == 5
 
 
+def test_draft_indexer_host_upper_bound_includes_lookahead():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=1048576),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            **_ratio_kwargs(4),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([8192, 17], dtype=torch.int32),
+        seq_lens_cpu=None,
+        _seq_lens_cpu=None,
+        seq_lens_cpu_upper_bound=torch.tensor([8191, 17], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+        max_query_len=1,
+        num_input_tokens=2,
+        max_seq_len=8192,
+        block_table_tensor=torch.zeros(2, 32, dtype=torch.int32),
+        slot_mapping=torch.tensor([8191, 16]),
+        positions=torch.tensor([8191, 16]),
+    )
+    metadata = builder.build_for_drafting(common, draft_index=1)
+    assert metadata.seq_lens_cpu is None
+    assert metadata.pool_seq_len_upper_bound == 2049
+    # Building a subsequent step must not mutate the earlier bound.
+    common.seq_lens_cpu_upper_bound[0] = 16383
+    later = builder.build_for_drafting(common, draft_index=2)
+    assert later.pool_seq_len_upper_bound == 4097
+    assert metadata.pool_seq_len_upper_bound == 2049
+    common.seq_lens_cpu_upper_bound = None
+    assert builder.build_for_drafting(common, draft_index=3).pool_seq_len_upper_bound is None
+
+
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),

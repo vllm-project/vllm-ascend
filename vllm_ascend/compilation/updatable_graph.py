@@ -38,6 +38,19 @@ class ContextSource:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSequenceSource:
+    """Resolve each invocation in a merged speculative graph in step order."""
+
+    contexts: Sequence[Any]
+
+    def get(self, provider: ParamProvider) -> Sequence[Params]:
+        context_index = getattr(provider, "context_index", None)
+        if context_index is not None:
+            return (provider.resolve(self.contexts[context_index]),)
+        return tuple(provider.resolve(context) for context in self.contexts)
+
+
+@dataclass(frozen=True, slots=True)
 class SharedSource:
     params: Sequence[Params]
 

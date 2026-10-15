@@ -4,9 +4,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+
+if TYPE_CHECKING:
+    from vllm_ascend.attention.indexer_kpool import KPoolIndexerGraphParams
 
 TRITON_POOL_CHUNK_SIZE = 128
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
@@ -200,6 +206,74 @@ def _expand_pool_indices(
         tl.store(output + token * OUTPUT_STRIDE + columns, values, columns < OUTPUT_WIDTH)
 
 
+def _score_and_topk(
+    *,
+    qbar: torch.Tensor,
+    cache: torch.Tensor,
+    cum_query_lens: torch.Tensor,
+    indexer_seq_lens: torch.Tensor,
+    indexer_block_table: torch.Tensor,
+    positions: torch.Tensor,
+    score_storage: torch.Tensor,
+    topk_scores: torch.Tensor,
+    pool_ids: torch.Tensor,
+    token_offset: int,
+    rows: int,
+    pool_seq_capacity: int,
+    max_pool_seq_len: int,
+    selected: int,
+    cache_blocks: int,
+    cache_block_size: int,
+    head_dim: int,
+    pool_size: int,
+    block_pool: int,
+    outer_pool: int,
+    index32: bool,
+    packed_cache: bool,
+    bucket_lengths: bool,
+) -> None:
+    if bucket_lengths:
+        # Buffers and output addresses remain fixed while task updates change
+        # only the active, contiguous score view. Equal live lengths therefore
+        # use equal TopK shapes at different configured context limits.
+        max_pool_seq_len = (
+            pool_seq_capacity
+            if max_pool_seq_len < 0
+            else min(pool_seq_capacity, next_power_of_2(max(selected, max_pool_seq_len)))
+        )
+    scores = score_storage[: rows * max_pool_seq_len].view(rows, max_pool_seq_len)
+    chunks = triton.cdiv(max_pool_seq_len, outer_pool)
+    _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
+        qbar,
+        cache,
+        cum_query_lens,
+        indexer_seq_lens,
+        indexer_block_table,
+        positions,
+        scores,
+        token_offset,
+        rows,
+        max_pool_seq_len,
+        cum_query_lens.numel(),
+        cache_blocks,
+        0 if packed_cache else cache.stride(0),
+        cache.stride(1),
+        cache.stride(3),
+        *indexer_block_table.stride(),
+        cache_block_size,
+        QUERY_END_SENTINEL,
+        next_power_of_2(cum_query_lens.numel()),
+        head_dim,
+        pool_size,
+        block_pool,
+        NEG_INF_SENTINEL,
+        index32,
+        outer_pool,
+        packed_cache,
+    )
+    torch.topk(scores, selected, dim=1, out=(topk_scores, pool_ids))
+
+
 def glm5_next_lightning_indexer_triton(
     query: torch.Tensor,
     indexer_cache: torch.Tensor,
@@ -215,6 +289,7 @@ def glm5_next_lightning_indexer_triton(
     output_buffer: torch.Tensor | None = None,
     pack_tail: bool = False,
     allow_cache_packing: bool = True,
+    graph_params: KPoolIndexerGraphParams | None = None,
 ) -> torch.Tensor:
     """Select pools, expand tokens and optionally write the final SFA buffer."""
     num_tokens, _, head_dim = query.shape
@@ -291,39 +366,43 @@ def glm5_next_lightning_indexer_triton(
                 .sum(dim=1)
                 .contiguous()
             )
-            scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
+            score_storage = torch.empty(rows * max_pool_seq_len, dtype=torch.float32, device=query.device)
+            topk_scores = torch.empty((rows, selected), dtype=torch.float32, device=query.device)
+            pool_ids = torch.empty((rows, selected), dtype=torch.int64, device=query.device)
             block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
             outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
-            chunks = triton.cdiv(max_pool_seq_len, outer_pool)
-            _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
-                qbar,
-                cache,
-                cum_query_lens,
-                indexer_seq_lens,
-                indexer_block_table,
-                positions,
-                scores,
-                start,
-                rows,
-                max_pool_seq_len,
-                cum_query_lens.numel(),
-                indexer_cache.shape[0],
-                0 if packed_cache else cache.stride(0),
-                cache.stride(1),
-                cache.stride(3),
-                *indexer_block_table.stride(),
-                indexer_cache.shape[1],
-                QUERY_END_SENTINEL,
-                next_power_of_2(cum_query_lens.numel()),
-                head_dim,
-                index_kpool,
-                block_pool,
-                NEG_INF_SENTINEL,
-                index32,
-                outer_pool,
-                packed_cache,
+            score_kwargs = dict(
+                qbar=qbar,
+                cache=cache,
+                cum_query_lens=cum_query_lens,
+                indexer_seq_lens=indexer_seq_lens,
+                indexer_block_table=indexer_block_table,
+                positions=positions,
+                score_storage=score_storage,
+                topk_scores=topk_scores,
+                pool_ids=pool_ids,
+                token_offset=start,
+                rows=rows,
+                pool_seq_capacity=max_pool_seq_len,
+                max_pool_seq_len=max_pool_seq_len,
+                selected=selected,
+                cache_blocks=indexer_cache.shape[0],
+                cache_block_size=indexer_cache.shape[1],
+                head_dim=head_dim,
+                pool_size=index_kpool,
+                block_pool=block_pool,
+                outer_pool=outer_pool,
+                index32=index32,
+                packed_cache=packed_cache,
+                bucket_lengths=graph_params is not None,
             )
-            topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
+            if graph_params is None:
+                _score_and_topk(**score_kwargs)
+            else:
+                # Lazy import: the operator is also usable without graph state.
+                from vllm_ascend.compilation.updatable_graph import register_task
+
+                register_task(_score_and_topk, score_kwargs, replace(graph_params, token_offset=start))
             # Ascend scalarizes Triton's int64-to-int32 vector conversion.
             # Convert once before expanding each selected pool into tokens.
             pool_ids = pool_ids.to(torch.int32)
