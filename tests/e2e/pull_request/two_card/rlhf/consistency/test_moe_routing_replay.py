@@ -23,18 +23,29 @@ MODELS = [
     "Qwen/Qwen3-30B-A3B",
 ]
 
-# The TP-sharded capture paths pinned by the case below are model independent, so it
-# runs on a single model: `test_moe_routing_replay` already loads the other one, and
-# loading a 30B+ model a second time would double this file's runtime for no extra
-# coverage.
-TP_SHARDED_MODEL = "Qwen/Qwen3-30B-A3B"
-
 
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1", "VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_moe_routing_replay(model):
-    """Routed experts output is valid and non-empty for MoE models (MRV2)."""
-    prompts = ["Hello, please introduce yourself."]
+    """Every token row carries its own routing decision (regression for #15451).
+
+    With DP == 1 and TP > 1 the TP-sharded strategies still pad and split the
+    token dimension inside the TP group, so ``select_experts`` only routes this
+    rank's shard; a capture that treats that shard as the whole batch leaves the
+    rows owned by the other TP ranks unwritten.
+
+    Both strategies are covered from this one engine. ``set_moe_comm_method``
+    picks MC2 for a batch of at most ``mc2_tokens_capacity`` tokens and ALLTOALL
+    above it, and ``set_mc2_tokens_capacity`` derives that capacity from
+    ``max_cudagraph_capture_size`` when ``cudagraph_capture_sizes`` is set -- 8
+    tokens here, split over the two TP ranks. The prompts are submitted one at a
+    time so each prefill is a step of its own: the short one prefills inside the
+    size-8 graph (still MC2), the long one goes through ALLTOALL.
+    """
+    prompts = [
+        "Hello, please introduce yourself.",  # 6 tokens -> MC2
+        "Hello, please introduce yourself. " * 8,  # 49 tokens -> ALLTOALL
+    ]
     with VllmRunner(
         model,
         tensor_parallel_size=2,
@@ -50,67 +61,17 @@ def test_moe_routing_replay(model):
             top_p=0.95,
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
-        inputs = vllm_model.get_inputs(prompts=prompts)
-        outputs = vllm_model.model.generate(prompts=inputs, sampling_params=sampling_params)
-        assert outputs[0].finished
-        assert len(outputs[0].outputs[0].text) > 0
-        routed_experts = outputs[0].outputs[0].routed_experts
-        assert routed_experts is not None
-        assert routed_experts.size > 0
-
-
-@pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"OMP_NUM_THREADS": "1", "VLLM_USE_V2_MODEL_RUNNER": "1"})
-def test_moe_routing_replay_covers_every_token(model):
-    """Every token row carries its own routing decision, under MC2 and ALLTOALL.
-
-    Regression test for #15451. Both strategies pad and split the token dimension
-    inside the TP group even with DP == 1, so ``select_experts`` only routes this
-    rank's shard. A capture that treats that shard as the complete batch writes
-    only the first ``batch / tp_size`` rows and leaves the rows owned by the other
-    TP ranks unwritten, which routing replay then serves as zeros.
-
-    The two strategies are picked by ``max_num_tokens <= mc2_tokens_capacity``
-    (``set_moe_comm_method``), and in eager mode without CUDA-graph sizes that
-    capacity is ``max_num_reqs * decode_query_len``, i.e. ``max_num_seqs`` here.
-    Pinning ``max_num_seqs`` to 8 therefore gives a deterministic threshold: the
-    short prompt routes through MC2 and the long one through ALLTOALL.
-
-    Eager mode is deliberate: graph warm-up would pre-fill the capture buffer, so
-    an unwritten row would hold stale expert ids instead of zeros and the
-    assertion below could no longer tell the two apart.
-
-    Runs on one model only, see ``TP_SHARDED_MODEL``.
-    """
-    if model != TP_SHARDED_MODEL:
-        pytest.skip(f"TP-sharded capture is already covered on {TP_SHARDED_MODEL}")
-    prompts = [
-        "Hello, please introduce yourself.",  # 6 tokens -> MC2
-        "Hello, please introduce yourself. " * 8,  # > 8 tokens -> ALLTOALL
-    ]
-    with VllmRunner(
-        model,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        enforce_eager=True,
-        max_num_seqs=8,
-        distributed_executor_backend="mp",
-        enable_return_routed_experts=True,
-        async_scheduling=False,
-    ) as vllm_model:
-        sampling_params = SamplingParams(
-            max_tokens=8,
-            temperature=0.0,
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
         for prompt in prompts:
             inputs = vllm_model.get_inputs(prompts=[prompt])
             outputs = vllm_model.model.generate(prompts=inputs, sampling_params=sampling_params)
-            output = outputs[0].outputs[0]
-            routed_experts = output.routed_experts
+            assert outputs[0].finished
+            completion = outputs[0].outputs[0]
+            assert len(completion.text) > 0
+            routed_experts = completion.routed_experts
             assert routed_experts is not None
+            assert routed_experts.size > 0
             # The last sampled token has not been forwarded yet, so it has no routing.
-            expected_rows = len(outputs[0].prompt_token_ids) + len(output.token_ids) - 1
+            expected_rows = len(outputs[0].prompt_token_ids) + len(completion.token_ids) - 1
             assert routed_experts.shape[0] == expected_rows
             empty_rows = [row for row in range(expected_rows) if not routed_experts[row].any()]
             assert not empty_rows, (
