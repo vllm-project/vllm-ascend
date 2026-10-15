@@ -1536,24 +1536,16 @@ export LOG_PATH=./minimax-m3-1m-a3.log
 
 source "${CANN_PATH}/set_env.sh"
 
-export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
 export VLLM_PP_LAYER_PARTITION="15,15,15,15"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export HCCL_SOCKET_IFNAME=$NIC_NAME
-export GLOO_SOCKET_IFNAME=$NIC_NAME
-export TP_SOCKET_IFNAME=$NIC_NAME
+export VLLM_USE_V2_MODEL_RUNNER=1
 export HCCL_BUFFSIZE=256
 export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_CONNECT_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=7200
-export TASK_QUEUE_ENABLE=1
+export HCCL_SOCKET_IFNAME=$NIC_NAME
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export GLOO_SOCKET_IFNAME=$NIC_NAME
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 
 vllm serve "$MODEL_PATH" \
     --host 0.0.0.0 \
@@ -1605,12 +1597,12 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
     export CANN_PATH=/usr/local/Ascend/cann-9.1.0
     export LOG_PATH=./minimax-m3-1m-950dt-tp8.log
 
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
@@ -1660,12 +1652,12 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
     export CANN_PATH=/usr/local/Ascend/cann-9.1.0
     export LOG_PATH=./minimax-m3-1m-950dt-tp4pp2.log
 
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
