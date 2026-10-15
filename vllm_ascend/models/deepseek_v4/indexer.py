@@ -33,6 +33,7 @@ import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
@@ -123,6 +124,32 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     if not dtype_is_supported:
         raise ValueError(error_msg)
     return k_dtype
+
+
+def _gather_prefill_row_shard_topk(
+    local_topk: torch.Tensor,
+    shard_sizes: tuple[int, ...],
+) -> torch.Tensor:
+    """Gather padded per-rank TopK rows and restore their global row order."""
+    max_rows = max(shard_sizes)
+    if local_topk.shape[0] > max_rows:
+        raise ValueError("Local TopK rows exceed the prefill shard capacity")
+    if local_topk.shape[0] < max_rows:
+        padded = torch.full(
+            (max_rows, *local_topk.shape[1:]),
+            -1,
+            dtype=local_topk.dtype,
+            device=local_topk.device,
+        )
+        padded[: local_topk.shape[0]].copy_(local_topk)
+    else:
+        padded = local_topk.contiguous()
+
+    # Ascend's NPUCommunicator does not implement all_gatherv. Pad to the
+    # largest rank-local row count so the regular HCCL all-gather can be used.
+    gathered = get_tp_group().all_gather(padded, dim=0)
+    chunks = [gathered[rank * max_rows : rank * max_rows + size] for rank, size in enumerate(shard_sizes)]
+    return torch.cat(chunks, dim=0)
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
@@ -235,7 +262,15 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        prefill_row_shard = getattr(metadata, "prefill_row_shard", None)
+        op_metadata = metadata
+        if prefill_row_shard is not None:
+            query = query[prefill_row_shard.start : prefill_row_shard.stop].contiguous()
+            weights = weights[prefill_row_shard.start : prefill_row_shard.stop].contiguous()
+            query_scale = query_scale[prefill_row_shard.start : prefill_row_shard.stop].contiguous()
+            op_metadata = prefill_row_shard
+
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata.qli_metadata))
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
@@ -244,17 +279,19 @@ class AscendIndexerOps:
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
             quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
-            cu_seqlens_q=metadata.qli_cu_seqlens_q,
-            seqused_k=metadata.qli_seqused_k,
-            cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
-            metadata=metadata.qli_metadata,
+            cu_seqlens_q=op_metadata.qli_cu_seqlens_q,
+            seqused_k=op_metadata.qli_seqused_k,
+            cmp_residual_k=op_metadata.qli_cmp_residual_k,
+            block_table=op_metadata.block_table,
+            metadata=op_metadata.qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,
             cmp_ratio=4,
             return_value=0,
         )
+        if prefill_row_shard is not None:
+            return _gather_prefill_row_shard_topk(topk_idxs, prefill_row_shard.sizes)
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(

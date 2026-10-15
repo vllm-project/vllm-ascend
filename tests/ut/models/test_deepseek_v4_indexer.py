@@ -16,11 +16,13 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerOps,
     DeepseekV4Indexer,
     IndexerOverlapPlan,
+    _gather_prefill_row_shard_topk,
     get_indexer_k_dtype,
     hadamard_linear,
     hadamard_scale,
     rotate_activation,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
 def _make_indexer(topk_indices_buffer: torch.Tensor | None) -> DeepseekV4Indexer:
@@ -371,6 +373,109 @@ class TestIndexerForward:
 
 
 class TestIndexerOps:
+    def test_gather_prefill_row_shards_removes_padding(self):
+        local_topk = torch.tensor([[[10, 11]], [[12, 13]]], dtype=torch.int32)
+        gathered = torch.tensor(
+            [
+                [[0, 1]],
+                [[2, 3]],
+                [[4, 5]],
+                [[6, 7]],
+                [[-1, -1]],
+                [[-1, -1]],
+                [[8, 9]],
+                [[10, 11]],
+                [[-1, -1]],
+            ],
+            dtype=torch.int32,
+        )
+        tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered))
+
+        with patch(
+            "vllm_ascend.models.deepseek_v4.indexer.get_tp_group",
+            return_value=tp_group,
+        ):
+            actual = _gather_prefill_row_shard_topk(local_topk, (3, 1, 2))
+
+        expected = torch.tensor(
+            [[[0, 1]], [[2, 3]], [[4, 5]], [[6, 7]], [[8, 9]], [[10, 11]]],
+            dtype=torch.int32,
+        )
+        assert torch.equal(actual, expected)
+        padded = tp_group.all_gather.call_args.args[0]
+        assert padded.shape == (3, 1, 2)
+        assert torch.equal(padded[:2], local_topk)
+        assert torch.equal(padded[2], torch.full((1, 2), -1, dtype=torch.int32))
+        assert tp_group.all_gather.call_args.kwargs == {"dim": 0}
+
+    def test_select_topk_only_computes_local_prefill_rows(self):
+        indexer_ops = AscendIndexerOps(index_topk=3)
+        query = torch.arange(24, dtype=torch.int8).reshape(6, 1, 4)
+        weights = torch.arange(6, dtype=torch.float16).reshape(6, 1)
+        query_scale = torch.arange(6, dtype=torch.float16).reshape(6, 1)
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.int8)
+        scale_cache = torch.empty((1, 1, 1, 1), dtype=torch.float16)
+        local_topk = torch.tensor([[[1, 2, 3]], [[4, 5, 6]]], dtype=torch.int32)
+        gathered_topk = torch.arange(18, dtype=torch.int32).reshape(6, 1, 3)
+        shard = SimpleNamespace(
+            start=2,
+            stop=4,
+            sizes=(2, 2, 2),
+            block_table=torch.tensor([[7]], dtype=torch.int32),
+            qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([8], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([1], dtype=torch.int32),
+        )
+        metadata = SimpleNamespace(prefill_row_shard=shard)
+
+        with (
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_weights",
+                side_effect=lambda value: value,
+            ),
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_query_scale",
+                side_effect=lambda value: value,
+            ),
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_key_scale",
+                side_effect=lambda value: value,
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_quant_lightning_indexer_v2",
+                create=True,
+                return_value=(local_topk, None),
+            ) as qli,
+            patch("vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata") as wait,
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer._gather_prefill_row_shard_topk",
+                return_value=gathered_topk,
+            ) as gather,
+        ):
+            actual = indexer_ops.select_topk(
+                query,
+                weights,
+                query_scale,
+                key_cache,
+                scale_cache,
+                metadata,
+            )
+
+        assert actual is gathered_topk
+        wait.assert_called_once_with(DeviceMetadataStage.INDEXER, id(shard.qli_metadata))
+        qli_kwargs = qli.call_args.kwargs
+        assert torch.equal(qli_kwargs["query"], query[2:4])
+        assert torch.equal(qli_kwargs["weights"], weights[2:4])
+        assert torch.equal(qli_kwargs["query_dequant_scale"], query_scale[2:4])
+        assert qli_kwargs["block_table"] is shard.block_table
+        assert qli_kwargs["cu_seqlens_q"] is shard.qli_cu_seqlens_q
+        gather.assert_called_once_with(local_topk, shard.sizes)
+
     def test_quantize_scatter_then_select_topk(self):
         indexer_ops = AscendIndexerOps(index_topk=3)
         key_cache = torch.empty((1, 1, 1, 4), dtype=torch.int8)

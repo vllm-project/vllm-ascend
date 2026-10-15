@@ -82,6 +82,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
+    # Split DeepSeek-V4 pure-prefill indexer query rows across TP ranks.
+    # Default: 0 (disabled). Valid values: 0 or 1. This configuration is not
+    # sensitive and is intended for performance evaluation on Ascend A2.
+    "VLLM_ASCEND_DSV4_PREFILL_INDEXER_TP_SHARD": lambda: _strict_binary_env(
+        "VLLM_ASCEND_DSV4_PREFILL_INDEXER_TP_SHARD"
+    ),
 }
 
 # end-env-vars-definition
