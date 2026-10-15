@@ -253,6 +253,7 @@ def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
     assert generated_tokens[True] == generated_tokens[False]
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @patch.dict(
     os.environ,
     {
@@ -266,6 +267,7 @@ def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @patch.dict(
     os.environ,
     {
