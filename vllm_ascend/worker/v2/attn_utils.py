@@ -91,6 +91,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
+from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -1626,35 +1627,22 @@ def _reshape_kv_cache_v2(
                 continue
 
             if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
-                typed_slot = raw_cache.view(kv_cache_spec.dtype)
-                dtype_size = get_dtype_size(kv_cache_spec.dtype)
-                num_blocks = kv_cache_config.num_blocks
-                page_el = typed_slot.numel() // num_blocks if num_blocks else 0
-                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // dtype_size
-                if num_blocks and tail_block_el > page_el:
-                    raise ValueError(
-                        f"KPool tail cache for {layer_name} does not fit one small page: "
-                        f"tail={tail_block_el} elements, page={page_el} elements."
-                    )
-                kv_caches[layer_name] = [
-                    torch.as_strided(
-                        typed_slot,
-                        size=(
-                            num_blocks,
-                            2,
-                            kv_cache_spec.block_size,
-                            kv_cache_spec.head_size,
-                        ),
-                        stride=(
-                            page_el,
-                            kv_cache_spec.block_size * kv_cache_spec.head_size,
-                            kv_cache_spec.head_size,
-                            1,
-                        ),
-                    )
-                ]
+                kv_caches[layer_name] = view_kpool_tail_cache(
+                    layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks
+                )
+                continue
+            if (
+                isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+                and getattr(kv_cache_spec, "model_version", None) == "glm5_next"
+                and get_kv_cache_compression_ratio(kv_cache_spec) > 1
+            ):
+                kv_caches[layer_name] = view_compressed_indexer_cache(
+                    layer_name,
+                    kv_cache_spec,
+                    raw_cache,
+                    group.backend,
+                    kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
+                )
                 continue
             if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                 if not isinstance(raw_cache, torch.Tensor):

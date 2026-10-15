@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -237,3 +238,96 @@ def test_business_shape_index_packing_in_place():
     expected[:3, 2048] = torch.tensor([65536, -1, 65540], dtype=torch.int32, device="npu")
     torch.testing.assert_close(indices, expected, rtol=0, atol=0)
     assert result.data_ptr() == indices.data_ptr()
+
+
+@pytest.mark.parametrize("reuse_output", [False, True])
+@torch.inference_mode()
+def test_empty_query_skips_selection_after_cache_writes(monkeypatch, reuse_output):
+    from torch import nn
+    from vllm.config.compilation import CUDAGraphMode
+
+    import vllm_ascend.attention.indexer_kpool as backend_module
+    from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
+
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    )
+    rows, dim, topk, device = 322, 128, 2048, "npu"
+    width = topk + 4 - 1
+    op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(op)
+    op.topk_tokens, op.head_dim, op.index_kpool = topk, dim, 4
+    op._key_weight = op._gate_weight = torch.empty(dim, 3, dtype=torch.bfloat16, device=device)
+    op._norm_weight_f32 = op._norm_bias_f32 = None
+    op.k_norm = SimpleNamespace(eps=1e-6)
+    op.index_kpool_compress_ape = torch.empty(4, dim, device=device)
+    output_storage = torch.full((2 * (rows + 2), width + 29), 17, dtype=torch.int32, device=device)
+    op.topk_indices_buffer = output_storage[::2, : width + 13] if reuse_output else None
+    tail_storage = torch.full((2 * 80 * 2 * dim + 2 * dim,), 17.0, device=device)
+    tail = tail_storage.as_strided((2, 7, 2 * dim), (80 * 2 * dim, 2 * dim, 1), dim)
+    cache_storage = torch.full((3 * 48 * dim + 2 * dim,), 17, dtype=torch.bfloat16, device=device)
+    cache = cache_storage.as_strided((3, 32, 1, dim), (48 * dim, dim, dim, 1), dim)
+    key = torch.arange(5 * dim, dtype=torch.float32, device=device).view(5, dim)
+    gate = key + 1000
+    state = torch.cat((key, gate), dim=1)
+    pooled = torch.arange(4 * dim, dtype=torch.float32, device=device).view(4, dim).to(torch.bfloat16)
+    metadata = SimpleNamespace(
+        query_metadata=SimpleNamespace(
+            positions=torch.zeros(rows, dtype=torch.int64, device=device),
+            cum_query_lens=torch.zeros(3, dtype=torch.int64, device=device),
+            num_actual_tokens=0,
+            seq_lens=torch.zeros(3, dtype=torch.int64, device=device),
+            pool_tail=torch.zeros(3, dtype=torch.int64, device=device),
+        ),
+        cum_query_lens=torch.tensor([2, 5, 5], dtype=torch.int64, device=device),
+        query_start_loc=torch.tensor([0, 2, 5, 5], dtype=torch.int32, device=device),
+        start_pos=torch.zeros(3, dtype=torch.int32, device=device),
+        pool_tail=torch.zeros(3, dtype=torch.int64, device=device),
+        pooled_slot_mapping=torch.tensor([0, 33, 96, -1], device=device),
+        keypool_state_table=torch.zeros(3, 2, dtype=torch.int32, device=device),
+        keypool_start_offsets=torch.zeros(3, dtype=torch.int32, device=device),
+    )
+    tail_metadata = SimpleNamespace(
+        block_size=7,
+        cann_inputs=SimpleNamespace(
+            retained_indices=None,
+            write_indices=torch.tensor([[6, 86, 160, 7, -1]], device=device),
+            state_indices=torch.arange(5, device=device).view(1, 5),
+            page_rows=80,
+        ),
+    )
+    op._prepare_keypool_state = MagicMock(return_value=state)
+    op._key_pool = MagicMock(return_value=pooled)
+    op._write_keypool_caches = adapters.write_keypool_caches
+    op._pool_key_indexer = MagicMock(side_effect=AssertionError("empty query reached CANN PoolKeyIndexer"))
+    op._pack_keypool_indices = MagicMock(side_effect=AssertionError("empty query reached index packing"))
+    with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
+        result = op._forward_cann(
+            torch.empty(5, 3, dtype=torch.bfloat16, device=device),
+            torch.empty(rows, 32, dim, dtype=torch.bfloat16, device=device),
+            torch.empty(rows, 32, dtype=torch.bfloat16, device=device),
+            cache,
+            tail,
+            metadata,
+            tail_metadata,
+            compute_topk=True,
+        )
+    torch.npu.synchronize()
+    op._key_pool.assert_called_once()
+    op._pool_key_indexer.assert_not_called()
+    assert result.shape == (rows, 1, width)
+    assert result.dtype == torch.int32
+    assert (result == -1).all()
+    expected_tail = torch.full_like(tail_storage, 17)
+    expected_tail[dim + 6 * 2 * dim : dim + 7 * 2 * dim] = state[0]
+    expected_tail[dim + 86 * 2 * dim : dim + 87 * 2 * dim] = state[1]
+    expected_cache = torch.full_like(cache_storage, 17)
+    expected_cache[dim : 2 * dim] = pooled[0]
+    expected_cache[50 * dim : 51 * dim] = pooled[1]
+    torch.testing.assert_close(tail_storage, expected_tail, rtol=0, atol=0)
+    torch.testing.assert_close(cache_storage, expected_cache, rtol=0, atol=0)
+    expected_output = torch.full_like(output_storage, 17)
+    if reuse_output:
+        expected_output[: 2 * rows : 2, : width + 13] = -1
+        assert result.data_ptr() == output_storage.data_ptr()
+    torch.testing.assert_close(output_storage, expected_output, rtol=0, atol=0)
