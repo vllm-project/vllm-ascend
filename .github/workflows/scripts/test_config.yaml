@@ -512,6 +512,20 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
 
+- name: spec_decode_domino
+  optional: false
+  base: spec_decode_dflash
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/domino_proposer.py
+    - vllm_ascend/spec_decode/domino_correction.py
+    - vllm_ascend/spec_decode/llm_base_proposer.py
+    - vllm_ascend/models/qwen3_domino.py
+    - vllm_ascend/ops/triton/spec_decode/domino.py
+    - vllm_ascend/ops/triton/spec_decode/domino_candidate.py
+    - vllm_ascend/patch/platform/patch_speculative_config.py
+  tests:
+    - tests/e2e/pull_request/one_card/spec_decode/test_domino.py
+
 - name: spec_decode_dspark
   optional: false
   base: spec_decode_base
@@ -727,6 +741,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 550
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 770
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 300
+  # Initial scheduling estimate for full-vocabulary and top-64 correction runs.
+  tests/e2e/pull_request/one_card/spec_decode/test_domino.py: 600
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 360
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 260
   tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 440
