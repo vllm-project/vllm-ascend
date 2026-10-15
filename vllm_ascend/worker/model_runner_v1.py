@@ -5462,6 +5462,29 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        from vllm_ascend.worker.c8_hybrid_layout import (
+            c8_contiguous_views,
+            mamba_contiguous_views,
+            use_contiguous_c8_hybrid_layout,
+        )
+
+        hybrid_mamba_spec = None
+        if use_contiguous_c8_hybrid_layout(self.vllm_config):
+            layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+            if not (layout.is_layer_compact and layout.is_block_compact):
+                raise ValueError("C8 hybrid contiguous layout requires layer/block compact backing.")
+            if any(
+                descriptor.block_stride != layer_kv_cache_spec[name].page_size_bytes
+                for descriptor in kv_cache_config.kv_cache_tensors
+                for name in get_kv_cache_tensor_layers(descriptor)
+            ):
+                raise ValueError("C8 hybrid contiguous layout requires descriptor stride equal to page size.")
+            hybrid_mamba_spec = next(
+                (spec for spec in layer_kv_cache_spec.values() if isinstance(spec, MambaSpec)), None
+            )
+            if hybrid_mamba_spec is None:
+                raise ValueError("C8 hybrid contiguous layout requires a Mamba cache spec.")
+            logger.info("Using C8 hybrid contiguous sections: Conv | SSM/K | V | K_scale | V_scale")
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         layer_tuple_strides = {}
         if is_deepseek_v41_cache(layer_kv_cache_spec):
@@ -5496,7 +5519,12 @@ class NPUModelRunner(GPUModelRunner):
                     raw = kv_cache_raw_tensors[layer_name]
                     if not isinstance(raw, torch.Tensor):
                         raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
-                    kv_caches[layer_name] = mxfp_cache_views_for_spec(raw, current_kv_cache_spec, kernel_block_size)
+                    if hybrid_mamba_spec is not None:
+                        kv_caches[layer_name] = c8_contiguous_views(
+                            raw, current_kv_cache_spec, kernel_block_size, hybrid_mamba_spec
+                        )
+                    else:
+                        kv_caches[layer_name] = mxfp_cache_views_for_spec(raw, current_kv_cache_spec, kernel_block_size)
                     continue
 
                 if layer_name in layer_tuple_strides:
@@ -6027,6 +6055,14 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    if hybrid_mamba_spec is not None:
+                        if (
+                            current_kv_cache_spec.shapes != hybrid_mamba_spec.shapes
+                            or current_kv_cache_spec.dtypes != hybrid_mamba_spec.dtypes
+                        ):
+                            raise ValueError("C8 hybrid contiguous layout requires homogeneous Mamba state shapes.")
+                        kv_caches[layer_name] = mamba_contiguous_views(raw_tensor, current_kv_cache_spec)
+                        continue
                     assert raw_tensor is not None
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes

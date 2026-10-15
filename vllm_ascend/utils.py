@@ -1427,9 +1427,22 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
-    # Hybrid page padding is handled by the upstream cache planner. C8 only
-    # constrains the scheduler block to contain whole 512-token kernel blocks.
+    # Hybrid C8 uses dedicated continuous sections. Other C8 layouts only
+    # require whole 512-token kernel blocks.
     if is_c8_mxfp_kv_quant(vllm_config):
+        from vllm_ascend.worker.c8_hybrid_layout import (
+            configure_contiguous_c8_hybrid_layout,
+            use_contiguous_c8_hybrid_layout,
+        )
+
+        if use_contiguous_c8_hybrid_layout(vllm_config):
+            configure_contiguous_c8_hybrid_layout(vllm_config)
+            logger.info(
+                "C8 hybrid contiguous layout: block_size=%s, page_bytes=%s",
+                cache_config.block_size,
+                cache_config.mamba_page_size_padded,
+            )
+            return
         kernel_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
         if cache_config.block_size % kernel_size:
             if getattr(cache_config, "user_specified_block_size", False):
