@@ -249,17 +249,25 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_max_tokens_zero_request_leaks_load_specs(self, mock_client_cls):
-        """Reproduce the max_tokens=0 metadata leak (CVE-2026-93436 pattern).
+    def test_unconsumed_load_spec_finished_request_leaks(self, mock_client_cls):
+        """Reproduce the load-spec leak: a request whose load spec is created
+        but never consumed, then finishes.
 
-        A max_tokens=0 request registers a load spec during pool lookup,
-        reaches update_state_after_alloc with num_external_tokens=0, and
-        finishes without ever being rescheduled. load specs are only popped
-        when a request is scheduled again (_process_new_request /
-        _process_preempted_cached_request / _process_async_load_request), and
-        build_connector_meta's finished cleanup pops every other per-request
-        dict (_request_trackers / _unfinished_requests /
-        _unfinished_request_ids) but never load_specs, so every such request
+        This is the real leak window (not the normal max_tokens=0 path,
+        which closes via _process_new_request in the same step):
+
+        1. Async KV transfer: the request sits in WAITING_FOR_REMOTE_KVS
+           (vLLM puts it there without entering scheduled_new_reqs) and is
+           aborted mid-transfer. The finished cleanup in build_connector_meta
+           pops _unfinished_requests, so _process_async_load_request never
+           sees the request again -> its load spec is stranded.
+        2. Aborted while queued with a spec already created (token budget
+           break / allocate_slots returned None, then the client disconnects).
+
+        build_connector_meta's finished cleanup pops five per-request dicts
+        (_request_trackers / _unfinished_requests / _unfinished_request_ids /
+        _preempted_req_ids / _loading_req_ids) but never load_specs, and
+        load_specs has no other cleanup path, so each such request
         permanently grows the dict. Observing the dict length after each
         finished request gives a deterministic, O(1) leak signal instead of
         waiting for RSS to creep up.
@@ -284,7 +292,9 @@ class TestKVPoolScheduler(unittest.TestCase):
             need, _ = scheduler.get_num_new_matched_tokens(request, 0)
             self.assertEqual(need, 32)
 
-            scheduler.update_state_after_alloc(request, MagicMock(), 0)
+            # Spec created but the request is aborted before any scheduling
+            # step consumes it (async-transfer abort / queue-time abort).
+            scheduler.update_state_after_alloc(request, MagicMock(), 32)
 
             sched_output = MagicMock()
             sched_output.finished_req_ids = {req_id}
@@ -304,7 +314,7 @@ class TestKVPoolScheduler(unittest.TestCase):
             len(scheduler.load_specs),
             num_requests,
             f"{len(scheduler.load_specs)} load specs retained after "
-            f"{num_requests} finished max_tokens=0 requests",
+            f"{num_requests} requests finished before consuming their load spec",
         )
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
