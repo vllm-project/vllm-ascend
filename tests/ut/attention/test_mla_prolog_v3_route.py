@@ -174,32 +174,30 @@ def test_current_kv_gather_materializes_only_selected_rows(cache_factory, slots)
     cache_k, cache_v = cache_factory()
     slot_tensor = torch.tensor(slots, dtype=torch.int64)
     packed = _load_cache_rows_on_cpu(cache_k, cache_v, slot_tensor)
-    original_getitem = torch.Tensor.__getitem__
-    original_contiguous = torch.Tensor.contiguous
 
-    def check_getitem(tensor, index):
-        if tensor is cache_k or tensor is cache_v:
+    class CacheReadGuard(torch.Tensor):
+        def __getitem__(self, index):
             raise AssertionError("Do not index the entire strided cache.")
-        return original_getitem(tensor, index)
 
-    def check_contiguous(tensor, *args, **kwargs):
-        if tensor is cache_k or tensor is cache_v:
+        def contiguous(self, *args, **kwargs):
             raise AssertionError("Do not materialize the entire strided cache.")
-        return original_contiguous(tensor, *args, **kwargs)
 
-    with (
-        patch.object(mla_v1, "load_mla_cache_rows_by_slots", return_value=packed) as mock_reader,
-        patch.object(torch.Tensor, "__getitem__", check_getitem),
-        patch.object(torch.Tensor, "contiguous", check_contiguous),
-    ):
-        nope, rope = AscendMLAImpl._gather_current_kv_from_cache((cache_k, cache_v), slot_tensor)
+    guarded_cache = (cache_k.as_subclass(CacheReadGuard), cache_v.as_subclass(CacheReadGuard))
+    with patch.object(mla_v1, "load_mla_cache_rows_by_slots", return_value=packed) as mock_reader:
+        nope, rope = AscendMLAImpl._gather_current_kv_from_cache(guarded_cache, slot_tensor)
 
-    mock_reader.assert_called_once_with(cache_k, cache_v, slot_tensor)
+    mock_reader.assert_called_once_with(*guarded_cache, slot_tensor)
     assert nope.shape == (len(slots), 1, NOPE_DIM)
     assert rope.shape == (len(slots), 1, ROPE_DIM)
     assert nope.is_contiguous() and rope.is_contiguous()
     torch.testing.assert_close(nope[:, 0], packed[:, :NOPE_DIM])
     torch.testing.assert_close(rope[:, 0], packed[:, NOPE_DIM:])
+    # Patching Tensor.__getitem__ leaves CPython sequence slots changed even
+    # after restoration, breaking scalar-tensor construction in later EPLB UTs.
+    torch.testing.assert_close(
+        torch.tensor([torch.tensor(3), torch.tensor(7)], dtype=torch.int32),
+        torch.tensor([3, 7], dtype=torch.int32),
+    )
 
 
 @pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
