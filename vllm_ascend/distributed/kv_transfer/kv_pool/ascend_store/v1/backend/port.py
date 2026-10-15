@@ -46,7 +46,11 @@ class KVStoreBackend(Protocol):
 
 
 class KeyRangeBackend(KVStoreBackend, Protocol):
-    """Block-key sessions that copy selected byte ranges."""
+    """Block-key sessions that copy selected byte ranges.
+
+    Range copies return zero per key only when every requested byte was copied;
+    adapters must normalize native byte counts before returning status codes.
+    """
 
     def validate_key_range_support(self) -> None: ...
 

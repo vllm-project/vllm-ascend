@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, FakeLoadStartGate, begin_step, make_worker
 from tests.ut.distributed.ascend_store.v1.worker.resource_fixtures import (
     run_backend_resource_lifecycle,
 )
@@ -25,6 +26,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake import (
     MooncakeBackend,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import BackendResultError
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import LoadCommand, RangeStoreCommand
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import RegistrationAcquisitionError
@@ -83,6 +87,134 @@ def test_v1_mooncake_adapter_preserves_native_bulk_store_contract() -> None:
     assert (keys, addresses, sizes) == (["key"], [[100]], [[10]])
     assert replicate_config.preferred_segment == "segment-0"
     assert not replicate_config.prefer_alloc_in_same_node
+
+
+@pytest.mark.parametrize("direction", ("store", "load"))
+@pytest.mark.parametrize(
+    "native_results, expected_codes", (([524288, 24, 0], (0, 0, 0)), ([524288, -707, -7], (0, -707, -7)))
+)
+def test_mooncake_range_copy_normalizes_native_byte_counts(direction, native_results, expected_codes) -> None:
+    store = MagicMock()
+    method = (
+        store.batch_put_from_multi_buffer_ranges if direction == "store" else store.batch_get_into_multi_buffer_ranges
+    )
+    method.return_value = native_results
+    backend = _make_mooncake_registration_backend(store)
+    copy = backend.copy_key_range_store if direction == "store" else backend.copy_key_range_load
+    keys = ["large", "split", "empty"]
+    addresses = [[100, 200], [300, 400], []]
+    sizes = [[262144, 262144], [8, 16], []]
+    offsets = [[0, 262144], [8, 32], []]
+
+    assert copy(keys, addresses, sizes, offsets) == expected_codes
+    method.assert_called_once_with(keys, addresses, sizes, offsets)
+
+
+@pytest.mark.parametrize("direction", ("store", "load"))
+@pytest.mark.parametrize("copied_bytes", (0, 8, 23, 25))
+def test_mooncake_range_copy_rejects_inexact_byte_counts(direction, copied_bytes, caplog) -> None:
+    store = MagicMock()
+    method = (
+        store.batch_put_from_multi_buffer_ranges if direction == "store" else store.batch_get_into_multi_buffer_ranges
+    )
+    method.return_value = [524288, copied_bytes]
+    backend = _make_mooncake_registration_backend(store)
+    copy = backend.copy_key_range_store if direction == "store" else backend.copy_key_range_load
+
+    codes = copy(["complete", "incomplete"], [[100], [200, 300]], [[524288], [8, 16]], [[0], [8, 32]])
+
+    assert codes[0] == 0
+    assert codes[1] < 0
+    assert "incomplete" in caplog.text
+    assert f"copied_bytes={copied_bytes}" in caplog.text
+    assert "expected_bytes=24" in caplog.text
+
+
+@pytest.mark.parametrize("direction", ("store", "load"))
+@pytest.mark.parametrize("native_results", (None, [], [32, 32], [True], [32.0]))
+def test_mooncake_range_copy_rejects_malformed_results(direction, native_results) -> None:
+    store = MagicMock()
+    method = (
+        store.batch_put_from_multi_buffer_ranges if direction == "store" else store.batch_get_into_multi_buffer_ranges
+    )
+    method.return_value = native_results
+    backend = _make_mooncake_registration_backend(store)
+    copy = backend.copy_key_range_store if direction == "store" else backend.copy_key_range_load
+
+    with pytest.raises(BackendResultError):
+        copy(["key"], [[100]], [[32]], [[0]])
+
+
+@pytest.mark.parametrize("code", (0, -707, 32))
+def test_mooncake_range_sessions_preserve_native_status_codes(code) -> None:
+    store = MagicMock()
+    backend = _make_mooncake_registration_backend(store)
+    backend.config = SimpleNamespace(preferred_segment=False, prefer_alloc_in_same_node=False)
+    for method in (
+        store.batch_put_session_start,
+        store.batch_put_session_end,
+        store.batch_put_session_revoke,
+        store.batch_get_session_start,
+    ):
+        method.return_value = [code]
+    store.batch_get_session_end.return_value = code
+
+    assert backend.start_key_range_store(["key"], [32]) == (code,)
+    assert backend.commit_key_range_store(["key"]) == (code,)
+    assert backend.revoke_key_range_store(["key"]) == (code,)
+    assert backend.start_key_range_load(["key"]) == (code,)
+    if code == 0:
+        backend.finish_key_range_load(["key"])
+    else:
+        with pytest.raises(RuntimeError, match="batch_get_session_end failed"):
+            backend.finish_key_range_load(["key"])
+
+
+@pytest.mark.parametrize("failed_copy", (None, "store", "load"))
+def test_mooncake_native_byte_counts_reach_layerwise_store_and_load(failed_copy) -> None:
+    store = MagicMock()
+    backend = _make_mooncake_registration_backend(store)
+    backend.device_id = 0
+    backend.config = SimpleNamespace(preferred_segment=False, prefer_alloc_in_same_node=False)
+    store.batch_put_session_start.side_effect = lambda keys, sizes, config: [0] * len(keys)
+    store.batch_put_session_end.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_session_revoke.side_effect = lambda keys: [0] * len(keys)
+    store.batch_get_session_start.side_effect = lambda keys: [0] * len(keys)
+    store.batch_get_session_end.return_value = 0
+    store.batch_put_from_multi_buffer_ranges.side_effect = lambda keys, addresses, sizes, offsets: [
+        sum(row) - (failed_copy == "store") for row in sizes
+    ]
+    store.batch_get_into_multi_buffer_ranges.side_effect = lambda keys, addresses, sizes, offsets: [
+        sum(row) - (failed_copy == "load") for row in sizes
+    ]
+    worker, resources, _ = make_worker(
+        cast(FakeBackend, backend), layerwise=True, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
+    )
+    try:
+        command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+        begin_step(worker, store=(command,))
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+        worker.finish_step()
+        assert store.batch_put_from_multi_buffer_ranges.call_count == 2
+        assert store.batch_put_session_end.call_count == (0 if failed_copy == "store" else 1)
+        assert store.batch_put_session_revoke.call_count == (1 if failed_copy == "store" else 0)
+        assert worker.take_released_store_job_ids() == {17}
+        worker.end_step()
+
+        if failed_copy != "store":
+            begin_step(worker, load=(LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
+            worker.start_load()
+            worker.wait_for_layer_load("layers.0.group.0")
+            worker.wait_for_layer_load("layers.1.group.0")
+            result = worker.collect_load_result()
+            assert bool(result.failed_locations) == (failed_copy == "load")
+            assert store.batch_get_into_multi_buffer_ranges.call_count == 2
+            store.batch_get_session_end.assert_called_once()
+            worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
 
 
 def test_mooncake_store_registration_failure_rolls_back_owned_prefix() -> None:

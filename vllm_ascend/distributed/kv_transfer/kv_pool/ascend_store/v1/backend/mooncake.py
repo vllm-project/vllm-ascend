@@ -35,6 +35,9 @@ from .registration import (
 )
 from .results import presence_results, result_code, result_codes
 
+# Adapter-local failure: a completed native copy did not cover the requested ranges.
+_RANGE_COPY_SIZE_MISMATCH = -1
+
 
 class MooncakeBackend:
     """Translate v1 operations directly to one owned Mooncake store client."""
@@ -182,14 +185,7 @@ class MooncakeBackend:
         sizes: list[list[int]],
         source_offsets: list[list[int]],
     ) -> tuple[int, ...]:
-        return self._call_key_range(
-            "batch_get_into_multi_buffer_ranges",
-            keys,
-            keys,
-            addresses,
-            sizes,
-            source_offsets,
-        )
+        return self._copy_key_ranges("batch_get_into_multi_buffer_ranges", keys, addresses, sizes, source_offsets)
 
     def finish_key_range_load(self, keys: list[str]) -> None:
         self._ensure_initialized()
@@ -218,20 +214,43 @@ class MooncakeBackend:
         sizes: list[list[int]],
         destination_offsets: list[list[int]],
     ) -> tuple[int, ...]:
-        return self._call_key_range(
-            "batch_put_from_multi_buffer_ranges",
-            keys,
-            keys,
-            addresses,
-            sizes,
-            destination_offsets,
-        )
+        return self._copy_key_ranges("batch_put_from_multi_buffer_ranges", keys, addresses, sizes, destination_offsets)
 
     def commit_key_range_store(self, keys: list[str]) -> tuple[int, ...]:
         return self._call_key_range("batch_put_session_end", keys, keys)
 
     def revoke_key_range_store(self, keys: list[str]) -> tuple[int, ...]:
         return self._call_key_range("batch_put_session_revoke", keys, keys)
+
+    def _copy_key_ranges(
+        self,
+        operation: str,
+        keys: list[str],
+        addresses: list[list[int]],
+        sizes: list[list[int]],
+        offsets: list[list[int]],
+    ) -> tuple[int, ...]:
+        """Convert native byte counts to v1 status codes without accepting partial copies."""
+
+        native_results = self._call_key_range(operation, keys, keys, addresses, sizes, offsets)
+        codes = []
+        for key, copied_bytes, range_sizes in zip(keys, native_results, sizes, strict=True):
+            if copied_bytes < 0:
+                codes.append(copied_bytes)
+                continue
+            expected_bytes = sum(range_sizes)
+            if copied_bytes == expected_bytes:
+                codes.append(0)
+            else:
+                logger.error(
+                    "Mooncake %s returned an unexpected range copy size for key %s: copied_bytes=%d, expected_bytes=%d",
+                    operation,
+                    key,
+                    copied_bytes,
+                    expected_bytes,
+                )
+                codes.append(_RANGE_COPY_SIZE_MISMATCH)
+        return tuple(codes)
 
     def _ensure_initialized(self) -> None:
         self._require_open()
