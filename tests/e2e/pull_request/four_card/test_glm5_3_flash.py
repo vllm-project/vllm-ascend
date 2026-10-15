@@ -114,7 +114,9 @@ class FlashWorker:
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager):
     for name, value in {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        # V2 KV-block zeroing launches a 3D grid that becomes coreDim 0 on this
+        # hybrid dummy and aborts the four-card shard before KVPP PD. Stay on V1.
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "400",
