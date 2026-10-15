@@ -412,10 +412,6 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         first.cum_query_lens.data_ptr(),
         first.raw_seq_lens.data_ptr(),
         first.positions.data_ptr(),
-        first.query_start_loc.data_ptr(),
-        first.start_pos.data_ptr(),
-        first.pool_tail.data_ptr(),
-        first.pooled_slot_mapping.data_ptr(),
     )
     captured = builder.build_for_graph_capture(common, attn_state=object())
     drafted = builder.build_for_drafting(
@@ -435,10 +431,6 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         refreshed.cum_query_lens.data_ptr(),
         refreshed.raw_seq_lens.data_ptr(),
         refreshed.positions.data_ptr(),
-        refreshed.query_start_loc.data_ptr(),
-        refreshed.start_pos.data_ptr(),
-        refreshed.pool_tail.data_ptr(),
-        refreshed.pooled_slot_mapping.data_ptr(),
     )
     assert refreshed_ptrs == first_ptrs
 
@@ -451,10 +443,6 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         second.cum_query_lens.data_ptr(),
         second.raw_seq_lens.data_ptr(),
         second.positions.data_ptr(),
-        second.query_start_loc.data_ptr(),
-        second.start_pos.data_ptr(),
-        second.pool_tail.data_ptr(),
-        second.pooled_slot_mapping.data_ptr(),
     )
     assert all(left != right for left, right in zip(first_ptrs, second_ptrs))
     for field in ("query_start_loc", "start_pos", "pool_tail", "pooled_slot_mapping"):

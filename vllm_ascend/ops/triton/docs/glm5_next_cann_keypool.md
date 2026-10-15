@@ -2,14 +2,13 @@
 
 ## Description
 
-- **Function**: Four Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
+- **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
 - **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
 - **FP8 extension**: When `scale_cache` is supplied, each pool stores E4M3 keys with `scale=max(abs(pooled))/448` (or 1 for a zero vector), and stores one FP32 descale per pool.
 - **Algorithm flow**:
     1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. DSA-CP also builds rank-local cumulative query ends, visible pool counts and tail lengths in the same launch. Completed pools retain their compact output row even when their cache slot is evicted.
     2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
-    3. `prepare_pool_key_indexer_inputs` prepends an independent one-query/one-pool request, shifts cumulative query ends by one and copies query/weight/scale inputs in one launch. Its discarded output keeps CANN out of the unsafe TND no-work cleanup during empty or tail-only graph replay. Real cache contents and per-request lengths are preserved.
-    4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
+    3. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
 
 ## Parameters

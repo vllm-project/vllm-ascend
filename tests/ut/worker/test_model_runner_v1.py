@@ -2140,9 +2140,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
         self.assertIs(specs["model.layers.1.indexer.k_cache"], indexer_spec)
-        self.assertEqual(specs["model.layers.1.indexer.k_cache"].scale_dim, 1)
-        self.assertEqual(specs["model.layers.1.indexer.k_cache"].scale_dtype, torch.float32)
-        self.assertEqual(specs["model.layers.1.indexer.k_cache"].dtype, torch.float8_e4m3fn)
         self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

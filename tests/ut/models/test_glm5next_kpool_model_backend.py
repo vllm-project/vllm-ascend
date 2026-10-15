@@ -400,15 +400,6 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     state = torch.empty(5, 4, 4)
     query_rows = 4 if dsa_cp else 8
     packed = torch.empty(query_rows, 1, 7, dtype=torch.int32)
-    safe_inputs = SimpleNamespace(
-        query=torch.empty(query_rows + 1, 1, 2, dtype=torch.bfloat16),
-        weights=torch.empty(query_rows + 1, 1, dtype=torch.bfloat16),
-        cum_query_lens=torch.tensor([1, 1, 5]),
-        seq_lens=torch.tensor([1, 0, 1]),
-        pool_tail=torch.zeros(3, dtype=torch.int64),
-        block_table=torch.zeros(3, 1, dtype=torch.int32),
-        q_descale=torch.ones(query_rows + 1, 1),
-    )
     op._quantize_keypool_query = MagicMock(
         return_value=(torch.empty(query_rows, 1, 2, dtype=torch.float8_e4m3fn), torch.ones(query_rows, 1))
     )
@@ -417,8 +408,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         ("prepare_keypool_state", state),
         ("key_pool", pooled),
         ("write_keypool_caches", None),
-        ("prepare_pool_key_indexer_inputs", safe_inputs),
-        ("pool_key_indexer", (torch.empty(query_rows + 1, 7, dtype=torch.int32), None)),
+        ("pool_key_indexer", (torch.empty(query_rows, 7, dtype=torch.int32), None)),
         ("pack_keypool_indices", packed),
     ):
         mock = MagicMock(return_value=result)
@@ -463,6 +453,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
     assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
     assert op._write_keypool_caches.call_args.args[4] is pooled
+    assert op._write_keypool_caches.call_args.kwargs["scale_cache"] is scale_cache
     skip_empty_query = actual_query_tokens == 0 and runtime_mode != CUDAGraphMode.FULL
     if compute_topk and skip_empty_query:
         assert result.shape == (query_rows, 1, 7)
@@ -479,18 +470,16 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             assert torch.all(storage[:, 11:] == 77)
     elif compute_topk:
         assert result is packed
-        assert names[3:] == ["prepare_pool_key_indexer_inputs", "pool_key_indexer", "pack_keypool_indices"]
+        assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
         assert op._pool_key_indexer.call_args.args[1] is cache
-        assert op._pool_key_indexer.call_args.kwargs["block_table"] is safe_inputs.block_table
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is safe_inputs.cum_query_lens
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is safe_inputs.seq_lens
-        assert op._pool_key_indexer.call_args.args[3] is safe_inputs.pool_tail
-        assert op._pool_key_indexer.call_args.args[0] is safe_inputs.query
-        assert op._pack_keypool_indices.call_args.args[0].shape[0] == query_rows
+        assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is query_metadata.cum_query_lens
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
+        assert op._pool_key_indexer.call_args.args[3] is query_metadata.pool_tail
         assert op._pack_keypool_indices.call_args.args[1] is query_metadata
         if quantized:
             assert op._pool_key_indexer.call_args.kwargs["quant_mode"] == 0
-            assert op._pool_key_indexer.call_args.kwargs["q_descale"] is safe_inputs.q_descale
+            assert op._pool_key_indexer.call_args.kwargs["q_descale"] is op._quantize_keypool_query.return_value[1]
             assert op._pool_key_indexer.call_args.kwargs["k_descale"].data_ptr() == scale_cache.data_ptr()
     else:
         assert result is None
