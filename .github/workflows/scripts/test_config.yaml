@@ -27,7 +27,7 @@
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
 #                        single_npu reports one test device even when the
-#                        runner allocates more cards (singlecard launcher only).
+#                        runner allocates more cards (masked before pytest).
 #
 # Per-file estimated execution times live in ``estimated_times.yaml`` so
 # timing-only updates do not force the full PR suite.

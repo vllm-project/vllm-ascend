@@ -183,7 +183,6 @@ jobs:
               - '.github/workflows/scripts/resolve_csrc_cache_targets.py'
               - '.github/workflows/scripts/select_tests.py'
               - '.github/workflows/scripts/run_selected_tests.sh'
-              - '.github/workflows/scripts/run_singlecard_test.py'
               - '.github/workflows/scripts/test_selector.py'
               - '.github/workflows/scripts/collect_merged_new_tests.py'
               - '.github/workflows/scripts/test_config.yaml'

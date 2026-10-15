@@ -47,8 +47,8 @@ files; split independently tested native operator interfaces into separate
 files. Several files covering different contracts of the same operator may
 remain separate.
 
-The CI launcher exposes one assigned NPU before importing accelerator
-packages. Runner allocation can contain additional cards; it does not change
+The existing CI test runner exposes one assigned NPU before starting pytest.
+Runner allocation can contain additional cards; it does not change
 the single-device test contract. CI selects and routes individual test files,
 so local runs should select files supported by the current device rather
 than collect every architecture directory together.

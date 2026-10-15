@@ -176,14 +176,18 @@ run_pytest_target() {
   log_name="${log_name%.py}"
   log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
-  local pytest_command=(pytest)
-  local coverage_command=(-m pytest)
   local report_args=()
   case "${target}" in
     tests/e2e/nightly/single_node/ops/singlecard_ops/*)
-      local launcher="${project_root}/.github/workflows/scripts/run_singlecard_test.py"
-      pytest_command=(python "${launcher}")
-      coverage_command=("${launcher}")
+      # Set the mask before pytest imports accelerator packages or conftest.
+      # A local export restores the assignment before the next test target.
+      local -x ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES-0}"
+      if [[ ! "${ASCEND_RT_VISIBLE_DEVICES}" =~ ^[[:space:]]*[0-9]+[[:space:]]*(,[[:space:]]*[0-9]+[[:space:]]*)*$ ]]; then
+        echo "Invalid ASCEND_RT_VISIBLE_DEVICES assignment: ${ASCEND_RT_VISIBLE_DEVICES}" >&2
+        return 1
+      fi
+      ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES%%,*}"
+      ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES//[[:space:]]/}"
       report_args=(-rs "--junitxml=${log_file%.log}.xml")
       ;;
   esac
@@ -196,10 +200,10 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" "${coverage_command[@]}" -sv --color=yes "${report_args[@]}" "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${report_args[@]}" "${target}"
   else
     set +e
-    run_logged_command "${log_file}" "${pytest_command[@]}" -sv --color=yes "${report_args[@]}" "${target}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${report_args[@]}" "${target}"
   fi
   local status=$?
   set -e
