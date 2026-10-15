@@ -269,7 +269,7 @@ a3-560t:
   single_node:
     test_config:
       - name: Qwen3-8B-w8a8sc-310p
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3-8B-w8a8sc-310p.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3-14B-w8a8sc-310p
