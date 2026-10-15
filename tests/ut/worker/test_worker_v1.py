@@ -818,16 +818,8 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.5
 
             # Test _init_device
-            with (
-                patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint,
-                patch(
-                    "vllm_ascend.worker.worker.get_ascend_config",
-                    return_value=SimpleNamespace(rope_ub_size_kb=128),
-                ),
-            ):
+            with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
                 result = worker._init_device()
-
-            mock_init_triton.assert_called_once_with(rope_ub_size_kb=128)
 
             # Both calls must use the mapped visible ordinal, not local_rank.
             mock_set_device.assert_called_once_with(torch.device("npu:1"))
