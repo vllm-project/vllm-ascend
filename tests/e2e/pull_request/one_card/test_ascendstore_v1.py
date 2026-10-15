@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import time
+from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,10 @@ def _exercise_connector(
     warmup: list[SampleRequest],
     connector: tuple[str, str, str],
     observations: list[dict[str, Any]],
+    *,
+    use_layerwise: bool = False,
+    worker_extension: str = WORKER_EXTENSION,
+    validate: Callable[[Any, Any], None] | None = None,
 ) -> None:
     _, connector_name, connector_module = connector
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
@@ -101,7 +106,7 @@ def _exercise_connector(
         "kv_connector_extra_config": {
             "backend": "mooncake",
             "lookup_rpc_port": lookup_port,
-            "use_layerwise": False,
+            "use_layerwise": use_layerwise,
             "load_async": False,
             "save_decode_cache": False,
             "discard_partial_chunks": True,
@@ -114,7 +119,7 @@ def _exercise_connector(
         --tensor-parallel-size 1 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8
         --enable-prefix-caching --prefix-caching-hash-algo sha256 --no-enable-chunked-prefill
         --enforce-eager --no-async-scheduling --seed 42
-    """) + ["--kv-transfer-config", json.dumps(transfer_config), "--worker-extension-cls", WORKER_EXTENSION]
+    """) + ["--kv-transfer-config", json.dumps(transfer_config), "--worker-extension-cls", worker_extension]
     # This optional native dependency is needed only when executing our E2E.
     pool_runtime = import_module("tests.e2e.common.single_node.kv_pool_runtime")
     with pool_runtime.SingleNodeMooncakeManager(pool_config, tmp_path.name) as pool:
@@ -138,6 +143,9 @@ def _exercise_connector(
             env_dict=server_envs,
         ) as server:
             run_benchmark(server, tokenizer, warmup)
+            if validate is not None:
+                validate(server, pool)
+                return
             for round_index in range(1, ROUNDS_PER_RUN + 1):
                 row: dict[str, Any] = {"round": round_index}
                 observations.append(row)

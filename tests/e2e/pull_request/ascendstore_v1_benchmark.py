@@ -183,11 +183,11 @@ def _wait_for_prompt_tokens(
     raise AssertionError(f"Prompt-token metrics did not account for all {expected_tokens} measured input tokens")
 
 
-def assert_prompt_sources(measurement: dict[str, Any], *, external: bool) -> None:
+def assert_prompt_sources(measurement: dict[str, Any], *, external: bool, request_count: int = REQUEST_COUNT) -> None:
     assert measurement["prompt_tokens_by_source"] == {
-        "local_compute": REQUEST_COUNT if external else REQUEST_COUNT * PROMPT_TOKEN_COUNT,
+        "local_compute": request_count if external else request_count * PROMPT_TOKEN_COUNT,
         "local_cache_hit": 0,
-        "external_kv_transfer": REQUEST_COUNT * REUSABLE_TOKEN_COUNT if external else 0,
+        "external_kv_transfer": request_count * REUSABLE_TOKEN_COUNT if external else 0,
     }, "Cold requests must compute locally; warm requests must load every reusable block from External"
 
 
