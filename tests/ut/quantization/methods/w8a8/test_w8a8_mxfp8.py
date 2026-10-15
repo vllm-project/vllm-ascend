@@ -88,12 +88,8 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertFalse(layer._mxfp8_transformed)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._should_trans_nz", return_value=True)
-    @patch(
-        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz",
-        side_effect=lambda weight, **kwargs: weight.clone(),
-    )
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
-    def test_single_group_nz_layout_round_trip(self, mock_cast, mock_trans_nz, mock_should_trans_nz):
+    def test_single_group_nz_layout_round_trip(self, mock_cast, mock_should_trans_nz):
         layer = nn.Module()
         original_weight = torch.randn(128, 256).to(torch.float8_e4m3fn)
         original_scale = torch.randint(0, 255, (128, 8), dtype=torch.uint8)
@@ -131,7 +127,6 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertEqual(layer.weight_scale.data_ptr(), scale_ptr)
             torch.testing.assert_close(layer.weight.squeeze(0).float(), original_weight.T.float(), rtol=0, atol=0)
             torch.testing.assert_close(layer.weight_scale.squeeze(0), original_scale.reshape(128, 4, 2).transpose(0, 1))
-        mock_trans_nz.assert_not_called()
         # One initial NZ cast; reloads only convert the checkpoint view to ND.
         self.assertEqual([call.args[1] for call in mock_cast.call_args_list], [29, 2, 2])
 

@@ -32,14 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
-    FP8_METHOD,
-    _should_trans_nz,
-    dispose_tensor,
-    maybe_trans_nz,
-    maybe_trans_nz_with_scale,
-)
+from vllm_ascend.utils import FP8_METHOD, _should_trans_nz, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
 
 from ..base import (
     AscendLinearScheme,
@@ -275,35 +268,28 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
 
-        target_weight = padded_weight.transpose(0, 1).contiguous()
-        use_gmm_nz_layout = (
+        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        layer._mxfp8_gmm_nz_layout = (
             getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
-            and _should_trans_nz(target_weight)
+            and _should_trans_nz(transposed_weight)
         )
-        layer._mxfp8_gmm_nz_layout = use_gmm_nz_layout
-        if use_gmm_nz_layout:
+        if layer._mxfp8_gmm_nz_layout:
             # Add the group dimension before casting: WeightNz GMM needs
             # physical rank-5 NZ storage, not a view of rank-4 NZ storage.
-            target_weight = target_weight.unsqueeze(0)
+            transposed_weight = transposed_weight.unsqueeze(0)
             target_scale = target_scale.unsqueeze(0)
-        target_scale = target_scale.contiguous()
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            if use_gmm_nz_layout:
-                # NZ policy was checked on the original 2-D weight above.
-                target_weight = torch_npu.npu_format_cast(
-                    target_weight, ACL_FORMAT_FRACTAL_NZ, customize_dtype=torch.float8_e4m3fn
-                )
-            elif not getattr(layer, "_fused_preprocess_managed", False):
-                target_weight = maybe_trans_nz(target_weight, customize_dtype=torch.float8_e4m3fn)
-            layer._mxfp8_weight_buf = target_weight
-            layer._mxfp8_scale_buf = target_scale
+            layer._mxfp8_weight_buf = transposed_weight
+            if not getattr(layer, "_fused_preprocess_managed", False):
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
+            layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(target_weight)
-            layer._mxfp8_scale_buf.copy_(target_scale)
+            layer._mxfp8_weight_buf.copy_(transposed_weight)
+            layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf
