@@ -140,6 +140,7 @@ class AscendLinearMethod(LinearMethodBase):
 
         pergroup_input_size = input_size_per_partition
         if isinstance(layer, RowParallelLinear) and getattr(self.quant_method, "supports_unaligned_tp_groups", False):
+            assert hasattr(self.quant_method, "group_size")
             # A shard can start inside a checkpoint group and cover one more
             # scale than ceil(local K / group_size), depending on its TP rank.
             pergroup_input_size += (layer.tp_rank * input_size_per_partition) % self.quant_method.group_size
