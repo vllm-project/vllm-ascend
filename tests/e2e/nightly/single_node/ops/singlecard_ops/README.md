@@ -29,11 +29,12 @@ to 310P. There are no backend-specific `310p` directories.
 The authoritative routing rules are in
 [test_config.yaml](../../../../../../.github/workflows/scripts/test_config.yaml).
 
-- `a2a3` tests normally run on both A2 and A3.
+- `a2a3` tests run on A3 in PR CI.
 - `a5` tests run only on A5.
-- The A3-only `attn_res_fwd`, `gmm_dequant_situ_quant_msd`,
-  `copy_sfa_offload_metadata`, `lim_mtp_index_reuse` and `sparse_kv_offload`
-  tests have specific A3 routes within `ascendc/a2a3`.
+- The `a2a3` directory also contains A3-only tests, including `attn_res_fwd`,
+  `gmm_dequant_situ_quant_msd`, `copy_sfa_offload_metadata`,
+  `lim_mtp_index_reuse` and `sparse_kv_offload`. Local A2 runs must select
+  tests supported by A2.
 - Generic Triton tests are classified under the current A2/A3 coverage group.
   This placement does not establish whether an untested A5 path is supported.
 - Mixed tests with existing A5 coverage have an A5 variant. FP8 RoPE and the
