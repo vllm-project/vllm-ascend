@@ -71,8 +71,15 @@ def _scheduler_output(total: int = 4) -> SimpleNamespace:
     return SimpleNamespace(total_num_scheduled_tokens=total)
 
 
-def test_step_runs_sync_inside_inference_mode():
+def _active_guard() -> MagicMock:
+    """Guard mock that is not fully off (full sync / sample shells)."""
     guard = MagicMock()
+    guard.is_fully_off.return_value = False
+    return guard
+
+
+def test_step_runs_sync_inside_inference_mode():
+    guard = _active_guard()
     runner = _StepRunner(guard)
     so = _scheduler_output()
 
@@ -87,7 +94,7 @@ def test_step_runs_sync_inside_inference_mode():
 
 
 def test_step_idle_scheduler_never_arms():
-    guard = MagicMock()
+    guard = _active_guard()
     runner = _StepRunner(guard)
     so = _scheduler_output(total=0)
 
@@ -96,7 +103,7 @@ def test_step_idle_scheduler_never_arms():
 
 
 def test_step_skips_flush_when_sample_phase_will_run():
-    guard = MagicMock()
+    guard = _active_guard()
     runner = _StepRunner(guard)
     runner.execute_model_state = object()  # sample_tokens will pop it
 
@@ -105,7 +112,7 @@ def test_step_skips_flush_when_sample_phase_will_run():
 
 
 def test_step_flushes_dummy_wave_even_with_state():
-    guard = MagicMock()
+    guard = _active_guard()
     runner = _StepRunner(guard)
     runner.execute_model_state = object()  # dummy waves never reach sample_tokens
 
@@ -114,7 +121,7 @@ def test_step_flushes_dummy_wave_even_with_state():
 
 
 def test_step_reads_positional_dummy_run():
-    guard = MagicMock()
+    guard = _active_guard()
     runner = _StepRunner(guard)
     runner.execute_model_state = object()
 
@@ -124,7 +131,7 @@ def test_step_reads_positional_dummy_run():
 
 
 def test_step_flushes_on_body_exception():
-    guard = MagicMock()
+    guard = _active_guard()
     runner = _RaisingStepRunner(guard)
 
     with pytest.raises(RuntimeError):
@@ -165,7 +172,7 @@ class _IdleWorker:
 
 
 def test_idle_step_syncs_without_arming():
-    guard = MagicMock()
+    guard = _active_guard()
     worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
 
     assert worker.execute_dummy_batch() == "done"
@@ -176,7 +183,7 @@ def test_idle_step_syncs_without_arming():
 
 def test_idle_step_propagates_sync_failure():
     """Idle sync is a lockstep gate — do not soft-fail (matches busy path)."""
-    guard = MagicMock()
+    guard = _active_guard()
     guard.sync_for_step.side_effect = RuntimeError("boom")
     worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
 
@@ -231,8 +238,29 @@ class _SampleRunner:
         self.order.append("postprocess")
 
 
-def test_sample_tokens_orchestrates_guard_around_body():
+def test_step_fully_off_skips_sync_shells():
+    """Default-off guard: execute_model body only (no sync / eow)."""
     guard = MagicMock()
+    guard.is_fully_off.return_value = True
+    runner = _StepRunner(guard)
+
+    assert runner.execute_model(_scheduler_output()) == "output"
+    assert runner.body_ran
+    guard.sync_for_step.assert_not_called()
+    guard.end_of_wave_sync.assert_not_called()
+
+
+def test_idle_step_fully_off_skips_sync():
+    guard = MagicMock()
+    guard.is_fully_off.return_value = True
+    worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
+
+    assert worker.execute_dummy_batch() == "done"
+    guard.sync_for_step.assert_not_called()
+
+
+def test_sample_tokens_orchestrates_guard_around_body():
+    guard = _active_guard()
     guard.runtime_config.detector_get.return_value = False  # need_pre_sample_hook -> False
     guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)
@@ -271,8 +299,19 @@ def test_sample_tokens_guardless_keeps_bare_path():
     assert runner.order == ["body"]
 
 
-def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
+def test_sample_tokens_fully_off_bypasses_orchestration():
     guard = MagicMock()
+    guard.is_fully_off.return_value = True
+    runner = _SampleRunner(guard)
+
+    out = runner.sample_tokens("grammar")
+    assert out.sampled_token_ids == [[7]]
+    assert runner.order == ["body", "postprocess"]
+    guard.run_sample_phase.assert_not_called()
+
+
+def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
+    guard = _active_guard()
     guard.runtime_config.detector_get.return_value = False  # need_pre_sample_hook -> False
     guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)

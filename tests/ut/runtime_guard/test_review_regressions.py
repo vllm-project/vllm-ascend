@@ -2225,8 +2225,8 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
         worker.stop()
 
 
-def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
-    """Static-idle clear (dump inactive, no reload) must refund armed arms."""
+def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
+    """dump_only path with dump inactive refunds unclaimed arms (not fully off)."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
@@ -2235,6 +2235,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
+    # Sync enters dump_only branch (detectors off, hot-reload off).
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False
@@ -2245,6 +2246,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     p._end_of_wave_sync_if_no_sample = MagicMock()
 
     RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
+    p.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
 
