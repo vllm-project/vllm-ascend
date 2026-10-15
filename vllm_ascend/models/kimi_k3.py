@@ -110,7 +110,9 @@ class AscendKimiK3RoutedLinear(ReplicatedLinear):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._kimi_single_group_gmm_nz = True
+        # MXFP8 NZ weights need a leading single-group dimension before the
+        # format cast so GroupedMatmulWeightNz receives its 5-D contract.
+        self._single_group_gmm_nz = True
 
     @staticmethod
     def apply_projection(
@@ -156,7 +158,7 @@ class AscendKimiK3DeltaAttention(AscendKimiK3DeltaAttentionBase):
         if self.uses_mixed_projection:
             # Set before weight loading so fused QKV uses the same NZ GMM
             # layout as the routed projections.
-            self.in_proj_qkvgfab._kimi_single_group_gmm_nz = True
+            self.in_proj_qkvgfab._single_group_gmm_nz = True
 
     def _matmul_fused_qkv(
         self,

@@ -35,7 +35,7 @@ def test_kimi_kda_marks_only_mixed_qkv_for_gmm_layout(uses_mixed_projection):
     with patch.object(kimi_k3.AscendKimiK3DeltaAttentionBase, "__init__", new=fake_backend_init):
         attention = kimi_k3.AscendKimiK3DeltaAttention(None, None)
 
-    assert getattr(attention.in_proj_qkvgfab, "_kimi_single_group_gmm_nz", False) is uses_mixed_projection
+    assert getattr(attention.in_proj_qkvgfab, "_single_group_gmm_nz", False) is uses_mixed_projection
 
 
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
