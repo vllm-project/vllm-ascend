@@ -1953,11 +1953,11 @@ Decode exposes ports 8000-8003 on each node, and the proxy listens on
 Prefill layout in Section 5.1.2.5. Use the A2 image from Section 4.1 and
 the A2 Decode launcher in Section 5.1.2.5.1.
 
-The commands retain the supplied A2 pooling script's Prefill/Decode
-budgets: maximum lengths 128000/200000 and MTP token counts 1/5.
-The end-to-end limit is **128,000 tokens**, including input and output,
-because every request passes through Prefill. Both roles declare the
-actual Prefill DP1/PP2/TP8 partition `42,36` and Decode DP16/TP2 topology.
+The pooled Prefill and Decode engines both use `--max-model-len 128000`,
+with MTP token counts 1 and 5, respectively.
+The end-to-end limit is **128,000 tokens**, including input and output.
+Both roles declare the actual Prefill DP1/PP2/TP8 partition `42,36` and
+Decode DP16/TP2 topology.
 
 ###### 5.1.3.5.1 Prepare MemCache
 
@@ -2221,7 +2221,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-prefix-caching \
   --seed 1024 \
   --served-model-name glm5 \
-  --max-model-len 200000 \
+  --max-model-len 128000 \
   --max-num-batched-tokens 256 \
   --max-num-seqs 64 \
   --gpu-memory-utilization 0.92 \
@@ -2357,64 +2357,6 @@ DP rank; it is not a TCP listener on port zero.
       --decoder-ports 8000 8001 8002 8003 8000 8001 8002 8003 \
         8000 8001 8002 8003 8000 8001 8002 8003
     ```
-
-###### 5.1.3.5.5 Verify Pooling
-
-Send requests to the proxy with model name `glm5`, keeping the combined
-input and output within the 128,000-token Prefill limit:
-
-```shell
-curl --noproxy '*' "http://<PROXY_IP>:1999/v1/models"
-curl --noproxy '*' "http://<PROXY_IP>:1999/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm5",
-    "messages": [{"role": "user", "content": "Explain shared KV cache pooling."}],
-    "max_tokens": 128,
-    "temperature": 0
-  }'
-```
-
-Check P/D logs for successful Mooncake KV transfers and MemCache
-initialization. Warm the pool with a prompt longer than one cache block,
-then repeat requests with the same prefix. Inspect Ascend Store/MemCache
-saves, lookups, loads, and hit metrics. Confirm a shared-pool load when
-the prefix is absent from the selected engine's local cache; a successful
-response or a local prefix-cache hit alone does not demonstrate pooling.
-All nodes use the same `PYTHONHASHSEED=0` and MemCache configuration.
-
-Also inspect the vLLM external prefix-cache statistics. After warmup,
-the external hit rate should be greater than zero:
-
-```text
-External prefix cache hit rate: > 0%
-```
-
-Correlate this external-cache metric with the MemCache backend's
-successful lookups and loads to confirm reuse through the shared
-pool rather than only the engine's local HBM prefix cache.
-
-The supplied A2 deployment validation record dated 2026-10-15 reports
-the following results for this pooled topology after configuring
-hugepages and applying the rc1 compatibility fix:
-
-| Check | Recorded result |
-| --- | --- |
-| Smoke request | HTTP 200; answer `42` |
-| GSM8K requests / successful / failed | 200 / 200 / 0 |
-| Elapsed time for the 200-request run | 75.666 seconds |
-| Decode external prefix cache hit rate | 100.0% |
-
-The observed log line was `External prefix cache hit rate: 100.0%`.
-The request counts report successful completion, not an accuracy score.
-
-The A2 pooled Prefill budget is 16,384 batched tokens and 64 sequences,
-with eager execution, one MTP token, DSA CP, FlashComm1, and synchronous
-profiling-chunk scheduling. Decode uses 256 batched tokens, 64 sequences,
-five MTP tokens with an eager draft, `FULL_DECODE_ONLY` graphs, and
-recomputation scheduling. Both roles use memory utilization 0.92,
-chunked prefill, prefix caching, int8 attention/indexer KV caches, and
-`glm47` tool and reasoning parsers.
 
 ### 5.2 1M Context Configuration
 
