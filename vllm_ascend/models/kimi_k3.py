@@ -459,6 +459,8 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         attention_layer.impl.scale = float(self.scaling)
         attention_layer.impl.rotary_emb = rotary_emb
         attention_layer.impl.use_mla_rope = use_rope
+        # RoPE changes the static PROLOG_V3 writer eligibility.
+        mark_fused_preprocess_weights(attention_layer.impl)
 
     @property
     def _attention_layer(self):
