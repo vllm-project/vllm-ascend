@@ -1010,7 +1010,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.use_async_scheduling = async_scheduling
                 runner.cache_config.mamba_cache_mode = "none"
                 runner.gdn_recover_context = MagicMock()
-                order = []
+                order: list[str] = []
                 runner.gdn_recover_context.commit.side_effect = lambda _, order=order: order.append("commit")
                 runner.num_accepted_tokens_event.record.side_effect = lambda order=order: order.append("publish")
                 sampled = torch.tensor([[10, -1, -1], [11, 12, -1]])
