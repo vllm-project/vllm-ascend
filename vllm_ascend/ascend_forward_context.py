@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.logger import logger
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -86,15 +87,26 @@ def get_mrv2_in_profile_run() -> bool:
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
-    return (
-        is_mega_moe_supported()
-        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
-        and get_ascend_config().enable_fused_mc2 == 1
+    mega_moe_available = is_mega_moe_supported()
+    can_megamoe = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
+    fused_mc2_enabled = get_ascend_config().enable_fused_mc2 == 1
+    supported = (
+        mega_moe_available
+        and can_megamoe
+        and fused_mc2_enabled
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
     )
+    logger.info_once(
+        "use_cann_megamoe=%s (mega_moe_available=%s, hw_supports_megamoe=%s, enable_fused_mc2=%s)",
+        supported,
+        mega_moe_available,
+        can_megamoe,
+        fused_mc2_enabled,
+    )
+    return supported
 
 
 @contextmanager
@@ -154,6 +166,8 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -300,12 +314,50 @@ def _select_capacity_and_expert_density_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+
+    # attn_metadata can be a dict (v2/multi-modal) or a metadata object (v1).
+    # Extract the first metadata object to check num_prefills for prefill detection.
+    _attn_meta = None
+    if attn_metadata is not None:
+        if isinstance(attn_metadata, dict):
+            _attn_meta = list(attn_metadata.values())[0] if attn_metadata else None
+        else:
+            _attn_meta = attn_metadata
+    num_prefills = getattr(_attn_meta, "num_prefills", 0) if _attn_meta is not None else 0
+    num_decode_tokens = getattr(_attn_meta, "num_decode_tokens", 0) if _attn_meta is not None else 0
+    # Only use MegaMoe for pure prefill batches. Mixed prefill/decode batches
+    # should keep the original MC2/ALLGATHER path to avoid decode degradation.
+    is_pure_prefill = num_prefills > 0 and num_decode_tokens == 0
+
+    # MegaMoe has high host-side tiling overhead (~16ms/call). Only use it for
+    # prefill batches where the communication savings outweigh the overhead.
+    # Very small prefills (<=64 tokens) fall through to ALLGATHER/MC2.
+    _MEGAMOE_PREFILL_TOKEN_THRESHOLD = 64
+    if (
+        use_cann_megamoe(vllm_config)
+        and get_ascend_config().enable_fused_mc2 == 1
+        and (is_pure_prefill or in_profile_run)
+        and (in_profile_run or (num_tokens is not None and num_tokens > _MEGAMOE_PREFILL_TOKEN_THRESHOLD))
+    ):
+        logger.info_once(
+            "A2 MegaMoe fused prefill selected (num_tokens=%s, num_prefills=%s, num_decode_tokens=%s, in_profile_run=%s)",
+            num_tokens,
+            num_prefills,
+            num_decode_tokens,
+            in_profile_run,
+        )
+        return MoECommType.FUSED_MC2
+
+    if num_experts > 512:
+        return MoECommType.ALLGATHER
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
@@ -321,6 +373,8 @@ def _select_fused_or_capacity_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -339,6 +393,8 @@ def _select_capacity_and_world_size_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
@@ -375,6 +431,8 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -411,6 +469,8 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
+            attn_metadata,
+            in_profile_run,
         )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
