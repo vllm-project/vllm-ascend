@@ -298,3 +298,14 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("internal_checkpoint,expected_tokens", [(False, 1152), (True, 1536)])
+def test_aligned_resend_state_uses_split_or_internal_export(internal_checkpoint, expected_tokens):
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.block_size = scheduler.hash_block_size = scheduler.cache_config.block_size = 384
+    scheduler.mamba_has_prefill_checkpoint_blocks = internal_checkpoint
+    scheduler.mamba_prefill_checkpoint_alignment = 128
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1536, num_tokens=1536)
+    assert _mamba_block_aligned_split(scheduler, request, 1536) == expected_tokens
+    assert scheduler.use_eagle_block_drop is True

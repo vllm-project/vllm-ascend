@@ -37,6 +37,10 @@ import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (
+    get_mamba_prefill_checkpoint_position,
+    is_mamba_prefill_checkpoint_valid,
+)
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -55,6 +59,36 @@ _EXPECTED_PARAMETERS = (
 )
 
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
+
+
+def _split_at_resend_boundary(
+    self, request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens
+):
+    """Materialize the resend state even when the prompt is hash-aligned."""
+    start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    end = start + num_new_tokens
+    alignment = self.hash_block_size if getattr(self, "mamba_partial_cache_hit", False) else self.block_size
+    boundary = (request.num_prompt_tokens - 1) // alignment * alignment
+    if not start < boundary < end:
+        return num_new_tokens
+    prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+    checkpoint = get_mamba_prefill_checkpoint_position(prefill_end, alignment, False)
+    if (
+        getattr(self, "mamba_has_prefill_checkpoint_blocks", False)
+        and end >= prefill_end
+        and checkpoint == boundary
+        and is_mamba_prefill_checkpoint_valid(
+            query_start=start,
+            query_end=end,
+            checkpoint_position=checkpoint,
+            hash_block_size=self.hash_block_size,
+            mamba_block_size=self.cache_config.block_size,
+            checkpoint_alignment=getattr(self, "mamba_prefill_checkpoint_alignment", None),
+        )
+    ):
+        # The worker exports this same state within the final forward pass.
+        return num_new_tokens
+    return boundary - start
 
 
 @functools.wraps(_original_mamba_block_aligned_split)
@@ -130,6 +164,10 @@ def _mamba_block_aligned_split(
                     num_new_tokens = chunked_tokens
             elif num_computed_tokens < last_cache_position < scheduled_end:
                 num_new_tokens = last_cache_position - num_computed_tokens
+        if _skips_eagle_block_drop(kv_transfer_config):
+            return _split_at_resend_boundary(
+                self, request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens
+            )
         return num_new_tokens
 
     if not _skips_eagle_block_drop(kv_transfer_config):
@@ -149,12 +187,15 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        return _original_mamba_block_aligned_split(
+        scheduled = _original_mamba_block_aligned_split(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
+        )
+        return _split_at_resend_boundary(
+            self, request, scheduled, num_new_local_computed_tokens, num_external_computed_tokens
         )
     finally:
         for name, value in original_drop_values.items():
