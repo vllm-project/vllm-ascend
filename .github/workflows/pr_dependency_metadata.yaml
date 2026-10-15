@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'requirements.txt'
+      - 'requirements/**'
+      - 'MANIFEST.in'
       - 'pyproject.toml'
       - 'setup.py'
       - 'vllm_ascend/envs.py'
@@ -34,6 +36,11 @@ jobs:
         run: |
           # This job verifies packaging only; native builds and runtime
           # resolution remain the responsibility of the Ascend test jobs.
-          python -m build --wheel --no-isolation --skip-dependency-check
+          python -m build --sdist --wheel --no-isolation --skip-dependency-check
           python -m tools.check_wheel_dependencies dist/*.whl
-          python -m pip install --no-deps dist/*.whl
+          mkdir -p "$RUNNER_TEMP/ascend-sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/ascend-sdist"
+          python -m build "$RUNNER_TEMP"/ascend-sdist/vllm_ascend-* --wheel \
+            --no-isolation --skip-dependency-check --outdir dist/from-sdist
+          python -m tools.check_wheel_dependencies dist/from-sdist/*.whl
+          python -m pip install --no-deps dist/from-sdist/*.whl
