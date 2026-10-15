@@ -8,7 +8,7 @@ The mask is stored as packed INT32 words, with one word representing 32 consecut
 
 ## Kernel organization
 
-The Ascend implementation uses mask-major scheduling. Each VectorCore program owns a contiguous range of mask rows and processes all vocabulary blocks for each row. The request/position mapping and active-row check are therefore loaded once per mask row instead of once per vocabulary block.
+The Ascend implementation uses mask-major scheduling. Each VectorCore program owns a contiguous range of mask rows and processes all vocabulary blocks for each row. The request/position mapping and active-row check are therefore loaded once per mask row instead of once per vocabulary block. Host-known logits stride, bitmask stride, and vocabulary size are compile-time constants for each specialization, while request-dependent offsets and task counts remain runtime values.
 
 For each vocabulary block, the kernel selects one of three paths:
 
