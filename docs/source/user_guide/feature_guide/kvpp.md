@@ -34,7 +34,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
 | Eager mode | ✅ Supported | Use `--enforce-eager`. |
-| Graph mode | ✅ PIECEWISE only | Use eager execution or `PIECEWISE`; full graph modes are not supported. |
+| Graph mode | ✅ Supported | PIECEWISE only. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
 | PP | ✅ Supported | Each PP stage allocates and broadcasts its caches independently. |
@@ -42,19 +42,18 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Speculative decoding | ✅ Supported | All speculative decoding modes are supported. Draft caches are allocated independently and excluded from KVPP layer partitioning. |
+| Speculative decoding | ✅ Supported | All speculative decoding methods with fixed K; dynamic K has not been validated. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
-| MultiConnector | ✅ Supported | Combine `MooncakeConnectorV2` and `AscendStoreConnector`; each child connector must satisfy its type and role restrictions. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
 - ❌ **Not supported**: The combination is not currently supported.
 
 ## Usage
 
-Enable KVPP through `enable_kvpp` in `--additional-config`, using eager mode:
+Enable KVPP through `enable_kvpp` in `--additional-config`:
 
 ```bash
 vllm serve <model-path> \
@@ -66,8 +65,6 @@ vllm serve <model-path> \
 Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
-
-For PIECEWISE execution, omit `--enforce-eager` and set `--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`. Other model and backend graph-mode restrictions still apply.
 
 ### Combining Features
 
@@ -92,14 +89,13 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-KVPP supports all speculative decoding modes, including MTP, DSpark, and Eagle3, with fixed or dynamic speculative lengths. Draft caches remain independently allocated and are excluded from KVPP layer partitioning.
+KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle3, with a fixed number of speculative tokens (K). Dynamic K has not been validated. Draft caches remain independently allocated and are excluded from KVPP layer partitioning.
 
 ## Configuration Parameters
 
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
-| `--enforce-eager` | Not enabled | Selects eager execution. Without it, explicitly select `PIECEWISE` graph mode. |
 
 KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
 
