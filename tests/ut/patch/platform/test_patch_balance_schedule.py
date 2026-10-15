@@ -955,3 +955,80 @@ def test_balance_engine_core_hooks(monkeypatch):
             assert pe._engine_core_mod.DPEngineCoreProc is orig
     finally:
         pe._engine_core_mod.DPEngineCoreProc = orig
+
+
+# Regression coverage for admission-time prefix-cache statistics.
+def test_balance_prefix_stats_records_miss_once():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=64)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, 64, 0)
+
+    scheduler.update_from_output(output, _make_output(scheduler))
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+
+def test_balance_prefix_stats_records_reused_prefix():
+    scheduler = _make_balance_scheduler()
+    first = _create_requests(1, num_tokens=64)[0]
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_output(scheduler))
+    scheduler.kv_cache_manager.make_prefix_cache_stats()
+
+    second = _create_requests(1, num_tokens=64, id_offset=100)[0]
+    scheduler.add_request(second)
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries) == (1, 64)
+    assert stats.hits == 64 - _BLOCK_SIZE
+
+
+def test_balance_prefix_stats_waits_for_allocation_success():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=64)[0]
+    scheduler.add_request(request)
+
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, 64, 0)
+
+
+@pytest.mark.parametrize("mode", ["cache_disabled", "stats_disabled", "skip_reading"])
+def test_balance_prefix_stats_respects_lookup_guards(mode):
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=64)[0]
+    manager = scheduler.kv_cache_manager
+    if mode == "cache_disabled":
+        manager.enable_caching = False
+    elif mode == "stats_disabled":
+        manager.log_stats = False
+    else:
+        request.skip_reading_prefix_cache = True
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    stats = manager.prefix_cache_stats
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+
+def test_balance_prefix_stats_separates_preempted_requests():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=64)[0]
+    request.num_preemptions = 1
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+    assert (stats.preempted_requests, stats.preempted_queries, stats.preempted_hits) == (1, 64, 0)
