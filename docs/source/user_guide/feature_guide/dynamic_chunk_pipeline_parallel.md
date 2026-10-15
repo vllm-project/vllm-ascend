@@ -140,7 +140,7 @@ Note:
         --host <PROXY_IP> \
         --port 8080 \
         --prefiller-hosts <PREFILL_MACHINE_IP> \
-        --prefiller-port 13700 \
+        --prefiller-ports 13700 \
         --decoder-hosts <DECODE_MACHINE_IP> \
         --decoder-ports 13701
     ```
@@ -148,7 +148,7 @@ Note:
     | Parameter | Meaning |
     | --- | --- |
     | --port | Port of proxy |
-    | --prefiller-port | All ports of prefill |
+    | --prefiller-ports | All ports of prefill |
     | --decoder-ports | All ports of decoder |
 
 === "Verification"
@@ -214,7 +214,8 @@ Controls trust level in dynamic prediction
 
 - `1.0`: Strictly follow model prediction
 - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead
-- `0.0`: No dynamic adjustment (degrades to fixed chunking)
+
+The value must be in the range (0, 1]. To disable CPP and return to normal fixed chunking, set `profiling_chunk_config.enabled` to `false`.
 
 Enabling `need_timing` for correct online calibration can typically yield more accurate chunk-latency fitting results. Therefore, you are advised not to adjust `smooth_factor` when `need_timing` is enabled. If `need_timing` is disabled, you can adjust `smooth_factor` to a value ranging from 0.5 to 0.8 to achieve the effect of enabling `need_timing`.
 
