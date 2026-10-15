@@ -130,6 +130,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         rank=7,
         data_parallel_size=dp_size,
         data_parallel_rank=dp_size - 1,
+        data_parallel_index=dp_size - 1,
         pipeline_parallel_size=1 if engram else 2,
         enable_elastic_ep=False,
     )
@@ -365,6 +366,36 @@ def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size,
     assert config.parallel_config.eplb_config.num_redundant_experts == redundant
 
 
+@pytest.mark.parametrize("dp_rank", [0, 1])
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("speculator_cls", [speculator_module.AscendAutoRegressiveSpeculator, AscendEagleSpeculator])
+def test_draft_config_preserves_independent_dp_index(eplb_worker_config, dp_rank, pcp_size, speculator_cls):
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=pcp_size,
+        decode_context_parallel_size=2,
+        data_parallel_size=2,
+        data_parallel_rank=dp_rank,
+        distributed_executor_backend="mp",
+    )
+    parallel_config.reconfigure_for_independent_dp_rank()
+    eplb_worker_config.parallel_config = parallel_config
+
+    execution_config, replicated_pcp = prepare_replicated_pcp_config(eplb_worker_config)
+    assert execution_config.parallel_config.data_parallel_index == dp_rank
+    speculator = object.__new__(speculator_cls)
+    speculator.vllm_config = execution_config
+    speculator.replicated_pcp = replicated_pcp
+    speculator.draft_model_config = eplb_worker_config.speculative_config.draft_model_config
+    draft_config = speculator._create_draft_vllm_config()
+
+    assert draft_config.parallel_config.data_parallel_index == dp_rank
+    assert draft_config.parallel_config.data_parallel_rank == 0
+    assert draft_config.parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_index == dp_rank
+    assert parallel_config.prefill_context_parallel_size == pcp_size
+
+
 def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
     spec_config = eplb_worker_config.speculative_config
     # Exercise every loader override that reconstructs the config.
@@ -405,6 +436,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
             prefill_context_parallel_size=2,
             enable_expert_parallel=True,
             enable_eplb=True,
+            data_parallel_index=0,
         ),
         additional_config=additional_config,
     )
