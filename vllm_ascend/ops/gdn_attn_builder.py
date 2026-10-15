@@ -38,6 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
+from vllm_ascend.ops.triton.kda.conv_state import prepare_conv_indices, prepare_conv_indices_pair
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -135,6 +136,8 @@ class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     initial_state_mode: torch.Tensor | None
+    prepared_cache_indices: torch.Tensor | None = None
+    null_block_id: int | None = None
 
 
 @dataclass
@@ -142,6 +145,8 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    prepared_cache_indices: torch.Tensor | None = None
+    null_block_id: int | None = None
 
 
 @dataclass
@@ -1006,6 +1011,106 @@ class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
         return AscendGDNHostMetadataBuilder
+
+
+class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
+    """Prepare GLM convolution indices once for every attention/cache group."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._conv_layer_name = layer_names[0]
+        capacity = max(vllm_config.scheduler_config.max_num_seqs, self.decode_cudagraph_max_bs)
+        self._spec_conv_indices = torch.empty(capacity, dtype=torch.int32, device=device)
+        self._non_spec_conv_indices = torch.empty(capacity, dtype=torch.int32, device=device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+        num_actual_reqs: int | None = None,
+    ) -> GDNAttentionMetadata:
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            fast_build,
+            num_actual_reqs,
+        )
+        # Resolve this group's physical capacity from its bound convolution
+        # cache, rather than the global block count of a hybrid cache manager.
+        # Before cache binding, profiling/dummy callers retain the op fallback.
+        layer = self.compilation_config.static_forward_context.get(self._conv_layer_name)
+        caches = getattr(layer, "kv_cache", ())
+        if (
+            not isinstance(caches, (list, tuple))
+            or not caches
+            or not isinstance(caches[0], torch.Tensor)
+            or caches[0].ndim != 3
+        ):
+            return metadata
+        num_slots = caches[0].shape[0]
+
+        prefill = metadata.non_spec_prefill_metadata
+        decode = metadata.non_spec_decode_metadata
+        non_spec = prefill if prefill is not None else decode
+        non_spec_conv = non_spec.causal_conv1d if non_spec is not None else None
+        spec = metadata.spec_decode_metadata
+        spec_conv = spec.spec_causal_conv1d if spec is not None else None
+        spec_indices = spec_conv.cache_indices if spec_conv is not None else None
+        spec_starts = spec_conv.query_start_loc if spec_conv is not None else None
+        if spec_conv is None and self.use_full_cuda_graph and self.use_spec_decode:
+            # A replay retains the captured spec convolution even without
+            # draft tokens. The parent has cleared these raw inputs; refresh
+            # the prepared spec buffer in the same launch as non-spec indices.
+            spec_indices = self.spec_state_indices_tensor[: common_attn_metadata.num_reqs]
+            spec_starts = self.spec_query_start_loc[: common_attn_metadata.num_reqs + 1]
+
+        prepared = prepared_spec = None
+        if non_spec_conv is not None and spec_indices is not None:
+            prepared, prepared_spec = prepare_conv_indices_pair(
+                non_spec_conv.cache_indices,
+                non_spec_conv.query_start_loc,
+                self._non_spec_conv_indices,
+                spec_indices,
+                spec_starts,
+                self._spec_conv_indices,
+                num_slots,
+            )
+        elif non_spec_conv is not None:
+            prepared = prepare_conv_indices(
+                non_spec_conv.cache_indices, non_spec_conv.query_start_loc, num_slots, out=self._non_spec_conv_indices
+            )
+        elif spec_indices is not None:
+            prepared_spec = prepare_conv_indices(spec_indices, spec_starts, num_slots, out=self._spec_conv_indices)
+
+        if non_spec_conv is not None:
+            # Mixed prefill/decode uses one convolution over the non-spec
+            # requests. Both descriptors share that one prepared index view.
+            for phase in (prefill, decode):
+                if phase is not None:
+                    phase.causal_conv1d.prepared_cache_indices = prepared
+                    phase.causal_conv1d.null_block_id = num_slots
+
+        if spec_conv is not None:
+            spec_conv.prepared_cache_indices = prepared_spec
+            spec_conv.null_block_id = num_slots
+        return metadata
+
+
+class AscendGDNPreparedConvMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNPreparedConvMetadataBuilder]:
+        return AscendGDNPreparedConvMetadataBuilder
 
 
 class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):

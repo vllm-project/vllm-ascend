@@ -23,6 +23,8 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
+    AscendGDNPreparedConvMetadataBackend,
+    AscendGDNPreparedConvMetadataBuilder,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
@@ -342,7 +344,7 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNPreparedConvMetadataBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -1459,3 +1461,123 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
+
+
+@pytest.fixture
+def prepared_conv_launches(monkeypatch):
+    launches = []
+
+    def compute(indices, starts, num_slots, out):
+        first = indices[:, 0] if indices.ndim == 2 else indices
+        active = (first >= 0) & (first < num_slots) & (starts[1:] > starts[:-1])
+        result = out[: indices.shape[0]]
+        result.copy_(torch.where(active, first, num_slots).to(torch.int32))
+        return result
+
+    def single(indices, starts, num_slots, *, out):
+        launches.append(("single", num_slots))
+        return compute(indices, starts, num_slots, out)
+
+    def pair(first, first_starts, first_out, second, second_starts, second_out, num_slots):
+        launches.append(("pair", num_slots))
+        return compute(first, first_starts, num_slots, first_out), compute(second, second_starts, num_slots, second_out)
+
+    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_conv_indices", single)
+    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_conv_indices_pair", pair)
+    return launches
+
+
+def _make_prepared_conv_builder(num_slots, num_speculative_tokens=0, cudagraph_mode=CUDAGraphMode.NONE):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=num_speculative_tokens,
+        builder_cls=AscendGDNPreparedConvMetadataBuilder,
+        cudagraph_mode=cudagraph_mode,
+    )
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(kv_cache=(torch.empty(num_slots, 3, 8), torch.empty(0)))
+    }
+    return builder
+
+
+def test_prepared_conv_metadata_shares_mixed_prefill_decode_indices(prepared_conv_launches):
+    builder = _make_prepared_conv_builder(8)
+    common = create_common_attn_metadata(BatchSpec([8, 4], [1, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[0, 3], [5, 6]], dtype=torch.int64)
+    metadata = builder.build(0, common)
+    prefill = metadata.non_spec_prefill_metadata.causal_conv1d
+    decode = metadata.non_spec_decode_metadata.causal_conv1d
+    assert prepared_conv_launches == [("single", 8)]
+    assert prefill.prepared_cache_indices is decode.prepared_cache_indices
+    assert prefill.prepared_cache_indices.tolist() == [0, 5]
+    assert prefill.prepared_cache_indices.dtype == torch.int32
+    assert prefill.prepared_cache_indices.is_contiguous()
+    assert prefill.null_block_id == decode.null_block_id == 8
+
+
+def test_prepared_conv_metadata_uses_one_launch_for_mixed_spec_prefill(prepared_conv_launches):
+    builder = _make_prepared_conv_builder(16, num_speculative_tokens=3)
+    common = create_common_attn_metadata(BatchSpec([8, 3], [4, 3]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[0, 1, 2, 3], [8, 9, 10, 11]], dtype=torch.int32)
+    metadata = builder.build(0, common, torch.tensor([2, 1]), torch.tensor([3, -1]))
+    assert prepared_conv_launches == [("pair", 16)]
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.prepared_cache_indices.tolist() == [0]
+    assert metadata.non_spec_prefill_metadata.causal_conv1d.prepared_cache_indices.tolist() == [8]
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_prepared_conv_metadata_refreshes_stable_graph_buffers(prepared_conv_launches, speculative):
+    builder = _make_prepared_conv_builder(
+        32, num_speculative_tokens=3 if speculative else 0, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+    )
+    query_lens = [4, 4] if speculative else [1, 1]
+    common = create_common_attn_metadata(BatchSpec([8, 8], query_lens), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[0, 1, 2, 3], [7, 8, 9, 10]], dtype=torch.int32)
+    arguments = (torch.tensor([2, 1]), torch.tensor([3, 3])) if speculative else ()
+    captured = builder.build(0, common, *arguments)
+    conv = (
+        captured.spec_decode_metadata.spec_causal_conv1d
+        if speculative
+        else captured.non_spec_decode_metadata.causal_conv1d
+    )
+    stable = conv.prepared_cache_indices
+    pointer = stable.data_ptr()
+    common.block_table_tensor[:, 0] = torch.tensor([4, 9])
+    replayed = builder.build(0, common, *arguments)
+    replay_conv = (
+        replayed.spec_decode_metadata.spec_causal_conv1d
+        if speculative
+        else replayed.non_spec_decode_metadata.causal_conv1d
+    )
+    assert replay_conv.prepared_cache_indices.data_ptr() == pointer
+    assert stable.tolist() == [4, 9]
+    assert len(prepared_conv_launches) == 2
+    if speculative:
+        plain = create_common_attn_metadata(BatchSpec([8, 0], [1, 0]), 16, torch.device("cpu"))
+        builder.build(0, plain, torch.ones(2, dtype=torch.int32), torch.tensor([-1, -1]))
+        assert stable.tolist() == [32, 32]
+        assert prepared_conv_launches[-1] == ("pair", 32)
+
+
+def test_prepared_conv_metadata_isolated_between_cache_groups(prepared_conv_launches):
+    first, second = _make_prepared_conv_builder(8), _make_prepared_conv_builder(16)
+    common = create_common_attn_metadata(BatchSpec([4, 4], [4, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[0], [12]], dtype=torch.int32)
+    a = first.build(0, common).non_spec_prefill_metadata.causal_conv1d
+    b = second.build(0, common).non_spec_prefill_metadata.causal_conv1d
+    assert a.prepared_cache_indices.tolist() == [0, 8]
+    assert b.prepared_cache_indices.tolist() == [0, 12]
+    assert a.prepared_cache_indices.data_ptr() != b.prepared_cache_indices.data_ptr()
+    assert prepared_conv_launches == [("single", 8), ("single", 16)]
+
+
+@pytest.mark.parametrize("unbound_cache", [(), torch.empty(0), (torch.empty(0),)])
+def test_prepared_conv_metadata_before_cache_binding_uses_fallback(prepared_conv_launches, unbound_cache):
+    builder = _make_prepared_conv_builder(8)
+    builder.compilation_config.static_forward_context["layer0"].kv_cache = unbound_cache
+    common = create_common_attn_metadata(BatchSpec([4], [4]), 16, torch.device("cpu"))
+    conv = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d
+    assert conv.prepared_cache_indices is None
+    assert conv.null_block_id is None
+    assert prepared_conv_launches == []
