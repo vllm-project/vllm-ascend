@@ -2636,6 +2636,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 0
             attn_mask = None
 
+        fp8_token_major_output = self.fa_quant_layer and self.support_fp8_attention
+        if fp8_token_major_output and input_layout == "TND_NTD":
+            # CANN 9.2 FP8 TND_NTD can retain token-major data order.
+            # Request native TND and normalize the output explicitly below.
+            input_layout = "TND"
+            attn_output_shape = (num_tokens, self.num_heads_padded, self.kv_lora_rank)
+
         # mla_nope_zero_rope64: FIA MLA requires rope D=64. All-zero rope
         # keeps NoPE scores and stays on the kv_lora_rank=512 MLA kernel.
         if self.qk_rope_head_dim == 0:
@@ -2737,6 +2744,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 
+        if fp8_token_major_output:
+            # Both FP8 BNSD and TND return tokens before heads. V projection
+            # and padded-head trimming require a real head-major tensor.
+            attn_output = attn_output.transpose(0, 1).contiguous()
         if self.head_padding > 0:
             attn_output = attn_output[: self.num_heads]
         return self._v_up_proj(attn_output)
