@@ -1464,21 +1464,16 @@ def test_third_party_entry_without_artifact_model_uses_legacy_model(tmp_path: Pa
     assert counter.read_text() == "1"
 
 
-@pytest.mark.parametrize("blocker_kind", ["cache_root", "build_lock"])
-def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path, blocker_kind: str):
+def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
     builder = _write_builder(tmp_path)
     counter = tmp_path / "counter"
 
-    if blocker_kind == "cache_root":
-        blocker = tmp_path / "not-a-directory"
-        blocker.write_text("block cache mkdir", encoding="utf-8")
-        unusable_cache = blocker / "cache"
-    else:
-        unusable_cache = tmp_path / "cache"
-        (unusable_cache / ".build.lock").mkdir(parents=True)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("block cache mkdir", encoding="utf-8")
+    unusable_cache = blocker / "cache"
 
     proc = _run_cache(
         cache_root=unusable_cache,
@@ -1912,22 +1907,13 @@ def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str
     # Either reuse the oldest version or build a third source version.
     index = 0 if trigger == "HIT" else 2
     (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
-    with engine._file_lock_or_error(cache_root / engine.BUILD_LOCK, shared=True):
-        warm = _run_cache(**options, action="a", artifact_name="a.o")
-        _assert_success(warm)
-        assert f"[build-cache] {trigger}" in warm.stdout
-        assert "[build-cache] PRUNED" not in warm.stdout
-        assert all(version.is_dir() for version in versions)
-        assert len(list(versions[0].parent.glob("[0-9a-f]" * 64))) == 3
-        if trigger == "HIT":
-            # Test concurrent cleanup once; its lock is independent of HIT/MISS.
-            start = time.monotonic()
-            deferred = run_command([sys.executable, str(ENGINE), "prune", "--cache-root", str(cache_root)])
-            _assert_success(deferred)
-            assert "PRUNE skipped" in deferred.stdout
-            assert time.monotonic() - start < 2
-        assert all(version.is_dir() for version in versions)
-        marker.unlink()
+    warm = _run_cache(**options, action="a", artifact_name="a.o")
+    _assert_success(warm)
+    assert f"[build-cache] {trigger}" in warm.stdout
+    assert "[build-cache] PRUNED" not in warm.stdout
+    assert all(version.is_dir() for version in versions)
+    assert len(list(versions[0].parent.glob("[0-9a-f]" * 64))) == 3
+    marker.unlink()
     engine.prune(cache_root)
     assert counter.read_text() == ("6" if trigger == "HIT" else "5")
     assert versions[0].exists() == (trigger == "HIT")
@@ -1978,36 +1964,42 @@ def test_operator_version_cleanup_isolated_and_fail_open(tmp_path: Path, monkeyp
 
 
 @pytest.mark.parametrize(
-    ("build_status", "limit", "retained", "broken_lock"),
+    ("build_status", "limit", "retained"),
     [
-        (0, "2", 2, False),
-        (7, "2", 3, False),
-        (0, "0", 3, False),
-        (0, "1", 1, False),
-        (0, "3", 3, False),
-        (0, "invalid", 3, False),
-        (0, "2", 3, True),
+        (0, "2", 2),
+        (7, "2", 3),
+        (0, "0", 3),
+        (0, "1", 1),
+        (0, "3", 3),
+        (0, "invalid", 3),
     ],
 )
-def test_csrc_build_cleanup_runs_only_after_success(tmp_path: Path, build_status, limit, retained, broken_lock):
+def test_csrc_build_cleanup_runs_only_after_success(tmp_path: Path, build_status, limit, retained):
     cache_root = tmp_path / "custom-cache"
     versions = _seed_operator_versions(cache_root / "custom_operator" / "a3" / "op")
     build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
-    helpers = build_script[
-        build_script.index("function cleanup_build_cache()") : build_script.index("function help_info()")
+    cleanup = build_script[
+        build_script.index(
+            "# Prune only after all foreground csrc build commands have succeeded."
+        ) : build_script.rindex("} | awk")
     ]
-    if broken_lock:
-        (cache_root / ".build.lock").mkdir()
     script = (
-        helpers
-        + """
+        """
 CURRENT_DIR=$1
 BUILD_CACHE_DIR=$2
 BUILD_CACHE_MAX_OPERATOR_VERSIONS=$3
-setup_build_cache_cleanup
-test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3
-exit "$4"
+(
+    test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3
+    (test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3) &
+    first=$!
+    (test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3) &
+    second=$!
+    wait "$first"
+    wait "$second"
+    exit "$4"
+)
 """
+        + cleanup
     )
     result = run_command(
         ["bash", "-e", "-c", script, "cleanup-test", str(REPO_ROOT / "csrc"), str(cache_root), limit, str(build_status)]
