@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.ops.gdn_recover import GDNRecoverContext
 from vllm_ascend.ops.triton.mamba.gdn_recover import (
     gdn_commit_conv_history,
     gdn_recover_commit,
@@ -111,6 +114,48 @@ def test_heterogeneous_allocations_use_per_layer_fallback():
     a = _views(raw_a, blocks=3, physical_layers=1, page=page, field_offsets=fields, geometry=geometry)[0]
     b = _views(raw_b, blocks=3, physical_layers=1, page=page, field_offsets=fields, geometry=geometry)[0]
     assert GDNRecoverBatchLayout.try_create([a, b]) is None
+
+
+@pytest.mark.parametrize("shared_allocation", [False, True])
+def test_context_commits_device_sampled_tokens_in_forward_row_order(shared_allocation):
+    geometry = (2, 33, 17, 3, 234)
+    heads, kd, vd, _, _ = geometry
+    page, fields = _page(*geometry)
+    raw = torch.full((4 * 2 * page,), 0x6A, dtype=torch.uint8, device="npu")
+    caches = _views(raw, blocks=4, physical_layers=2, page=page, field_offsets=fields, geometry=geometry)
+    if not shared_allocation:
+        other = raw.clone()
+        caches[1] = _views(other, blocks=4, physical_layers=2, page=page, field_offsets=fields, geometry=geometry)[1]
+    indices = torch.tensor([1, 3], dtype=torch.int32, device="npu")
+    offsets = torch.tensor([0, 4, 8], dtype=torch.int32, device="npu")
+    rows = torch.tensor([2, 0], dtype=torch.int64, device="npu")
+    sampled = torch.tensor([[11, 12, -1, -1], [21, 22, 23, 24], [31, -1, -1, -1]], device="npu")
+    assert sampled.device == rows.device
+    expected_counts = torch.tensor([1, 2], dtype=torch.int32, device="npu")
+    context = GDNRecoverContext()
+    context.begin()
+    expected = []
+    for layer, cache in enumerate(caches):
+        cache[1].normal_(0, 0.03)
+        cache[0].normal_()
+        _verify(cache, indices, offsets, heads, kd, vd)
+        golden = tuple(t.clone() for t in cache)
+        gdn_recover_commit(golden[1], golden[2], indices, offsets, expected_counts)
+        gdn_commit_conv_history(golden[0], golden[3], indices, offsets, expected_counts)
+        expected.append(golden)
+        context.enqueue(
+            f"target.layer.{layer}",
+            cache,
+            SimpleNamespace(recover_state_indices=indices, recover_query_offsets=offsets, recover_request_rows=rows),
+        )
+    context.commit(sampled)
+    assert (context._layout is not None) == shared_allocation
+    context.commit(sampled)  # No second replay of the same records.
+    context.begin()  # The next forward waits for completion before slot reuse.
+    context.reset()
+    for cache, golden in zip(caches, expected):
+        for actual, reference in zip(cache, golden):
+            assert torch.equal(actual.cpu(), reference.cpu())
 
 
 def test_batch_layer_offsets_beyond_eight_gib():

@@ -118,6 +118,8 @@ class GDNRecoverContext:
                 torch.npu.current_stream().wait_event(self._completion)
             self.active = False
             return
+        # The runner passes the device-side SamplerOutput tensor; its host
+        # output copy is a separate object. Counts and row indices stay on NPU.
         # Accepted drafts + sampled bonus count equals the processed mandatory
         # input + accepted draft count. The bonus itself is not replayed.
         counts = (sampled_token_ids != -1).sum(dim=1, dtype=torch.int32)
