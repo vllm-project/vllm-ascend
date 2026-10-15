@@ -61,14 +61,17 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
+        # ``self.block_size`` counts state slots; the spec field is a token
+        # count -- one slot holds one ``compress_ratio``-token interval.
         return AscendSlidingWindowMLASpec(
-            block_size=self.block_size,
+            block_size=self.block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            compress_ratio=self.compress_ratio,
         )
 
     def forward(self): ...
