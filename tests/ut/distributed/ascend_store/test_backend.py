@@ -525,6 +525,32 @@ class TestMooncakeBackendSetup(unittest.TestCase):
 
 
 class TestMooncakeBackendMethods(unittest.TestCase):
+    def test_qos_put_reports_boolean_success_and_preserves_get_status(self):
+        backend = self._make_backend()
+        backend.qos_policy = MagicMock()
+        backend.qos_policy.select.return_value = 7
+        backend.qos_policy.log_enabled = False
+        backend.qos_pool = MagicMock()
+        backend.qos_pool.transfer.return_value = [0, 0]
+        keys, addrs, sizes = ["k1", "k2"], [[100], [200]], [[16], [16]]
+        with patch.object(backend, "_build_replicate_config", return_value=None):
+            result = backend.put_request("r", 7, keys, addrs, sizes)
+        self.assertEqual(result, [True, True])
+        self.assertTrue(all(type(value) is bool for value in result))
+        backend.qos_pool.transfer.assert_called_once_with(7, "put", keys, addrs, sizes, None)
+        self.assertEqual(backend.get_request("r", 7, keys, addrs, sizes), [0, 0])
+
+    def test_qos_put_propagates_pool_failure(self):
+        backend = self._make_backend()
+        backend.qos_policy = MagicMock()
+        backend.qos_pool = MagicMock()
+        backend.qos_pool.transfer.side_effect = RuntimeError("native PUT failed")
+        with (
+            patch.object(backend, "_build_replicate_config", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "native PUT failed"),
+        ):
+            backend.put_request("r", 7, ["k"], [[100]], [[16]])
+
     def _make_backend(self):
         with (
             patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}),

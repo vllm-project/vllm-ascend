@@ -474,6 +474,31 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
+    def test_request_priority_put_only_advances_saved_offset_on_success(self):
+        for result in ([True, True], [True, False], False, RuntimeError("QoS PUT failed")):
+            with self.subTest(result=result):
+                thread, store = self._make_thread([0, 0])
+                store.put = MagicMock(side_effect=AssertionError("plain PUT must not run"))
+                store.put_request = MagicMock()  # type: ignore[attr-defined]
+                if isinstance(result, Exception):
+                    store.put_request.side_effect = result
+                else:
+                    store.put_request.return_value = result
+                req = ReqMeta(
+                    req_id="qos-save",
+                    token_len_chunk=32,
+                    block_ids=[0, 1],
+                    block_hashes=["h0", "h1"],
+                    kv_priority=7,
+                )
+                thread.add_stored_request(req)
+                thread.request_queue.put(req)
+                thread._handle_request(req)
+                self.assertEqual(store.put_request.call_args.args[:2], ("qos-save", 7))
+                self.assertEqual(thread.get_saved_offset("qos-save"), 32 if result == [True, True] else 0)
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                store.put.assert_not_called()
+
     def _make_thread(
         self,
         exists_result=None,

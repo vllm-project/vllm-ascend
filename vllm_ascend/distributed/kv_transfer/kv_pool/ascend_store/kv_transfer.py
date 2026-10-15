@@ -753,6 +753,8 @@ class KVTransferThread(threading.Thread):
                 if request_data is None:
                     logger.warning("Received a None request. This indicates queue shutdown or invalid request.")
                     self.request_queue.task_done()
+                    if getattr(self.m_store, "qos_pool", None) is not None:
+                        return
                     continue
                 self._handle_request(request_data)
             except Exception as e:
@@ -1411,7 +1413,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+            if req_meta.kv_priority is None:
+                put_result = self.m_store.put(keys, addrs, sizes)
+            else:
+                put_result = self.m_store.put_request(req_meta.req_id, req_meta.kv_priority, keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
@@ -1552,7 +1557,18 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if req_meta.kv_priority is None:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            else:
+                try:
+                    ret = self.m_store.get_request(
+                        req_meta.req_id, req_meta.kv_priority, key_list_c, addr_list_c, size_list_c
+                    )
+                except Exception:
+                    # Match plain GET operation failure contract; the common path below
+                    # records invalid blocks and completes this request once.
+                    logger.exception("KV QoS async GET failed for request %s", req_id)
+                    ret = None
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
                     "load_get",
