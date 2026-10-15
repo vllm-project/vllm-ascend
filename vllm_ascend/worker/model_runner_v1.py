@@ -58,7 +58,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
-from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
+from vllm.model_executor.offloader.base import get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.import_utils import LazyLoader
@@ -140,6 +140,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
+    supports_strided_mla_cache,
     using_paged_attention,
 )
 
@@ -4372,17 +4373,6 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
-    def _prepare_prolog_v3_weights(self) -> None:
-        """Include private strided-cache writer weights in the model budget."""
-        # Offloaded projections are only valid inside their onload context.
-        if not isinstance(get_offloader(), NoopOffloader):
-            return
-        for layer_name, cache_spec in self.get_kv_cache_spec().items():
-            attn_module = self.compilation_config.static_forward_context.get(layer_name)
-            if self._uses_single_raw_mla_cache(layer_name, cache_spec, attn_module):
-                assert isinstance(attn_module, MLAAttention)
-                attn_module.impl._prepare_prolog_v3_weights()
-
     def load_model(self) -> None:
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
             join_early_kernel_warmup,
@@ -4486,9 +4476,6 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
-            # The cache budget is computed before graph warmup, so private
-            # PROLOG projections must be counted by the model memory profiler.
-            self._prepare_prolog_v3_weights()
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
@@ -4868,37 +4855,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_module = self.compilation_config.static_forward_context.get(layer_name)
             if attn_module is None:
                 return False
-        if not isinstance(attn_module, MLAAttention):
-            return False
-        if getattr(attn_module, "indexer", None) is not None:
-            return False
-        impl = getattr(attn_module, "impl", None)
-        if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
-            # PCP gathers and sharded-decode writes still use the legacy
-            # preprocessing contract. Keep their allocation compatible with it.
-            return False
-        if getattr(impl, "dcp_enabled", False):
-            buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
-            if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
-                return False
-            if not buffers_are_sufficient():
-                # DCP split attention needs stable private current-KV buffers
-                # for every admitted decode, prefill, and mixed graph.
-                return False
-        if getattr(impl, "fa_quant_layer", False):
-            return False
-        if getattr(impl, "enable_kv_nz", False):
-            # NZ decode reshapes each component with .view(). A5 token-fused
-            # NoPE/RoPE slices are separated by the other component's lanes,
-            # so keep the legacy component-dense allocation for this mode.
-            return False
-        supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
-        if supports_prolog_writer is None:
-            return False
-        # The strided writer needs MLAPrologV3, RoPE MLA, and a supported
-        # projection/quantization contract. Keep incompatible layers on the
-        # legacy writer layout instead of allocating a cache they cannot use.
-        return supports_prolog_writer()
+        return supports_strided_mla_cache(self.vllm_config, attn_module, kv_cache_spec)
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):

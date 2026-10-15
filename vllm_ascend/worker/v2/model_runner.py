@@ -20,19 +20,16 @@
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
-from vllm.model_executor.offloader.base import NoopOffloader, get_offloader
 from vllm.sequence import IntermediateTensors
-from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -63,7 +60,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -102,7 +99,6 @@ from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
-    _uses_single_raw_mla_cache,
     build_attn_state,
     skip_ring_state_update,
 )
@@ -295,15 +291,6 @@ class NPUModelRunner(GPUModelRunner):
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
         self.pd_dspark_aux_layer_ids = aux_layers
-        # Offloaded parameters may alias shared staging buffers outside forward.
-        if isinstance(get_offloader(), NoopOffloader):
-            # Prepare private writer weights before profiling determines the KV budget.
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, MLAAttention)
-            with DeviceMemoryProfiler() as prolog_memory:
-                for layer_name, kv_cache_spec in self.get_kv_cache_spec().items():
-                    if _uses_single_raw_mla_cache(self.vllm_config, layer_name, kv_cache_spec):
-                        cast(AscendMLAImpl, attn_layers[layer_name].impl)._prepare_prolog_v3_weights()
-            self.model_memory_usage += prolog_memory.consumed_memory
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).

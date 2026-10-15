@@ -12,11 +12,21 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
@@ -31,6 +41,46 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+def supports_strided_mla_cache(
+    vllm_config: VllmConfig,
+    attn_module: AttentionLayerBase | None,
+    kv_cache_spec: KVCacheSpec,
+) -> bool:
+    """Share the writer contract between post-load weights and cache allocation.
+
+    Attention post-load hooks see upstream MLA specs before the runners add
+    Ascend layout metadata, so inspect the geometry and layer markers directly.
+    """
+    if not isinstance(attn_module, MLAAttention) or not isinstance(
+        kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+    ):
+        return False
+    if (
+        get_kv_cache_compression_ratio(kv_cache_spec) != 1
+        or getattr(kv_cache_spec, "model_version", None) is not None
+        or getattr(attn_module, "model_version", None) is not None
+        or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
+        or getattr(attn_module, "indexes_kv_by_block_stride", False)
+        or getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
+        or not supports_component_major_mla_pd(vllm_config)
+        or getattr(attn_module, "indexer", None) is not None
+    ):
+        return False
+    impl = getattr(attn_module, "impl", None)
+    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+        return False
+    if getattr(impl, "dcp_enabled", False):
+        buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
+        if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
+            return False
+        if not buffers_are_sufficient():
+            return False
+    if getattr(impl, "fa_quant_layer", False) or getattr(impl, "enable_kv_nz", False):
+        return False
+    supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
+    return supports_prolog_writer is not None and supports_prolog_writer()
 
 
 @lru_cache(maxsize=1)
