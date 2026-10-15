@@ -11,6 +11,19 @@ from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 PCP_COPY_MAX_TILE_ROWS = 8
 
 
+def load_mla_cache_rows_by_slots(cache_k, cache_v, slots):
+    """Read selected ND MLA rows without making the source cache contiguous."""
+    slots = slots.reshape(-1).to(torch.int64)
+    num_tokens = slots.numel()
+    # The existing A3 batched copy can raise MTE errors on a partial final tile.
+    # Repeat the first slot to fill the tile; the kernel zero-fills negative
+    # slots and clamps their addresses, including when every slot is -1.
+    padded_tokens = (num_tokens + PCP_COPY_MAX_TILE_ROWS - 1) // PCP_COPY_MAX_TILE_ROWS * PCP_COPY_MAX_TILE_ROWS
+    if padded_tokens != num_tokens:
+        slots = torch.cat((slots, slots[:1].expand(padded_tokens - num_tokens)))
+    return copy_pcp_kv_cache((cache_k, cache_v), slots)[:num_tokens]
+
+
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
     """Handle validated strided 4D FP16/BF16 ND caches with one physical head."""
     if (
@@ -64,13 +77,7 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
     physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
     slots = physical_blocks * block_size + positions % block_size
 
-    # The existing A3 batched copy can raise MTE errors on a partial final tile.
-    # Pad to the maximum tile size of 8 rows by repeating a valid slot. This reads
-    # at most 7 extra tokens without accessing additional pages.
-    padded_tokens = (num_tokens + PCP_COPY_MAX_TILE_ROWS - 1) // PCP_COPY_MAX_TILE_ROWS * PCP_COPY_MAX_TILE_ROWS
-    if padded_tokens != num_tokens:
-        slots = torch.cat((slots, slots[:1].expand(padded_tokens - num_tokens)))
-    packed = copy_pcp_kv_cache((cache_k, cache_v), slots)[:num_tokens]
+    packed = load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
     # Split views retain a row stride spanning both components. Copy into the
     # original TND outputs to preserve the consumer's layout contract.
     key.copy_(packed[:, : cache_k.shape[-1]].unsqueeze(1))
