@@ -324,10 +324,8 @@ def split_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str,
         fused_intermediate, hidden = shape
         assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
         shard_shape = (fused_intermediate // 2, hidden)
-        return [
-            (name.replace(".gate_up_proj.weight", f".{projection}.weight"), shard_shape)
-            for projection in ("gate_proj", "up_proj")
-        ]
+        prefix = name.removesuffix(".gate_up_proj.weight")
+        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
     return [(name, shape)]
 
 
@@ -435,10 +433,10 @@ class FixedRandomWeightSource(WeightSource):
             )
             for mapped_name in (self._apply_name_map(expanded_name, case),)
         ]
-        # Persistent buffers are checkpoint state too. ``state_dict`` excludes
-        # runtime-only buffers such as rotary tables registered with
-        # ``persistent=False`` while retaining learned integer or floating-point
-        # buffers such as router tables and correction bias.
+        # Preserve integer buffers such as token-to-expert tables regardless of
+        # persistence, and include persistent floating-point checkpoint state
+        # such as router correction bias. Non-persistent floating-point runtime
+        # buffers such as rotary tables remain excluded.
         parameters += [
             (
                 mapped_name,
@@ -447,7 +445,7 @@ class FixedRandomWeightSource(WeightSource):
             )
             for name, buffer in meta_model.named_buffers()
             for mapped_name in (self._apply_name_map(self._checkpoint_name(name, case), case),)
-            if name in persistent_state_names
+            if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
