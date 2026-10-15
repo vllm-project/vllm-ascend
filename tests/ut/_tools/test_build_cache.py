@@ -710,7 +710,8 @@ def test_semantic_configuration_change_invalidates_cache(tmp_path: Path, changed
         output_dir=output,
         builder=builder,
         counter=counter,
-        **{changed_field: ["setting=before"]},
+        recipe_values=["setting=before"] if changed_field == "recipe_values" else None,
+        environment_values=["setting=before"] if changed_field == "environment_values" else None,
     )
     _assert_success(first)
     key_a = _extract_key(first)
@@ -724,7 +725,8 @@ def test_semantic_configuration_change_invalidates_cache(tmp_path: Path, changed
         output_dir=output,
         builder=builder,
         counter=counter,
-        **{changed_field: ["setting=after"]},
+        recipe_values=["setting=after"] if changed_field == "recipe_values" else None,
+        environment_values=["setting=after"] if changed_field == "environment_values" else None,
     )
     _assert_success(second)
     assert "[build-cache] MISS" in second.stdout
@@ -1882,21 +1884,26 @@ def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str
     cache_root = tmp_path / "cache"
     counter = tmp_path / "counter"
     builder = _write_builder(tmp_path)
-    options = dict(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=tmp_path / "output",
-        builder=builder,
-        counter=counter,
-    )
+
+    def run_action(action: str) -> subprocess.CompletedProcess[str]:
+        return _run_cache(
+            cache_root=cache_root,
+            prepared_inputs=[prepared],
+            operator_source=source,
+            output_dir=tmp_path / "output",
+            builder=builder,
+            counter=counter,
+            action=action,
+            artifact_name=f"{action}.o",
+        )
+
     versions = []
     # Start with two versions, or an oversized restored snapshot on the HIT path.
     version_count = 3 if trigger == "HIT" else 2
     for index in range(version_count):
         (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
         for action in ("a", "b"):
-            proc = _run_cache(**options, action=action, artifact_name=f"{action}.o")
+            proc = run_action(action)
             _assert_success(proc)
         operator_hash, _ = engine._hash_operator_text(source, None)
         version = cache_root / "custom_operator" / "ascend910b" / "test_operator" / operator_hash
@@ -1907,7 +1914,7 @@ def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str
     # Either reuse the oldest version or build a third source version.
     index = 0 if trigger == "HIT" else 2
     (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
-    warm = _run_cache(**options, action="a", artifact_name="a.o")
+    warm = run_action("a")
     _assert_success(warm)
     assert f"[build-cache] {trigger}" in warm.stdout
     assert "[build-cache] PRUNED" not in warm.stdout
