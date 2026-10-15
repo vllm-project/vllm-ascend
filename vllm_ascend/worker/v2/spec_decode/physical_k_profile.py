@@ -170,6 +170,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_recommendation = None
     manager._physical_k_last_logged = {}
     manager._physical_k_score_steps = defaultdict(int)
+    manager._physical_k_seen_narrow_draft = defaultdict(bool)
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
         base = list(original_batches(capture_sizes))
@@ -416,11 +417,12 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         if self._physical_k_last_logged.get(bucket) != selected:
             logger.info(
                 "ASCEND_AV_PHYSICAL_K_DECISION batch_bucket=%d physical_k=%d "
-                "score=%.6f fresh_width=%d",
+                "score=%.6f fresh_width=%d candidate_scores=%s",
                 bucket,
                 selected,
                 score,
                 fresh_width,
+                {k: round(value, 6) for value, k in scored},
             )
             self._physical_k_last_logged[bucket] = selected
         return batch_size, selected
@@ -438,8 +440,29 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             bucket = _batch_bucket(len(num_tokens_per_req))
             steps = self._physical_k_score_steps[bucket]
             self._physical_k_score_steps[bucket] = steps + 1
-            if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0:
+            probe_due = False
+            if self._physical_k_last_logged.get(bucket, max_k) < max_k:
+                active_widths = [
+                    len(draft_tokens[req_id])
+                    for req_id in num_tokens_per_req
+                    if draft_tokens.get(req_id)
+                ]
+                if active_widths:
+                    if min(active_widths) < max_k:
+                        self._physical_k_seen_narrow_draft[bucket] = True
+                    elif self._physical_k_seen_narrow_draft[bucket]:
+                        # A full-width probe is the first fresh confidence
+                        # after a narrowed step. Score it immediately rather
+                        # than possibly missing it with the periodic timer.
+                        probe_due = True
+                        self._physical_k_seen_narrow_draft[bucket] = False
+            if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0 or probe_due:
                 self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
+                if (
+                    self._physical_k_recommendation is not None
+                    and self._physical_k_recommendation[1] == max_k
+                ):
+                    self._physical_k_seen_narrow_draft[bucket] = False
             else:
                 self._physical_k_recommendation = None
         return result
