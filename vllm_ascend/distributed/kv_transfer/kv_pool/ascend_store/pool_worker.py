@@ -3618,19 +3618,7 @@ class KVPoolWorker:
         ) -> list[BlockHash | str]:
             group_block_size = coordinator.group_effective_block_sizes[group_id]
             present: list[BlockHash | str] = []
-            if hbm_hit_tokens:
-                # Blocks already computed locally are present by construction;
-                # the pool only has to confirm the blocks beyond them.
-                present.extend(group_block_hashes[: hbm_hit_tokens // group_block_size])
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
-
-            def chunk_filter(
-                start: int,
-                group_block_size=group_block_size,
-                lookup_mask=lookup_mask,
-            ) -> bool:
-                chunk_idx = start // group_block_size
-                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
 
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
@@ -3640,7 +3628,7 @@ class KVPoolWorker:
                 block_hashes,
                 mask_num=lookup_start,
                 kv_cache_group_id=group_id,
-                chunk_filter=chunk_filter,
+                chunk_mask=lookup_mask,
             ):
                 variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
@@ -3671,6 +3659,7 @@ class KVPoolWorker:
             token_len,
             query_group_hits,
             log_context="KV pool coordinator lookup",
+            hbm_hit_tokens=hbm_hit_tokens,
         )
 
     def lookup_scheduler(
