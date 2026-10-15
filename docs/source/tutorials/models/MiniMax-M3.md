@@ -165,7 +165,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 43008 \
+      --max-model-len 133000 \
       --data-parallel-size 2 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -201,7 +201,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --quantization ascend \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --data-parallel-size 4 \
       --api-server-count 1 \
@@ -295,7 +295,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 65920 \
+      --max-model-len 133000 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -334,7 +334,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
-      --max-model-len 65920 \
+      --max-model-len 133000 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -375,7 +375,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --quantization ascend \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -415,7 +415,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --trust-remote-code \
       --quantization ascend \
       --headless \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
