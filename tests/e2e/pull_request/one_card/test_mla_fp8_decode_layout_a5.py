@@ -4,7 +4,7 @@
 
 Run on Ascend 950 with the same torch_npu/CANN bundle as the serving test::
 
-    pytest -v tests/e2e/nightly/single_node/ops/singlecard_ops/test_mla_fp8_decode_layout_a5.py
+    pytest -v tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
 
 These tests cover the backend and its updatable attention graph, rather than
 claiming full-model Eagle3 generation or FULL-graph dispatch coverage.
