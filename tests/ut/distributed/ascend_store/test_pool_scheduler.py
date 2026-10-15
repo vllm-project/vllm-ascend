@@ -123,7 +123,9 @@ def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
-    scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
+    scheduler.dspark_prefix_keys = (
+        DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
+    )
     scheduler.layerwise_offload = mode == "reuse"
     scheduler.dspark_draft_only_group_ids = frozenset({1})
     scheduler.layerwise_max_transfer_blocks = 0
