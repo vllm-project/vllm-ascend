@@ -496,12 +496,12 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
 
 
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
-def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch, connector):
+def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatch, connector):
     layer_name = "model.layers.0.self_attn.attn"
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
         block_size=384,
-        num_heads=64,
+        num_query_heads=64,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -513,6 +513,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     attn_module.qk_rope_head_dim = 64
     attn_module.impl = SimpleNamespace(
         fa_quant_layer=False,
+        use_flashmla=True,
         supports_prolog_v3_writer=lambda: True,
     )
     backend = MagicMock()
@@ -527,6 +528,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     vllm_config = SimpleNamespace(
         additional_config={},
         cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context={layer_name: attn_module}),
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         quant_config=None,
@@ -581,15 +583,16 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
     monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: (MagicMock(), MagicMock()))
     for q_heads in (8, 12, 64, 96):
-        spec = replace(spec, num_heads=q_heads)
+        spec = replace(spec, num_query_heads=q_heads)
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
         assert fused.shape == (6, 128, 1, 576)
         assert fused.stride() == (81408, 576, 576, 1)
 
-    # Even on A5, FlashMLA-incompatible query-head counts use the
-    # FIA-compatible component-major layout.
-    spec = replace(spec, num_heads=48)
+    # The resolved backend rejects unsupported query-head counts before cache
+    # allocation, so FIA receives the component-major view even on A5.
+    spec = replace(spec, num_query_heads=48)
+    attn_module.impl.use_flashmla = False
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
 
@@ -2435,8 +2438,6 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
-    assert specs["fa"].num_heads == 64
-    assert specs["sfa"].num_heads == 64
     assert specs["sfa"].cache_sparse_sfa_c8 is True
 
     mla_spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)

@@ -1179,13 +1179,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
-    def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
+    def test_mla_single_raw_backing_selects_layout_by_resolved_backend(self):
         runner = self._build_runner()
         layer_name = "model.layers.0.self_attn.attn"
         num_blocks = 2
         spec = AscendMLAAttentionSpec(
             block_size=384,
-            num_heads=64,
+            num_query_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1200,6 +1200,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=False,
+            use_flashmla=True,
             supports_prolog_v3_writer=lambda: True,
         )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
@@ -1217,26 +1218,23 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
 
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
-        with patch(
-            "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
-            return_value=(MagicMock(), MagicMock()),
-        ):
-            for q_heads in (8, 12, 64, 96):
-                with self.subTest(q_heads=q_heads):
-                    spec = replace(spec, num_heads=q_heads)
-                    with patch(
-                        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
-                        return_value=flash_profile,
-                    ):
-                        fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+        for q_heads in (8, 12, 64, 96):
+            with self.subTest(q_heads=q_heads):
+                spec = replace(spec, num_query_heads=q_heads)
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                    return_value=flash_profile,
+                ):
+                    fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
-                    self.assertIsInstance(fused, torch.Tensor)
-                    self.assertEqual(fused.shape, (6, 128, 1, 576))
-                    self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+                self.assertIsInstance(fused, torch.Tensor)
+                self.assertEqual(fused.shape, (6, 128, 1, 576))
+                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
 
-        # A5 FlashMLA does not support arbitrary query-head counts. Keep these
-        # models on the FIA-compatible component-major layout.
-        spec = replace(spec, num_heads=48)
+        # The resolved backend rejects unsupported query-head counts before
+        # allocation, so FIA receives the component-major views.
+        spec = replace(spec, num_query_heads=48)
+        attn_module.impl.use_flashmla = False
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,
@@ -1941,7 +1939,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(spec, AscendMLAAttentionSpec)
         self.assertEqual(spec.model_version, attn_module.model_version)
         self.assertTrue(spec.indexes_kv_by_block_stride)
-        self.assertEqual(spec.num_heads, 64)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
