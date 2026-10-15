@@ -232,11 +232,11 @@ def create_test_data(
     )
 
 
-def launch_with_vocab_grid_size(data, vocab_grid_size: int, block_size: int = VOCAB_BLOCK_SIZE) -> None:
-    """Run _penalties_kernel with an explicit vocab_grid_size, in place.
+def launch_with_num_workers(data, num_workers: int, block_size: int = VOCAB_BLOCK_SIZE) -> None:
+    """Run _penalties_kernel with an explicit worker count, in place.
 
-    apply_penalties chooses vocab_grid_size itself; this bypasses that choice so
-    the grid-invariance property can be pinned directly.
+    apply_penalties uses get_vectorcore_num(); this bypasses that so the
+    worker-invariance property can be pinned directly.
     """
     (
         logits,
@@ -251,7 +251,9 @@ def launch_with_vocab_grid_size(data, vocab_grid_size: int, block_size: int = VO
     ) = data
     num_tokens, vocab_size = logits.shape
     num_vocab_blocks = (vocab_size + block_size - 1) // block_size
-    _penalties_kernel[(num_tokens, vocab_grid_size)](
+    total_tiles = num_tokens * num_vocab_blocks
+    tiles_per_worker = (total_tiles + num_workers - 1) // num_workers
+    _penalties_kernel[(num_workers,)](
         logits,
         logits.stride(0),
         idx_mapping,
@@ -265,8 +267,9 @@ def launch_with_vocab_grid_size(data, vocab_grid_size: int, block_size: int = VO
         output_bin_counts,
         output_bin_counts.stride(0),
         vocab_size,
+        total_tiles,
+        tiles_per_worker,
         NUM_VOCAB_BLOCKS=num_vocab_blocks,
-        VOCAB_GRID_SIZE=vocab_grid_size,
         BLOCK_SIZE=block_size,
     )
 
@@ -360,20 +363,24 @@ class TestApplyPenalties:
         torch.testing.assert_close(logits_triton, expected, atol=atol, rtol=rtol)
         cleanup()
 
-    # vocab_grid_size only controls how the vocab blocks are distributed over
-    # programs; the grid-stride loop covers every block exactly once for any
-    # value in [1, num_vocab_blocks]. Pin that, because apply_penalties' choice
-    # of vocab_grid_size is shape dependent.
+    # The worker count only controls how the (token, vocab_block) tiles are
+    # split across programs; each tile is read-modify-written by exactly one
+    # worker, so the result must not depend on it. Pin that, because
+    # apply_penalties takes the count from get_vectorcore_num(), which varies
+    # by SKU. Counts coprime with num_vocab_blocks force workers to start and
+    # end mid-row, which is the only non-trivial indexing in the kernel.
     @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB)
-    @pytest.mark.parametrize("num_tokens", [1, 64])
+    @pytest.mark.parametrize("num_tokens", [1, 5, 64])
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
-    def test_apply_penalties_grid_invariance(self, vocab_size, num_tokens, device):
+    def test_apply_penalties_worker_invariance(self, vocab_size, num_tokens, device):
         n = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
         assert n > 1, "need more than one vocab block for this to mean anything"
 
-        candidates = sorted({g for g in (1, 2, 3, n // 2, n - 1, n) if 1 <= g <= n})
-        assert len(candidates) > 1, "need at least two grids to compare"
+        # 7 and 40 are coprime with n = 38 for Qwen3; 100 exceeds the tile count
+        # at num_tokens = 1, leaving workers with nothing to do.
+        candidates = sorted({1, 2, 3, 7, n, 40, 48, 100})
+        assert len(candidates) > 1, "need at least two worker counts to compare"
 
         data = create_test_data(
             num_tokens=num_tokens,
@@ -390,15 +397,15 @@ class TestApplyPenalties:
         pristine = logits.clone()
 
         reference = None
-        for grid_size in candidates:
+        for num_workers in candidates:
             logits.copy_(pristine)
-            launch_with_vocab_grid_size(data, grid_size)
+            launch_with_num_workers(data, num_workers)
             torch.npu.synchronize()
             if reference is None:
                 reference = logits.clone()
             else:
                 assert torch.equal(logits, reference), (
-                    f"vocab_grid_size={grid_size} differs from vocab_grid_size={candidates[0]} "
+                    f"num_workers={num_workers} differs from num_workers={candidates[0]} "
                     f"(max abs diff {(logits - reference).abs().max().item():.3e})"
                 )
         cleanup()
