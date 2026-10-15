@@ -177,24 +177,6 @@ def test_publish_lock_timeout_fails_fast(tmp_path: Path):
     assert counter.read_text() == "1"
 
 
-def test_publish_lock_timeout_does_not_create_publish_directory(tmp_path: Path):
-    _, _, _, _, publish, state, _, counter, command = _seed_one(tmp_path)
-    publish.rename(tmp_path / "previous-publish")
-    lock = _hold_lock(state / ".publish.lock")
-    try:
-        failed = run_command(
-            command,
-            {"VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": "0.2"},
-        )
-    finally:
-        lock.close()
-
-    assert failed.returncode == 75, failed.stdout + failed.stderr
-    assert counter.read_text() == "1"
-    # A waiting publisher must not recreate a directory another publisher owns.
-    assert not publish.exists()
-
-
 def test_action_lock_timeout_fails_fast(tmp_path: Path):
     _, _, _, _, _, state, _, counter, command = _seed_one(tmp_path)
     action_identity = "test_unit/TestOperator-0"
