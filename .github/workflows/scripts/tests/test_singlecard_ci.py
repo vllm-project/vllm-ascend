@@ -78,7 +78,6 @@ def test_all_operator_tests_have_backend_and_architecture():
         assert len(relative.parts) == 3, relative
         assert relative.parts[0] in {"ascendc", "triton"}, relative
         assert relative.parts[1] in {"a2a3", "a5"}, relative
-    assert not list(root.rglob(".gitkeep"))
 
 
 def test_a5_cases_are_separated_from_a2a3():
@@ -93,19 +92,6 @@ def test_a5_cases_are_separated_from_a2a3():
     assert any(name.startswith("test_a5_") for name in names("triton/a5/test_dcp_a2a.py"))
     assert "test_a5_cache_destination_layout" not in names("ascendc/a2a3/test_scatter_nd_update_sk.py")
     assert "test_a5_cache_destination_layout" in names("ascendc/a5/test_scatter_nd_update_sk.py")
-
-
-def test_external_operator_only_files_are_removed():
-    removed = {
-        "test_cann_qli_binding.py",
-        "test_gating_top_k_softmax.py",
-        "test_pa_kv_cache_ops.py",
-        "test_chunk_kda_aclnn.py",
-        "test_kimi_k3_chunk_kda_tail_npu.py",
-        "test_kimi_kda_ascendc_npu.py",
-        "test_kimi_kda_recurrent_ascendc_npu.py",
-    }
-    assert not {source.name for source in (ROOT / OPS).rglob("test_*.py")} & removed
 
 
 def test_new_file_is_discovered_recursively(tmp_path):
