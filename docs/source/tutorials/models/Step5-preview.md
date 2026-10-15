@@ -11,7 +11,7 @@ This document describes how to quickly get started with `Step 5 Preview` model i
     **Current status and constraints**
 
     - `Step 5 Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - Only **Ascend 950 (A5)** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step 5 Preview`.
+    - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step 5 Preview`.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step 5 Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
 ## 2 Supported Features
@@ -41,7 +41,7 @@ The features below are the ones enabled by the verified deployment commands in [
 | --- | --- |
 | Step-5-Preview-w8a8-mxfp8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
-This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk. We choose mxfp8 quantization format to get better performance on Ascend 950.
+This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk. We choose mxfp8 quantization format to get better performance on 950DT products.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -49,9 +49,9 @@ This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelsc
 
 | Hardware | Ascend HDK | CANN version | torch_npu version | vLLM | vLLM-Ascend version |
 | --- | --- | --- | --- | --- | --- |
-| Ascend 950 (A) | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | Based on v0.27.0 | Based on v0.27.0 |
+| 950DT products | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | Based on v0.27.0 | Based on v0.27.0 |
 
-`Step 5 Preview` currently supports **only the Ascend 950 (A5)** hardware; other Ascend hardware (e.g., Atlas 800I A3) is not supported.
+`Step 5 Preview` currently supports **only the 950DT products** hardware; other Ascend hardware (e.g., Atlas 800I A3) is not supported.
 
 Before getting started, confirm that the firmware/driver is installed correctly. The recommended HDK version is 25.5.0. Run the following command to confirm; the version shown in the output header is the HDK version.
 
@@ -268,8 +268,8 @@ The following table shows the results of `Step 5 Preview`.
 
 | dataset | model | hardware | deployment | metric | mode | vllm-api-general-chat |
 | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA Diamond | Step-5-Preview-w8a8-mxfp8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 93.8 |
-| MMMU-Pro | Step-5-Preview-w8a8-mxfp8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 76.24 |
+| GPQA Diamond | Step-5-Preview-w8a8-mxfp8 | 950DT products | Multi-Node Co-Located Deployment | accuracy | gen | 93.8 |
+| MMMU-Pro | Step-5-Preview-w8a8-mxfp8 | 950DT products | Multi-Node Co-Located Deployment | accuracy | gen | 76.24 |
 
 ## 8 Performance Evaluation
 
