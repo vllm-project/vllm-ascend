@@ -194,10 +194,18 @@ def _fused_forward_factory(orig_forward):
 
             if isinstance(self.quant_method, UnquantizedLinearMethod):
                 # BF16: dense matmul + allreduce fused directly.
+                logger.warning_once("MC2 FUSED (bf16): M=%d warmup=%s", input_.shape[0], _mc2_warmup_done)
                 output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t())
             elif hasattr(self, "weight_scale") and hasattr(self.quant_method, "act_quant_type"):
                 # W8A8 / MXFP8: quantize the activation, then fused
                 # quantized matmul + allreduce via antiquant parameters.
+                logger.warning_once(
+                    "MC2 FUSED (quant): M=%d quant=%s warmup=%s w_scale=%s",
+                    input_.shape[0],
+                    type(self.quant_method).__name__,
+                    _mc2_warmup_done,
+                    self.weight_scale.shape if hasattr(self.weight_scale, "shape") else "N/A",
+                )
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(
                     input_parallel, dst_type=self.quant_method.act_quant_type
                 )
@@ -215,8 +223,25 @@ def _fused_forward_factory(orig_forward):
                 )
             else:
                 # Unsupported quantization scheme: stock path.
+                logger.warning_once(
+                    "MC2 FALLBACK (unsupported quant): M=%d quant=%s w_scale=%s act_q=%s",
+                    input_.shape[0],
+                    type(self.quant_method).__name__,
+                    hasattr(self, "weight_scale"),
+                    hasattr(self.quant_method, "act_quant_type"),
+                )
                 return orig_forward(input_)
             return (output, None) if self.return_bias else output
+        if input_.shape[0] != input_.shape[0]:  # never true; silence linter
+            pass
+        if not (input_.shape[0] > 1000):
+            logger.warning_once(
+                "MC2 FALLBACK (M=%d <= 1000): reduce=%s tp=%d bias=%s",
+                input_.shape[0],
+                self.reduce_results,
+                self.tp_size,
+                self.bias is not None,
+            )
         return orig_forward(input_)
 
     return forward
