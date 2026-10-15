@@ -88,9 +88,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     if is_310p():
         reasons.append("310P")
 
-    if _is_configured(model_config) and getattr(model_config, "is_encoder_decoder", False) is True:
-        reasons.append("encoder-decoder")
-
     if _is_configured(getattr(vllm_config, "ec_transfer_config", None)):
         reasons.append("VL encoder disaggregation")
     elif _is_configured(model_config):
@@ -137,7 +134,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     except for these models and features, which fall back to V1:
 
     * 310P
-    * encoder-decoder (Whisper)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
