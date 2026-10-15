@@ -23,17 +23,19 @@ def test_packed_first_row_is_not_a_null_block(monkeypatch, packed, run_mode):
     def copy_state(cache, staging, ids, query_starts, staging_ids, *, write_back):
         calls.append(write_back)
         if not write_back:
-            staging.copy_(cache[1:2])
+            assert staging.shape == (2, 3, 8)
+            staging[:1].copy_(cache[1:2])
             staging_ids.zero_()
 
     def prefill(x, weight, bias, **kwargs):
-        assert kwargs["null_block_id"] == (-1 if packed else 0)
+        assert kwargs["null_block_id"] == (1 if packed else 0)
         assert kwargs["cache_indices"].item() == (0 if packed else 1)
         assert kwargs["cache_indices"].item() != kwargs["null_block_id"]
         return x + 2
 
     def decode(x, state, weight, **kwargs):
         kwargs["cache_indices"] = kwargs["conv_state_indices"]
+        assert torch.count_nonzero(kwargs["out"]) == 0
         return prefill(x, weight, **kwargs)
 
     monkeypatch.setattr(conv_ops, "copy_conv_state", copy_state)

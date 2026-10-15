@@ -34,12 +34,13 @@ def causal_conv1d(
     if not conv_state.is_contiguous():
         requests = cache_indices.shape[0]
         state_len, dim = conv_state.shape[1:]
-        kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
+        # UPDATE does not recognize PAD_SLOT_ID: a negative null_block_id
+        # disables its null-block check. Reserve a non-negative slot after
+        # the request rows, keeping packed request zero a valid state.
+        null_block_id = requests
+        kernel_state = torch.empty((requests + 1, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-        # Packed rows start at zero, so zero is now a valid cache slot. Invalid
-        # requests were mapped to PAD_SLOT_ID by the gather kernel.
-        null_block_id = PAD_SLOT_ID
     kernel_indices = kernel_indices.contiguous()
     if run_mode == 0:
         result = causal_conv1d_fn(
@@ -65,6 +66,7 @@ def causal_conv1d(
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc=query_start_loc,
             null_block_id=null_block_id,
+            out=output,
         )
     if not conv_state.is_contiguous():
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
