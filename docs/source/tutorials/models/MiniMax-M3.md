@@ -2124,6 +2124,8 @@ The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the t
 The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
 
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 vllm serve ${WEIGHT_PATH} \
   --reasoning-parser minimax_m3 \
   ...
@@ -2153,6 +2155,8 @@ MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with 
 When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
 
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 vllm serve ${WEIGHT_PATH} \
   --reasoning-parser minimax_m3 \
   --enable-auto-tool-choice \
