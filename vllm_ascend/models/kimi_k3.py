@@ -16,7 +16,7 @@ from typing import Any, TypeVar, cast
 import torch
 import vllm.envs as envs
 from torch import nn
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -89,10 +89,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import (
-    AscendKimiK3DeltaAttention,
-    AscendKimiK3RoutedLinear,
+    AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
@@ -103,6 +103,72 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+
+class AscendKimiK3RoutedLinear(ReplicatedLinear):
+    """Dispatch eager Kimi K3 MXFP8 projections through single-group GMM."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # MXFP8 NZ weights need a leading single-group dimension before the
+        # format cast so GroupedMatmulWeightNz receives its 5-D contract.
+        self._kimi_single_group_gmm_nz = True
+
+    @staticmethod
+    def apply_projection(
+        layer: nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        quant_method = layer.quant_method
+        inner_method = getattr(quant_method, "quant_method", quant_method)
+        if isinstance(x, PreparedLinearInput):
+            can_use_gmm = x.quantized.ndim == 2 and x.scale is not None
+        elif isinstance(x, tuple):
+            can_use_gmm = x[0].ndim == 2
+        else:
+            can_use_gmm = x.ndim == 2
+        if (
+            bias is None
+            and isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
+            and is_forward_context_available()
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and can_use_gmm
+        ):
+            return inner_method.apply_single_group_gmm(layer, x)
+        output = quant_method.apply(layer, x, bias=bias)
+        # Remove only the artificial singleton group dimension from the NZ
+        # fallback path. Other quantized projections keep their native shape.
+        if getattr(layer, "_mxfp8_gmm_nz_layout", False) and can_use_gmm and output.dim() == 3 and output.shape[0] == 1:
+            output = output.squeeze(0)
+        return output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        output = self.apply_projection(self, x, bias)
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class AscendKimiK3DeltaAttention(AscendKimiK3DeltaAttentionBase):
+    """Select the Kimi K3 projection path around the Ascend KDA backend."""
+
+    def __init__(self, config, vllm_config, prefix: str = "") -> None:
+        super().__init__(config, vllm_config, prefix)
+        if self.uses_mixed_projection:
+            # Set before weight loading so fused QKV uses the same NZ GMM
+            # layout as the routed projections.
+            self.in_proj_qkvgfab._kimi_single_group_gmm_nz = True
+
+    def _matmul_fused_qkv(
+        self,
+        qkv_input: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        if self.in_proj_qkvgfab.quant_method is None:
+            raise RuntimeError("KDA fused QKV quantization method is not initialized")
+        return AscendKimiK3RoutedLinear.apply_projection(self.in_proj_qkvgfab, qkv_input)
 
 
 def _use_attn_res_prefill_cache() -> bool:

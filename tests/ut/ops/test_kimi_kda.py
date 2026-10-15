@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
-from vllm.config import CUDAGraphMode
 
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
@@ -239,49 +238,6 @@ def test_mixed_forward_uses_overlapped_projection():
     attention._run_overlapped_qkv_bfg.assert_called_once_with(hidden_states)
     assert attention._forward.call_args.kwargs["beta"] is beta
     assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
-
-
-@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_qkv_matmul_uses_common_dispatch(runtime_mode):
-    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
-    nn.Module.__init__(attention)
-    inner_method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
-    quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
-    x_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
-    output = torch.randn(4, 192, dtype=torch.bfloat16)
-    quant_method = SimpleNamespace(quant_method=inner_method, apply=MagicMock(return_value=output))
-    layer = SimpleNamespace(
-        quant_method=quant_method,
-        weight=torch.empty(128, 192, dtype=torch.float8_e4m3fn),
-        weight_scale=torch.empty(2, 192, 2, dtype=torch.uint8),
-    )
-    attention.in_proj_qkvgfab = layer
-    qkv_input = (quantized, x_scale)
-
-    with (
-        patch(
-            "vllm_ascend.ops.kimi_kda.get_forward_context",
-            return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
-        ),
-        patch("vllm_ascend.ops.kimi_kda.is_forward_context_available", return_value=True),
-        patch("vllm_ascend.ops.kimi_kda.torch_npu.npu_grouped_matmul", return_value=[output]) as grouped,
-        patch.object(inner_method, "apply_single_group_gmm", wraps=inner_method.apply_single_group_gmm) as single_group,
-    ):
-        actual = attention._matmul_fused_qkv(qkv_input)
-
-    assert actual is output
-    if runtime_mode == CUDAGraphMode.NONE:
-        single_group.assert_called_once_with(layer, qkv_input)
-        quant_method.apply.assert_not_called()
-        kwargs = grouped.call_args.kwargs
-        assert kwargs["group_list"].tolist() == [4]
-        assert kwargs["group_list"].device == quantized.device
-        assert kwargs["split_item"] == 2
-        assert kwargs["group_type"] == 0
-    else:
-        grouped.assert_not_called()
-        single_group.assert_not_called()
-        quant_method.apply.assert_called_once_with(layer, qkv_input, bias=None)
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():

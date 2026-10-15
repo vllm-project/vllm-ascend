@@ -24,6 +24,67 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8Dyna
 from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.parametrize("uses_mixed_projection", [False, True])
+def test_kimi_kda_marks_only_mixed_qkv_for_gmm_layout(uses_mixed_projection):
+    def fake_backend_init(attention, _config, _vllm_config, _prefix):
+        nn.Module.__init__(attention)
+        attention.uses_mixed_projection = uses_mixed_projection
+        attention.in_proj_qkvgfab = nn.Module()
+
+    with patch.object(kimi_k3.AscendKimiK3DeltaAttentionBase, "__init__", new=fake_backend_init):
+        attention = kimi_k3.AscendKimiK3DeltaAttention(None, None)
+
+    assert getattr(attention.in_proj_qkvgfab, "_kimi_single_group_gmm_nz", False) is uses_mixed_projection
+
+
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("nz_layout", [False, True])
+def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, nz_layout):
+    attention = kimi_k3.AscendKimiK3DeltaAttention.__new__(kimi_k3.AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    inner_method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
+    x_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
+    output = torch.randn(4, 192, dtype=torch.bfloat16)
+    fallback_output = output.unsqueeze(0) if nz_layout else output
+    quant_method = SimpleNamespace(quant_method=inner_method, apply=MagicMock(return_value=fallback_output))
+    layer = SimpleNamespace(
+        quant_method=quant_method,
+        weight=torch.empty((1, 128, 192) if nz_layout else (128, 192), dtype=torch.float8_e4m3fn),
+        weight_scale=torch.empty((1, 2, 192, 2) if nz_layout else (2, 192, 2), dtype=torch.uint8),
+        _mxfp8_gmm_nz_layout=nz_layout,
+    )
+    attention.in_proj_qkvgfab = layer
+    qkv_input = (quantized, x_scale)
+
+    with (
+        patch(
+            "vllm_ascend.models.kimi_k3.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
+        ),
+        patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=True),
+        patch(
+            "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_grouped_matmul", return_value=[output]
+        ) as grouped,
+        patch.object(inner_method, "apply_single_group_gmm", wraps=inner_method.apply_single_group_gmm) as single_group,
+    ):
+        actual = attention._matmul_fused_qkv(qkv_input)
+
+    torch.testing.assert_close(actual, output)
+    if runtime_mode == CUDAGraphMode.NONE:
+        single_group.assert_called_once_with(layer, qkv_input)
+        quant_method.apply.assert_not_called()
+        kwargs = grouped.call_args.kwargs
+        assert kwargs["group_list"].tolist() == [4]
+        assert kwargs["group_list"].device == quantized.device
+        assert kwargs["split_item"] == 2
+        assert kwargs["group_type"] == 0
+    else:
+        grouped.assert_not_called()
+        single_group.assert_not_called()
+        quant_method.apply.assert_called_once_with(layer, qkv_input, bias=None)
+
+
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("nz_layout", [False, True])
 def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, nz_layout):
@@ -43,10 +104,10 @@ def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, nz_layout):
 
     with (
         patch(
-            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            "vllm_ascend.models.kimi_k3.get_forward_context",
             return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
         ),
-        patch("vllm_ascend.ops.kimi_kda.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=True),
         patch.object(AscendW8A8MXFP8DynamicLinearMethod, "apply_single_group_gmm", return_value=output) as grouped,
     ):
         actual = layer.forward(x)
@@ -68,7 +129,7 @@ def test_kimi_routed_nz_fallback_preserves_batched_input_shape():
         _mxfp8_gmm_nz_layout=True,
         quant_method=SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output)),
     )
-    with patch("vllm_ascend.ops.kimi_kda.is_forward_context_available", return_value=False):
+    with patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=False):
         actual = kimi_k3.AscendKimiK3RoutedLinear.apply_projection(layer, torch.randn(1, 4, 128))
     assert actual is output
 
