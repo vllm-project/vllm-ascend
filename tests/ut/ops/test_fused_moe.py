@@ -1195,6 +1195,47 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     assert shared_experts._select_mlp_path() is expected_path
 
 
+@pytest.mark.parametrize("has_expert_gate", [False, True])
+def test_mxfp_shared_expert_preserves_output_gate(monkeypatch, has_expert_gate):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.multistream_overlap = False
+    shared_experts.situ_activation = None
+    shared_experts.swiglu_limit = None
+    hidden_states = torch.tensor([[1.0, -1.0], [2.0, 1.0]])
+    down_output = torch.tensor([[2.0, 4.0], [6.0, 8.0]])
+    gate_weight = torch.tensor([[1.0, 2.0]])
+    expert_gate = MagicMock(side_effect=lambda x: (F.linear(x, gate_weight), None))
+    shared_experts.layer = SimpleNamespace(down_proj=MagicMock(return_value=(down_output, None)))
+    if has_expert_gate:
+        shared_experts.layer.expert_gate = expert_gate
+    quantized_x = torch.ones(2, 2)
+    scale = torch.ones(2, 1)
+    monkeypatch.setattr(
+        shared_experts_module.torch.ops._C_ascend,
+        "npu_swiglu_group_quant",
+        MagicMock(return_value=(quantized_x, scale, None)),
+        raising=False,
+    )
+    submitted = SubmittedSharedExpertGateUp(
+        hidden_states=hidden_states,
+        gate_up=torch.ones(2, 4),
+        gate_up_input_scale=None,
+        local_dp_metadata=None,
+        path=SharedExpertMLPPath.A8_MXFP_FUSED,
+    )
+
+    result = shared_experts._run_a8_mxfp_mlp(submitted, RoutedMoEMilestones())
+
+    expected = down_output
+    if has_expert_gate:
+        expected = down_output * torch.sigmoid(F.linear(hidden_states, gate_weight))
+        expert_gate.assert_called_once_with(hidden_states)
+    else:
+        expert_gate.assert_not_called()
+    torch.testing.assert_close(result, expected)
+    shared_experts.layer.down_proj.assert_called_once_with((quantized_x, scale))
+
+
 def test_multistream_missing_required_milestone_fails_fast():
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.multistream_overlap = True

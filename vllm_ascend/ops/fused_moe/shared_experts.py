@@ -614,7 +614,7 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
-        return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+        return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
         if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
