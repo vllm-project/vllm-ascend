@@ -22,8 +22,18 @@ _original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_ru
 
 
 def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
+    """Allow Ascend-supported V1 drafts while retaining other upstream restrictions."""
     unsupported = _original_get_v1_model_runner_unsupported_features(self)
-    return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
+    return [
+        feature
+        for feature in unsupported
+        if feature not in _ASCEND_V1_SUPPORTED_FEATURES
+        and not (
+            feature == "DFlash candidate-head drafts"
+            and self.speculative_config.draft_sample_method == "greedy"
+            and "DFlash2DraftModel" in self.speculative_config.draft_model_config.architectures
+        )
+    ]
 
 
 VllmConfig._get_v1_model_runner_unsupported_features = _patched_get_v1_model_runner_unsupported_features
