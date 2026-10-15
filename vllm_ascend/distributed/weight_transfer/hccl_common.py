@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared HCCL process-group initialization helpers."""
+"""HCCL process-group initialization helpers.
 
+Mirrors `vllm.distributed.weight_transfer.nccl_common`: the HCCL backend speaks
+upstream's broadcast protocol over a `StatelessProcessGroup`, so only the
+communicator constructor, the TCP-only rendezvous and the NPU device lookup
+differ from the upstream helpers.
+"""
+
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
-    from vllm.distributed.parallel_state import ParallelConfig
+    from vllm.config.parallel import ParallelConfig
 
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
     from vllm_ascend.distributed.weight_transfer.hccl_engine import (
@@ -43,19 +50,35 @@ def stateless_init_process_group(
     return pyhccl
 
 
+def worker_init_payload(init_info: "HCCLWeightTransferInitInfo") -> dict[str, Any]:
+    """Serialize a worker init info for `init_weight_transfer_engine`.
+
+    Unset (``None``) wire params are dropped, so the payload carries only what
+    the trainer actually fixed and the worker keeps its per-update fallback for
+    the ones left out.
+    """
+    return {key: value for key, value in asdict(init_info).items() if value is not None}
+
+
 def worker_init_process_group(
     init_info: "HCCLWeightTransferInitInfo",
     parallel_config: "ParallelConfig",
 ) -> "PyHcclCommunicator":
-    """Create the worker communicator using its DP/TP/PP rank."""
+    """Create the trainer<->worker HCCL group on an inference worker.
+
+    The rank arithmetic mirrors
+    `vllm.distributed.weight_transfer.nccl_common.worker_init_process_group`: a
+    worker's rank has to be unique across data-parallel groups, and the trainer
+    occupies the ranks before `rank_offset`.
+    """
     dp_rank = parallel_config.data_parallel_index
     world_size_per_dp = parallel_config.world_size
     rank_within_dp = parallel_config.rank
-    worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-    rank = worker_rank + init_info.rank_offset
+    rank = dp_rank * world_size_per_dp + rank_within_dp + init_info.rank_offset
+
     device = torch.accelerator.current_device_index()
     if device is None:
-        raise ValueError("HCCL worker requires an explicit current NPU device")
+        raise ValueError("HCCL weight transfer requires an explicit current NPU device")
     return stateless_init_process_group(
         init_info.master_address,
         init_info.master_port,
@@ -66,12 +89,10 @@ def worker_init_process_group(
 
 
 def trainer_init(
-    init_info: "HCCLTrainerInitInfo | HCCLWeightTransferInitInfo | Any",
+    init_info: "HCCLTrainerInitInfo | HCCLWeightTransferInitInfo",
     rank: int = 0,
 ) -> "PyHcclCommunicator":
-    """Create the trainer-side communicator, defaulting to rank zero."""
-    import torch
-
+    """Open the trainer-side endpoint as ``rank``, defaulting to the sender."""
     device = torch.accelerator.current_device_index()
     if device is None:
         raise ValueError("HCCL trainer requires an explicit current NPU device")
