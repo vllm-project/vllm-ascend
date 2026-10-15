@@ -145,6 +145,18 @@ def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
     assert len(max_k) == 15
 
 
+def test_profile_interleaves_widths_without_reordering_upstream_samples():
+    manager = configure_physical_k_profiling(FakeManager(), config())
+    cases = list(manager.batches_to_profile([8]))
+    assert [case["profile_physical_k"] for case in cases[:6]] == [3, 4, 3, 4, 3, 4]
+    upstream = [
+        case
+        for case, is_upstream in zip(cases, manager._physical_k_profile_is_upstream)
+        if is_upstream
+    ]
+    assert [case["num_tokens"] for case in upstream] == [8, 8]
+
+
 def test_lower_k_profile_median_ignores_one_cold_replay():
     manager = configure_physical_k_profiling(FakeManager(), config())
     cases = list(manager.batches_to_profile([8]))
