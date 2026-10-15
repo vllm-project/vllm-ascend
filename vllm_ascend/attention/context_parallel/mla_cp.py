@@ -36,7 +36,6 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
-    update_graph_params_workspaces,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import cp_decode_comm_stream, weak_ref_tensors
@@ -900,7 +899,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     k_nope,
                     **common_kwargs,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                # Keep the workspace in its owning graph; draft capture must not overwrite the target graph's entry.
+                graph_params.workspaces[num_tokens] = workspace
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BSND":
                 num_decodes = attn_metadata.num_decodes
