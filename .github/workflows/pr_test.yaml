@@ -118,6 +118,11 @@ jobs:
             echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check singlecard CI selection and isolation
+        run: |
+          pip install pytest pyyaml regex
+          python3 -m pytest -q .github/workflows/scripts/tests/test_singlecard_ci.py
+
       - name: cp problem matchers
         run: |
           cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
@@ -159,6 +164,8 @@ jobs:
               - 'cmake/**'
               - 'tests/ut/**'
               - 'tests/e2e/pull_request/**'
+              - 'tests/e2e/nightly/single_node/ops/singlecard_ops/**'
+              - 'tests/e2e/nightly/single_node/ops/conftest.py'
               - 'tests/e2e/*.py'
               - 'tests/e2e/*.sh'
               - 'tools/**'
@@ -176,6 +183,7 @@ jobs:
               # test_selector.py is listed under src instead: a label is
               # required, and ready-precise keeps the precise path.
             ci_pipeline:
+              - 'tests/e2e/nightly/single_node/ops/conftest.py'
               - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'
               - '.github/workflows/_selected_tests_upstream.yaml'
@@ -185,6 +193,9 @@ jobs:
               - '.github/workflows/scripts/resolve_csrc_cache_targets.py'
               - '.github/workflows/scripts/select_tests.py'
               - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/run_singlecard_test.py'
+              - '.github/workflows/scripts/test_selector.py'
+              - '.github/workflows/scripts/collect_merged_new_tests.py'
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'

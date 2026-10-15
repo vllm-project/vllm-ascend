@@ -176,6 +176,17 @@ run_pytest_target() {
   log_name="${log_name%.py}"
   log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
+  local pytest_command=(pytest)
+  local coverage_command=(-m pytest)
+  local report_args=()
+  case "${target}" in
+    tests/e2e/nightly/single_node/ops/singlecard_ops/*)
+      local launcher="${project_root}/.github/workflows/scripts/run_singlecard_test.py"
+      pytest_command=(python "${launcher}")
+      coverage_command=("${launcher}")
+      report_args=(-rs "--junitxml=${log_file%.log}.xml")
+      ;;
+  esac
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
@@ -185,10 +196,10 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" "${coverage_command[@]}" -sv --color=yes "${report_args[@]}" "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" "${pytest_command[@]}" -sv --color=yes "${report_args[@]}" "${target}"
   fi
   local status=$?
   set -e

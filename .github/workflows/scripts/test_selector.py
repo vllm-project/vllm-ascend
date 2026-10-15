@@ -41,7 +41,11 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 # Minimum affected lines threshold
 MIN_AFFECTED_LINES = 1
 
-TEST_ROOTS = ("tests/e2e/pull_request/", "tests/ut/")
+TEST_ROOTS = (
+    "tests/e2e/pull_request/",
+    "tests/ut/",
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/",
+)
 
 
 def is_selectable_test(path: str) -> bool:
