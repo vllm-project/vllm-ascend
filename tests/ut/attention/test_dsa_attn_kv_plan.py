@@ -226,22 +226,19 @@ def test_non_a5_pins_cache_dtype_to_the_model_dtype():
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
 
 
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
+def test_a5_resolves_unset_requests_to_bfloat16():
+    # "auto" means the model dtype, bfloat16, so it has to select the same layout an
+    # explicit bfloat16 request does; a named dtype keeps its own string.
     with _on(AscendDeviceType.A5):
-        assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        for launch in ("auto", "bfloat16", "bf16"):
+            assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "fp8"
 
 
 def test_a5_mode_survives_the_spec_path_rewrite():
     with _on(AscendDeviceType.A5):
-        for launch in ("auto", "fp8"):
-            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
-            assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
-            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
-            assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
-
-        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
-        assert is_a5_bf16_kv_enabled(_cache_config(pinned))
+        # An unset request resolves to the bfloat16 layout, so the page and the plan
+        # agree instead of the fp8 plan meeting a bfloat16 page.
+        for launch in ("auto", "bfloat16"):
+            assert is_a5_bf16_kv_enabled(_cache_config(resolve_dsv4_cache_dtype(launch, "bfloat16")))
+        assert not is_a5_bf16_kv_enabled(_cache_config(resolve_dsv4_cache_dtype("fp8", "bfloat16")))

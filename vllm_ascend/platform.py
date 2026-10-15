@@ -246,6 +246,58 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        backend = cls._select_attn_backend_cls(attn_selector_config)
+        # Upstream rejects a dtype the selected backend cannot store from
+        # get_valid_backends, which get_attn_backend_cls calls
+        # (vllm/platforms/rocm.py:594). Ascend selects its backend with a lookup
+        # table instead, so the same questions are asked here, against the backend
+        # the table just returned.
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+        from vllm.v1.attention.backend import AttentionBackend
+
+        try:
+            backend_cls = resolve_obj_by_qualname(backend)
+        except ImportError:
+            # The backend's own module can need a package this install may not have:
+            # the FA3 backend imports ``flash_attn_npu_v3``. A backend that cannot be
+            # imported declares nothing, and selecting it will report the missing
+            # package far more clearly than a dtype check could.
+            return backend
+        # Only backends that declare the set are checked, and the whole MRO counts:
+        # the inherited upstream default is a CUDA-oriented set that would reject
+        # configurations working today, while the DeepSeek sparse layers select the
+        # C4 / C128 / SWA subclasses that inherit the declaration. This runs before
+        # anything is read off the selector config, which not every caller fills in.
+        if not any(
+            "supported_kv_cache_dtypes" in klass.__dict__
+            for klass in backend_cls.__mro__
+            if klass is not AttentionBackend
+        ):
+            return backend
+
+        # Only the kv cache dtype is acted on: the selection table above already
+        # decided every other axis, so the backend's own answer to that one question
+        # is all this needs. ``validate_configuration`` would answer for all 22 axes
+        # and needs the whole selector config through ``_asdict()``, which is not
+        # guaranteed here -- ``use_compress`` is not a field of
+        # ``AttentionSelectorConfig``, so callers that set it build a
+        # ``SimpleNamespace`` instead (tests/ut/attention/test_flash_attn.py).
+        cache_dtype = attn_selector_config.kv_cache_dtype
+        if not backend_cls.supports_kv_cache_dtype(cache_dtype):
+            # List what this backend accepts *here*: the device narrows the declared
+            # set, and naming a dtype that was just refused would contradict it.
+            supported = sorted(
+                dtype for dtype in backend_cls.supported_kv_cache_dtypes if backend_cls.supports_kv_cache_dtype(dtype)
+            )
+            hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+            raise ValueError(
+                f"KV cache dtype {cache_dtype!r} is not supported by the attention backend "
+                f"{backend_cls.__name__}. Reasons: kv_cache_dtype not supported.{hint}"
+            )
+        return backend
+
+    @classmethod
+    def _select_attn_backend_cls(cls, attn_selector_config) -> str:
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
@@ -520,6 +572,8 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.methods.kv_cache.turboquant.config import validate_turboquant
 
         validate_turboquant(vllm_config)
+        # Resolve an unset DeepSeek-V4 cache dtype before anything reads the string.
+        _resolve_dsv4_cache_dtype(vllm_config)
         if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
             assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
@@ -688,6 +742,33 @@ class NPUPlatform(Platform):
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
+
+
+def _resolve_dsv4_cache_dtype(vllm_config: VllmConfig) -> None:
+    """Pin the DeepSeek-V4 cache dtype to the value the A5 layout is chosen from.
+
+    ``--kv-cache-dtype`` is unset by default, which vLLM records as ``"auto"`` and
+    resolves to the model dtype, bfloat16. The A5 KV layout is chosen from the
+    literal string instead (``dsa_attn_kv_plan.is_a5_bf16_kv_enabled``), so ``auto``
+    selected the fp8 compress epilog while the page stayed bfloat16: the plan asked
+    the operator for a fp8 page (``head_size + 96``) and got a bfloat16 one. Pinning
+    the resolved value here makes both sides read the same string, and a request that
+    names another dtype keeps it.
+    """
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    if model_config is None or cache_config is None:
+        return
+    if not get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        return
+    hf_config = getattr(model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return
+
+    from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
+
+    model_dtype = str(model_config.dtype).removeprefix("torch.")
+    cache_config.cache_dtype = resolve_dsv4_cache_dtype(cache_config.cache_dtype, model_dtype)
 
 
 def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
