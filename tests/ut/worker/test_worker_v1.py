@@ -1832,12 +1832,12 @@ class TestNPUWorker(TestBase):
 
             # Should call capture_model in non-eager mode
             worker.model_runner.capture_model.assert_called_once()
-            mock_v2_warmup.assert_called_once_with(worker.model_runner, worker.execute_model, worker.sample_tokens)
+            mock_v2_warmup.assert_called_once_with(worker.model_runner, ANY, worker.sample_tokens)
             self.assertEqual(
                 warmup_order.mock_calls,
                 [
                     unittest.mock.call.legacy(worker),
-                    unittest.mock.call.v2(worker.model_runner, worker.execute_model, worker.sample_tokens),
+                    unittest.mock.call.v2(worker.model_runner, ANY, worker.sample_tokens),
                     unittest.mock.call.capture(),
                 ],
             )
@@ -1878,10 +1878,47 @@ class TestNPUWorker(TestBase):
                 warmup_order.mock_calls,
                 [
                     unittest.mock.call.legacy(worker),
-                    unittest.mock.call.v2(worker.model_runner, worker.execute_model, worker.sample_tokens),
+                    unittest.mock.call.v2(worker.model_runner, ANY, worker.sample_tokens),
                 ],
             )
             worker.model_runner.capture_model.assert_not_called()
+
+    def test_v2_warmup_finishes_forward_before_sampling(self):
+        """Hot-cache warmup must not sample while NPU forward work is pending."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_runner = MagicMock()
+        pending_forwards = []
+        forward_output = object()
+        scheduler_output = object()
+        grammar_output = object()
+
+        def execute_model(output):
+            self.assertIs(output, scheduler_output)
+            pending_forwards.append(output)
+            return forward_output
+
+        def sample_tokens(output):
+            self.assertFalse(pending_forwards)
+            self.assertIs(output, grammar_output)
+
+        def warmup(runner, execute, sample):
+            self.assertIs(runner, worker.model_runner)
+            for _ in range(2):
+                self.assertIs(execute(scheduler_output), forward_output)
+                sample(grammar_output)
+
+        worker.execute_model = MagicMock(side_effect=execute_model)
+        worker.sample_tokens = MagicMock(side_effect=sample_tokens)
+        with (
+            patch("vllm_ascend.worker.worker.warmup_kernels", side_effect=warmup),
+            patch("vllm_ascend.worker.worker.torch.npu.synchronize", side_effect=pending_forwards.clear),
+        ):
+            worker._warmup_v2_model_runner()
+            # The normal serving callback is not replaced by the warmup wrapper.
+            self.assertIs(worker.execute_model(scheduler_output), forward_output)
+            self.assertTrue(pending_forwards)
 
     def test_compile_or_warm_up_model_v2_limits_scheduler_warmup_batch(self):
         """Bound speculative warmup memory and restore the serving config on failure."""

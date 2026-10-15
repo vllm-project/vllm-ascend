@@ -871,7 +871,14 @@ class NPUWorker(WorkerBase):
             )
 
     def _warmup_v2_model_runner(self) -> None:
-        warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        def execute_model(scheduler_output: SchedulerOutput):
+            output = self.execute_model(scheduler_output)
+            # Cached Triton kernels can reach sampling before queued NPU
+            # forward work completes. Serialize these startup-only steps.
+            torch.npu.synchronize()
+            return output
+
+        warmup_kernels(self.model_runner, execute_model, self.sample_tokens)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
