@@ -248,6 +248,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     notify.assert_called_once_with("mla")
 
 
+@pytest.mark.parametrize("use_v2_runner", [False, True])
 @pytest.mark.parametrize(
     "connector,module,expected",
     [
@@ -258,7 +259,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         ("MooncakeConnectorV2", "custom.connector", False),
     ],
 )
-def test_external_selection_retains_token_fused_pd(connector, module, expected):
+def test_external_selection_retains_token_fused_pd(connector, module, expected, use_v2_runner):
     scope = {
         "torch": torch,
         "HardwareCapability": SimpleNamespace(MLA_FLASH="mla"),
@@ -286,20 +287,20 @@ def test_external_selection_retains_token_fused_pd(connector, module, expected):
         supports_prolog_v3_projection=lambda: True,
         q_proj=SimpleNamespace(_chunk_size=0),
         vllm_config=SimpleNamespace(
-            use_v2_model_runner=True,
+            use_v2_model_runner=use_v2_runner,
             speculative_config=None,
             kv_transfer_config=transfer,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
     )
+    expected = expected and use_v2_runner
     assert select(impl) is expected
     if not expected:
         scope["get_flashmla_ops"].assert_not_called()
 
 
 @pytest.mark.parametrize("mode", ["normal", "dcp", "pcp", "quantization", "chunked_projection", "no_q_lora"])
-@pytest.mark.parametrize("runner", ["v1", "v2"])
-def test_external_selection_reaches_single_raw_allocation(mode, runner):
+def test_external_selection_reaches_mrv2_single_raw_allocation(mode):
     class Spec:
         supports_single_raw_backing = True
 
@@ -348,15 +349,8 @@ def test_external_selection_reaches_single_raw_allocation(mode, runner):
         load("vllm_ascend/core/kv_cache_interface.py", name, scope)
     select = load(MLA, "_can_use_flashmla", scope, "AscendMLAImpl")
     impl.use_flashmla = select(impl)
-    if runner == "v2":
-        allocate = load("vllm_ascend/worker/v2/attn_utils.py", "_uses_single_raw_mla_cache", scope)
-        single_raw = allocate(config, "mla", Spec())
-    else:
-        allocate = load("vllm_ascend/worker/model_runner_v1.py", "_uses_single_raw_mla_cache", scope, "NPUModelRunner")
-        worker = SimpleNamespace(
-            vllm_config=config, use_sparse=False, sparse_kv_offload_enabled=False, use_compress=False
-        )
-        single_raw = allocate(worker, "mla", Spec(), layer)
+    allocate = load("vllm_ascend/worker/v2/attn_utils.py", "_uses_single_raw_mla_cache", scope)
+    single_raw = allocate(config, "mla", Spec())
     assert select(impl) is (mode != "pcp")
     assert single_raw is (mode != "pcp")
 
