@@ -120,6 +120,11 @@ class AscendKimiK3RoutedLinear(ReplicatedLinear):
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Select GMM for eager Kimi K3 QKV and routed down/up projections.
+
+        This normally covers prefill; graph-mode decode keeps the existing
+        quantization apply path. Eager decode uses the same eligibility check.
+        """
         quant_method = layer.quant_method
         inner_method = getattr(quant_method, "quant_method", quant_method)
         if isinstance(x, PreparedLinearInput):

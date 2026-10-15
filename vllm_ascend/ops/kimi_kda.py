@@ -373,7 +373,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
             raise RuntimeError("KDA fused QKV quantization method is not initialized")
-        return quant_method.apply(self.in_proj_qkvgfab, qkv_input, bias=None)
+        return quant_method.apply(
+            self.in_proj_qkvgfab,
+            qkv_input,
+            bias=None,
+        )
 
     @staticmethod
     def _run_causal_conv1d(
