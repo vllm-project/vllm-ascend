@@ -380,6 +380,20 @@ def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, 
     aux_hidden_states.append(aux_hidden_state)
 
 
+def _gather_sequence_parallel_states(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    num_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if residual is None:
+        return tensor_model_parallel_all_gather(hidden_states, 0)[:num_tokens], None
+    hidden_size = hidden_states.shape[-1]
+    combined_states = torch.cat([hidden_states, residual], dim=-1)
+    combined_states = tensor_model_parallel_all_gather(combined_states, 0)[:num_tokens]
+    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+    return hidden_states, residual.contiguous()
+
+
 def _patched_forward(
     self,
     input_ids: torch.Tensor | None,
@@ -427,11 +441,8 @@ def _patched_forward(
         start=self.start_layer,
     ):
         # A dense layer following an SP MoE layer expects replicated inputs.
-        if hidden_states.shape[0] != positions.shape[0] and not layer.use_sequence_parallel_moe:
-            combined_states = torch.cat([hidden_states, residual], dim=-1)
-            combined_states = tensor_model_parallel_all_gather(combined_states, 0)[: positions.shape[0]]
-            hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
-            residual = residual.contiguous()
+        if hidden_states.shape[0] != positions.shape[0] and not getattr(layer, "use_sequence_parallel_moe", False):
+            hidden_states, residual = _gather_sequence_parallel_states(hidden_states, residual, positions.shape[0])
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
         # A boundary state belongs to the stage producing it, including end_layer.
         _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
@@ -440,11 +451,7 @@ def _patched_forward(
     # Gather residual together with hidden_states and trim TP padding. This
     # also restores the final norm/logits layout on the last stage.
     if hidden_states.shape[0] != positions.shape[0]:
-        combined_states = torch.cat([hidden_states, residual], dim=-1)
-        combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-        combined_states = combined_states[: positions.shape[0]]
-        hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
-        residual = residual.contiguous()
+        hidden_states, residual = _gather_sequence_parallel_states(hidden_states, residual, positions.shape[0])
 
     if not pp_group.is_last_rank:
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})

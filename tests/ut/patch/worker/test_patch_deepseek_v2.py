@@ -424,6 +424,42 @@ def test_sp_pp_restores_hidden_and_residual(monkeypatch, first, last, dense_afte
         assert output["residual"].is_contiguous()
 
 
+@pytest.mark.parametrize("num_tokens", [3, 4])
+@pytest.mark.parametrize("with_layer", [False, True])
+def test_sp_forward_without_residual_or_layer_sp_attribute(monkeypatch, num_tokens, with_layer):
+    full_hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    local_hidden = full_hidden[:2]
+    gather = Mock(return_value=full_hidden)
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", gather)
+    monkeypatch.setattr(
+        patch_deepseek_v2, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
+
+    # A plain callable has no use_sequence_parallel_moe attribute. With no
+    # layers, the same nullable state reaches the final layout restoration.
+    def layer(positions, hidden, residual, scaling):
+        torch.testing.assert_close(hidden, full_hidden[:num_tokens])
+        assert residual is None
+        return hidden, residual
+
+    def norm(hidden, residual):
+        assert residual is None
+        return hidden, None
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        layers=[layer] if with_layer else [],
+        start_layer=0,
+        end_layer=int(with_layer),
+        aux_hidden_state_layers=(),
+        norm=norm,
+    )
+    output = _patched_forward(model, None, torch.arange(num_tokens), None, inputs_embeds=local_hidden)
+    torch.testing.assert_close(output, full_hidden[:num_tokens])
+    gather.assert_called_once()
+    assert gather.call_args.args[0] is local_hidden
+
+
 def _empty_tensor_factory(batch_size, dtype, device):
     return IntermediateTensors({"hidden_states": torch.zeros((batch_size, 4), dtype=dtype, device=device)})
 
