@@ -116,6 +116,9 @@ def _is_glm_model(model_config) -> bool:
 
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
+    # Model-specific correction must run independently of sampling optimizations.
+    requires_custom_draft_sampling = False
+
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
@@ -1098,7 +1101,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        if self.requires_custom_draft_sampling or get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1277,7 +1280,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample:
+            if self.requires_custom_draft_sampling or get_ascend_config().enable_reduce_sample:
                 if self.method in ("eagle3", "dflash", "dspark", "mtp"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:

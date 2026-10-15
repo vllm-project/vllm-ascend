@@ -337,3 +337,78 @@ This entropy-aware threshold is controlled by two parameters:
     ```
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+## Speculating using Domino (DFlash + GRU correction)
+
+Domino extends DFlash parallel drafting with a recurrent GRU correction head.
+After DFlash produces `num_speculative_tokens` parallel drafts in one forward
+pass, a small GRU sequentially refines each draft position using the realized
+tokens, recovering autoregressive dependency information that pure parallel
+drafting misses.
+
+Domino is **selected by the draft checkpoint**, not by a separate method string
+(vLLM's `SpeculativeMethod` has no `"domino"`). Use `method="dflash"` with a
+Domino draft checkpoint whose `dflash_config.projector_type == "domino"` (e.g.
+`Huang2020/Qwen3-8B-Domino-b16`). vLLM Ascend auto-detects the checkpoint,
+remaps its architecture to `DFlashDominoDraftModel`, and dispatches to
+`AscendDominoProposer`.
+
+```python
+speculative_config = {
+    "method": "dflash",
+    "model": "Huang2020/Qwen3-8B-Domino-b16",
+    "num_speculative_tokens": 8,
+}
+```
+
+The Domino draft checkpoint ships the DFlash weights plus a `prefix_gru` and an
+`embed_proj` correction head (and no `embed_tokens`/`lm_head` of its own - these
+are shared from the target model, exactly as DFlash does). A pure-draft prefix
+of length `pure_draft_prefix_len` (from the checkpoint config) is sampled
+directly from the parallel logits and seeds the GRU together with the bonus
+token; the remaining positions are corrected by `embed_proj(cat([z_i, s_i]))`
+added to the parallel logits.
+
+By default, correction scores the full vocabulary. For an experimental
+candidate-only path, set `domino_candidate_topk` in `additional_config` (not
+`speculative_config`, whose schema is owned by upstream vLLM):
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{"method":"dflash","model":"<domino-draft>","num_speculative_tokens":15}' \
+  --additional-config '{"enable_reduce_sample":true,"domino_candidate_topk":64}'
+```
+
+`domino_candidate_topk=0` (or omitting it) retains full-vocabulary correction.
+`64` first takes the DFlash base-logit top-64, then applies the Domino
+correction only to those candidate rows. This reduces correction work but can
+change a proposal when the full-Domino winner lies outside the base top-64, so
+validate acceptance on the intended workload before enabling it in production.
+
+**Current limitations:**
+
+- The checkpoint must explicitly set `dflash_config.shift_label` to boolean
+  `true` or `false`. `true` samples the root and preceding mask hidden states;
+  `false` samples the mask hidden states themselves. Both seed the correction
+  GRU with the bonus token and pure-draft prefix. Do not change this trained
+  checkpoint setting to select a different inference mode. Supporting both
+  alignments does not establish compatibility with every target architecture;
+  Qwen3.6 target integration still requires separate validation.
+- The correction loop uses fused Triton-Ascend kernels and can be captured by
+  the draft NPUGraph path. Target and draft must use equal TP sizes and PP=1.
+  In TP mode the backbone is sharded, but the correction head and full `gi_table`
+  are replicated on each rank. Global base logits are explicitly all-gathered
+  before correction, independent of `enable_reduce_sample`. The table is built
+  at startup through chunked global-token embedding lookups. Separate lm-head
+  TP groups, reduced draft vocabularies and added-vocabulary layouts are not
+  supported. NPU TP correctness and graph replay require production validation.
+- For batch size greater than one, the fused correction MLP uses a batch-tiled
+  Cube path that reuses each vocabulary-weight tile across requests. Batch size
+  one keeps the vector path, and unsupported dtypes fall back to the original
+  implementation.
+- Domino correction is model logic and does not depend on
+  `additional_config.enable_reduce_sample`.
+- Candidate-only correction currently supports `domino_candidate_topk` values
+  `0` and `64` only. The value is fixed at engine initialization to keep the
+  candidate shape static for NPUGraph capture; capture with `torch.topk` must
+  still be verified on the target NPU/CANN combination.
