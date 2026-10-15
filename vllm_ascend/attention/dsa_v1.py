@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -62,6 +63,7 @@ from vllm_ascend.worker.device_metadata import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
+    from vllm.platforms.interface import DeviceCapability
     from vllm.v1.core.sched.output import SchedulerOutput
 
     from vllm_ascend.ops.triton.dspark_swa_indices import (
@@ -229,8 +231,70 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
     return max(compress_ratio, 1)
 
 
+# The KV cache dtypes each Ascend part implements. A5 stores the compressed
+# cache as fp8; bfloat16 is declared for parity with vLLM ahead of its operator
+# landing there. A3 runs no compressed cache, so an unset value ("auto") stands.
+# Same shape as upstream's DSA_INDEXER_KV_DTYPES in
+# vllm/v1/attention/backends/mla/indexer.py.
+_A5_KV_CACHE_DTYPES = ("bfloat16", "fp8")
+_A3_KV_CACHE_DTYPES = ("bfloat16", "auto")
+
+
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # The union of what the parts above implement. Which one applies is decided
+    # in ``supports_combination``, the way
+    # vllm/models/deepseek_v4/nvidia/flashinfer_sparse.py splits SM10x from SM12x.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+    ]
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype | None,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: "DeviceCapability | None",
+    ) -> str | None:
+        """Reject the KV cache dtypes this part has no implementation for.
+
+        ``auto`` resolves to the model dtype, bfloat16, and is therefore absent
+        from A5's list: the compressed cache there is built as fp8, and the bf16
+        counterpart runs on ``sparse_flash_mla``, which the ascend950 operator set
+        this list is written against does not build. A3 runs no compressed cache
+        and leaves the choice to the config.
+
+        If an operator package ever ships that kernel, bf16 becomes runnable on A5
+        and this belongs on an operator-availability check rather than on the
+        device, the way upstream tests ``has_flashinfer_sparse_mla_sm120()`` next
+        to its SM12x dtype set rather than trusting the capability alone.
+
+        Only ``kv_cache_dtype`` and the device are consulted; the remaining
+        arguments exist to match the upstream signature, and callers that have no
+        value for one pass ``None``. The device comes from the hardware profile
+        rather than from ``device_capability``, which Ascend reports as ``None``.
+
+        Asked by ``NPUPlatform.get_attn_backend_cls`` for the standard layers, and
+        by the DeepSeek sparse layers themselves -- those pick their backend
+        directly and never reach the platform selector.
+        """
+        if kv_cache_dtype is None:
+            return None
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            supported = _A5_KV_CACHE_DTYPES
+        else:
+            supported = _A3_KV_CACHE_DTYPES
+        if kv_cache_dtype in supported:
+            return None
+        return "kv_cache_dtype not supported"
 
     @staticmethod
     def get_name() -> str:
