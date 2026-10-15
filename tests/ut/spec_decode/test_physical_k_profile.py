@@ -47,6 +47,7 @@ class FakeManager:
 
 def config():
     return SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=4),
         additional_config={
             "dynamic_spec_config": {
                 "method": "dspark",
@@ -62,6 +63,17 @@ def test_tp16_keeps_upstream_adaptive_manager_unmodified():
     manager = FakeManager()
 
     assert configure_physical_k_profiling(manager, high_tp_config) is manager
+    assert not hasattr(manager, "_physical_k_profile_cases")
+
+
+def test_noop_minimum_keeps_upstream_adaptive_manager_unmodified():
+    no_op_config = config()
+    no_op_config.additional_config["dynamic_spec_config"]["physical_k"] = {
+        "min_k": 4
+    }
+    manager = FakeManager()
+
+    assert configure_physical_k_profiling(manager, no_op_config) is manager
     assert not hasattr(manager, "_physical_k_profile_cases")
 
 
@@ -128,9 +140,34 @@ def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
     cases = list(manager.batches_to_profile([8]))
     lower_k = [case for case in cases if case["profile_physical_k"] == 3]
     max_k = [case for case in cases if case["profile_physical_k"] == 4]
-    assert len(lower_k) == 10
+    assert len(lower_k) == 15
     assert {case["num_tokens"] for case in lower_k} == {1, 2, 4, 8, 16}
-    assert len(max_k) == 11
+    assert len(max_k) == 15
+
+
+def test_lower_k_profile_median_ignores_one_cold_replay():
+    manager = configure_physical_k_profiling(FakeManager(), config())
+    cases = list(manager.batches_to_profile([8]))
+    slow_replay_seen = False
+    samples = []
+    for case in cases:
+        slow_replay = (
+            case["profile_physical_k"] == 3
+            and case["num_tokens"] == 1
+            and not slow_replay_seen
+        )
+        if slow_replay:
+            slow_replay_seen = True
+        samples.append(
+            SimpleNamespace(
+                num_reqs=case["num_tokens"],
+                drafter_ms=6000.0 if slow_replay else 10.0,
+                physical_k=case["profile_physical_k"],
+                full_cudagraph=True,
+            )
+        )
+    manager.set_initial_cost_curves(samples)
+    assert manager._physical_k_draft_costs[3][1] == 10.0
 
 
 def test_profile_grid_extends_through_large_rl_batch_buckets():

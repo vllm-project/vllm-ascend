@@ -234,6 +234,11 @@ def test_tp8_enables_physical_k_and_wider_tp_falls_back():
     assert physical_k_runtime_enabled(config)
     assert _create_controller(config) is not None
 
+    config.additional_config["dynamic_spec_config"] = compact(min_k=5)
+    assert not physical_k_runtime_enabled(config)
+    assert _create_controller(config) is None
+    config.additional_config["dynamic_spec_config"] = compact()
+
     config.parallel_config.tensor_parallel_size = 16
     assert not physical_k_runtime_enabled(config)
     assert _create_controller(config) is None
