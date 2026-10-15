@@ -345,7 +345,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             if use_full:
                 assert self.decode_cudagraph_manager is not None
                 self._pending_draft_attn_metadata = attn_metadata
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                self.decode_cudagraph_manager.run_fullgraph(batch_desc, num_speculative_steps=num_speculative_steps)
                 if attn_metadata is not None:
                     self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
             else:
