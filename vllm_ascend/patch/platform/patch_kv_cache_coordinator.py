@@ -188,10 +188,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
+        # vLLM #53614 drops the in-flight Mamba checkpoint so EAGLE replay
+        # matches the exported draft state. ``mtp`` counts as eagle, but a
+        # Qwen3.5/3.6 target is itself a GDN hybrid and its Mamba group is not
+        # the draft. Dropping that checkpoint truncates the recurrent state,
+        # so decode collapses to a single token. Only groups marked
+        # ``is_eagle_group`` take the drop; the full-attention fallback above
+        # deliberately leaves target Mamba/GDN groups out.
         if use_eagle:
-            for manager in self.single_type_managers:
-                if isinstance(manager, MambaManager):
+            for group_id, manager in enumerate(self.single_type_managers):
+                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
                     manager.drop_eagle_checkpoint_block = True
 
         # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved

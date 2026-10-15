@@ -85,6 +85,7 @@ class _FakeFAManager:
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.drop_eagle_checkpoint_block = False
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
@@ -153,6 +154,22 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     # even when it is the mamba group (fallback must not overwrite it).
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, mamba_eagle=True)
     assert coordinator.eagle_group_ids == {1}
+
+
+def test_target_gdn_keeps_checkpoint_when_it_is_not_the_draft(monkeypatch):
+    # Qwen3.6 MTP: use_eagle is true, but the target GDN group is not marked
+    # eagle. The checkpoint drop must stay off or decode collapses to one token.
+    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
+    coordinator = _make_coordinator(monkeypatch, use_eagle=True)
+    assert coordinator.eagle_group_ids == {0}
+    assert coordinator.single_type_managers[1].drop_eagle_checkpoint_block is False
+
+
+def test_eagle_mamba_group_still_drops_checkpoint(monkeypatch):
+    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
+    coordinator = _make_coordinator(monkeypatch, use_eagle=True, mamba_eagle=True)
+    assert coordinator.eagle_group_ids == {1}
+    assert coordinator.single_type_managers[1].drop_eagle_checkpoint_block is True
 
 
 # ---------------------------------------------------------------------------
