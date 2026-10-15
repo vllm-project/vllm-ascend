@@ -24,26 +24,26 @@ TEST_REPOSITORY = Path("/vllm-workspace/vllm-ascend")
 
 def validate_path(raw_path: str, *, require_exists: bool = True) -> Path:
     if not raw_path or any(ord(char) < 32 for char in raw_path):
-        raise ValueError("--download path contains a control character")
+        raise ValueError("--log-path path contains a control character")
     path = Path(raw_path)
     if ".." in path.parts:
-        raise ValueError("--download path must not contain '..'")
+        raise ValueError("--log-path path must not contain '..'")
     if not path.is_absolute():
         path = TEST_REPOSITORY / path
     path = Path(os.path.normpath(path))
     if path == Path("/"):
-        raise ValueError("--download cannot select the filesystem root")
+        raise ValueError("--log-path cannot select the filesystem root")
     if any(part in {".git", ".ssh", ".aws", ".kube"} for part in path.parts):
-        raise ValueError("--download cannot select a credential directory")
+        raise ValueError("--log-path cannot select a credential directory")
     if path.name == ".env" or path.name.endswith((".pem", ".key")):
-        raise ValueError("--download cannot select a credential file")
+        raise ValueError("--log-path cannot select a credential file")
     for protected in PROTECTED_ROOTS:
         if path == protected or protected in path.parents or path in protected.parents:
-            raise ValueError(f"--download cannot include protected path: {protected}")
+            raise ValueError(f"--log-path cannot include protected path: {protected}")
     if require_exists and not (path.is_dir() or path.is_file()):
-        raise ValueError(f"--download file or directory does not exist: {path}")
+        raise ValueError(f"--log-path file or directory does not exist: {path}")
     if require_exists and (path.is_symlink() or any(parent.is_symlink() for parent in path.parents)):
-        raise ValueError("--download path must not contain symlinks")
+        raise ValueError("--log-path path must not contain symlinks")
     return path
 
 
@@ -71,21 +71,21 @@ def parse_request(raw: str) -> dict[str, list[str]]:
                 node, value = item[0]
                 paths.setdefault(node, []).append(value)
         else:
-            raise ValueError("--download must be a path or node mapping")
+            raise ValueError("--log-path must be a path or node mapping")
     else:
         paths = {"node0": [raw]}
     if not paths:
-        raise ValueError("--download node mapping must not be empty")
+        raise ValueError("--log-path node mapping must not be empty")
     for node, node_paths in paths.items():
         if not isinstance(node, str) or not node.startswith("node") or not node[4:].isdigit():
-            raise ValueError("--download node keys must be node0, node1, ...")
+            raise ValueError("--log-path node keys must be node0, node1, ...")
         if node != f"node{int(node[4:])}":
-            raise ValueError("--download node numbers must not have leading zeros")
+            raise ValueError("--log-path node numbers must not have leading zeros")
         if not node_paths:
-            raise ValueError("--download node path lists must not be empty")
+            raise ValueError("--log-path node path lists must not be empty")
         for path in node_paths:
             if not isinstance(path, str):
-                raise ValueError("--download node paths must be strings")
+                raise ValueError("--log-path node paths must be strings")
             validate_path(path, require_exists=False)
     return paths
 
@@ -134,7 +134,7 @@ def main() -> None:
     paths = parse_request(args.request)
     if args.node_count is not None:
         if args.node_count < 1 or any(int(node[4:]) >= args.node_count for node in paths):
-            parser.error("--download references a node outside this job")
+            parser.error("--log-path references a node outside this job")
     if args.list:
         for node, node_paths in sorted(paths.items(), key=lambda item: int(item[0][4:])):
             resolved = [str(validate_path(path, require_exists=False)) for path in node_paths]
@@ -146,7 +146,7 @@ def main() -> None:
             print(json.dumps(resolved, separators=(",", ":")))
         return
     if args.node not in paths:
-        parser.error(f"--download does not specify {args.node}")
+        parser.error(f"--log-path does not specify {args.node}")
     sources = [validate_path(path, require_exists=not args.check_only) for path in paths[args.node]]
     if not args.check_only:
         if args.destination is None:
