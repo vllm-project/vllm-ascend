@@ -14,6 +14,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.offloader.base import NoopOffloader, get_offloader
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -44,6 +45,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    supports_strided_mla_cache,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -68,6 +70,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -1179,6 +1182,31 @@ class AscendMLAImpl(MLAAttentionImpl):
             # captured tensor addresses remain valid while the values follow
             # the reloaded source weights and scales.
             self._refresh_prolog_v3_weights()
+        elif not getattr(self, "dcp_enabled", False):
+            self._prepare_prolog_v3_weights_after_loading()
+
+    def _prepare_prolog_v3_weights_after_loading(self) -> None:
+        """Create persistent writer projections inside the loader memory profile."""
+        # Offloaded projections may alias staging buffers outside their onload
+        # context. Preserve their existing lazy preparation contract.
+        if not isinstance(get_offloader(), NoopOffloader):
+            return
+        config = self.vllm_config
+        if enable_sfa(config):
+            return
+        if not config.use_v2_model_runner and (
+            hasattr(config.model_config.hf_config, "compress_ratios")
+            or get_ascend_config().sparse_kv_offload_config.enabled
+        ):
+            # V1 keeps these global cache modes on their legacy writer layout,
+            # including draft layers constructed from the target model config.
+            return
+        attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
+        if not isinstance(attn_module, MLAAttention):
+            return
+        cache_spec = attn_module.get_kv_cache_spec(config)
+        if supports_strided_mla_cache(config, attn_module, cache_spec):
+            self._prepare_prolog_v3_weights()
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
