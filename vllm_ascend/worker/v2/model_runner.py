@@ -60,6 +60,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -143,6 +144,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
+        self._uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -440,11 +442,12 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
-            if any(
+            self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
                 for group in groups
-            ):
+            )
+            if self._uses_flashmla:
                 self.flashmla_executor = DeviceMetadataExecutor()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -709,33 +712,6 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 self.max_num_tokens = global_max_num_tokens
 
-    # SHA-built wheels may report a dev version unrelated to their API.
-    # Select the PD helper contract from the upstream request-state fields.
-    if "decode_graph_eligible" not in BatchReqState._fields:
-
-        def _pd_uniform_decode_token_count(self, batch_state: BatchReqState) -> int | None:
-            # The release request-state contract keys the helper on has_prefill.
-            return vllm_model_runner.get_uniform_decode_token_count(
-                len(batch_state.req_ids),
-                batch_state.num_tokens,
-                int(batch_state.num_scheduled_tokens.max()),
-                batch_state.has_prefill,
-            )
-
-    else:
-
-        def _pd_uniform_decode_token_count(self, batch_state: BatchReqState) -> int | None:
-            # vLLM main renamed the helper argument to decode_graph_eligible;
-            # after the PD reclassification above, has_prefill is False exactly
-            # when no genuinely-prefilling row remains, i.e. the batch is
-            # graph-eligible.
-            return vllm_model_runner.get_uniform_decode_token_count(
-                len(batch_state.req_ids),
-                batch_state.num_tokens,
-                int(batch_state.num_scheduled_tokens.max()),
-                not batch_state.has_prefill,
-            )
-
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
         kv_cfg = self.vllm_config.kv_transfer_config
@@ -753,35 +729,15 @@ class NPUModelRunner(GPUModelRunner):
             if np.any(pd_decode_recompute):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
                 batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = self._pd_uniform_decode_token_count(batch_state)
-        if self.flashmla_executor is not None and batch_state is not None:
-            # Reorder every per-request field before positions, slots, tables
-            # and sampling indices are constructed. A short prompt is prefill.
-            order = np.argsort(batch_state.is_prefilling_np, kind="stable")
-            reordered_fields = dict(
-                req_ids=[batch_state.req_ids[index] for index in order],
-                num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
-                idx_mapping_np=batch_state.idx_mapping_np[order],
-                prefill_len_np=batch_state.prefill_len_np[order],
-                num_computed_prefill_tokens_np=batch_state.num_computed_prefill_tokens_np[order],
-                is_prefilling_np=batch_state.is_prefilling_np[order],
-            )
-            # vLLM main adds optional per-request arrays; v0.30.0 lacks them.
-            for field in ("num_draft_tokens_np", "prefill_runs_as_decode_np"):
-                if field in batch_state._fields:
-                    values = getattr(batch_state, field)
-                    reordered_fields[field] = values[order] if values is not None else None
-            batch_state = batch_state._replace(**reordered_fields)
-            # Real prefill retains FIA, including prompt tails that upstream
-            # may run as decode. Keep FULL graph dispatch on the same route.
-            if batch_state.is_prefilling_np.any():
-                if "decode_graph_eligible" in batch_state._fields:
-                    batch_state = batch_state._replace(decode_graph_eligible=False)
-                uniform_token_count = None
-            elif "decode_graph_eligible" in batch_state._fields and not batch_state.decode_graph_eligible:
-                # PD reclassification may recompute a uniform count without
-                # satisfying upstream's graph gate. Keep that gate restrictive.
-                uniform_token_count = None
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    int(batch_state.num_scheduled_tokens.max()),
+                    batch_state.has_prefill,
+                )
+        if self._uses_flashmla and batch_state is not None:
+            # The backend order must precede derived inputs and graph dispatch.
+            batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

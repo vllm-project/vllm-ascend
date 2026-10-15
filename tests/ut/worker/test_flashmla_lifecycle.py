@@ -328,9 +328,8 @@ def test_draft_preserves_dependency_dp_coordination(wrapper, replicated, adaptiv
     assert obj.parent_call.call_args.args[11] == expected
 
 
-@pytest.mark.parametrize("contract", ["legacy", "main", "main_without_optional_arrays"])
 @pytest.mark.parametrize("external", [False, True])
-def test_request_order_keeps_new_batch_fields_aligned(contract, external):
+def test_request_order_keeps_release_batch_fields_aligned(external):
     fields = (
         "req_ids num_scheduled_tokens idx_mapping_np prefill_len_np "
         "num_computed_prefill_tokens_np is_prefilling_np has_prefill num_tokens"
@@ -345,13 +344,6 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
         True,
         6,
     ]
-    if contract != "legacy":
-        fields += " num_draft_tokens_np prefill_runs_as_decode_np decode_graph_eligible"
-        values += [
-            np.array([0, 3, 0]) if contract == "main" else None,
-            np.array([True, False, True]) if contract == "main" else None,
-            True,
-        ]
     state: Any = namedtuple("BatchReqState", fields)(*values)
 
     class Parent:
@@ -361,10 +353,11 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
     method = source_node(RUNNER, "gather_batch_req_state", "NPUModelRunner")
     cls = class_node("Runner", [ast.Name(id="Parent", ctx=ast.Load())], [method])
     scope: dict[str, Any] = {"np": np, "Parent": Parent}
-    compile_nodes([cls], scope)
+    compile_nodes([source_node("vllm_ascend/attention/flashmla.py", "prepare_flashmla_batch_req_state"), cls], scope)
     runner = scope["Runner"]()
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
-    runner.flashmla_executor = object() if external else None
+    runner._uses_flashmla = external
+    runner.flashmla_executor = None if external else object()
     result, uniform_count = runner.gather_batch_req_state(None, False)
     order = [1, 0, 2] if external else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
@@ -373,8 +366,6 @@ def test_request_order_keeps_new_batch_fields_aligned(contract, external):
         actual = getattr(result, field)
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
-        elif field == "decode_graph_eligible" and external:
-            assert actual is False
         elif field != "req_ids":
             assert actual == expected
     assert uniform_count == (None if external else 4)

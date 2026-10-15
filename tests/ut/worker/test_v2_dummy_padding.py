@@ -26,6 +26,7 @@ def buffers():
 def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.flashmla_executor = None
+    runner._uses_flashmla = False
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.input_buffers = buffers
     runner.debugger = None

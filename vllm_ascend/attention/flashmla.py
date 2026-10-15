@@ -11,7 +11,9 @@ in preflight tests: the decode hot path must not copy lengths or tables to the C
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -19,11 +21,37 @@ from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashml
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataStage, DeviceMetadataTask
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
+
 FLASHMLA_QK_DIM = 576
 FLASHMLA_V_DIM = 512
 FLASHMLA_BLOCK_SIZE = 128
 FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_MAX_BATCH_SIZE = 65535
+
+
+def prepare_flashmla_batch_req_state(
+    batch_state: "BatchReqState", uniform_token_count: int | None
+) -> tuple["BatchReqState", int | None]:
+    """Order real decode before FIA prefill before inputs and graph dispatch.
+
+    Reorder the release request-state fields together so positions, KV slots
+    and sampling indices inherit the same order. A one-token prompt remains
+    FIA prefill and cannot reuse a graph captured for FlashMLA decode.
+    """
+    order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+    batch_state = batch_state._replace(
+        req_ids=[batch_state.req_ids[index] for index in order],
+        num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
+        idx_mapping_np=batch_state.idx_mapping_np[order],
+        prefill_len_np=batch_state.prefill_len_np[order],
+        num_computed_prefill_tokens_np=batch_state.num_computed_prefill_tokens_np[order],
+        is_prefilling_np=batch_state.is_prefilling_np[order],
+    )
+    if batch_state.has_prefill:
+        uniform_token_count = None
+    return batch_state, uniform_token_count
 
 
 def split_flashmla_requests(common) -> tuple[int, int, int, int]:
