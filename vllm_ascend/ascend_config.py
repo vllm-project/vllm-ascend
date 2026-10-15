@@ -432,6 +432,7 @@ class AscendConfig:
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
+            "enable_dspark_draft_kv_optimistic_bound": false,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
@@ -580,6 +581,13 @@ class AscendConfig:
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
+    # Parallel drafting (DFlash / DSpark): upstream keeps a draft build's true KV
+    # lengths on the device and hands the host only an optimistic bound, so the
+    # attention builder otherwise pays a blocking device->host copy every step
+    # (issue #16271). When enabled, the draft build publishes that bound as its
+    # host mirror. Eligible eager draft builds mask the rolled-back ``[L, U)``
+    # tail using exact device lengths; unsupported builds read the exact lengths.
+    enable_dspark_draft_kv_optimistic_bound: bool = False
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the

@@ -403,6 +403,14 @@ def build_attn_metadata(
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
         skip_ring_state_update = ring_state_update_skipped()
+    # Record provenance before the mainline fallback fills seq_lens_np with
+    # per-request bounds. A bound converted to numpy is still not exact.
+    seq_lens_cpu_is_exact = seq_lens_np is not None
+    seq_lens_cpu_is_approximate = bool(
+        not seq_lens_cpu_is_exact
+        and seq_lens_cpu_upper_bound is not None
+        and get_ascend_config().enable_dspark_draft_kv_optimistic_bound
+    )
     if seq_lens_np is None:
         if seq_lens_cpu_upper_bound is not None:
             # FIA needs a CPU-side seq_lens upper bound for each request when
@@ -505,6 +513,8 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
+            seq_lens_cpu_is_approximate=seq_lens_cpu_is_approximate,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,

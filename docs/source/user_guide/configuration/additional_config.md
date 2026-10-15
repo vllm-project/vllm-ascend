@@ -85,6 +85,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
+| `enable_dspark_draft_kv_optimistic_bound` | bool | `False` | Parallel drafting (DFlash / DSpark): use a trusted CPU KV-length upper bound for eligible eager, rectangular draft batches in the standard non-context-parallel attention backend. A device mask uses exact lengths to hide the rolled-back tail, avoiding the blocking device-to-host length read. Unsupported builds or layers fall back to exact lengths. Requires draft `enforce_eager=true`; does not enable the masked path for draft graph replay (issue [#16271](https://github.com/vllm-project/vllm-ascend/issues/16271)). |
 
 The details of each configuration option are as follows:
 
