@@ -1006,6 +1006,12 @@ class KVPoolWorker:
 
         layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
+            if self.use_kvpp:
+                # Both data planes address the compact owner-only cache table.
+                # phys is stage-local; PP offsets belong to remote keys only.
+                self.physical_layer_to_group_layers.setdefault(phys, []).append(
+                    (group_id, len(layer_cache_entry_offsets) - 1)
+                )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 for cache in self._as_cache_tuple(cache_or_caches):
@@ -1122,6 +1128,7 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
+            self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {
                 name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
@@ -1233,6 +1240,10 @@ class KVPoolWorker:
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
+        if self.use_kvpp:
+            assert self.layer_load_finished_events is not None
+            for event in self.layer_load_finished_events:
+                event.clear()
         reset_attention_compute_start_gate()
         self._attention_saved_layers = set()
         self.process_layer_data(metadata.requests)
@@ -2175,6 +2186,8 @@ class KVPoolWorker:
         return self._make_layerwise_full_key(0, block_hash_or_tail)
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
+        if self.use_kvpp:
+            return self.physical_layer_to_group_layers.get(local_layer, [])
         if self.use_block_key_layerwise:
             # The map and buffer builders both use stage-local physical layer
             # indices. A group's dense layer index is a third, distinct axis.
@@ -2814,6 +2827,21 @@ class KVPoolWorker:
             if submit_layer_load(layer_id):
                 submitted_layers += 1
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Non-consuming completion signal shared by attention and KVPP."""
+        physical_layer = self._extract_physical_layer_index(layer_name)
+        layer_id = self._global_to_local_layer.get(physical_layer, physical_layer)
+        assert self.kv_recv_thread is not None
+        self.kv_recv_thread.raise_if_failed()
+        if not self.layer_load_tasks[layer_id] and layer_id not in self.prefetch_layer_map:
+            return
+        assert self.layer_load_finished_events is not None
+        while not self.layer_load_finished_events[layer_id].wait(timeout=1):
+            self.kv_recv_thread.raise_if_failed()
+            if self._layer_load_aborted.is_set():
+                raise RuntimeError("Layerwise load aborted before KVPP broadcast")
+        self.kv_recv_thread.raise_if_failed()
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -2858,10 +2886,15 @@ class KVPoolWorker:
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        self.layer_load_finished_events[self.current_layer].clear()
-        if getattr(self, "block_key_hybrid", False) and self.current_layer == self.num_layers - 1:
+        # The KVPP prefetch task may observe this event after attention does.
+        # Reset shared completion at metadata binding for the next step.
+        if not self.use_kvpp:
+            self.layer_load_finished_events[self.current_layer].clear()
+        if (
+            getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
+        ) and self.current_layer == self.num_layers - 1:
             # The final model layer can have no reachable load rows. Completion
-            # belongs to the whole request, not whichever group happens to end here.
+            # also belongs to the whole request when this rank does not own it.
             for req_id in self._current_layerwise_last_chunk_req_ids:
                 self.kv_recv_thread.set_finished_request(req_id)
         if getattr(self, "use_block_key_layerwise", False) and (

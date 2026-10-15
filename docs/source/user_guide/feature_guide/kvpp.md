@@ -48,6 +48,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
+| Mooncake layerwise KV pooling | Implementation available | `AscendStoreConnector`, `backend="mooncake"`, `use_layerwise=true`, and synchronous layerwise loading. GLM-5.2 NPU validation is pending. |
 | PCP + P/D disaggregation + KVPP | ❌ Not supported | `MooncakeConnectorV2` does not yet support PCP. |
 | PCP + KV pooling + KVPP | ❌ Not supported | PCP and KV pooling are individually supported with KVPP, but the three-way combination is not supported. |
 
@@ -68,6 +69,44 @@ vllm serve <model-path> \
 Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
+
+### GLM-5.2 with Mooncake layerwise pooling
+
+Use a Mooncake client implementing the range/session APIs described in the
+[Mooncake layerwise guide](mooncake_layerwise_adaptation_and_optimization.md).
+After starting Mooncake Master and setting `MOONCAKE_CONFIG_PATH`, launch:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <glm-5.2-model-path> \
+    --trust-remote-code \
+    --quantization ascend \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --enforce-eager \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --additional-config '{"enable_kvpp": true}' \
+    --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":true,"load_async":false}}'
+```
+
+The example assumes an Ascend-quantized GLM-5.2 checkpoint. Main SFA KV and
+indexer caches are loaded only by their layer owner, then broadcast together
+before either cache is read or updated. Fixed-step MTP caches remain local and
+are included in the owner's pool objects independently of target-layer ownership.
+
+Mooncake objects use a separate KVPP topology namespace because their layer
+ranges differ from ordinary replicated-cache objects. Every required owner key
+must be readable before the scheduler reports a prefix hit. KVPP-enabled and
+KVPP-disabled deployments therefore do not share these pool objects.
+
+This combination uses Mooncake's existing block-key layerwise transfer protocol.
+It does not enable cross-layer reuse of persistent owner caches. Existing Mooncake
+restrictions on PCP, DCP, and mismatched producer/consumer topology still apply.
+Start with MRV2, eager execution, and TP8; graph execution and NPU performance
+need separate validation. The added GLM-5.2 E2E test covers write/reload after
+resetting local prefix cache, batched replay, chunked prefill, and fixed-step MTP;
+it requires real Ascend NPUs and Mooncake services.
 
 ### Combining Features
 
