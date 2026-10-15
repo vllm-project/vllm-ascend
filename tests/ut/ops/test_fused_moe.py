@@ -2118,6 +2118,7 @@ def test_runner_without_routed_input_transform_keeps_original_shared_input_path(
 
 def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._early_shared_output_event = False
     latent_states = torch.randn(4, 2)
     full_states = torch.randn(4, 4)
     operation_order = []
@@ -3256,3 +3257,67 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("quant_type", [QuantType.NONE, QuantType.W4A8])
+@pytest.mark.parametrize("fail_transform", [False, True])
+def test_early_shared_output_event_order_and_fallback(monkeypatch, enabled, overlap, quant_type, fail_transform):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._early_shared_output_event = enabled
+    states = torch.randn(4, 2)
+    output = torch.randn(4, 4)
+    operations = []
+    events = []
+
+    def record():
+        event = object()
+        events.append(event)
+        operations.append(("record", event))
+        return event
+
+    def transform(value):
+        assert value is states
+        operations.append(("transform",))
+        if fail_transform:
+            raise ValueError("transform failed")
+        return output, None
+
+    runner.routed_output_transform = transform
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=overlap,
+        quant_type=quant_type,
+        parallel_mode=lambda: SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+        record_output_ready=record,
+        wait_for_output=lambda: operations.append(("wait_stream",)),
+    )
+    stream = MagicMock()
+    stream.wait_event.side_effect = lambda event: operations.append(("wait_event", event))
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    early = enabled and overlap and quant_type is QuantType.W4A8
+    for _ in range(2):
+        operations.clear()
+        if fail_transform:
+            with pytest.raises(ValueError, match="transform failed"):
+                runner.apply_routed_output_transform(states)
+        else:
+            assert runner.apply_routed_output_transform(states) is output
+        expected = (["record"] if early else []) + ["transform"]
+        if overlap and not fail_transform:
+            expected.append("wait_event" if early else "wait_stream")
+        assert [op[0] for op in operations] == expected
+        if early and not fail_transform:
+            assert operations[0][1] is operations[-1][1]
+    if early:
+        assert len(events) == 2 and events[0] is not events[1]
+    stream.synchronize.assert_not_called()
+
+
+def test_record_shared_output_ready_uses_shared_stream(monkeypatch):
+    shared = AscendSharedExperts.__new__(AscendSharedExperts)
+    stream = MagicMock()
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: stream)
+    assert shared.record_output_ready() is stream.record_event.return_value
+    stream.record_event.assert_called_once_with()
+    stream.synchronize.assert_not_called()
