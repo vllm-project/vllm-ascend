@@ -237,6 +237,7 @@ jobs:
       base_sha: ${{ matrix.target.base_sha }}
       test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
+      coverage-upload: artifact
       coverage-obs-prefix: ${{ matrix.target.coverage_obs_prefix }}
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
       timeout-minutes: 180
