@@ -58,6 +58,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
+from vllm_ascend.observability.forward_metrics import run_timed_forward
+from vllm_ascend.observability.forward_metrics_config import forward_phase
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import (
@@ -1383,6 +1385,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
+            collector = getattr(self.runner, "forward_time_collector", None)
+            if collector is not None and collector.collect_draft and scheduler_output is not None:
+                run_draft = partial(
+                    run_timed_forward,
+                    collector,
+                    "draft",
+                    lambda: forward_phase(self.runner.attn_state, draft=True),
+                    self.runner.input_batch.num_reqs,
+                    run_draft,
+                )
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)

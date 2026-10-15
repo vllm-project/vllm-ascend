@@ -181,6 +181,8 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.observability.forward_metrics import ForwardTimeCollector, npu_stream_id, run_timed_forward
+from vllm_ascend.observability.forward_metrics_config import ForwardTimeMetricsConfig, forward_phase
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
@@ -421,6 +423,23 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.forward_time_collector: ForwardTimeCollector | None = None
+        timing_config = ForwardTimeMetricsConfig.from_mapping(self.ascend_config.forward_time_metrics_config)
+        if timing_config.enabled:
+            if type(self) is not NPUModelRunner:
+                raise ValueError("Forward timing currently supports the standard Model Runner V1 only")
+            self.forward_time_collector = ForwardTimeCollector(
+                self.parallel_config.rank,
+                timing_config.window_size,
+                timing_config.target_batch_sizes,
+                stream_getter=npu_stream_id,
+                labels={
+                    "dp_rank": self.parallel_config.data_parallel_rank,
+                    "tp_rank": get_tp_group().rank_in_group,
+                    "pp_rank": get_pp_group().rank_in_group,
+                },
+                collect_draft=timing_config.collect_draft,
+            )
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         self.kvpp = KVPPRuntime()
@@ -2684,9 +2703,21 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            collector = getattr(self, "forward_time_collector", None)
+            if collector is None:
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
+            else:
+                hidden_states = run_timed_forward(
+                    collector,
+                    "target",
+                    lambda: forward_phase(self.attn_state, bool(scheduler_output.scheduled_spec_decode_tokens)),
+                    self.input_batch.num_reqs,
+                    lambda: self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                    ),
+                )
             self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
                 profiling_chunk_config,
                 execution_start_time,

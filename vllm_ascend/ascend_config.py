@@ -598,6 +598,7 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    forward_time_metrics_config: dict[str, Any] = dataclasses.field(default_factory=dict)
     runtime_config_path: str | None = None
     runtime_config_hot_reload: bool = False
     # Runtime object constructed in init_ascend_config (not from additional_config dict).
@@ -653,6 +654,14 @@ class AscendConfig:
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
+    @field_validator("forward_time_metrics_config", mode="before")
+    @classmethod
+    def _validate_forward_time_metrics(cls, value):
+        from vllm_ascend.observability.forward_metrics_config import ForwardTimeMetricsConfig
+
+        ForwardTimeMetricsConfig.from_mapping(value)
+        return {} if value is None else value
+
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
@@ -680,6 +689,16 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.forward_time_metrics_config.get("enabled", False):
+            if vc.use_v2_model_runner:
+                raise ValueError("forward_time_metrics_config currently supports Model Runner V1 only")
+            spec = vc.speculative_config
+            if (
+                self.forward_time_metrics_config.get("collect_draft", True)
+                and spec is not None
+                and spec.method not in ("mtp", "eagle", "eagle3")
+            ):
+                raise ValueError("Draft forward timing supports MTP/EAGLE only; set collect_draft=false")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

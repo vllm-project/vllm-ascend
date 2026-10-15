@@ -370,6 +370,12 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        collector = getattr(getattr(self, "model_runner", None), "forward_time_collector", None)
+        if collector is not None:
+            try:
+                collector.flush_window(final=True)
+            except Exception:
+                logger.warning("Could not flush forward timing samples during shutdown", exc_info=True)
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
