@@ -347,9 +347,7 @@ For example, add `"qos_priority": 1` alongside your existing parallelism setting
   "kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_connector_extra_config": {
-    "qos_priority": 1,
-    "prefill": {"dp_size": 1, "tp_size": 2},
-    "decode": {"dp_size": 1, "tp_size": 2}
+    "qos_priority": 1
   }
 }
 ```
@@ -464,15 +462,7 @@ Modify `run_dp_template.sh` on each node.
       '{"kv_connector": "LayerwisePushConnector",
       "kv_role": "kv_producer",
       "kv_port": "36000",
-      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                 },
-                 "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
-                 }
+      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
           }
       }'
     ```
@@ -519,15 +509,7 @@ Modify `run_dp_template.sh` on each node.
       '{"kv_connector": "LayerwisePushConnector",
       "kv_role": "kv_producer",
       "kv_port": "36100",
-      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                 },
-                 "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
-                 }
+      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
           }
       }'
     ```
@@ -574,15 +556,7 @@ Modify `run_dp_template.sh` on each node.
       '{"kv_connector": "LayerwisePushConnector",
       "kv_role": "kv_consumer",
       "kv_port": "36200",
-      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                 },
-                 "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
-                 }
+      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
           }
       }'
     ```
@@ -629,16 +603,7 @@ Modify `run_dp_template.sh` on each node.
       '{"kv_connector": "LayerwisePushConnector",
       "kv_role": "kv_consumer",
       "kv_port": "36200",
-      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                 },
-                 "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
-                 }
+      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
           }
       }'
     ```

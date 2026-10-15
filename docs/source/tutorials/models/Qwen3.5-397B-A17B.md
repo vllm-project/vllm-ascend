@@ -475,15 +475,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   '{"kv_connector": "LayerwisePushConnector",
     "kv_role": "kv_producer",
     "kv_port": "23010",
-    "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-      "prefill": {
-        "dp_size": 1,
-        "tp_size": 16
-      },
-      "decode": {
-        "dp_size": 1,
-        "tp_size": 16
-      }
+    "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
     }
   }'
 ```
@@ -547,15 +539,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
-    "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-      "prefill": {
-        "dp_size": 1,
-        "tp_size": 16
-      },
-      "decode": {
-        "dp_size": 1,
-        "tp_size": 16
-      }
+    "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
     }
   }'
 ```
