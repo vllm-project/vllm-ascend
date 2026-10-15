@@ -4,6 +4,7 @@
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -27,7 +28,9 @@ def test_fp8_decode_matches_all_256_torch_e4m3fn_encodings():
         def to(self, dtype, bitcast=False):
             return (self.view(dtype) if bitcast else self.astype(dtype)).view(Lanes)
 
-    scope = {"tl": SimpleNamespace(float32=np.float32, where=lambda *args: np.where(*args).view(Lanes))}
+    scope: dict[str, Any] = {
+        "tl": SimpleNamespace(float32=np.float32, where=lambda condition, x, y: np.where(condition, x, y).view(Lanes))
+    }
     exec(compile(ast.Module(body=[function], type_ignores=[]), score_module.__file__, "exec"), scope)
     values = np.arange(256, dtype=np.int32).view(Lanes)
     actual = scope[function.name](values)
