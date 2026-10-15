@@ -294,7 +294,9 @@ class TestKVPoolScheduler(unittest.TestCase):
 
             # Spec created but the request is aborted before any scheduling
             # step consumes it (async-transfer abort / queue-time abort).
-            scheduler.update_state_after_alloc(request, MagicMock(), 32)
+            blocks = MagicMock()
+            blocks.get_block_ids.return_value = [[0, 1]]
+            scheduler.update_state_after_alloc(request, blocks, 32)
 
             sched_output = MagicMock()
             sched_output.finished_req_ids = {req_id}
