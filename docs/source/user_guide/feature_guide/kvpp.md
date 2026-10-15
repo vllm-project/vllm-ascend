@@ -33,8 +33,7 @@ The following table lists individual feature combinations with KVPP. It does not
 
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
-| Eager mode | ✅ Supported | Use `--enforce-eager`. |
-| Graph mode | ✅ Supported | PIECEWISE only. |
+| Graph mode | ✅ Supported | Eager and PIECEWISE. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
 | PP | ✅ Supported | Can be combined with KVPP. |
@@ -62,7 +61,7 @@ vllm serve <model-path> \
     --additional-config '{"enable_kvpp": true}'
 ```
 
-Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
+Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
 
@@ -85,7 +84,7 @@ vllm serve <model-path> \
 
 Adjust the token budget and maximum number of sequences to device capacity and workload.
 
-For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks; Model Runner V1 does not support KVPP with PCP.
+For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks.
 
 For PP, add `enable_kvpp` to the existing PP launch configuration.
 
@@ -114,6 +113,18 @@ Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consume
 ```
 
 Each worker uses a handshake port derived from `kv_port` and its parallel rank. Choose non-overlapping port ranges when both nodes run on one host.
+
+### Memcache Pooling
+
+KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
+
+Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
+
+```bash
+--kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
+```
+
+The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false` and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
 
 ### Combining Connectors
 
@@ -147,18 +158,6 @@ The pooling backend still requires its own SDK and service configuration.
   }
 }
 ```
-
-### Memcache Pooling
-
-KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
-
-Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
-
-```bash
---kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
-```
-
-The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false` and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
 
 ## Performance
 
