@@ -32,6 +32,48 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
             self.assertEqual(result["weight_scale"].shape, (128, 256 // gs))
             self.assertEqual(result["weight_scale"].dtype, torch.uint8)
 
+    def test_get_pergroup_param_preserves_partial_group(self):
+        self.scheme.group_size = 32
+        result = self.scheme.get_pergroup_param(4304, 128, torch.bfloat16)
+        self.assertEqual(result["weight_scale"].shape, (128, 135))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_partial_scale_group_round_trip(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.zeros(4, 2152, dtype=torch.uint8), requires_grad=False)
+        scales = torch.randint(0, 255, (4, 135), dtype=torch.uint8)
+        layer.weight_scale = nn.Parameter(scales.clone(), requires_grad=False)
+        for _ in range(2):
+            self.scheme.process_weights_after_loading(layer)
+            unpacked = layer.weight_scale.transpose(-3, -2).reshape(4, 136)
+            self.assertTrue(torch.equal(unpacked[:, :135], scales))
+            self.assertTrue(torch.equal(unpacked[:, 135], torch.zeros(4, dtype=torch.uint8)))
+            self.scheme.restore_weights_for_rl_loading(layer)
+            self.assertTrue(torch.equal(layer.weight_scale, scales))
+            self.assertTrue(layer.weight_scale.is_contiguous())
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_apply_restores_activation_shape_and_expands_bias(self, mock_npu):
+        for shape in [(64,), (6, 64), (2, 3, 64), (2, 2, 3, 64)]:
+            with self.subTest(shape=shape):
+                x = torch.randn(*shape, dtype=torch.bfloat16)
+                flat_x = x.reshape(-1, shape[-1])
+                quantized = torch.zeros_like(flat_x, dtype=torch.uint8)
+                scale = torch.zeros(flat_x.shape[0], 2, dtype=torch.uint8)
+                mock_npu.npu_dynamic_mx_quant.return_value = (quantized, scale)
+                projected = torch.randn(flat_x.shape[0], 16, dtype=x.dtype)
+                mock_npu.npu_quant_matmul.return_value = projected
+                bias = torch.randn(16, dtype=x.dtype)
+                output = self.scheme.apply(MagicMock(), x, bias)
+                quant_input = mock_npu.npu_dynamic_mx_quant.call_args.args[0]
+                self.assertTrue(torch.equal(quant_input, flat_x))
+                matmul_bias = mock_npu.npu_quant_matmul.call_args.kwargs["bias"]
+                self.assertEqual(matmul_bias.shape, (1, 16))
+                self.assertTrue(torch.equal(matmul_bias[0], bias))
+                self.assertEqual(output.shape, (*shape[:-1], 16))
+                self.assertTrue(torch.equal(output.reshape(-1, 16), projected))
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_weights_after_loading_transposes(self, mock_npu):
         # npu_format_cast returns the input tensor (mocked as identity)

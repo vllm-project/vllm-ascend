@@ -72,7 +72,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
+        scale_groups = (input_size + self.group_size - 1) // self.group_size
+        params_dict["weight_scale"] = torch.empty(output_size, scale_groups, dtype=torch.uint8)
         return params_dict
 
     def prepare_input_for_overlap(
@@ -92,6 +93,14 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        input_shape = None
+        if isinstance(x, torch.Tensor) and x.dim() != 2:
+            # Weight-NZ quant matmul accepts only matrices, while ViT linears
+            # also receive batched activations. Quantize the flattened tokens
+            # and restore the leading dimensions after the projection.
+            input_shape = x.shape
+            x = x.reshape(-1, x.shape[-1])
+
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
             assert x.scale is not None
@@ -103,6 +112,10 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         else:
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
             output_dtype = x.dtype
+
+        # The MXFP4 Weight-NZ kernel requires a matrix-shaped bias.
+        if bias is not None and bias.dim() == 1:
+            bias = bias.unsqueeze(0)
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -117,6 +130,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             group_sizes=[0, 0, self.group_size],
         )
 
+        if input_shape is not None:
+            output = output.reshape(*input_shape[:-1], output.shape[-1])
         return output
 
     def process_weights_after_loading(self, layer):
@@ -140,6 +155,11 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         )
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         n, k = layer.weight_scale.shape
+        # MX scales are paired in the Weight-NZ layout. Preserve the final
+        # partial group (e.g. ViT K=4304) and pad only the unused scale byte.
+        if k % 2:
+            layer.weight_scale.data = torch.nn.functional.pad(layer.weight_scale.data, (0, 1))
+            k += 1
         layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
         layer._mxfp4_transformed = True
 
@@ -154,7 +174,11 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
         orig_scale_shape = layer._mxfp4_original_shapes["weight_scale"]
-        layer.weight_scale.data = layer.weight_scale.data.transpose(-3, -2).reshape(orig_scale_shape)
+        layer.weight_scale.data = (
+            layer.weight_scale.data.transpose(-3, -2)
+            .reshape(orig_scale_shape[0], -1)[:, : orig_scale_shape[1]]
+            .contiguous()
+        )
         layer._mxfp4_transformed = False
 
 
