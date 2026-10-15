@@ -94,6 +94,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
+    DeviceMetadataTask,
     wait_for_device_metadata,
 )
 
@@ -128,7 +129,12 @@ def _dsa_dcp_debug(kind: str, msg: str) -> None:
     if _dsa_dcp_debug_on() and _DSA_DCP_DEBUG_BUDGET.get(kind, 0) > 0:
         _DSA_DCP_DEBUG_BUDGET[kind] -= 1
         print(f"[dsa-dcp-debug {kind}]{msg}", flush=True)
-
+# python -c "
+# import vllm_ascend.patch.platform.patch_kv_cache_coordinator as m
+# import vllm.v1.core.kv_cache_coordinator as c
+# print(m.get_kv_cache_coordinator is c.get_kv_cache_coordinator)
+# print(c.get_kv_cache_coordinator.__module__)
+# "
 
 # One-shot KV-usage logging: keyed by (rank, group type, request batch
 # fingerprint) so each request logs its storage split / cache sizes exactly
@@ -503,7 +509,11 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         num_reqs = common_attn_metadata.num_reqs
         req_metadata = metadata.req_metadata
         assert req_metadata is not None
-        seq_lens_cpu = self._seq_lens_cpu(common_attn_metadata)[:num_reqs]
+        # Keep every DCP-local quantity device-resident: these buffers feed the
+        # per-step metadata and slot remaps, so deriving them from CPU tensors
+        # would freeze the first step's lengths under ACL graph capture (and
+        # costs a host sync every eager step).
+        seq_lens = self.seq_lens[:num_reqs]
 
         context = AscendDSADCPContext(
             dcp_size=self.dcp_size,
@@ -516,13 +526,13 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         )
 
         local_cmp = get_dsa_dcp_local_compressed_seq_lens(
-            seq_lens_cpu,
+            seq_lens,
             self.dcp_size,
             self.dcp_rank,
             self.cp_interleave_size,
             self.compressor_ratio,
         )
-        self.dcp_local_cmp_buf[:num_reqs].copy_(local_cmp.to(self.dcp_local_cmp_buf.device))
+        self.dcp_local_cmp_buf[:num_reqs].copy_(local_cmp.to(torch.int32))
         torch.cumsum(
             self.dcp_local_cmp_buf[:num_reqs],
             dim=0,
@@ -532,20 +542,20 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         if num_reqs + 1 < self.dcp_local_cu_cmp_buf.shape[0]:
             self.dcp_local_cu_cmp_buf[num_reqs + 1 :].zero_()
         local_residual = get_dsa_dcp_local_cmp_residual(
-            seq_lens_cpu,
+            seq_lens,
             self.dcp_size,
             self.dcp_rank,
             self.cp_interleave_size,
             self.compressor_ratio,
             self.storage_block_size,
         )
-        self.dcp_local_cmp_residual_buf[:num_reqs].copy_(local_residual.to(self.dcp_local_cmp_residual_buf.device))
+        self.dcp_local_cmp_residual_buf[:num_reqs].copy_(local_residual.to(torch.int32))
         global_cmp = torch.div(
-            seq_lens_cpu.to(torch.int64),
+            seq_lens.to(torch.int64),
             self.compressor_ratio,
             rounding_mode="floor",
         ).to(torch.int32)
-        self.dcp_global_cmp_buf[:num_reqs].copy_(global_cmp.to(self.dcp_global_cmp_buf.device))
+        self.dcp_global_cmp_buf[:num_reqs].copy_(global_cmp)
 
         context.local_cmp_seq_lens = self.dcp_local_cmp_buf[:num_reqs]
         context.local_cu_cmp_seqlens = self.dcp_local_cu_cmp_buf[: num_reqs + 1]
@@ -576,14 +586,40 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         """Switch the shared sas/qli metadata to DCP-local compressed lens."""
         num_reqs = context.num_reqs
         req_metadata.cu_cmp_seqlen_list = context.local_cu_cmp_seqlens
-        # Drop the base async ATTENTION task: it would rebuild the buffer
-        # with global compressed lengths after this synchronous local
-        # rebuild. The COMPRESSOR task keeps running (identity table).
-        self._drop_device_metadata_tasks(DeviceMetadataStage.ATTENTION)
-        # Rebuild every step: the metadata carries the growing decode
-        # cu_seqlens, so caching its contents would freeze the first step's
-        # lengths (the buffer returned by _build_local_sas_metadata IS
-        # sas_metadata_buffer, which would make the cached copy a no-op).
+        # Replace the base async tasks with DCP-local ones.  The runner takes
+        # and re-runs these tasks EVERY step, which is what keeps the metadata
+        # buffer tracking the growing decode lengths -- a synchronous build()
+        # alone is only valid where it runs (eager); under ACL graph capture it
+        # would freeze the captured step's metadata for every replay, which
+        # shows up as the first decode step being right and every later step
+        # drifting.  The COMPRESSOR task keeps running (identity table).
+        self._drop_device_metadata_tasks(
+            DeviceMetadataStage.ATTENTION,
+            DeviceMetadataStage.INDEXER,
+        )
+        dcp_tasks = (
+            DeviceMetadataTask(
+                DeviceMetadataStage.ATTENTION,
+                lambda: self._build_local_sas_metadata(context, common_attn_metadata),
+                id(self.sas_metadata_buffer),
+            ),
+            DeviceMetadataTask(
+                DeviceMetadataStage.ATTENTION,
+                lambda: self._build_local_swa_only_metadata(context, common_attn_metadata),
+                id(self.swa_sas_metadata_buffer),
+            ),
+        )
+        if self.compressor_ratio == 4:
+            dcp_tasks += (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.INDEXER,
+                    lambda: self._refresh_local_qli(context, common_attn_metadata),
+                    id(self.qli_metadata_buffer),
+                ),
+            )
+        self._device_metadata_tasks = self._device_metadata_tasks + dcp_tasks
+        # Also build once inline so the buffers are valid for the step being
+        # constructed (eager) and at the capture step itself.
         self._build_local_sas_metadata(context, common_attn_metadata)
         req_metadata.sas_metadata = self.sas_metadata_buffer
         self._build_local_swa_only_metadata(context, common_attn_metadata)
@@ -794,29 +830,33 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         """Request index per compressor output row (global group order).
 
         The compressor emits one row per compression group completed by this
-        step's queries, ordered by request.  Recompute the same counts from
-        start_pos / query lengths (CPU-side, no device sync) so the slot
-        remap can address the correct request's block-table row.
+        step's queries, ordered by request, so the slot remap can address the
+        correct request's block-table row.
+
+        Computed entirely on device with a STATIC output shape:
+        ``repeat_interleave`` over a data-dependent count would produce a
+        data-dependent output shape, which forces a host sync per step and
+        freezes the mapping under ACL graph capture.  The equivalent fixed
+        length form is "row j belongs to the request whose cumulative group
+        count first exceeds j".
         """
         num_reqs = context.num_reqs
-        seq_lens_cpu = self._seq_lens_cpu(common_attn_metadata)[:num_reqs].to(torch.int64)
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1].to(torch.int64)
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        start_pos = (seq_lens_cpu - query_lens).clamp(min=0)
+        seq_lens = self.seq_lens[:num_reqs].to(torch.int64)
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1].to(torch.int64)
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        start_pos = (seq_lens - query_lens).clamp(min=0)
         ratio = self.compressor_ratio
         completed = (
             torch.div(start_pos + query_lens, ratio, rounding_mode="floor")
             - torch.div(start_pos, ratio, rounding_mode="floor")
         ).clamp(min=0)
-        row_reqs = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int64),
-            completed,
-        )
+        cumulative = torch.cumsum(completed, dim=0)
         buf = self.dcp_compress_row_reqs_buf
-        n = min(row_reqs.numel(), buf.shape[0])
-        buf[:n].copy_(row_reqs[:n], non_blocking=True)
-        if n < buf.shape[0]:
-            buf[n:].fill_(max(num_reqs - 1, 0))
+        rows = torch.arange(buf.shape[0], dtype=torch.int64, device=buf.device)
+        row_reqs = torch.searchsorted(cumulative, rows, right=True)
+        last_req = max(num_reqs - 1, 0)
+        valid = rows < cumulative[-1]
+        buf.copy_(torch.where(valid, row_reqs.clamp(max=last_req), torch.full_like(row_reqs, last_req)))
         context.compress_row_req_indices = buf
 
     def _make_slot_remap(self, context: AscendDSADCPContext):
@@ -1101,7 +1141,7 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
         """
         g_cmp = context.global_cmp_seq_lens
         l_cmp = context.local_cmp_seq_lens
-        key = (self.dcp_rank, int(self.compressor_ratio), tuple(int(x) for x in g_cmp.tolist()))
+        key = (self.dcp_rank, int(self.compress_ratio), tuple(int(x) for x in g_cmp.tolist()))
         if key in _KV_USAGE_LOGGED_KEYS:
             return
         _KV_USAGE_LOGGED_KEYS.add(key)
@@ -1111,7 +1151,7 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
             return f"{nbytes / 1024 / 1024:.1f}MiB {tuple(t.shape)}"
 
         lines = [
-            f"[dsa-dcp-kv] rank={self.dcp_rank} group_ratio={self.compressor_ratio}",
+            f"[dsa-dcp-kv] rank={self.dcp_rank} group_ratio={self.compress_ratio}",
             f"  requests: n_req={g_cmp.shape[0]}",
             f"    req_global_cmp={g_cmp.tolist()}   (request total compressed tokens)",
             f"    req_local_cmp ={l_cmp.tolist()}   (tokens stored ON THIS card)",
@@ -1144,7 +1184,7 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
 
         compress_kv_cache, swa_kv_cache, state_cache, _, _, _ = self._unpack_kv_caches(kv_cache)
 
-        if _dsa_dcp_debug_on() and self.compressor_ratio > 1 and num_tokens == 1:
+        if _dsa_dcp_debug_on() and self.compress_ratio > 1 and num_tokens == 1:
             self._log_dsa_dcp_kv_usage(
                 context,
                 compress_kv_cache,
@@ -1277,6 +1317,11 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
             layout_kv=_dsa_layout_kv(self.vllm_config),
             return_softmax_lse=True,
         )
+        # The SWA-only pass consumes the second (merge-only) metadata buffer.
+        # Both buffers are refreshed by ATTENTION-stage tasks and are keyed by
+        # buffer identity, so this pass needs its own wait.
+        if context.swa_only_sas_metadata is not None:
+            wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(context.swa_only_sas_metadata))
         with attention_transfer_window():
             swa_output, swa_lse = attn_op(q, **swa_kwargs)
         return self._merge_dsa_dcp_decode_output(

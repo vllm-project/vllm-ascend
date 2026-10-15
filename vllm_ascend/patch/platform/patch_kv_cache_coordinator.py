@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import lcm
 
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -52,6 +52,10 @@ def dcp_world_size_for_kv_cache_spec(kv_cache_spec, dcp_world_size):
     return _upstream_dcp_world_size_for_kv_cache_spec(kv_cache_spec, dcp_world_size)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+# Bounded one-shot trace of per-group cache-hit lengths (startup-adjacent and
+# first requests), used to find which group zeroes the hybrid hit.
+_CACHE_HIT_TRACE_BUDGET = [60]
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
@@ -265,7 +269,29 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         tail_alignment = getattr(self, "tail_pool_alignment", 1)
         if self.enable_partial_hash_hits:
             return lcm(self.hash_block_size, tail_alignment)
+        if self.dcp_world_size > 1:
+            # Under DCP the per-group effective block sizes are inflated by
+            # dcp_world_size, so an ``lcm_block_size`` alignment would demand a
+            # shared prefix of at least that many tokens before ANY hit is
+            # reported.  Align on the unscaled per-group granularity instead.
+            return lcm(getattr(self, "lcm_block_size_unscaled", self.hash_block_size), tail_alignment)
         return lcm(self.scheduler_block_size or self.lcm_block_size, tail_alignment)
+
+    def _align_cacheable(self, num_tokens: int) -> int:
+        """Largest prefix a future cache hit could match.
+
+        Upstream rounds to ``scheduler_block_size``, which under DCP is
+        inflated by ``dcp_world_size`` (the DeepSeek-V4 C128 page becomes
+        131072 raw tokens): rounding to it would drop every prompt shorter
+        than one page out of the cache entirely, so the write path would never
+        register anything.  Round to the same alignment the hit lookup uses
+        instead.
+        """
+        if self.enable_partial_hash_hits:
+            return num_tokens
+        if self.dcp_world_size <= 1:
+            return round_down(num_tokens, self.scheduler_block_size)
+        return round_down(num_tokens, self._cache_hit_alignment_tokens)
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
@@ -277,6 +303,85 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if dcp_world_size_for_kv_cache_spec(kv_cache_spec, self.dcp_world_size) > 1:
             block_size *= self.dcp_world_size
         return block_size
+
+    def _block_hashes_for_spec(
+        self, block_hashes: BlockHashList, kv_cache_spec: KVCacheSpec
+    ) -> BlockHashList:
+        """Per-group hash view for the cache-hit lookup.
+
+        A group whose effective block spans several hit-alignment units is
+        looked up fine-grained: the manager probes interior hash boundaries
+        spaced ``alignment_tokens`` apart.  Upstream indexes those probes
+        straight into ``block_hashes``, which is only correct when the
+        alignment equals ``hash_block_size`` (the partial-hash Mamba case).
+        Under DCP the DeepSeek-V4 C128 page spans several unscaled alignment
+        units, so re-view the request hashes at ``alignment_tokens`` and let
+        the interior probes land on the right prefixes.
+        """
+        if self.enable_partial_hash_hits:
+            return block_hashes
+        alignment = self._cache_hit_alignment_tokens
+        group_block_size = self._get_effective_block_size(kv_cache_spec)
+        if alignment >= group_block_size or group_block_size % alignment:
+            return block_hashes
+        step = alignment // self.hash_block_size
+        if step <= 1 or len(block_hashes) < step or not isinstance(block_hashes, Sequence):
+            return block_hashes
+        # ``view[i]`` is the chained hash at ``(i + 1) * alignment`` tokens.
+        return [block_hashes[(i + 1) * step - 1] for i in range(len(block_hashes) // step)]
+
+    def cache_blocks(self, request, num_computed_tokens: int) -> None:
+        super().cache_blocks(request, num_computed_tokens)
+        self._cache_fine_aligned_partial_blocks(request, num_computed_tokens)
+
+    def _cache_fine_aligned_partial_blocks(self, request, num_computed_tokens: int) -> None:
+        """Make fine-aligned prefixes of oversized DCP cache blocks reachable.
+
+        Under DCP a compressed group's scheduler block spans ``block_size *
+        dcp_world_size`` raw tokens, so the block only becomes reachable once
+        the request has filled that whole (much coarser) page.  The hit lookup
+        can still report a prefix aligned to the *unscaled* granularity by
+        probing interior hash boundaries of the page being filled, but only if
+        those boundaries were registered: add one partial prefix entry per
+        aligned boundary inside the block currently in use.
+        """
+        if self.dcp_world_size <= 1 or not self.enable_caching:
+            return
+        alignment = self._cache_hit_alignment_tokens
+        boundary = self._align_cacheable(num_computed_tokens)
+        if boundary <= 0:
+            return
+        for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+            kv_cache_spec = _manager_spec(kv_cache_group.kv_cache_spec)
+            if not isinstance(kv_cache_spec, FullAttentionSpec) or not is_prefix_cacheable(kv_cache_spec):
+                continue
+            manager = self.single_type_managers[group_id]
+            block_size = manager.block_size
+            # Only pages spanning several alignment units are probed
+            # fine-grained by the hit lookup (the DeepSeek-V4 C128 page).
+            if alignment >= block_size or block_size % alignment:
+                continue
+            if boundary % block_size == 0:
+                # No partial region: every block up to ``boundary`` is full.
+                continue
+            block_idx = boundary // block_size
+            blocks = manager.req_to_blocks.get(request.request_id)
+            if blocks is None or block_idx >= len(blocks):
+                continue
+            block = blocks[block_idx]
+            if block.is_null:
+                continue
+            # Register high-to-low: ``cache_partial_block`` drops the block's
+            # existing entries when a larger boundary is registered, so the
+            # descending order keeps every boundary reachable.
+            for tokens in range(boundary, block_idx * block_size, -alignment):
+                manager.block_pool.cache_partial_block(
+                    request=request,
+                    block=block,
+                    num_tokens=tokens,
+                    kv_cache_group_id=manager.kv_cache_group_id,
+                    block_size=block_size,
+                )
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -358,6 +463,26 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+        # Unscaled twin: the raw per-group block sizes without the DCP
+        # multiplication.  Cache hits are produced by the scheduler at block
+        # granularity, so the hit alignment must not inherit the DCP-inflated
+        # sizes (the DeepSeek-V4 C128 group would otherwise demand a 131072
+        # token shared prefix before any hit is reported).
+        self.lcm_block_size_unscaled = lcm(*[group.spec.block_size for group in self.attention_groups])
+        # Unconditional one-shot startup diagnostic: this runs in the
+        # EngineCore/scheduler process, whose output would otherwise be missed
+        # when only worker logs are inspected.
+        print(
+            "[dsa-dcp-cache] groups="
+            f"{[(type(g.spec).__name__, g.spec.block_size, self._get_effective_block_size(g.spec)) for g in self.attention_groups]}"
+            f" full_attn_gid={self.full_attention_group_id}"
+            f" hash_block_size={self.hash_block_size}"
+            f" scheduler_block_size={self.scheduler_block_size}"
+            f" lcm_block_size={self.lcm_block_size} unscaled={self.lcm_block_size_unscaled}"
+            f" partial_hits={self.enable_partial_hash_hits} tail_pool_align={self.tail_pool_alignment}"
+            f" hit_align={self._cache_hit_alignment_tokens}",
+            flush=True,
+        )
 
     def find_longest_cache_hit(
         self,
@@ -383,7 +508,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            return block_hashes
+            return self._block_hashes_for_spec(block_hashes, kv_cache_spec)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -445,6 +570,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
+                if _CACHE_HIT_TRACE_BUDGET[0] > 0:
+                    _CACHE_HIT_TRACE_BUDGET[0] -= 1
+                    print(
+                        "[dsa-dcp-cache-hit]"
+                        f" idx={idx} spec={type(spec).__name__} gbs={group_block_size}"
+                        f" req_align={self._cache_hit_alignment_tokens} dcp={self.dcp_world_size}"
+                        f" curr_before={curr_hit_length} max_len={_max_length}"
+                        f" drop_eagle={drop_eagle_block} new_hit={_new_hit_length}",
+                        flush=True,
+                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -496,7 +631,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             blocks, group_hit = manager_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,
+                block_hashes=self._block_hashes_for_spec(block_hashes, spec),
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,

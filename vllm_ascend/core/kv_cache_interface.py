@@ -261,8 +261,12 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         # (dcp_world_size_for_kv_cache_spec keeps sliding-window groups
         # replicated with dcp_world_size=1 geometry), so per-rank memory
         # accounting for this replicated group is identical to the non-DCP
-        # case. DeepSeek-V4 DCP relies on the replication, so re-derive the
-        # same value without the assert.
+        # case. Re-derive the same value without the assert -- but only when
+        # DCP is actually on: this override replaces the upstream method,
+        # and applying it outside DCP changes the group's block accounting
+        # and breaks prefix-cache hits entirely.
+        if vllm_config.parallel_config.decode_context_parallel_size <= 1:
+            return super().max_memory_usage_bytes(vllm_config)
         max_blocks = self.max_admission_blocks_per_request(
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             max_model_len=vllm_config.model_config.max_model_len,

@@ -71,7 +71,7 @@ def initialize_kv_cache(
         # spec reports a window-bounded width, which is smaller than what the
         # scheduler allocates for long sequences (observed: needs 320 blocks
         # against a window-sized width of 256).
-        if group_cp_sizes[-1] == 1:
+        if self.dcp_size > 1 and group_cp_sizes[-1] == 1:
             full_seq_blocks = (block_table_max_model_len + spec.block_size - 1) // spec.block_size
             max_num_blocks = max(max_num_blocks, full_seq_blocks)
         if os.environ.get("DSA_DCP_DEBUG") == "1":
