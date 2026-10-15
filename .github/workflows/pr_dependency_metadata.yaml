@@ -1,0 +1,39 @@
+name: Dependency metadata
+
+on:
+  pull_request:
+    paths:
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'vllm_ascend/envs.py'
+      - 'vllm_ascend/device/**'
+      - 'tools/check_wheel_dependencies.py'
+      - 'tests/ut/test_wheel_dependencies.py'
+      - '.github/workflows/pr_dependency_metadata.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install packaging tools
+        run: python -m pip install build 'setuptools>=64' 'setuptools-scm>=8' wheel packaging
+      - name: Test dependency metadata checker
+        run: python -m unittest tests.ut.test_wheel_dependencies -v
+      - name: Build Python-only wheel and verify runtime requirements
+        env:
+          SOC_VERSION: ascend910b1
+          COMPILE_CUSTOM_KERNELS: '0'
+        run: |
+          # This job verifies packaging only; native builds and runtime
+          # resolution remain the responsibility of the Ascend test jobs.
+          python -m build --wheel --no-isolation --skip-dependency-check
+          python -m tools.check_wheel_dependencies dist/*.whl
+          python -m pip install --no-deps dist/*.whl
