@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from transformers.video_utils import VideoMetadata
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
@@ -41,9 +42,12 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.transformers_utils.processors.glm5next import glm_sample_frame_indices
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate, PromptUpdateDetails
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from vllm_ascend.models.glm5next.processor import Glm5NextProcessorKwargs
 
 
 class Glm5NextVisionPatchEmbed(nn.Module):
@@ -633,55 +637,72 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
 
-    def _get_video_second_idx_glm46v(self, metadata: dict[str, Any], total_frames: int) -> list[int]:
-        """Timestamps for the video placeholder, from the pixel path's sampler.
-
-        The inherited GLM-4.6V timestamp sampling uses different constants
-        than this checkpoint's ``Glm5NextVideoProcessor`` pixel sampling, so
-        placeholder count and ``video_grid_thw`` disagree outside 30-300s
-        durations. Sampling with the pixel path's own policy makes one
-        timestamp per temporal patch == ``grid_t``.
-        """
+    def _get_video_second_idx_glm46v(
+        self,
+        metadata: dict[str, Any],
+        total_frames: int,
+        *,
+        video_kwargs: Mapping[str, Any] | None = None,
+    ) -> list[int]:
+        """Use the pixel processor's sampler and effective request parameters."""
         video_processor = self.get_video_processor()
-        temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 1) or 1)
-        video_fps = float(metadata["fps"])
+        video_kwargs = video_kwargs or {}
+        temporal_patch_size = video_kwargs.get("temporal_patch_size") or video_processor.temporal_patch_size
+        video_fps = metadata.get("fps")
+        if video_fps is None or not np.isfinite(video_fps) or video_fps <= 0:
+            raise ValueError("Video metadata must contain a finite, positive fps.")
 
         if not metadata.get("do_sample_frames", True):
-            # The loader already picked the frames and the processor keeps them
-            # as they are, so the frame count is what was handed in and
-            # ``frames_indices`` only supplies the timestamp values.
-            frame_indices = [int(idx) for idx in metadata["frames_indices"]]
-            num_frames = int(total_frames)
+            frame_indices = [int(index) for index in metadata.get("frames_indices", [])]
+            num_frames = total_frames
+            if len(frame_indices) != num_frames:
+                raise ValueError("Pre-sampled video frames and frame indices must have the same length.")
         else:
-            frame_indices = [
-                int(idx)
-                for idx in glm_sample_frame_indices(
-                    int(metadata.get("total_num_frames", total_frames)),
-                    video_fps,
-                    float(metadata.get("duration") or 0),
-                    target_fps=video_processor.fps_interval,
-                    max_frame_count=video_processor.max_frame_count_dynamic,
-                    temporal_patch_size=temporal_patch_size,
-                )
-            ]
+            # BaseVideoProcessor.preprocess fills omitted kwargs from the
+            # processor before calling sample_frames. Match that resolution,
+            # including an explicitly supplied fps=None / target_fps pair.
+            sampling_kwargs = {
+                key: video_kwargs.get(key, getattr(video_processor, key, None))
+                for key in ("fps", "target_fps", "max_frames")
+            }
+            frame_indices = video_processor.sample_frames(
+                VideoMetadata(**{key: value for key, value in metadata.items() if key != "do_sample_frames"}),
+                **sampling_kwargs,
+            ).tolist()
             num_frames = len(frame_indices)
 
         if not frame_indices or num_frames <= 0:
-            # ``duration * fps_interval < 1`` selects no frames at all; the
-            # pixel path raises an opaque IndexError on the same input a moment
-            # later, so say what happened while there is still a request.
-            raise ValueError(
-                "The GLM-5-Next frame sampler selected no frames for this "
-                f"video (fps={video_fps}, duration={metadata.get('duration')!r},"
-                f" total_num_frames={metadata.get('total_num_frames')!r}). "
-                "Clips shorter than one frame sampling interval cannot be "
-                "processed."
-            )
+            raise ValueError("The GLM-5-Next frame sampler selected no frames for this video.")
 
-        num_padded_frames = num_frames + (-num_frames % temporal_patch_size)
-        grid_t = max(num_padded_frames // temporal_patch_size, 1)
-        last = len(frame_indices) - 1
-        return [int(frame_indices[min(i * temporal_patch_size, last)] / video_fps) for i in range(grid_t)]
+        return [int(frame_indices[i] / video_fps) for i in range(0, num_frames, temporal_patch_size)]
+
+    def _construct_video_placeholder(
+        self,
+        video_array: np.ndarray,
+        metadata: dict[str, Any],
+        grid_thw: torch.Tensor,
+        *,
+        video_kwargs: Mapping[str, Any] | None = None,
+    ) -> list[int]:
+        hf_processor = self.get_hf_processor()
+        config = self.get_hf_config()
+        timestamps = self._get_video_second_idx_glm46v(metadata, len(video_array), video_kwargs=video_kwargs)
+        # These are CPU preprocessing tensors, not device-side model state.
+        grid_t, grid_h, grid_w = grid_thw.tolist()
+        if len(timestamps) != grid_t:
+            raise ValueError("Video timestamps and processed temporal patches must have the same length.")
+        merge_size = (video_kwargs or {}).get("merge_size") or hf_processor.video_processor.merge_size
+        tokens_per_frame = grid_h * grid_w // merge_size**2
+        frame_token = self._get_video_frame_embed_token_id(hf_processor)
+        tokenizer = self.get_tokenizer()
+        placeholder = [config.video_start_token_id]
+        for timestamp in timestamps:
+            placeholder.append(config.image_start_token_id)
+            placeholder.extend([frame_token] * tokens_per_frame)
+            placeholder.append(config.image_end_token_id)
+            placeholder.extend(tokenizer.encode(f"{timestamp:.1f} seconds", add_special_tokens=False))
+        placeholder.append(config.video_end_token_id)
+        return placeholder
 
     def _get_vision_info(
         self,
@@ -745,9 +766,41 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     """The vLLM-native ``Glm5NextProcessor`` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
     (image token repeat, video frame/timestamp structure) is owned by vLLM's
-    prompt-update machinery — the inherited ``_get_prompt_updates`` builds
-    the replacement content and the placeholder scan validates against
-    exactly that."""
+    prompt-update machinery. Video updates carry request-local sampling
+    parameters; image updates retain the inherited behavior."""
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> list[PromptUpdate]:
+        updates = super()._get_prompt_updates(mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
+        if "video" not in mm_items:
+            return list(updates)
+        hf_processor = self.info.get_hf_processor()
+        # Resolve flat and videos_kwargs overrides exactly as the pixel path
+        # does. Keep this request-local: the HF processor is shared and cached.
+        video_kwargs = hf_processor._merge_kwargs(
+            Glm5NextProcessorKwargs,
+            tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
+            **hf_processor_mm_kwargs,
+        )["videos_kwargs"]
+
+        def get_video_replacement(item_idx: int):
+            video, metadata = mm_items["video"][item_idx]
+            grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
+            placeholder = self.info._construct_video_placeholder(video, metadata, grid_thw, video_kwargs=video_kwargs)
+            return PromptUpdateDetails.select_token_id(
+                placeholder, embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor)
+            )
+
+        return [
+            PromptReplacement(modality=update.modality, target=update.target, replacement=get_video_replacement)
+            if update.modality == "video"
+            else update
+            for update in updates
+        ]
 
     def _hf_processor_applies_updates(
         self,
