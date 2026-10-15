@@ -68,11 +68,21 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
+      - name: Checkout coverage helper from this workflow
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: ${{ runner.temp }}/workflow-src
+          fetch-depth: 1
+          sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
+          sparse-checkout-cone-mode: false
+
       - name: Resolve refs and select tests
         id: plan
         env:
           VLLM_ASCEND_REF: ${{ inputs.vllm_ascend_ref || 'main' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HELPER_SCRIPT: ${{ runner.temp }}/workflow-src/.github/workflows/scripts/resolve_latest_release_branch.py
         run: |
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -92,7 +102,7 @@ jobs:
 
           spec = importlib.util.spec_from_file_location(
               "resolve_latest_release_branch",
-              os.path.join(workspace, ".github/workflows/scripts/resolve_latest_release_branch.py"),
+              os.environ["HELPER_SCRIPT"],
           )
           helper = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(helper)
