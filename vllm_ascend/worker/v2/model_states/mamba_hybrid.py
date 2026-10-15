@@ -271,6 +271,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(input_batch.is_prefilling_np)
+        flashmla_phase = getattr(input_batch, "flashmla_is_prefilling_np", None)
 
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
@@ -326,6 +327,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
+            flashmla_is_prefilling=(torch.from_numpy(flashmla_phase) if flashmla_phase is not None else None),
             for_cudagraph_capture=for_capture,
         )
         return self.attn_metadata

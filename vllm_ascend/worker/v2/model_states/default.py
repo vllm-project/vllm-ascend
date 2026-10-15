@@ -222,6 +222,7 @@ class AscendModelState(DefaultModelState):
 
         num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
+        flashmla_phase = getattr(input_batch, "flashmla_is_prefilling_np", None)
         if self.kvpp_runtime is not None and self.kvpp_runtime.scheduler is not None:
             # PCP-local offsets include earlier chunks of this same forward.
             # Use prior-forward history shared by every PCP x TP group member.
@@ -306,6 +307,7 @@ class AscendModelState(DefaultModelState):
             num_actual_tokens=num_actual_tokens,
             num_input_tokens=num_input_tokens,
             is_prefilling=is_prefilling,
+            flashmla_is_prefilling=(torch.from_numpy(flashmla_phase) if flashmla_phase is not None else None),
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,

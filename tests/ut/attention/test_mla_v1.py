@@ -211,6 +211,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 @pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod])
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_flashmla = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
@@ -256,6 +257,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
 )
 def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_flashmla = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = True
@@ -886,7 +888,9 @@ class TestAscendMLAMetadataBuilder(TestBase):
                     mla_use_nope=layer_uses_rope,
                 )
                 mock_vllm_config.compilation_config.static_forward_context = {
-                    "self_attn": SimpleNamespace(impl=SimpleNamespace(use_mla_rope=layer_uses_rope)),
+                    "self_attn": SimpleNamespace(
+                        impl=SimpleNamespace(use_mla_rope=layer_uses_rope, use_flashmla=False)
+                    ),
                 }
                 with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=MagicMock()):
                     builder = AscendMLAMetadataBuilder(None, ["self_attn"], mock_vllm_config, "cpu")
@@ -2916,7 +2920,9 @@ class TestAscendMLAImpl(TestBase):
         self.impl._forward_decode = MagicMock(return_value=torch.ones(2, 2))
         self.impl.o_proj = MagicMock(side_effect=lambda x, **_kwargs: (x,))
         hidden, output = torch.zeros(2, 4), torch.empty(2, 2)
-        metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=2, num_prefills=0, num_decode_tokens=2)
+        metadata = SimpleNamespace(
+            external_flashmla=None, num_actual_tokens=2, num_decodes=2, num_prefills=0, num_decode_tokens=2
+        )
         with (
             patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
             patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),

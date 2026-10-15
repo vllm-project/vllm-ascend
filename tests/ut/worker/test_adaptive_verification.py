@@ -66,6 +66,7 @@ def test_aclgraph_model_forwards_confidence_computation():
 )
 def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.flashmla_executor = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.debugger = None
@@ -148,6 +149,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptive, is_profile, dummy_run):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.flashmla_executor = None
     spec.use_dcp = False
     spec.replicated_pcp = False
     spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
@@ -203,6 +205,7 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
     monkeypatch, adaptive, dummy, profile, context_len, scheduled_reqs, has_state, expected_reqs
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.flashmla_executor = None
     runner.debugger = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
