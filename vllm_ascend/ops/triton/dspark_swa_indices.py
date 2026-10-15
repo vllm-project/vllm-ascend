@@ -28,7 +28,7 @@ if HAS_TRITON:
         ]
     )
     def _dspark_swa_indices_kernel(
-        bt_ptr,  # block_table       [R_alloc, num_blocks]  i32
+        bt_ptr,  # block_table       [R_alloc, num_blocks]  i32/i64 (narrowed in-kernel)
         stride_bt_r,  # block_table.stride(0): row pitch of a possibly sliced/padded table
         qsl_ptr,  # query_start_loc  [R_alloc + 1]  i32/i64
         seq_lens_ptr,  # seq_lens         [R_alloc]  i32/i64
@@ -95,14 +95,16 @@ if HAS_TRITON:
                     safe_num = tl.minimum(tl.maximum(blk_num, 0), num_blocks - 1)
 
                     # triton-ascend's tl.gather rejects int32 payloads; ride
-                    # the id through fp32 bitcast (bits preserved). The
-                    # wrapper passes an int32 block_table.
+                    # the id through fp32 bitcast (bits preserved). Narrow the
+                    # loaded row to int32 first: no-op on i32 tables, a
+                    # value-preserving truncation on i64 (same pattern as
+                    # qsl/seq_lens above; physical block IDs fit int32).
                     r_offs = tl.arange(0, ROW_POW2)
                     bt_row = tl.load(
                         bt_ptr + r * stride_bt_r + r_offs,
                         mask=r_offs < num_blocks,
                         other=0,
-                    )
+                    ).to(tl.int32)
                     block_id = tl.gather(bt_row.to(tl.float32, bitcast=True), safe_num, 0).to(tl.int32, bitcast=True)
 
                     blk_off = pos - blk_num * BLOCK_SIZE
@@ -268,10 +270,6 @@ def build_dspark_swa_slot_indices_triton(
     total_items = R_alloc * num_cb
     init_device_properties_triton()
     grid = min(get_vectorcore_num(), total_items)
-
-    # The kernel bitcasts block_table through fp32 for tl.gather.
-    if block_table.dtype != torch.int32:
-        block_table = block_table.to(torch.int32)
 
     _dspark_swa_indices_kernel[(grid,)](
         block_table,
