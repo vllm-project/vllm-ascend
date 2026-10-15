@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
@@ -17,6 +18,8 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
     GDNPrefillMetadata,
+    GDNSpecCausalConv1dMetadata,
+    GDNSpecDecodeMetadata,
 )
 
 
@@ -58,7 +61,7 @@ def _make_mixed_metadata() -> GDNAttentionMetadata:
     )
     metadata.non_spec_decode_metadata = GDNDecodeMetadata(
         causal_conv1d=GDNCausalConv1dMetadata(
-            query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32),
             cache_indices=torch.tensor([0], dtype=torch.int32),
             initial_state_mode=None,
         ),
@@ -87,6 +90,14 @@ def _make_layer() -> SimpleNamespace:
     layer = SimpleNamespace(
         prefix="layers.0.linear_attn",
         activation=None,
+        head_k_dim=2,
+        head_v_dim=2,
+        num_k_heads=1,
+        num_v_heads=1,
+        tp_size=1,
+        key_dim=2,
+        value_dim=2,
+        num_spec=3,
         conv1d=nn.Conv1d(
             in_channels=1,
             out_channels=6,
@@ -110,9 +121,12 @@ def _make_layer() -> SimpleNamespace:
     return layer
 
 
-def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
+@pytest.mark.parametrize("initial_state", [True, False])
+def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     layer = _make_layer()
     metadata = _make_mixed_metadata()
+    if not initial_state:
+        metadata.non_spec_prefill_metadata.causal_conv1d.initial_state_mode = None
 
     # Token rows contain visibly different Q/K/V values so the assertions
     # can detect an incorrect decode/prefill boundary.
@@ -186,8 +200,14 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             side_effect=chunk_gated_delta_rule,
         ) as chunk_mock,
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_fn",
+            side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
+        ) as prefill_conv,
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_update",
+            side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
+        ) as decode_conv,
         patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent_gated_delta_rule),
     ):
         AscendGatedDeltaNetAttention._forward_core(
@@ -215,17 +235,23 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         torch.tensor([[[21.0, 22.0]]]),
     )
 
-    # The spec and non-spec branches both invoke rearrange_mixed_qkv.
-    # In this non-spec mixed batch, the spec invocation receives None.
-    # Verify that only one invocation processes an actual tensor, so the
-    # decode prefix is not rearranged for a second time.
-    non_none_calls = [call for call in layer.rearrange_mixed_qkv.call_args_list if call.args[0] is not None]
-    assert len(non_none_calls) == 1
-
+    # Each convolution sees only its own token slice and state rows.
+    decode_conv.assert_called_once()
+    prefill_conv.assert_called_once()
+    torch.testing.assert_close(decode_conv.call_args.args[0], mixed_qkv[:1])
+    torch.testing.assert_close(prefill_conv.call_args.args[0], mixed_qkv[1:])
+    torch.testing.assert_close(decode_conv.call_args.kwargs["conv_state_indices"], torch.tensor([0], dtype=torch.int32))
+    torch.testing.assert_close(prefill_conv.call_args.kwargs["cache_indices"], torch.tensor([1], dtype=torch.int32))
     torch.testing.assert_close(
-        non_none_calls[0].args[0],
-        mixed_qkv,
+        prefill_conv.call_args.kwargs["query_start_loc"], torch.tensor([0, 2], dtype=torch.int32)
     )
+    if initial_state:
+        torch.testing.assert_close(
+            prefill_conv.call_args.kwargs["has_initial_state"], torch.tensor([1], dtype=torch.int32)
+        )
+    else:
+        assert prefill_conv.call_args.kwargs["has_initial_state"] is None
+    torch.testing.assert_close(decode_conv.call_args.kwargs["query_start_loc"], torch.tensor([0, 1], dtype=torch.int32))
     prefill_call = chunk_mock.call_args.kwargs
     fused_chunk_mock.assert_not_called()
     torch.testing.assert_close(
@@ -252,3 +278,141 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             ]
         ),
     )
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_decode_forward_does_not_reconcat_qkv(speculative):
+    layer = _make_layer()
+    packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+    metadata = _make_mixed_metadata()
+    metadata.num_prefills = 0
+    metadata.num_prefill_tokens = 0
+    metadata.num_actual_tokens = 4
+    metadata.num_decodes = 0 if speculative else 4
+    metadata.num_decode_tokens = 0 if speculative else 4
+    metadata.num_spec_decodes = 2 if speculative else 0
+    metadata.num_spec_decode_tokens = 4 if speculative else 0
+    metadata.spec_sequence_masks = torch.tensor([True, True]) if speculative else None
+    metadata.spec_state_indices_tensor = torch.tensor([0, 1], dtype=torch.int32)
+    metadata.non_spec_state_indices_tensor = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+    metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+        spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+            query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+            cache_indices=torch.tensor([0, 1], dtype=torch.int32),
+            num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
+        ),
+        actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
+    )
+    output = torch.empty(4, 1, 2)
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+
+    def recurrent(q, k, v, state, **kwargs):
+        torch.testing.assert_close(q, packed[:, :2].reshape(4, 1, 2))
+        torch.testing.assert_close(k, packed[:, 2:4].reshape(4, 1, 2))
+        torch.testing.assert_close(v, packed[:, 4:].reshape(4, 1, 2))
+        if speculative:
+            torch.testing.assert_close(kwargs["num_accepted_tokens"], torch.tensor([1, 2], dtype=torch.int32))
+        return v.clone()
+
+    # Reject the inherited concat helper for all real decode inputs.
+    original = layer.rearrange_mixed_qkv.side_effect
+    layer.rearrange_mixed_qkv.side_effect = (
+        lambda x: original(x) if x is None else pytest.fail("decode used inherited QKV concat")
+    )
+    with (
+        override_forward_context(context),
+        patch("torch.cat", side_effect=AssertionError("unexpected decode cat")),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 4, 1), torch.ones(1, 4, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
+        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
+    torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
+    if speculative:
+        torch.testing.assert_close(
+            conv.call_args.kwargs["num_accepted_tokens"],
+            torch.tensor([1, 2], dtype=torch.int32),
+        )
+
+
+@pytest.mark.parametrize("mixed,head_dim", [(False, 16), (True, 16), (False, 2)])
+def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
+    layer = _make_layer()
+    layer.head_k_dim = layer.head_v_dim = head_dim
+    layer.key_dim = layer.value_dim = head_dim
+    layer.kv_cache = (torch.zeros(2, 1, 3 * head_dim), torch.zeros(2, 1, head_dim, head_dim))
+    metadata = _make_mixed_metadata()
+    if not mixed:
+        metadata.num_decodes = metadata.num_decode_tokens = 0
+        metadata.num_prefill_tokens = 3
+        metadata.prefill_query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+        conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
+        conv_meta.query_start_loc = metadata.prefill_query_start_loc
+        conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
+        conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
+    packed = torch.arange(9 * head_dim, dtype=torch.float32).reshape(3, 3 * head_dim)
+    expected_head_num = 3 if head_dim == 16 else 0
+
+    def conv(x, *args, **kwargs):
+        assert kwargs["head_num"] == expected_head_num
+        torch.testing.assert_close(x, packed[1:] if mixed else packed)
+        if expected_head_num:
+            return x.reshape(-1, 3, head_dim).transpose(0, 1).contiguous()
+        return x.clone()
+
+    def rearrange(x):
+        if x is None:
+            return None, None, None
+        assert not expected_head_num, "head-first prefill used the old QKV rearrangement"
+        return tuple(part.reshape(1, -1, 1, head_dim) for part in x.split(head_dim, dim=-1))
+
+    layer.rearrange_mixed_qkv.side_effect = rearrange
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    output = torch.empty(3, 1, head_dim)
+    with (
+        override_forward_context(context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv) as conv_mock,
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_update",
+            side_effect=lambda x, *args, **kwargs: x.clone(),
+        ) as update_mock,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch(
+            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.recurrent_gated_delta_rule",
+            side_effect=lambda q, k, v, *args, **kw: v.clone(),
+        ),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(3, 1), torch.zeros(3, 1), output)
+    conv_mock.assert_called_once()
+    if mixed:
+        update_mock.assert_called_once()
+        torch.testing.assert_close(update_mock.call_args.args[0], packed[:1])
+    else:
+        update_mock.assert_not_called()
+    torch.testing.assert_close(output, packed[:, 2 * head_dim :].reshape(3, 1, head_dim))

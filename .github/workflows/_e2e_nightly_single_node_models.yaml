@@ -48,6 +48,11 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      download_path:
+        required: false
+        type: string
+        default: ''
+        description: test container file or directory to upload as a GitHub artifact
       vllm_ascend_ref:
         required: false
         type: string
@@ -308,3 +313,28 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
+
+      - name: Collect requested path
+        if: ${{ always() && inputs.download_path != '' }}
+        id: collect_download
+        continue-on-error: true
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          ARTIFACT_LABEL: ${{ inputs.model_list }}
+          IMAGE_LABEL: ${{ inputs.image }}
+        run: |
+          python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" /tmp/download-artifact.tar.gz
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-60)
+          label_hash=$(printf '%s\n%s' "$ARTIFACT_LABEL" "$IMAGE_LABEL" | sha256sum | cut -c1-12)
+          echo "name=nightly-download-${safe_label}-${label_hash}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload requested path
+        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_download.outputs.name }}
+          path: /tmp/download-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

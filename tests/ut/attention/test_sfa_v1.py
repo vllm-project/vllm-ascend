@@ -486,19 +486,11 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
         expected = torch.randn(3, 2, 32)
 
-        with (
-            patch.object(
-                torch.ops._C_ascend,
-                "npu_kv_quant_sparse_flash_attention_vllm",
-                create=True,
-                return_value=(expected, torch.empty(0), torch.empty(0)),
-            ) as mock_qsfa,
-            patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-                create=True,
-                side_effect=AssertionError("Base must use _C_ascend custom op"),
-            ),
-        ):
+        with patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+            create=True,
+            return_value=expected,
+        ) as mock_qsfa:
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
@@ -515,7 +507,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
-        self.assertFalse(call_kwargs["return_softmax_lse"])
+        self.assertNotIn("return_softmax_lse", call_kwargs)
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         self._check_prolog_v3_enables_packed_kv_cache(AscendW8A8DynamicLinearMethod)
