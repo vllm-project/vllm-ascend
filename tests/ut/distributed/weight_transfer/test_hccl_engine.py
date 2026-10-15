@@ -4,13 +4,21 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine, HCCLWeightTransferInitInfo
+import pytest
+import torch
+
+from vllm_ascend.distributed.weight_transfer.hccl_engine import (
+    HCCLWeightTransferEngine,
+    HCCLWeightTransferInitInfo,
+    HCCLWeightTransferUpdateInfo,
+)
 
 
 def _make_engine():
     engine = object.__new__(HCCLWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    engine.device = torch.device("npu:0")
     return engine
 
 
@@ -47,6 +55,7 @@ def test_shutdown_closes_session_once():
 @patch("torch.accelerator.current_device_index", return_value=0)
 def test_reinit_closes_previous_session_before_creating_next(_mock_device):
     engine = _make_engine()
+    engine.device = torch.device("npu:2")
     engine.parallel_config = SimpleNamespace(data_parallel_index=0, world_size=1, rank=0)
     old_group = MagicMock()
     engine.model_update_group = old_group
@@ -60,5 +69,25 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
     with patch.object(HCCLWeightTransferEngine, "_stateless_init_process_group", side_effect=create_group) as init:
         engine.init_transfer_engine(init_info)
 
-    init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=0)
+    init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=2)
     assert engine.model_update_group is not old_group
+
+
+@pytest.mark.parametrize("field", ["dtype_names", "shapes"])
+def test_update_info_inherits_metadata_validation(field):
+    fields = dict(names=["w"], dtype_names=["float32"], shapes=[[1]], packed=True)
+    fields[field] = []
+    with pytest.raises(ValueError, match=field):
+        HCCLWeightTransferUpdateInfo(**fields)
+
+
+def test_packed_receive_uses_worker_device():
+    engine = _make_engine()
+    engine.device = torch.device("npu:2")
+    engine.model_update_group = MagicMock()
+    info = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[1]], packed=True)
+
+    with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer") as consume:
+        engine.receive_weights(info)
+
+    assert consume.call_args.kwargs["device"] == engine.device

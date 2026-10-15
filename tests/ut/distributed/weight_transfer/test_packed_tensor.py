@@ -36,6 +36,7 @@ import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_tensor_mo
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedIpcChunk,
+    PackedNpuBufferImporter,
     pack_tensors,
     packed_broadcast_consumer,
     packed_broadcast_producer,
@@ -94,7 +95,8 @@ def _stub_torch_npu():
     original_empty = torch.empty
 
     def _fake_empty(*args, **kwargs):
-        if kwargs.get("device") == "npu":
+        device = kwargs.get("device")
+        if device is not None and torch.device(device).type == "npu":
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
@@ -990,6 +992,66 @@ def test_pack_tensors_rejects_post_iter_dtype_change():
             lambda item: item[1].to(torch.int32),
             buffer_size_bytes=64,
         )
+
+
+@pytest.mark.parametrize("buffer_size_bytes", [8, 64])
+def test_pack_tensors_roundtrip_mixed_scalar_empty_and_non_contiguous(buffer_size_bytes):
+    """Upstream packing must preserve the compatibility layer's byte layout."""
+    originals = [
+        ("byte", torch.tensor([7], dtype=torch.uint8)),
+        ("scalar", torch.tensor(42, dtype=torch.int64)),
+        ("empty", torch.empty(0, 2, dtype=torch.float32)),
+        ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
+    ]
+    iterator = iter(originals)
+    restored = []
+    while (chunk := pack_tensors(iterator, lambda item: item[1], buffer_size_bytes)) is not None:
+        restored.extend(unpack_tensor(chunk.packed_tensor, chunk.names, chunk.shapes, chunk.dtypes, chunk.tensor_sizes))
+        # Loading weights may retain these tensors after the packed slot is reused.
+        chunk.packed_tensor.zero_()
+
+    assert [name for name, _ in restored] == [name for name, _ in originals]
+    for (_, actual), (_, expected) in zip(restored, originals):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
+
+
+def test_pack_tensors_exact_threshold_keeps_crossing_tensor_in_chunk():
+    iterator = iter((name, torch.ones(1)) for name in ("a", "b", "c", "d"))
+    chunk = pack_tensors(iterator, lambda item: item[1], buffer_size_bytes=8)
+
+    assert chunk is not None
+    assert chunk.names == ["a", "b", "c"]
+    assert chunk.tensor_sizes == [4, 4, 4]
+    assert next(iterator)[0] == "d"
+
+
+def test_pack_tensors_rejects_post_iter_element_count_change():
+    with pytest.raises(ValueError, match="materialized with 2 elements"):
+        pack_tensors(iter([("w", torch.ones(1))]), lambda item: torch.ones(2), buffer_size_bytes=64)
+
+
+def test_npu_importer_reuses_mapping_until_export_changes_or_closes():
+    """Chunks of one export share one rebuild; subsequent exports replace it."""
+    packed = torch.zeros(8, dtype=torch.uint8)
+    args = ("first-export", 8, 0, 0, 0, 0, 99, None)
+    importer = PackedNpuBufferImporter()
+    with _install_fake_rebuild_npu_tensor(packed):
+        import sys
+
+        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
+        assert importer.rebuild_for_device(args, 2) is packed
+        assert importer.rebuild_for_device(args, 2) is packed
+        rebuild.assert_called_once_with(*args[:6], 2, None)
+        assert args[6] == 99
+
+        next_args = ("next-export", *args[1:])
+        assert importer.rebuild_for_device(next_args, 2) is packed
+        assert rebuild.call_count == 2
+        importer.close()
+        assert importer.rebuild_for_device(next_args, 2) is packed
+        assert rebuild.call_count == 3
 
 
 @pytest.mark.parametrize(
