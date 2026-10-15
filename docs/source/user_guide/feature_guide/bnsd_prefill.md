@@ -43,8 +43,9 @@ The BNSD path is selected only when all of the following are true:
 - BF16 query and paged KV cache;
 - causal decoder attention without sliding-window attention or sinks;
 - 256-dimensional attention heads;
-- exactly one prefill request with at least 4096 query tokens in the current
-  scheduler step; and
+- exactly one prefill request with at least 1536 query tokens and at least
+  24576 total KV tokens visible to that request in the current scheduler step;
+  and
 - cached prefill or chunked prefill using the standard 128-token KV block
   size.
 
@@ -68,6 +69,12 @@ benchmark compared an approximately 7680-token prefill query attending to a
 The BNSD query path reduced operator latency by 13.10%. A mixed batch with
 query lengths `[7680, 4, 4, 4]`, including query reorder and output placement,
 improved from 66.1986 ms to 55.4271 ms (16.27%).
+
+In a separate two-NPU operator sweep including layout conversion, a 1536-token
+query was 4.41%-6.71% faster at 24576 KV tokens and 4.53%-6.50% faster at
+36864 KV tokens across four runs. At 12288 KV tokens, the benefit did not meet
+the stability criterion. These measurements motivated the query and KV
+eligibility thresholds; they are not end-to-end serving latency results.
 
 Measure the effect with the target model and traffic distribution before
 enabling this experimental option in production.

@@ -748,6 +748,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8, 64)
 
     @patch("vllm_ascend.attention.attention_v1.BNSD_PREFILL_MIN_QUERY_TOKENS", 8)
+    @patch("vllm_ascend.attention.attention_v1.BNSD_PREFILL_MIN_KV_TOKENS", 100)
     @patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile")
     @patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score")
     def test_bnsd_prefill_keeps_decode_in_tnd(
@@ -818,6 +819,49 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         metadata.num_prefills = 2
         self.assertFalse(impl._can_use_bnsd_prefill(query, key, value, 128, metadata.block_tables, metadata))
+
+    @patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile")
+    def test_bnsd_prefill_query_and_kv_thresholds(self, mock_hardware_profile):
+        impl = self.impl
+        impl.enable_prefill_bnsd = True
+        impl.pcp_enabled = False
+        impl.attn_type = attn_module.AttentionType.DECODER
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 256
+
+        query = torch.empty(8193, 1, 256, dtype=torch.bfloat16)
+        key = torch.empty(1, 128, 256, dtype=torch.bfloat16)
+        value = torch.empty_like(key)
+        metadata = AscendMetadata(
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_decode_tokens=0,
+            num_prefills=1,
+            num_decodes=0,
+            block_tables=torch.zeros(1, 192, dtype=torch.int32),
+            seq_lens_list=[24576],
+            actual_seq_lengths_q=[1536],
+        )
+        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+
+        def eligible(q_tokens, kv_tokens):
+            metadata.actual_seq_lengths_q = [q_tokens]
+            metadata.seq_lens_list = [kv_tokens]
+            return impl._can_use_bnsd_prefill(query[:q_tokens], key, value, 128, metadata.block_tables, metadata)
+
+        self.assertFalse(eligible(1535, 24576))
+        self.assertFalse(eligible(1536, 24575))
+        self.assertTrue(eligible(1536, 24576))
+        self.assertTrue(eligible(8193, 24576))
+
+        metadata.num_decodes = 1
+        metadata.num_decode_tokens = 1
+        metadata.block_tables = torch.zeros(2, 192, dtype=torch.int32)
+        metadata.actual_seq_lengths_q = [1, 1537]
+        metadata.seq_lens_list = [30000, 24575]
+        self.assertFalse(impl._can_use_bnsd_prefill(query[:1537], key, value, 128, metadata.block_tables, metadata))
+        metadata.seq_lens_list[1] = 24576
+        self.assertTrue(impl._can_use_bnsd_prefill(query[:1537], key, value, 128, metadata.block_tables, metadata))
 
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
     @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")

@@ -64,7 +64,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
-BNSD_PREFILL_MIN_QUERY_TOKENS = 4096
+BNSD_PREFILL_MIN_QUERY_TOKENS = 1536
+BNSD_PREFILL_MIN_KV_TOKENS = 24576
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
@@ -1033,6 +1034,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and key.shape[1:] == (block_size, self.num_kv_heads * self.head_size)
             and value.shape == key.shape
             and len(attn_metadata.seq_lens_list) > attn_metadata.num_decodes
+            and attn_metadata.seq_lens_list[attn_metadata.num_decodes] >= BNSD_PREFILL_MIN_KV_TOKENS
             and block_table.shape[0] > attn_metadata.num_decodes
         )
 
