@@ -1136,7 +1136,7 @@ exec vllm serve "$MODEL_PATH" \
   --tool-call-parser glm47 \
   --reasoning-parser glm47 \
   --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-  --additional-config '{"enable_dsa_cp":true,"enable_fused_mc2":1,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
+  --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
   --kv-transfer-config '{
     "kv_connector": "MooncakeConnectorV2",
     "kv_role": "kv_producer",
@@ -1223,7 +1223,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-auto-tool-choice \
   --tool-call-parser glm47 \
   --reasoning-parser glm47 \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_fused_mc2":1}' \
+  --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true}' \
   --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --kv-transfer-config '{
@@ -1333,9 +1333,9 @@ curl --noproxy '*' "http://<PROXY_IP>:8000/v1/chat/completions" \
 
 Both roles use a 135,000-token maximum length, memory utilization 0.92,
 and three MTP tokens. Prefill uses eager mode, an 8192-token batch budget,
-64 sequences, DSA CP, FlashComm1, and fused MC2. Decode uses a 256-token
+64 sequences, DSA CP, and FlashComm1. Decode uses a 256-token
 batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
-fused MC2, and recomputation scheduling.
+and recomputation scheduling.
 
 ###### 5.1.2.5.6 v0.30.0rc1 Compatibility and Troubleshooting
 
