@@ -219,6 +219,24 @@ def test_runtime_scoring_is_throttled_per_batch_bucket():
     assert manager._physical_k_recommendation == (8, 3)
 
 
+def test_full_width_probe_rescores_after_narrow_draft_without_waiting_for_timer():
+    manager = profiled_manager(1.0, 10.0)
+    per_req = {str(i): 5 for i in range(8)}
+    full_drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
+    narrow_drafts = {str(i): [1, 2, 3] for i in range(8)}
+
+    manager.get_num_tokens(per_req, full_drafts)
+    assert manager._physical_k_recommendation == (8, 3)
+    manager.get_num_tokens(per_req, narrow_drafts)
+    assert manager._physical_k_recommendation is None
+    mixed_drafts = dict(full_drafts)
+    mixed_drafts["0"] = [1, 2, 3]
+    manager.get_num_tokens(per_req, mixed_drafts)
+    assert manager._physical_k_recommendation is None
+    manager.get_num_tokens(per_req, full_drafts)
+    assert manager._physical_k_recommendation == (8, 3)
+
+
 def test_narrowed_runtime_width_does_not_replace_full_width_recommendation():
     manager = profiled_manager(5.0, 1.0)
     per_req = {str(i): 4 for i in range(16)}
