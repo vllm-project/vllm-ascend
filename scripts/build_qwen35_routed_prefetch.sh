@@ -27,7 +27,12 @@ cmake -S "${VLLM_ASCEND_ROOT}/csrc/qwen35_weight_prefetch" \
     -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
 cmake --build "${BUILD_DIR}" -j2
 
-artifact="${BUILD_DIR}/lib/_qwen35_routed_prefetch$(python3-config --extension-suffix)"
+extension_suffix="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")')"
+if [[ -z "${extension_suffix}" ]]; then
+    echo "Python did not report an extension suffix via sysconfig" >&2
+    exit 1
+fi
+artifact="${BUILD_DIR}/lib/_qwen35_routed_prefetch${extension_suffix}"
 if [[ ! -f "${artifact}" ]]; then
     echo "Expected extension artifact not found: ${artifact}" >&2
     exit 1

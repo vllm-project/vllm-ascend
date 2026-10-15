@@ -151,7 +151,7 @@ class Qwen35WeightPrefetch:
     def begin_routed(self, weight, groups, dependency, position, group_list_type):
         if position != self.config.routed_start or group_list_type != 1 or not self.can_run():
             return False
-        if not isinstance(weight, torch.Tensor) or self.routed_weights.get(weight) is not weight:
+        if not isinstance(weight, torch.Tensor) or self.routed_weights.get(id(weight)) is not weight:
             return False
         if groups.dtype != torch.int64 or groups.ndim != 1 or groups.numel() != weight.shape[0]:
             return False
@@ -256,7 +256,7 @@ def bind_qwen35_weight_prefetch(model, vllm_config, config):
             if supported_weight(weight, ROUTED_W2_SHAPE):
                 if config.routed_w2_bytes > weight.numel() * weight.element_size():
                     raise ValueError("routed_w2_bytes exceeds bound weight storage")
-                controller.routed_weights[weight] = weight
+                controller.routed_weights[id(weight)] = weight
                 logger.info(
                     "Qwen3.5 routed prefetch storage layer=%d shape=%s format=%d expert_bytes=%d",
                     index,
