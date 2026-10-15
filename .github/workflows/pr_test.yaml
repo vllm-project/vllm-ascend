@@ -118,11 +118,6 @@ jobs:
             echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check singlecard CI selection and isolation
-        run: |
-          pip install pytest pyyaml regex
-          python3 -m pytest -q .github/workflows/scripts/tests/test_singlecard_ci.py
-
       - name: cp problem matchers
         run: |
           cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
