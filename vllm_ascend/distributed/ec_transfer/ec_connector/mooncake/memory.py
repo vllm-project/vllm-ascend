@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
@@ -200,6 +202,8 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
             allocator.bounce_capacity,
             self._local,
         )
+        self._space_available = threading.Condition(self._lock)
+        self._poisoned = False
 
     @property
     def bounce_arena(self) -> AscendBounceArena:
@@ -210,25 +214,68 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         with self._lock:
             self._producer_allocator.prepare(device, self._transfer)
 
-    def stage(self, tensors: list[torch.Tensor]) -> StagedSources | None:
-        """Stage on an NPU stream without an upstream copy hook."""
+    def _allocate_staged(
+        self,
+        tensors: list[torch.Tensor],
+        *,
+        wait: bool,
+    ) -> tuple[list[torch.Tensor], list[tuple[int, int]]] | None:
+        """Allocate a complete batch atomically, optionally waiting for space."""
         if not tensors:
-            return StagedSources([], [])
+            return [], []
         allocator = self._allocator
-        staged: list[torch.Tensor] = []
-        regions: list[tuple[int, int]] = []
-        with self._lock:
+        required = sum(
+            round_up(tensor.nbytes, allocator.alignment)
+            for tensor in tensors
+        )
+        if required > self._producer_allocator.staging_capacity:
+            return None
+
+        with self._space_available:
+            if self._poisoned:
+                raise RuntimeError("Ascend producer staging pool is poisoned")
             allocator.prepare(tensors[0].device, self._transfer)
             pool = allocator.tensor
             if pool is None:
                 return None
-            for tensor in tensors:
-                region = allocator.allocate(tensor.nbytes)
-                if region is None:
-                    self._free_regions(regions)
+
+            while True:
+                staged: list[torch.Tensor] = []
+                regions: list[tuple[int, int]] = []
+                for tensor in tensors:
+                    region = allocator.allocate(tensor.nbytes)
+                    if region is None:
+                        self._free_regions(regions)
+                        break
+                    regions.append(region)
+                    staged.append(
+                        allocator.view(
+                            region[0],
+                            tensor.nbytes,
+                            tuple(tensor.shape),
+                            tensor.dtype,
+                        )
+                    )
+                else:
+                    return staged, regions
+
+                if not wait:
                     return None
-                regions.append(region)
-                staged.append(allocator.view(region[0], tensor.nbytes, tuple(tensor.shape), tensor.dtype))
+                self._space_available.wait()
+                if self._poisoned:
+                    raise RuntimeError(
+                        "Ascend producer staging pool is poisoned"
+                    )
+
+    def _copy_staged(
+        self,
+        tensors: list[torch.Tensor],
+        staged: list[torch.Tensor],
+    ) -> None:
+        if not tensors:
+            return
+        pool = self._allocator.tensor
+        assert pool is not None
         stream = getattr(self._local, "stream", None)
         if stream is None:
             stream = torch.npu.Stream(device=pool.device)
@@ -242,4 +289,44 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 destination.copy_(source, non_blocking=True)
 
         stream.synchronize()
-        return StagedSources(staged, regions)
+
+    def stage(self, tensors: list[torch.Tensor]) -> StagedSources | None:
+        """Stage on an NPU stream without an upstream copy hook."""
+        allocated = self._allocate_staged(tensors, wait=False)
+        if allocated is None:
+            return None
+        staged, regions = allocated
+        result = StagedSources(staged, regions)
+        try:
+            self._copy_staged(tensors, staged)
+        except BaseException:
+            self.release(result)
+            raise
+        return result
+
+    def stage_wait(self, tensors: list[torch.Tensor]) -> StagedSources | None:
+        """Wait for reusable regions, returning None only if the batch can never fit."""
+        allocated = self._allocate_staged(tensors, wait=True)
+        if allocated is None:
+            return None
+        staged, regions = allocated
+        result = StagedSources(staged, regions)
+        try:
+            self._copy_staged(tensors, staged)
+        except BaseException:
+            self.release(result)
+            raise
+        return result
+
+    def release(self, staged: StagedSources) -> None:
+        if not staged.regions:
+            return
+        with self._space_available:
+            self._free_regions(staged.regions)
+            self._space_available.notify_all()
+
+    def poison(self) -> None:
+        """Prevent reuse after any dual-engine completion becomes uncertain."""
+        with self._space_available:
+            self._poisoned = True
+            self._space_available.notify_all()

@@ -100,16 +100,21 @@ def test_producer_copies_to_staging_on_npu_stream():
     pool.device.type = "npu"
 
     source = MagicMock()
+    source.nbytes = 128
     destination = MagicMock()
 
     allocator = MagicMock()
     allocator.tensor = pool
+    allocator.alignment = 256
     allocator.allocate.return_value = (0, 256)
     allocator.view.return_value = destination
     producer = object.__new__(AscendProducerMemoryPool)
     producer._allocator = allocator
     producer._transfer = MagicMock()
     producer._lock = threading.Lock()
+    producer._space_available = threading.Condition(producer._lock)
+    producer._producer_allocator = SimpleNamespace(staging_capacity=256)
+    producer._poisoned = False
     producer._local = SimpleNamespace(stream=None)
     producer._free_regions = MagicMock()
 
@@ -133,6 +138,78 @@ def test_producer_copies_to_staging_on_npu_stream():
     assert result is not None
     assert result.tensors == [destination]
     assert result.regions == [(0, 256)]
+
+
+def test_stage_wait_reuses_region_only_after_previous_batch_releases():
+    allocator = AscendProducerAllocator(
+        staging_capacity=256,
+        bounce_capacity=0,
+    )
+    allocator.tensor = torch.empty(256, dtype=torch.uint8)
+    allocator._free = [(0, 256)]
+    producer = object.__new__(AscendProducerMemoryPool)
+    producer._allocator = allocator
+    producer._producer_allocator = allocator
+    producer._transfer = MagicMock()
+    producer._lock = threading.Lock()
+    producer._space_available = threading.Condition(producer._lock)
+    producer._local = threading.local()
+    producer._poisoned = False
+    producer._copy_staged = MagicMock()
+    source = torch.empty(256, dtype=torch.uint8)
+
+    first = producer.stage([source])
+    assert first is not None
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(producer.stage_wait, [source])
+        time.sleep(0.01)
+        assert not waiting.done()
+        producer.release(first)
+        second = waiting.result(timeout=1)
+
+    assert second is not None
+    assert second.regions == [(0, 256)]
+
+
+def test_stage_wait_rejects_batch_larger_than_entire_staging_pool():
+    allocator = AscendProducerAllocator(
+        staging_capacity=256,
+        bounce_capacity=0,
+    )
+    producer = object.__new__(AscendProducerMemoryPool)
+    producer._allocator = allocator
+    producer._producer_allocator = allocator
+
+    assert producer._allocate_staged(
+        [torch.empty(257, dtype=torch.uint8)],
+        wait=True,
+    ) is None
+
+
+def test_stage_wait_wakes_and_fails_when_pool_is_poisoned():
+    allocator = AscendProducerAllocator(
+        staging_capacity=256,
+        bounce_capacity=0,
+    )
+    allocator.tensor = torch.empty(256, dtype=torch.uint8)
+    allocator._free = []
+    producer = object.__new__(AscendProducerMemoryPool)
+    producer._allocator = allocator
+    producer._producer_allocator = allocator
+    producer._transfer = MagicMock()
+    producer._lock = threading.Lock()
+    producer._space_available = threading.Condition(producer._lock)
+    producer._local = threading.local()
+    producer._poisoned = False
+    source = torch.empty(256, dtype=torch.uint8)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(producer.stage_wait, [source])
+        time.sleep(0.01)
+        producer.poison()
+        with pytest.raises(RuntimeError, match="poisoned"):
+            waiting.result(timeout=1)
 
 
 def test_producer_allocator_layout():
@@ -192,17 +269,6 @@ def test_producer_allocator_prepares_partitioned_slab():
     assert bounce.nbytes == 2 * _MIB
 
     transfer.register_memory.assert_called_once_with(tensor)
-
-
-def test_producer_allocator_does_not_expose_bounce_to_staging():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 0
-    allocator.prepare(torch.device("cpu"), transfer)
-
     assert allocator.allocate(3 * _MIB) == (0, 3 * _MIB)
     assert allocator.allocate(1) is None
 

@@ -33,6 +33,10 @@ class _DirectRegistration:
     users: int = 1
 
 
+class _RegistrationCleanupError(RuntimeError):
+    """A failed deregistration makes later ownership transfer unsafe."""
+
+
 class AscendMooncakeTransfer(MooncakeTransfer):
     """Use the process-wide Ascend engine with EC registration ownership."""
 
@@ -93,7 +97,8 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                     )
                     acquired.append(item.address)
 
-            except Exception:
+            except Exception as error:
+                cleanup_failed = False
                 for address in reversed(acquired):
                     entry = self._direct_registrations[address]
                     entry.users -= 1
@@ -104,7 +109,13 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                     status = engine.unregister_memory(address)
                     if status == 0:
                         del self._direct_registrations[address]
+                    else:
+                        cleanup_failed = True
 
+                if cleanup_failed:
+                    raise _RegistrationCleanupError(
+                        "Mooncake registration rollback could not be confirmed"
+                    ) from error
                 raise
 
         return acquired

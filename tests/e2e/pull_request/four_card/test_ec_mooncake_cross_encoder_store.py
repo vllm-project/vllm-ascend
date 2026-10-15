@@ -8,13 +8,16 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -66,11 +69,7 @@ class _CapturingEPDServer(RemoteEPDServer):
     def wait_for_output(self, marker: str, process_prefix: str | None = None) -> bool:
         deadline = time.monotonic() + STORE_LOG_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
-            if any(
-                marker in line
-                and (process_prefix is None or process_prefix in line)
-                for line in self.output_lines
-            ):
+            if any(marker in line and (process_prefix is None or process_prefix in line) for line in self.output_lines):
                 return True
             time.sleep(0.1)
         return False
@@ -84,19 +83,34 @@ def _wait_for_mooncake_master(
     deadline = time.monotonic() + STORE_MASTER_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            pytest.fail(
-                "mooncake_master exited during startup:\n"
-                + log_path.read_text(errors="replace")
-            )
+            pytest.fail("mooncake_master exited during startup:\n" + log_path.read_text(errors="replace"))
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return
         except OSError:
             time.sleep(0.1)
-    pytest.fail(
-        "timed out waiting for mooncake_master:\n"
-        + log_path.read_text(errors="replace")
-    )
+    pytest.fail("timed out waiting for mooncake_master:\n" + log_path.read_text(errors="replace"))
+
+
+def _stop_mooncake_master(process: subprocess.Popen[Any]) -> None:
+    """Stop the dedicated master session, including surviving descendants."""
+    process_group = process.pid
+    with suppress(ProcessLookupError):
+        os.killpg(process_group, signal.SIGTERM)
+
+    deadline = time.monotonic() + STORE_MASTER_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        with suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
+
+    if process.poll() is None:
+        process.wait(timeout=STORE_MASTER_STOP_TIMEOUT_SECONDS)
 
 
 @pytest.fixture(scope="module")
@@ -129,18 +143,13 @@ def mooncake_store_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
             [master, "--port", str(port)],
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
             _wait_for_mooncake_master(process, port, log_path)
             yield str(config_path)
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=STORE_MASTER_STOP_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            _stop_mooncake_master(process)
 
 
 def _messages() -> dict[str, list[dict[str, Any]]]:
@@ -478,12 +487,20 @@ def _consumer_args(port: int, reservation_port: int) -> list[str]:
     quantization="BF16",
     graph_mode="eager",
 )
+@pytest.mark.parametrize(
+    "use_fabric_mem",
+    [
+        pytest.param(True, id="fabricmem"),
+        pytest.param(False, id="non-fabricmem"),
+    ],
+)
 @wait_until_npu_memory_free()
 def test_cross_encoder_store_put_then_remote_hit(
     baseline_outputs: dict[str, str],
     mooncake_store_config: str,
+    use_fabric_mem: bool,
 ) -> None:
-    """E0 publishes outputs that E1 reuses through the shared Store."""
+    """E0 publishes outputs that E1 reuses through both Store transports."""
     encoder0_port = get_open_port()
     encoder1_port = get_open_port()
     pd0_port = get_open_port()
@@ -499,7 +516,7 @@ def test_cross_encoder_store_put_then_remote_hit(
         _consumer_args(pd1_port, pd1_reservation_port),
     ]
     env_dict = {
-        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "1" if use_fabric_mem else "0",
         "MOONCAKE_CONFIG_PATH": mooncake_store_config,
         "MOONCAKE_EC_PROTOCOL": "ascend",
         "VLLM_SERVER_DEV_MODE": "1",
@@ -536,5 +553,3 @@ def test_cross_encoder_store_put_then_remote_hit(
         assert second_outputs == baseline_outputs
         if not server.wait_for_output(STORE_HIT_LOG, "[VLLM_1]"):
             pytest.fail("E1 never loaded E0's encoder output from Mooncake Store")
-
-
