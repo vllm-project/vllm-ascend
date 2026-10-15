@@ -58,7 +58,13 @@ test_cases:
       - '{"method":"dspark","model":"RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
       - "--additional-config"
       - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
-    test_content: []
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      # Reference floors from GLM-5.2-W4A8-DSpark-A3-V2.yaml.
+      # Calibrate for this W4A8C8 + PCP workload before merging.
+      baseline: [0.89, 0.79, 0.65, 0.55, 0.47, 0.40, 0.34]
+      tolerance: 0.05
     benchmarks:
       # Same checkpoint and accuracy settings as GLM-5.2-W4A8C8-SFA-DCP.yaml.
       acc_gsm8k:
