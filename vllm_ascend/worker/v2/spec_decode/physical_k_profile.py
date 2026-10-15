@@ -184,6 +184,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         )
         self._physical_k_profile_cases.clear()
         self._physical_k_profile_is_upstream.clear()
+        per_width_cases: dict[int, list[tuple[dict[str, int], bool]]] = {}
         for physical_k in candidates:
             # Preserve the complete upstream max-K profile so its verify-cost
             # curves are unchanged. Lower physical widths only need robust
@@ -194,7 +195,15 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 if physical_k == max_k
                 else [False] * len(batches)
             )
-            for batch, is_upstream in zip(batches, upstream_flags):
+            per_width_cases[physical_k] = list(zip(batches, upstream_flags))
+        # A sequential K sweep confounds width with device warmup/clock drift.
+        # Interleave nearby candidate timings while keeping the max-K samples
+        # in their original relative order for upstream AV cost curves.
+        for index in range(max(map(len, per_width_cases.values()))):
+            for physical_k in candidates:
+                if index >= len(per_width_cases[physical_k]):
+                    continue
+                batch, is_upstream = per_width_cases[physical_k][index]
                 case = dict(batch)
                 case["profile_physical_k"] = physical_k
                 self._physical_k_profile_cases.append(physical_k)
