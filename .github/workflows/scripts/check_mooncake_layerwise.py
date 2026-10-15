@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Check the installed native Layerwise SDK over TCP before starting the NPU E2E.
 
-This uses CPU buffers, not model KV or NPU transfers. It deliberately imports no
-vLLM modules so dependency failures are reported before compiling the plugin.
+Run with MC_FORCE_TCP=1 so the NPU wheel does not initialize Ascend transport.
+This uses CPU buffers, not model KV or NPU transfers. The setting belongs only
+to this process, not the subsequent Ascend E2E. No vLLM modules are imported.
 """
 
 import argparse
 import ctypes
+import os
 import socket
 import subprocess
 import sys
@@ -44,6 +46,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-version", required=True)
     arguments = parser.parse_args()
+    require_result("CPU smoke requires MC_FORCE_TCP=1", os.environ.get("MC_FORCE_TCP"), "1")
     wheel = distribution("mooncake-transfer-engine-npu")
     require_result("installed version", wheel.version, arguments.expected_version)
     store_module = import_module("mooncake.store")

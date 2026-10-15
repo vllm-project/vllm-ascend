@@ -19,7 +19,8 @@ LAYERWISE_TEST = "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.
 
 
 @pytest.fixture
-def smoke():
+def smoke(monkeypatch):
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
     spec = importlib.util.spec_from_file_location("check_mooncake_layerwise", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -72,6 +73,20 @@ def test_native_contract_matches_production_without_importing_vllm(smoke):
         )
     )
     assert ast.literal_eval(declaration.value) == smoke.REQUIRED_METHODS
+
+
+@pytest.mark.parametrize("force_tcp", [None, "0"])
+def test_cpu_smoke_requires_tcp_only_before_importing_sdk(smoke, monkeypatch, force_tcp):
+    monkeypatch.setattr(smoke.sys, "argv", [str(SCRIPT_PATH), "--expected-version", "0.3.13.post1"])
+    if force_tcp is None:
+        monkeypatch.delenv("MC_FORCE_TCP")
+    else:
+        monkeypatch.setenv("MC_FORCE_TCP", force_tcp)
+    imports = Mock()
+    monkeypatch.setattr(smoke, "import_module", imports)
+    with pytest.raises(RuntimeError, match="CPU smoke requires MC_FORCE_TCP=1"):
+        smoke.main()
+    imports.assert_not_called()
 
 
 def test_smoke_writes_reverse_layers_reads_forward_and_revokes(smoke, store):
@@ -201,6 +216,16 @@ def test_ci_scopes_new_wheel_and_native_preflight_to_layerwise():
     condition = "${{ matrix.group.npu_type != 'cpu' && contains(matrix.group.tests, '" + LAYERWISE_TEST + "') }}"
     assert preflight["if"] == condition
     assert preflight["timeout-minutes"] == 3
+    assert preflight["env"]["MC_FORCE_TCP"] == "1"
+    # The production/v1 NPU E2E must not inherit the smoke test's TCP-only setting.
+    job = workflow["jobs"]["selected-tests"]
+    assert "MC_FORCE_TCP" not in workflow.get("env", {})
+    assert "MC_FORCE_TCP" not in job.get("env", {})
+    assert "MC_FORCE_TCP" not in job["container"].get("env", {})
+    for step in steps:
+        if step is not preflight:
+            assert "MC_FORCE_TCP" not in step.get("env", {})
+    assert "GITHUB_ENV" not in preflight["run"]
     assert steps.index(install) < steps.index(preflight) < steps.index(build)
     assert "check_mooncake_layerwise.py --expected-version 0.3.13.post1" in preflight["run"]
     subprocess.run(["bash", "-n", "-c", install["run"]], check=True, capture_output=True)
