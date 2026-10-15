@@ -1,37 +1,24 @@
-# Step 5 Preview (Experimental)
+# Step-5-Preview (Experimental)
 
 ## 1 Introduction
 
-**Step 5 Preview** is a next-generation flagship Mixture-of-Experts (MoE) model developed by StepFun. The model has **600B** total parameters, with **27B** active per token, and supports a 1M-token context window and vision input.
+**Step-5-Preview** is a next-generation flagship Mixture-of-Experts (MoE) model developed by StepFun. The model has **600B** total parameters, with **27B** active per token, and supports a 1M-token context window and vision input.
 
-This document describes how to quickly get started with `Step 5 Preview` model inference deployment on Ascend NPU using vLLM-Ascend, based on W8A8 quantized weights.
+This document describes how to quickly get started with `Step-5-Preview` model inference deployment on Ascend NPU using vLLM-Ascend, based on W8A8 quantized weights.
 
 !!! warning
 
     **Current status and constraints**
 
-    - `Step 5 Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step 5 Preview`.
-    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step 5 Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
+    - `Step-5-Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step-5-Preview`.
+    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
-
-The features below are the ones enabled by the verified deployment commands in [Chapter 5](#5-online-service-deployment).
-
-| Feature | Description | Configuration |
-| --- | --- | --- |
-| Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
-| Expert Parallel (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
-| Automatic Prefix Caching | Reuses the KV cache for shared prompt prefixes. | `--enable-prefix-caching` |
-| Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
-| Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
-
-> **Note:** The features listed above are the ones enabled in the verified deployment commands in this document. Other features, such as LoRA, Pipeline Parallel, and Prefill-Decode Disaggregation, are not verified in this document.
 
 ## 3 Prerequisites
 
@@ -41,8 +28,6 @@ The features below are the ones enabled by the verified deployment commands in [
 | --- | --- |
 | Step-5-Preview-w8a8-mxfp8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
-This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk. We choose mxfp8 quantization format to get better performance on 950DT products.
-
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Hardware and Software Preparation
@@ -50,8 +35,6 @@ This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelsc
 | Hardware | Ascend HDK | CANN version | torch_npu version | vLLM | vLLM-Ascend version |
 | --- | --- | --- | --- | --- | --- |
 | 950DT products | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | Based on v0.27.0 | Based on v0.27.0 |
-
-`Step 5 Preview` currently supports **only the 950DT products** hardware; other Ascend hardware (e.g., Atlas 800I A3) is not supported.
 
 Before getting started, confirm that the firmware/driver is installed correctly. The recommended HDK version is 25.5.0. Run the following command to confirm; the version shown in the output header is the HDK version.
 
@@ -72,14 +55,6 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 ```bash
 docker pull quay.io/ascend/vllm-ascend:step5-a5
 ```
-
-After a successful download, check the existing images:
-
-```bash
-docker images | grep 
-```
-
-The output should contain the downloaded `quay.io/ascend/vllm-ascend:step5-a5`.
 
 #### Create Docker Container
 
@@ -133,7 +108,7 @@ docker exec -it ${CONTAINER_NAME} bash
 
 !!! note
 
-    `Step 5 Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
+    `Step-5-Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
 ## 5 Online Service Deployment
 
@@ -232,6 +207,20 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
+Key Parameter Descriptions:
+
+| Feature | Description | Configuration |
+| --- | --- | --- |
+| Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
+| Expert Parallel (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
+| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
+| Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
+| Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
+| Data parallelism for shared experts | Use data parallelism to deploy shared experts | `"enable_shared_expert_dp": true` |
+| Shared-expert overlap | Overlaps shared-expert execution with other work | `multistream_overlap_shared_expert: true` |
+
+> **Note:** The features listed above are the ones enabled in the verified deployment commands in this document. Other features, such as LoRA, Pipeline Parallel, and Prefill-Decode Disaggregation, are not verified in this document.
+
 ## 6 Functional Verification
 
 Send an inference request to test the inference service, refer to the following command:
@@ -264,7 +253,7 @@ The expected result is as follows:
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-The following table shows the results of `Step 5 Preview`.
+The following table shows the results of `Step-5-Preview`.
 
 | dataset | model | hardware | deployment | metric | mode | vllm-api-general-chat |
 | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
