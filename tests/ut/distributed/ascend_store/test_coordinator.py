@@ -19,6 +19,7 @@ import inspect
 import unittest
 from dataclasses import dataclass, replace
 from unittest.mock import patch
+from weakref import ref
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -373,6 +374,12 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             coord.store_mask(48, 33)
             coord.store_mask(32, 65)
             self.assertEqual(build_mask.call_count, 5)
+
+        cached_masks = coord._cached_reachable_masks
+        coord_ref = ref(coord)
+        del coord
+        self.assertIsNone(coord_ref())
+        self.assertGreater(cached_masks.cache_info().currsize, 0)
 
     def test_compressed_masks_use_full_attention_reachability(self):
         coord = AscendStoreCoordinator(
