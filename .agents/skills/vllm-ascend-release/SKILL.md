@@ -1,6 +1,7 @@
 ---
 name: vllm-ascend-release
 description: "End-to-end release management skill for vLLM Ascend. Creates release checklist issues, identifies critical bugs, runs functional tests, invokes release note generation, and guides through the complete release process."
+disable-model-invocation: true
 ---
 
 # vLLM Ascend Release Skill
