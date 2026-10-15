@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
@@ -17,7 +17,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -739,6 +739,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.load_config = SimpleNamespace(load_format="auto")
     runner.vllm_config.load_config = runner.load_config
     runner.model_config.dtype = torch.bfloat16
+    runner.model_config.logits_processors = None
     runner.model_config.hf_config = SimpleNamespace()
     runner.model_config.hf_text_config = SimpleNamespace()
     runner.vllm_config.model_config = runner.model_config
@@ -746,6 +747,8 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.vllm_config.compilation_config = runner.compilation_config
     runner.vllm_config.use_v2_model_runner = True
     runner.compilation_config.static_forward_context = {}
+    runner.compilation_config.mode = CompilationMode.NONE
+    runner.req_states = Mock()
     runner.parallel_config = SimpleNamespace(enable_batch_sharded_sampling=False)
     runner.eplb = Mock(
         maybe_register_model=Mock(return_value=False), maybe_register_speculator=Mock(return_value=False)
@@ -768,6 +771,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     def load_attention(name):
         layer = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(layer)
+        layer.attn_backend = AscendMLABackend
         impl = AscendMLAImpl.__new__(AscendMLAImpl)
         impl.layer_name = name
         impl.vllm_config = runner.vllm_config

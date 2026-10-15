@@ -172,6 +172,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     )
     owner = MLAAttention.__new__(MLAAttention)
     nn.Module.__init__(owner)
+    owner.attn_backend = mla_v1.AscendMLABackend
     owner.impl = impl
     owner.indexer = None
     owner.kv_cache_dtype = "auto"

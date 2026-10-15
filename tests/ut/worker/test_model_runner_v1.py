@@ -1204,6 +1204,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         def add_layer(name):
             layer = MLAAttention.__new__(MLAAttention)
             torch.nn.Module.__init__(layer)
+            layer.attn_backend = AscendMLABackend
             impl = AscendMLAImpl.__new__(AscendMLAImpl)
             impl.layer_name = name
             impl.vllm_config = runner.vllm_config
