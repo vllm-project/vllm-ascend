@@ -818,6 +818,8 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
 
 Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
 
+The templates below assume the same tensor-parallel size on Prefill and Decode. Both `prefill.tp_size` and `decode.tp_size` in `--kv-transfer-config` use the seventh template argument (`$7`) and must match the actual TP size on each side.
+
 #### 5.2.1 Create the engine templates
 
 === "Prefill"
@@ -886,11 +888,11 @@ Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2
           "kv_connector_extra_config": {
             "prefill": {
               "dp_size": 4,
-              "tp_size": 16
+              "tp_size": '"$7"'
             },
             "decode": {
               "dp_size": 4,
-              "tp_size": 16
+              "tp_size": '"$7"'
             }
           }
         }'
@@ -962,11 +964,11 @@ Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2
           "kv_connector_extra_config": {
             "prefill": {
               "dp_size": 4,
-              "tp_size": 16
+              "tp_size": '"$7"'
             },
             "decode": {
               "dp_size": 4,
-              "tp_size": 16
+              "tp_size": '"$7"'
             }
           }
         }'
@@ -1021,7 +1023,7 @@ Key PD settings:
 
 ### 5.3 Pooled PD Separation Deployment
 
-This deployment extends the A3 4P4D configuration in [Section 5.2](#52-eight-node-pd-separation-deployment) with MemCache-backed KV Cache Pool.
+This deployment extends the A3 4P4D configuration in [Section 5.2](#52-eight-node-pd-separation-deployment) with MemCache-backed KV Cache Pool. Keep TP16 on both sides for this A3 pooled deployment; the connector TP sizes follow `$7`.
 
 #### 5.3.1 Install MF
 
@@ -1154,6 +1156,7 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
     export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
     export VLLM_SERVER_DEV_MODE=1
     export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
     export PYTHONHASHSEED=0
@@ -1205,11 +1208,11 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
                 "kv_connector_extra_config": {
                   "prefill": {
                     "dp_size": 4,
-                    "tp_size": 16
+                    "tp_size": '"$7"'
                   },
                   "decode": {
                     "dp_size": 4,
-                    "tp_size": 16
+                    "tp_size": '"$7"'
                   }
                 }
               },
@@ -1249,6 +1252,7 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
     export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
     export VLLM_SERVER_DEV_MODE=1
     export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
     export PYTHONHASHSEED=0
@@ -1300,11 +1304,11 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
                 "kv_connector_extra_config": {
                   "prefill": {
                     "dp_size": 4,
-                    "tp_size": 16
+                    "tp_size": '"$7"'
                   },
                   "decode": {
                     "dp_size": 4,
-                    "tp_size": 16
+                    "tp_size": '"$7"'
                   }
                 }
               },
