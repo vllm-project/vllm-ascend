@@ -19,6 +19,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -29,6 +30,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
     spec.requires_non_causal = True
@@ -119,7 +121,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
@@ -261,20 +263,35 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args: tuple[Any, ...] = (
+    forward_args: tuple[Any, ...] = (
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
         [],
         object(),
         128,
-        False,
-        "capture",
     )
+    if vllm_version_is("0.30.0"):
+        # v0.30.0 capture() has no precompute_context_kv hook; the trailing
+        # positional is progress_bar_desc.
+        args: tuple[Any, ...] = (*forward_args, False, "Capturing CUDA graphs")
+        expected_kwargs = {
+            "causal": False,
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
+    else:
+        args = (*forward_args, False, "capture")
+        expected_kwargs = {
+            "causal": False,
+            "precompute_context_kv": "capture",
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
 
-    def capture(self, *received):
+    def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == args
+        assert received == forward_args
+        # The Ascend wrapper forwards the trailing options as keywords.
+        assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:

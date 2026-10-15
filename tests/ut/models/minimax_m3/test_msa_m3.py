@@ -41,28 +41,23 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseMetadata,
     AscendMiniMaxM3SparseMetadataBuilder,
     AscendMiniMaxM3SparsePrefillMetadata,
-    _is_mrv2_idle_dp_dummy,
     _register_m3_sparse_packed_modules,
-    _should_use_tp_sharded_index_decode,
     _sparse_proj_quant_type,
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
 from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
-    MiniMaxM3TPDecodeScoreMetadata,
     _as_ascendc_index_kv_cache,
-    _index_score_topk_candidates,
-    _minimax_m3_index_decode,
     _minimax_m3_index_score,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
     minimax_m3_index_prefill,
-    minimax_m3_index_tp_block_parallel_decode,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
+from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -299,6 +294,16 @@ def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
     assert "return topk_idx, select_num_idx" in decode_source
 
 
+def test_a3_decode_topk_uses_fused_prepare_and_postprocess() -> None:
+    source_path = Path(msa_m3_index_postprocess.__file__)
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "def _ascendc_decode_score_prepare_kernel(" in source
+    assert "_, raw_indices = torch.topk(prepared, k=topk" in source
+    assert "def _ascendc_decode_topk_postprocess_kernel(" in source
+    assert "return indices, counts" in source
+
+
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
 def test_minimax_m3_sparse_forward_dispatches_to_layer(
     mock_get_forward_context: MagicMock,
@@ -368,6 +373,9 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill.cu_seqlens_k.shape[0] == batch_spec.batch_size + 1
         assert metadata.prefill.total_kv_blocks == 5
         assert metadata.prefill.max_kv_blocks == 3
+        assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
+        rebuilt = builder.build(0, common)
+        assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
 @pytest.mark.parametrize(
@@ -391,7 +399,12 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
-        assert metadata.decode.start_loc is None
+        assert metadata.decode.start_loc.dtype == torch.int32
+        assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
+        assert builder.decode_start_loc_buffer is not None
+        assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
+        rebuilt = builder.build(0, common)
+        assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
@@ -400,6 +413,12 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
             metadata.prefill.start_loc,
             metadata.prefill.context_lens // 128,
         )
+        assert builder.prefill_start_loc_buffer is not None
+        assert metadata.prefill.start_loc.data_ptr() == builder.prefill_start_loc_buffer.data_ptr()
+        assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
+        rebuilt = builder.build(0, common)
+        assert rebuilt.prefill.start_loc.data_ptr() == metadata.prefill.start_loc.data_ptr()
+        assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
 def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
@@ -449,7 +468,8 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     assert indexer_metadata.prefill.context_lens.shape[0] == batch_size
 
 
-def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
+def test_indexer_metadata_builder_trims_graph_padded_spec_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True)
     device = torch.device("cpu")
     common = _create_common_attn_metadata(
         BatchSpec(
@@ -465,10 +485,6 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
 
     with (
         patch(
-            "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
-            return_value=SimpleNamespace(rank_in_group=0),
-        ),
-        patch(
             "vllm_ascend.models.minimax_m3.msa_m3.split_decodes_and_prefills",
             return_value=(16, 0, 60, 0),
         ),
@@ -479,16 +495,14 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
     assert first.num_decodes == 15
     assert first.num_decode_tokens == 60
     assert first.decode is not None
-    assert first.decode.tp_score is not None
     assert first.decode.cu_seqlens_q.shape == (16,)
     assert first.decode.cu_seqlens_q[-1] == 60
     assert first.decode.block_table.shape[0] == 15
-    assert first.decode.tp_score.context_lens.shape == (15,)
+    assert first.decode.context_lens.shape == (15,)
     assert second.decode is not None
-    assert second.decode.tp_score is not None
-    assert first.decode.tp_score.block_table.data_ptr() == second.decode.tp_score.block_table.data_ptr()
-    assert first.decode.tp_score.context_lens.data_ptr() == second.decode.tp_score.context_lens.data_ptr()
-    assert first.decode.tp_score.cu_seqlens_q.data_ptr() == second.decode.tp_score.cu_seqlens_q.data_ptr()
+    assert first.decode.block_table.data_ptr() == second.decode.block_table.data_ptr()
+    assert first.decode.context_lens.data_ptr() == second.decode.context_lens.data_ptr()
+    assert first.decode.cu_seqlens_q.data_ptr() == second.decode.cu_seqlens_q.data_ptr()
 
 
 def test_sparse_proj_quant_type_falls_back_to_language_model_prefix() -> None:
@@ -549,7 +563,7 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
 def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
-    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
+    a5_branch_end = module_source.index("\n\ndef _active_decode_num_reqs", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
@@ -561,44 +575,6 @@ def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
     assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A5,
-    ):
-        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
-
-
-def test_non_a5_decode_keeps_tp_block_sharding() -> None:
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A3,
-    ):
-        assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
-        assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
-        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
-
-
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_indexer_caches_model_runner_choice(use_v2_model_runner: bool) -> None:
-    with (
-        patch.object(
-            msa_m3_module,
-            "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=use_v2_model_runner),
-        ) as get_config,
-        patch.object(msa_m3_module, "AscendMiniMaxM3IndexerCache"),
-    ):
-        impl = AscendMiniMaxM3IndexerImpl(
-            num_kv_heads=1,
-            scale=1.0,
-            topk_blocks=2,
-            sparse_block_size=128,
-            num_index_heads=1,
-            index_head_dim=4,
-            prefix="layer.attn",
-        )
-    assert impl.use_v2_model_runner is use_v2_model_runner
-    get_config.assert_called_once_with()
 
 
 def _make_mrv2_padding_context(
@@ -616,113 +592,6 @@ def _make_mrv2_padding_context(
         additional_kwargs={},
         cudagraph_runtime_mode=cudagraph_mode,
     )
-
-
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
-def test_mrv2_idle_dp_dummy_is_detected_and_cached(
-    mock_get_vllm_config: MagicMock,
-) -> None:
-    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
-    forward_context = _make_mrv2_padding_context()
-
-    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is True
-    forward_context.is_padding[0] = False
-    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is True
-    mock_get_vllm_config.assert_not_called()
-
-
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
-def test_mrv1_padding_shape_is_not_classified_as_mrv2_dummy(
-    mock_get_vllm_config: MagicMock,
-) -> None:
-    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
-
-    assert _is_mrv2_idle_dp_dummy(_make_mrv2_padding_context(), use_v2_model_runner=False) is False
-
-
-@pytest.mark.parametrize(
-    ("forward_context"),
-    [
-        _make_mrv2_padding_context(is_padding=False),
-        _make_mrv2_padding_context(tokens_across_dp=(1, 1)),
-        _make_mrv2_padding_context(cudagraph_mode=CUDAGraphMode.FULL),
-        _make_mrv2_padding_context(num_tokens=512),
-        _make_mrv2_padding_context(num_tokens=512, cudagraph_mode=CUDAGraphMode.FULL),
-    ],
-    ids=["real_one_token_decode", "all_dp_ranks_one_token", "full_graph", "capture_warmup", "capture_full"],
-)
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
-def test_mrv2_non_dummy_forwards_are_not_skipped(
-    mock_get_vllm_config: MagicMock,
-    forward_context: SimpleNamespace,
-) -> None:
-    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
-
-    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is False
-
-
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
-def test_mrv2_idle_dp_runs_first_indexer_layer_then_skips_repeats(
-    mock_get_forward_context: MagicMock,
-    mock_get_tp_group: MagicMock,
-    mock_get_vllm_config: MagicMock,
-) -> None:
-    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
-    torch.nn.Module.__init__(impl)
-    impl.use_v2_model_runner = True
-    impl.num_index_heads = 1
-    impl.index_head_dim = 4
-    impl.topk_blocks = 2
-    impl.init_blocks = 1
-    impl.local_blocks = 1
-    impl.index_cache = SimpleNamespace(
-        prefix="layer.attn.index_cache",
-        kv_cache=torch.zeros(4, 128, 4),
-    )
-    decode = AscendMiniMaxM3IndexerDecodeMetadata(
-        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-        seq_lens=torch.tensor([1], dtype=torch.int32),
-        context_lens=torch.tensor([0], dtype=torch.int32),
-        block_table=torch.tensor([[0]], dtype=torch.int32),
-        start_loc=torch.tensor([0], dtype=torch.int32),
-        max_seq_len=1,
-        decode_query_len=1,
-        tp_score=MagicMock(),
-    )
-    metadata = AscendMiniMaxM3IndexerMetadata(
-        seq_lens=decode.seq_lens,
-        max_seq_len=1,
-        slot_mapping=torch.zeros(1, dtype=torch.int64),
-        causal_mask=torch.zeros(1, 1, dtype=torch.bool),
-        num_actual_tokens=1,
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefills=0,
-        num_prefill_tokens=0,
-        decode=decode,
-    )
-    forward_context = _make_mrv2_padding_context()
-    forward_context.attn_metadata = {impl.index_cache.prefix: metadata}
-    mock_get_forward_context.return_value = forward_context
-    mock_get_tp_group.return_value = SimpleNamespace(world_size=4)
-    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
-    expected = torch.zeros(1, 1, 2, dtype=torch.int32)
-
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_index_tp_block_parallel_decode",
-        return_value=expected,
-    ) as mock_decode:
-        first = impl.forward(torch.zeros(1, 4))
-        second = impl.forward(torch.zeros(1, 4))
-
-    assert first[0] is expected
-    assert first[1:] == (None, None)
-    assert second == (None, None, None)
-    mock_decode.assert_called_once()
-    assert forward_context.additional_kwargs[msa_m3_module._MRV2_DUMMY_INDEXER_TP_WARMED_KEY]
-    assert forward_context.additional_kwargs[msa_m3_module._MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY]
 
 
 def test_a5_indexer_forward_keeps_original_decode_path() -> None:
@@ -758,7 +627,6 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     )
     expected = torch.zeros(1, 1, 2, dtype=torch.int32)
     expected_select_num_idx = torch.ones(1, 1, dtype=torch.int32)
-    tp_group = SimpleNamespace(world_size=4, rank_in_group=0)
 
     with (
         patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", False),
@@ -768,12 +636,6 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
             return_value=SimpleNamespace(
                 attn_metadata={impl.index_cache.prefix: metadata},
             ),
-        ),
-        patch.object(msa_m3_module, "get_tp_group", return_value=tp_group),
-        patch.object(
-            msa_m3_module,
-            "_should_use_tp_sharded_index_decode",
-            return_value=False,
         ),
         patch.object(
             msa_m3_module,
@@ -802,6 +664,67 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
         decode.decode_query_len,
     )
     assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
+
+
+def test_a3_indexer_forward_receives_fused_select_counts() -> None:
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.num_kv_heads = 1
+    impl.index_head_dim = 4
+    impl.block_size = 128
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.scale = 0.5
+    impl.index_cache = SimpleNamespace(
+        prefix="layer.attn.index_cache",
+        kv_cache=torch.zeros(4, 128, 4),
+    )
+    decode = AscendMiniMaxM3IndexerDecodeMetadata(
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        context_lens=torch.tensor([128], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        start_loc=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=129,
+        decode_query_len=1,
+    )
+    metadata = AscendMiniMaxM3IndexerMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=decode.max_seq_len,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        causal_mask=torch.zeros(1, 1, dtype=torch.bool),
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    expected = torch.zeros(1, 1, 2, dtype=torch.int32)
+    expected_select_num_idx = torch.ones(1, 1, dtype=torch.int32)
+
+    with (
+        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True),
+        patch.object(
+            msa_m3_module,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={impl.index_cache.prefix: metadata},
+            ),
+        ),
+        patch.object(
+            msa_m3_module,
+            "minimax_m3_index_decode_ascendc",
+            return_value=(expected, expected_select_num_idx),
+        ),
+    ):
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
+
+    assert actual is expected
+    assert prefill is None
+    assert select_num_idx is expected_select_num_idx
 
 
 def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
@@ -1262,7 +1185,7 @@ def test_ascendc_index_prefill_limits_score_width_for_topk(
     assert topk_args[3:] == (1, 2, 1, 1)
 
 
-def test_ascendc_index_decode_wraps_score_candidates() -> None:
+def test_ascendc_index_decode_returns_fused_select_counts() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
     block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
@@ -1271,58 +1194,9 @@ def test_ascendc_index_decode_wraps_score_candidates() -> None:
     context_lens = torch.tensor([128], dtype=torch.int32)
     start_loc = torch.tensor([1], dtype=torch.int32)
     causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    score = torch.zeros(2, 1, 4)
     expected = torch.zeros(2, 1, 2, dtype=torch.int32)
-    scores = torch.zeros(2, 1, 2)
-
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
-        return_value=(expected, scores),
-    ) as mock_decode:
-        actual = minimax_m3_index_decode(
-            idx_q,
-            index_key_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            context_lens,
-            start_loc,
-            causal_mask,
-            topk=2,
-            init_blocks=1,
-            local_blocks=1,
-            decode_query_len=1,
-        )
-
-    assert actual is expected
-    mock_decode.assert_called_once_with(
-        idx_q,
-        index_key_cache,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        context_lens,
-        start_loc,
-        causal_mask,
-        topk=2,
-        init_blocks=1,
-        local_blocks=1,
-        decode_query_len=1,
-    )
-
-
-@pytest.mark.parametrize("decode_query_len", [1, 2])
-def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> None:
-    idx_q = torch.zeros(decode_query_len, 2, 128)
-    index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, decode_query_len], dtype=torch.int32)
-    seq_lens = torch.tensor([128 + decode_query_len], dtype=torch.int32)
-    context_lens = torch.tensor([128], dtype=torch.int32)
-    start_loc = torch.tensor([1], dtype=torch.int32)
-    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    score = torch.zeros(2, decode_query_len, 4)
-    expected_indices = torch.zeros(2, decode_query_len, 2, dtype=torch.int32)
-    expected_scores = torch.zeros(2, decode_query_len, 2)
+    expected_counts = torch.ones(2, 1, dtype=torch.int32)
 
     with (
         patch(
@@ -1330,11 +1204,11 @@ def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> Non
             return_value=score,
         ) as mock_score,
         patch(
-            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._index_score_topk_candidates",
-            return_value=(expected_indices, expected_scores),
-        ) as mock_topk,
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+            return_value=(expected, expected_counts),
+        ) as mock_fused_topk,
     ):
-        actual_indices, actual_scores = _minimax_m3_index_decode(
+        actual, counts = minimax_m3_index_decode(
             idx_q,
             index_key_cache,
             block_table,
@@ -1346,456 +1220,29 @@ def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> Non
             topk=2,
             init_blocks=1,
             local_blocks=1,
-            decode_query_len=decode_query_len,
-        )
-
-    assert actual_indices is expected_indices
-    assert actual_scores is expected_scores
-    assert mock_score.call_args.kwargs == {
-        "init_blocks": 1,
-        "local_blocks": 1,
-    }
-    assert mock_topk.call_args.kwargs["init_blocks"] == 1
-    assert mock_topk.call_args.kwargs["local_blocks"] == 1
-
-
-@pytest.mark.parametrize(
-    ("tp_rank", "expected_blocks"),
-    [(0, [0, 1]), (1, [2, 3])],
-)
-def test_tp_single_token_decode_uses_dense_mode(
-    tp_rank: int,
-    expected_blocks: list[int],
-) -> None:
-    class FakeTPGroup:
-        world_size = 2
-        rank_in_group = tp_rank
-
-        @staticmethod
-        def all_gather(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-            return torch.cat((tensor, tensor), dim=dim)
-
-    idx_q = torch.zeros(1, 1, 128)
-    index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    context_lens = torch.tensor([511], dtype=torch.int32)
-    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    local_topk = torch.zeros(2, 1, 1, dtype=torch.int32)
-    local_scores = torch.ones(2, 1, 1)
-    builder = _make_indexer_builder(torch.device("cpu"), tp_size=2)
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
-        return_value=FakeTPGroup(),
-    ):
-        tp_score = builder._build_tp_score_metadata(
-            block_table,
-            torch.tensor([0, 1], dtype=torch.int32),
-            context_lens,
-            max_seq_len=512,
             decode_query_len=1,
         )
 
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
-        return_value=(local_topk, local_scores),
-    ) as mock_decode:
-        minimax_m3_index_tp_block_parallel_decode(
-            idx_q,
-            index_key_cache,
-            tp_score,
-            causal_mask,
-            topk=1,
-            init_blocks=0,
-            local_blocks=0,
-            tp_group=FakeTPGroup(),
-        )
-
-    decode_args = mock_decode.call_args.args
-    assert decode_args[7] is None
-    assert torch.equal(
-        decode_args[2],
-        torch.tensor([expected_blocks], dtype=torch.int32),
-    )
-    assert torch.equal(decode_args[3], torch.tensor([0, 1], dtype=torch.int32))
-    assert torch.equal(decode_args[4], torch.tensor([256], dtype=torch.int32))
-    assert decode_args[6].dtype == torch.int32
-
-
-@pytest.mark.parametrize(
-    ("tp_rank", "expected_block_table", "expected_k_lens"),
-    [
-        (0, [[0, 1], [2, 3], [4, 5]], [129, 13, 130]),
-        (1, [[1], [3], [5]], [1, 0, 75]),
-    ],
-)
-def test_tp_speculative_decode_uses_packed_causal_halo(
-    tp_rank: int,
-    expected_block_table: list[list[int]],
-    expected_k_lens: list[int],
-) -> None:
-    class FakeTPGroup:
-        world_size = 2
-        rank_in_group = tp_rank
-
-        @staticmethod
-        def all_gather(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-            return torch.cat((tensor, tensor), dim=dim)
-
-    # Request 0's query positions 126, 127 and 128 straddle the TP chunks
-    # [0, 128) and [128, 256). Rank 0 includes rank 1's block as a score-only
-    # halo, so packed right-down causal visibility is [127, 128, 129]. Its
-    # halo score is discarded before TopK, leaving [127, 128, 128] for chunk0.
-    # Request 2 starts at 200, so rank 0 uses klen=130: right-down visibility
-    # begins at 128 and the entire owned block remains visible for every query.
-    idx_q = torch.arange(9, dtype=torch.float32).view(9, 1, 1).expand(-1, -1, 128)
-    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    score_width = len(expected_block_table[0])
-    causal_score = torch.zeros(2, 9, score_width)
-    local_topk = torch.zeros(2, 9, 1, dtype=torch.int32)
-    local_scores = torch.ones(2, 9, 1)
-    builder = _make_indexer_builder(torch.device("cpu"), tp_size=2)
-    common = _create_common_attn_metadata(
-        BatchSpec(seq_lens=[129, 13, 203], query_lens=[3, 3, 3]),
-        block_size=128,
-        device=torch.device("cpu"),
-    )
-    with (
-        patch(
-            "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
-            return_value=FakeTPGroup(),
-        ),
-        patch(
-            "vllm_ascend.models.minimax_m3.msa_m3.split_decodes_and_prefills",
-            return_value=(3, 0, 9, 0),
-        ),
-        patch.object(
-            builder,
-            "_build_tp_score_metadata",
-            wraps=builder._build_tp_score_metadata,
-        ) as mock_build_tp_score,
-    ):
-        metadata = builder.build(0, common)
-    assert mock_build_tp_score.call_count == 1
-    assert metadata.decode is not None
-    assert metadata.decode.tp_score is not None
-    tp_score = metadata.decode.tp_score
-
-    with (
-        patch(
-            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
-            return_value=causal_score,
-        ) as mock_score,
-        patch(
-            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._index_score_topk_candidates",
-            return_value=(local_topk, local_scores),
-        ) as mock_topk,
-    ):
-        minimax_m3_index_tp_block_parallel_decode(
-            idx_q,
-            torch.zeros(2, 128, 128),
-            tp_score,
-            causal_mask,
-            topk=1,
-            init_blocks=0,
-            local_blocks=0,
-            tp_group=FakeTPGroup(),
-        )
-
-    mock_score.assert_called_once()
-    score_args = mock_score.call_args.args
-    assert score_args[6] is causal_mask
-    assert torch.equal(
-        score_args[2],
-        torch.tensor(expected_block_table, dtype=torch.int32),
-    )
-    assert torch.equal(score_args[3], torch.tensor([0, 3, 6, 9], dtype=torch.int32))
-    assert torch.equal(
-        score_args[4],
-        torch.tensor(expected_k_lens, dtype=torch.int32),
-    )
-    assert torch.equal(mock_topk.call_args.args[0], causal_score[..., :1])
-
-
-def test_tp_score_metadata_reuses_graph_input_storage() -> None:
-    """TP metadata consumed by ACLGraph must not point at per-build tensors."""
-
-    builder = _make_indexer_builder(torch.device("cpu"), tp_size=2)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 4], dtype=torch.int32)
-    context_lens = torch.tensor([125], dtype=torch.int32)
-
-    tp_group = SimpleNamespace(rank_in_group=1)
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
-        return_value=tp_group,
-    ):
-        first = builder._build_tp_score_metadata(
-            block_table,
-            cu_seqlens_q,
-            context_lens,
-            max_seq_len=256,
-            decode_query_len=4,
-        )
-        context_lens.copy_(torch.tensor([129], dtype=torch.int32))
-        second = builder._build_tp_score_metadata(
-            block_table,
-            cu_seqlens_q,
-            context_lens,
-            max_seq_len=256,
-            decode_query_len=4,
-        )
-
-    assert first.block_table is second.block_table is block_table
-    assert first.context_lens is second.context_lens is context_lens
-    assert first.cu_seqlens_q is second.cu_seqlens_q is cu_seqlens_q
-    assert first.max_block_count == second.max_block_count == 2
-    assert first.block_offset == second.block_offset == 1
-    assert first.block_count == second.block_count == 1
-
-
-def test_tp_block_parallel_forwards_global_forced_block_counts() -> None:
-    class FakeTPGroup:
-        world_size = 2
-        rank_in_group = 1
-
-        @staticmethod
-        def all_gather(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-            return torch.cat((tensor, tensor), dim=dim)
-
-    idx_q = torch.zeros(1, 1, 128)
-    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    local_topk = torch.zeros(2, 1, 1, dtype=torch.int32)
-    local_scores = torch.ones(2, 1, 1)
-    tp_score = MiniMaxM3TPDecodeScoreMetadata(
-        block_table=torch.tensor([[4, 5, 6, 7]], dtype=torch.int32),
-        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-        context_lens=torch.tensor([511], dtype=torch.int32),
-        max_block_count=8,
-        block_size=128,
-        block_offset=4,
-        block_count=4,
-        decode_query_len=1,
-    )
-
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
-        return_value=(local_topk, local_scores),
-    ) as mock_decode:
-        minimax_m3_index_tp_block_parallel_decode(
-            idx_q,
-            torch.zeros(8, 128, 128),
-            tp_score,
-            causal_mask,
-            topk=1,
-            init_blocks=5,
-            local_blocks=6,
-            tp_group=FakeTPGroup(),
-        )
-
-    assert mock_decode.call_args.kwargs["init_blocks"] == 5
-    assert mock_decode.call_args.kwargs["local_blocks"] == 6
-    assert mock_decode.call_args.kwargs["block_offset"] == 4
-
-
-def test_tp_topk_applies_init_blocks_by_global_block_id() -> None:
-    score = torch.tensor([[[1.0, 2.0]]])
-
-    indices, scores = _index_score_topk_candidates(
-        score,
-        context_lens=torch.tensor([256], dtype=torch.int32),
-        decode_query_len=1,
-        topk=2,
-        block_offset=4,
-        init_blocks=5,
-    )
-
-    assert torch.equal(indices, torch.tensor([[[4, 5]]], dtype=torch.int32))
-    assert scores[0, 0, 0] == 1.0e30
-    assert scores[0, 0, 1] == 2.0
-
-
-def test_speculative_topk_masks_future_blocks_before_selection() -> None:
-    score = torch.tensor(
-        [
-            [
-                [9.0, 8.0, 7.0, 1.0e20],
-                [9.0, 8.0, 7.0, 6.0],
-            ]
-        ]
-    )
-
-    indices, scores = _index_score_topk_candidates(
-        score,
-        context_lens=torch.tensor([383], dtype=torch.int32),
-        decode_query_len=2,
-        topk=3,
-        local_blocks=1,
-    )
-
-    assert set(indices[0, 0].tolist()) == {0, 1, 2}
-    assert torch.isfinite(scores[0, 0]).all()
-    assert set(indices[0, 1].tolist()) == {0, 1, 3}
-
-
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
-def test_indexer_speculative_decode_uses_tp_block_parallel_path(
-    mock_get_forward_context: MagicMock,
-    mock_get_tp_group: MagicMock,
-) -> None:
-    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
-    torch.nn.Module.__init__(impl)
-    impl.use_v2_model_runner = True
-    impl.num_index_heads = 1
-    impl.index_head_dim = 4
-    impl.topk_blocks = 2
-    impl.init_blocks = 1
-    impl.local_blocks = 1
-    impl.index_cache = SimpleNamespace(
-        prefix="layer.attn.index_cache",
-        kv_cache=torch.zeros(4, 128, 4),
-    )
-
-    decode = AscendMiniMaxM3IndexerDecodeMetadata(
-        cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
-        seq_lens=torch.tensor([258], dtype=torch.int32),
-        context_lens=torch.tensor([256], dtype=torch.int32),
-        block_table=torch.tensor([[0, 1, 2]], dtype=torch.int32),
-        start_loc=torch.tensor([2], dtype=torch.int32),
-        max_seq_len=258,
-        decode_query_len=2,
-        tp_score=MiniMaxM3TPDecodeScoreMetadata(
-            block_table=torch.tensor([[0, 1, 2]], dtype=torch.int32),
-            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
-            context_lens=torch.tensor([256], dtype=torch.int32),
-            max_block_count=3,
-            block_size=128,
-            block_offset=0,
-            block_count=2,
-            decode_query_len=2,
-        ),
-    )
-    metadata = AscendMiniMaxM3IndexerMetadata(
-        seq_lens=decode.seq_lens,
-        max_seq_len=decode.max_seq_len,
-        slot_mapping=torch.arange(2, dtype=torch.int64),
-        causal_mask=torch.zeros(2048, 2048, dtype=torch.int8),
-        num_actual_tokens=2,
-        num_decodes=1,
-        num_decode_tokens=2,
-        num_prefills=0,
-        num_prefill_tokens=0,
-        decode=decode,
-    )
-    mock_get_forward_context.return_value = SimpleNamespace(
-        attn_metadata={impl.index_cache.prefix: metadata},
-    )
-    mock_get_tp_group.return_value = SimpleNamespace(
-        world_size=4,
-        rank_in_group=0,
-    )
-    expected = torch.zeros((1, 2, 2), dtype=torch.int32)
-
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_index_tp_block_parallel_decode",
-        return_value=expected,
-    ) as mock_tp_block_parallel:
-        actual, prefill, select_num_idx = impl.forward(torch.zeros(2, 4))
-
     assert actual is expected
-    assert prefill is None
-    assert select_num_idx is None
-    mock_tp_block_parallel.assert_called_once()
-    call_kwargs = mock_tp_block_parallel.call_args.kwargs
-    assert mock_tp_block_parallel.call_args.args[2] is decode.tp_score
-    assert mock_tp_block_parallel.call_args.args[3] is metadata.causal_mask
-    assert call_kwargs["tp_group"] is mock_get_tp_group.return_value
-
-
-def test_speculative_decode_candidates_use_per_token_visibility() -> None:
-    score = torch.tensor([[[5.0], [7.0]]])
-
-    indices, scores = _index_score_topk_candidates(
-        score,
-        context_lens=torch.tensor([-1], dtype=torch.int32),
-        decode_query_len=2,
-        topk=2,
-        block_offset=1,
+    assert counts is expected_counts
+    mock_score.assert_called_once_with(
+        idx_q,
+        index_key_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
     )
-
-    assert torch.equal(indices, torch.tensor([[[-1, -1], [1, -1]]], dtype=torch.int32))
-    assert torch.isneginf(scores[0, 0]).all()
-    assert scores[0, 1, 0] == 7.0
-    assert torch.isneginf(scores[0, 1, 1])
-
-
-def test_speculative_decode_candidates_move_local_mask_per_token() -> None:
-    score = torch.tensor([[[9.0, 1.0], [9.0, 1.0]]])
-
-    indices, scores = _index_score_topk_candidates(
+    mock_fused_topk.assert_called_once_with(
         score,
-        context_lens=torch.tensor([127], dtype=torch.int32),
-        decode_query_len=2,
-        topk=1,
+        context_lens,
+        1,
+        2,
+        block_table.shape[-1],
+        init_blocks=1,
         local_blocks=1,
     )
-
-    assert torch.equal(indices, torch.tensor([[[0], [1]]], dtype=torch.int32))
-    assert torch.equal(scores, torch.full((1, 2, 1), 1.0e29))
-
-
-def test_speculative_decode_candidates_do_not_overforce_earlier_tp_shard() -> None:
-    score = torch.tensor([[[9.0, 8.0], [9.0, 8.0]]])
-
-    indices, scores = _index_score_topk_candidates(
-        score,
-        context_lens=torch.tensor([510], dtype=torch.int32),
-        decode_query_len=2,
-        topk=1,
-        block_offset=0,
-        local_blocks=2,
-    )
-
-    assert torch.equal(indices, torch.tensor([[[0], [0]]], dtype=torch.int32))
-    assert torch.equal(scores, torch.tensor([[[9.0], [9.0]]]))
-
-
-@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
-@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn_decode")
-@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
-def test_sparse_impl_zeros_mrv2_idle_dp_output_after_indexer_warmup(
-    mock_get_forward_context: MagicMock,
-    mock_sparse_attn_decode: MagicMock,
-    mock_sparse_attn_prefill: MagicMock,
-) -> None:
-    impl = AscendMiniMaxM3SparseImpl(
-        num_heads=2,
-        head_size=4,
-        scale=0.5,
-        num_kv_heads=2,
-        topk_blocks=8,
-        sparse_block_size=128,
-    )
-    mock_get_forward_context.return_value = SimpleNamespace(
-        attn_metadata={"layer.attn": object()},
-        additional_kwargs={
-            msa_m3_module._MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY: True,
-        },
-    )
-    output = torch.ones(1, 8)
-
-    result = impl.forward(
-        SimpleNamespace(layer_name="layer.attn"),
-        torch.zeros_like(output),
-        torch.empty(0),
-        (None, None, None),
-        output,
-    )
-
-    assert result is output
-    assert torch.count_nonzero(output) == 0
-    mock_sparse_attn_decode.assert_not_called()
-    mock_sparse_attn_prefill.assert_not_called()
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
@@ -2241,3 +1688,79 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
         }
 
     mock_is_available.assert_called_once_with()
+
+
+@pytest.mark.parametrize("tp_size", [1, 4, 8])
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("num_prefills", [0, 1])
+@pytest.mark.parametrize("idle_dp", [False, True])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    query_len: int,
+    num_prefills: int,
+    idle_dp: bool,
+    device_type: AscendDeviceType,
+) -> None:
+    # Exercise metadata and forward together: an unguarded metadata, dummy,
+    # or forward TP branch must fail even when the other branches are correct.
+    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True)
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_PREFILL", True)
+    group = SimpleNamespace(world_size=tp_size, rank_in_group=0, all_gather=MagicMock())
+    monkeypatch.setattr("vllm.distributed.get_tp_group", lambda: group)
+    device = torch.device("cpu")
+    common = _create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[16384 + query_len] * 2 + [128] * num_prefills,
+            query_lens=[query_len] * 2 + [128] * num_prefills,
+        ),
+        block_size=128,
+        device=device,
+    )
+    monkeypatch.setattr(
+        msa_m3_module,
+        "split_decodes_and_prefills",
+        lambda *a, **kw: (2, num_prefills, 2 * query_len, 128 * num_prefills),
+    )
+    builder = _make_indexer_builder(device, tp_size=tp_size)
+    forbidden = MagicMock(side_effect=AssertionError("AscendC decode must use the full cache"))
+    metadata = builder.build(0, common)
+    assert metadata.decode is not None
+    assert metadata.decode.block_table.shape == (2, 129)
+
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.index_head_dim = 4
+    impl.block_size = 128
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.index_cache = SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+    context = _make_mrv2_padding_context() if idle_dp else SimpleNamespace(additional_kwargs={})
+    context.attn_metadata = {"index": metadata}
+    monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode", forbidden, raising=False)
+    expected = torch.zeros(1, 2 * query_len, 2, dtype=torch.int32)
+    expected_select_num_idx = torch.full((1, 2 * query_len), 2, dtype=torch.int32)
+    decode_op = MagicMock(return_value=(expected, expected_select_num_idx))
+    prefill_op = MagicMock(return_value=torch.zeros(1, 128, 2, dtype=torch.int32))
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode_ascendc", decode_op)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_prefill_ascendc", prefill_op)
+    for _ in range(2):
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(common.num_actual_tokens, 4))
+        assert actual is expected
+        assert prefill is (prefill_op.return_value if num_prefills else None)
+        assert select_num_idx is expected_select_num_idx
+    assert decode_op.call_count == 2
+    assert decode_op.call_args.args[0].shape == (2 * query_len, 1, 4)
+    assert decode_op.call_args.args[1] is impl.index_cache.kv_cache
+    assert decode_op.call_args.args[2] is metadata.decode.block_table
+    assert torch.equal(decode_op.call_args.args[6], torch.tensor([128, 128], dtype=torch.int32))
+    assert all(call.args[6] is metadata.decode.start_loc for call in decode_op.call_args_list)
+    assert decode_op.call_args.kwargs["decode_query_len"] == query_len
+    assert prefill_op.call_count == 2 * num_prefills
+    forbidden.assert_not_called()
+    group.all_gather.assert_not_called()

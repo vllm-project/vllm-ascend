@@ -749,18 +749,30 @@ def masked_block_runs(
         return []
     if mask is None:
         return [(start_block, end_block)]
+    mask_len = len(mask)
+    if start_block >= mask_len:
+        return [(start_block, end_block)]
+    scan_end = min(end_block, mask_len)
+    # True/False map to b"\x01"/b"\x00"; bytes.find scans at C speed and
+    # never raises (unlike list.index), so both dense and holey masks skip
+    # the per-block Python loop.
+    bits = bytes(mask[start_block:scan_end])
     runs: list[tuple[int, int]] = []
-    run_start: int | None = None
-    for block_idx in range(start_block, end_block):
-        allowed = block_idx >= len(mask) or mask[block_idx]
-        if allowed and run_start is None:
-            run_start = block_idx
-        elif not allowed and run_start is not None:
-            runs.append((run_start, block_idx))
-            run_start = None
-    if run_start is not None:
-        runs.append((run_start, end_block))
-    return runs
+    pos = 0
+    while True:
+        hole = bits.find(b"\x00", pos)
+        if hole == -1:
+            runs.append((start_block + pos, end_block))
+            return runs
+        if hole > pos:
+            runs.append((start_block + pos, start_block + hole))
+        pos = bits.find(b"\x01", hole + 1)
+        if pos == -1:
+            # Remaining mask blocks are all disallowed, but blocks at or
+            # beyond mask_len stay allowed.
+            if end_block > mask_len:
+                runs.append((mask_len, end_block))
+            return runs
 
 
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
@@ -835,6 +847,11 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
+
+    # End of the range being (re)prefilled. For a resumed request this also
+    # includes previously generated tokens, so decode-only offload does not
+    # publish intermediate recomputation state.
+    prefill_end_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
@@ -854,6 +871,7 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
+        prefill_end_tokens: int | None = None,
         block_gvas: list[int] | None = None,
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
@@ -871,6 +889,7 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
+        self.prefill_end_tokens = prefill_end_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
@@ -964,6 +983,11 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    # Monotonic identity of one queued store operation. Unlike req_id, this
+    # value is never reused while the engine is alive, so an old asynchronous
+    # operation cannot update the save progress of a new request generation
+    # that happens to reuse the same req_id.
+    store_job_id: int | None = None
 
     def __init__(
         self,
@@ -982,6 +1006,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        store_job_id: int | None = None,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -1026,6 +1051,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1053,6 +1079,20 @@ class ReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+    def get_event_token_ids(self, start: int, end: int) -> list[int] | None:
+        """Return token ids for an absolute request range.
+
+        Metadata carries only the newly savable suffix to avoid repeatedly
+        serializing the full request history during long decode sequences.
+        An empty list means this metadata does not cover the requested range.
+        """
+        if self.token_ids is None:
+            return None
+        token_ids_end = self.save_start_token + len(self.token_ids)
+        if start < self.save_start_token or end > token_ids_end:
+            return []
+        return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
@@ -1159,8 +1199,12 @@ class ReqMeta:
             )
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # The worker consumes metadata asynchronously. Own a stable,
+            # bounded snapshot rather than sharing the scheduler's growing
+            # full-history list.
+            token_ids_end = target_token_len if should_save_partial_block else num_tokens_to_save
+            token_ids = tracker.token_ids[previous_saved_tokens:token_ids_end].copy()
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -1183,7 +1227,10 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
+            # A resumed MRV2 request re-prefills prompt + previously generated
+            # tokens. Reachability masks must treat that complete range as the
+            # prefill boundary for this generation.
+            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,

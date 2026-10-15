@@ -227,11 +227,17 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     dcp_local_seq_lens=dcp_local_seq_lens,
                 )
         if attn_metadata is not None:
-            # Draft attention uses decode state even during graph capture.
+            # Align with draft ACLGraph capture: q_len>1 / step0 → SpecDecoding
+            # (splitfuse); single-token draft-decode → DecodeOnly (PA).
+            q_len = num_tokens_padded // max(num_reqs_padded, 1) if num_reqs_padded else 1
+            use_spec_decoding = step == 0 or num_query_per_req > 1 or q_len > 1
+            draft_attn_state = (
+                AscendAttentionState.SpecDecoding if use_spec_decoding else AscendAttentionState.DecodeOnly
+            )
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
+                metadata.attn_state = draft_attn_state
 
             # Step 0 is draft prefill; only decode steps update CPU lengths.
             if step > 0:

@@ -9,7 +9,7 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, SlidingWindowMLASpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -23,6 +23,7 @@ from vllm_ascend.core.kv_cache_interface import (
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
+    supports_component_major_mla_pd,
 )
 
 
@@ -109,6 +110,36 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert pool.get_num_free_blocks() == len(old_ids)
 
 
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
+
+
 # --- the fields a hand-rebuilt spec has to carry -----------------------------
 
 
@@ -123,11 +154,6 @@ def _swa_spec(**overrides):
     )
 
 
-@pytest.mark.skipif(
-    not hasattr(SlidingWindowMLASpec, "bounded_replay"),
-    reason="bounded_replay arrives with vLLM #56227. Until the Main2Main pin includes it "
-    "no spec can set the field, so there is nothing for merge to carry.",
-)
 def test_sliding_window_mla_merge_carries_bounded_replay():
     """The Ascend override rebuilds the merged spec instead of calling the
     parent's ``merge``, so upstream's field has to be carried across by hand:
@@ -190,9 +216,8 @@ def test_the_swa_spec_accepts_whatever_the_probe_returns():
     replaying = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True))
     plain = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", False))
 
-    if hasattr(SlidingWindowMLASpec, "bounded_replay"):
-        assert replaying.bounded_replay
-        assert not plain.bounded_replay
+    assert replaying.bounded_replay
+    assert not plain.bounded_replay
 
 
 # --- which layers may declare a replay window --------------------------------

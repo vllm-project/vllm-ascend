@@ -149,6 +149,16 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
+    def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
+        # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
+        # slices input_ids to valid local rows to match the image mask, leaving
+        # different input lengths on PCP ranks. Publish the common padded length
+        # (including graph padding) before that slice, and overwrite it each batch.
+        set_embedding_num_tokens_padded = getattr(self.model, "set_embedding_num_tokens_padded", None)
+        if set_embedding_num_tokens_padded is not None:
+            set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
+        return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
