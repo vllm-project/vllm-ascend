@@ -31,7 +31,6 @@ def make_speculator():
     spec.replicated_pcp = False
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
-    spec.flashmla_executor = None
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
@@ -133,10 +132,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
-    draft_groups = [
-        [],
-        [SimpleNamespace(backend=draft_backend, get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=None))],
-    ]
+    draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
 
     def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
         assert target_attn_groups is target_groups

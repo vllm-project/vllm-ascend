@@ -28,7 +28,6 @@ class _BackendA:
 def _speculator(**attributes):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.attn_architecture = None
-    speculator.flashmla_executor = None
     for name, value in attributes.items():
         setattr(speculator, name, value)
     return speculator
@@ -50,9 +49,7 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     def parent_set_attn(self, *_args):
         assert active_context == [draft_config]
         self._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
-        self.attn_groups = [
-            [SimpleNamespace(backend=_BackendA, get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=None))]
-        ]
+        self.attn_groups = [[SimpleNamespace(backend=_BackendA)]]
 
     def get_layers(config, layer_type, names):
         assert active_context == [draft_config]

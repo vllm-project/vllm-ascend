@@ -2523,7 +2523,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
     layer_names, specs, _, _, kv_cache_config = _make_dsa_metadata_groups()
     for group in kv_cache_config.kv_cache_groups:
         group.kv_cache_spec = replace(group.kv_cache_spec, cache_dtype_str="turboquant_4bit_nc")
-    builders = [MagicMock(tq_group_block_sizes=None, flashmla_state=None) for _ in layer_names]
+    builders = [MagicMock(tq_group_block_sizes=None) for _ in layer_names]
     attn_groups = [
         [
             AttentionGroup(
