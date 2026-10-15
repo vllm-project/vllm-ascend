@@ -272,6 +272,10 @@ def test_local_argmax_validation_rejects_unsupported_config(monkeypatch, mutate,
     with pytest.raises(ValueError, match=message):
         spec._validate_local_argmax_reduction()
 
+def test_local_argmax_validation_missing_flag_is_noop():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    assert not hasattr(spec, "use_local_argmax_reduction")
+    spec._validate_local_argmax_reduction()
 
 def test_local_argmax_disabled_uses_upstream_sampling(monkeypatch):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
@@ -281,9 +285,20 @@ def test_local_argmax_disabled_uses_upstream_sampling(monkeypatch):
     monkeypatch.setattr(DSparkSpeculator, "_sample_sequential", upstream)
 
     spec._sample_sequential(2, hidden_states)
-
     upstream.assert_called_once_with(2, hidden_states)
-
+def test_local_argmax_missing_flag_uses_upstream_sampling(monkeypatch):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    hidden_states = torch.ones(2, 3)
+    assert not hasattr(spec, "use_local_argmax_reduction")
+    upstream = MagicMock(return_value=torch.tensor([[1, 2]]))
+    monkeypatch.setattr(
+        DSparkSpeculator,
+        "_sample_sequential",
+        upstream,
+    )
+    result = spec._sample_sequential(2, hidden_states)
+    upstream.assert_called_once_with(2, hidden_states)
+    torch.testing.assert_close(result, torch.tensor([[1, 2]]))
 
 def test_local_argmax_sampling_matches_full_vocab_markov_reference(monkeypatch):
     batch_size, num_steps, vocab_size = 2, 3, 6
@@ -308,7 +323,7 @@ def test_local_argmax_sampling_matches_full_vocab_markov_reference(monkeypatch):
         bias = torch.zeros(previous.shape[0], vocab_size)
         favored = (previous + 1) % vocab_size
         return bias.scatter_(1, favored.unsqueeze(-1), 5.0)
-
+    
     expected_steps = []
     remote_pairs = []
     previous = anchors

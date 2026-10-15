@@ -93,7 +93,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         """Validate the DSpark-specific local reduction instead of the
         generic ``model.get_top_tokens`` contract.
         """
-        if not self.use_local_argmax_reduction:
+        if not getattr(self, "use_local_argmax_reduction", False):
             return
         if self.speculative_config.draft_sample_method == "probabilistic":
             raise ValueError("DSpark local argmax requires draft_sample_method='greedy'.")
@@ -181,7 +181,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         num_reqs: int,
         head_hidden: torch.Tensor,
     ) -> None:
-        if not self.use_local_argmax_reduction:
+        if not getattr(self, "use_local_argmax_reduction", False):
             return super()._sample_sequential(
                 num_reqs,
                 head_hidden,
