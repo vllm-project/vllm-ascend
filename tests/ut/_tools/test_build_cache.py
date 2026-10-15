@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import regex as re
@@ -101,37 +105,22 @@ def _run_cache(
     normalize_paths: list[Path] | None = None,
     set_env_values: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    is_custom = domain == "custom_operator"
     actual_output = output_dir
-    if domain == "custom_operator":
+    if is_custom:
         safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
         stage_dir = stage_dir or (output_dir.parent / "private-stages" / safe_action)
         publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
         actual_output = stage_dir
-
-    custom_soc: str | None = None
-    custom_operator: str | None = None
-    custom_action: str | None = None
-    custom_operator_source: Path | None = None
-    custom_publish_dir: Path | None = None
-    custom_publish_state_dir: Path | None = None
-    if domain == "custom_operator":
         if operator_source is None:
             operator_source = prepared_inputs[0]
-        assert stage_dir is not None
-        assert publish_state_dir is not None
-        custom_soc = "ascend910b"
-        custom_operator = "test_operator"
-        custom_action = action
-        custom_operator_source = operator_source
-        custom_publish_dir = output_dir
-        custom_publish_state_dir = publish_state_dir
 
     command = build_cache_command(
         cache_root=cache_root,
         domain=domain,
         unit="test_unit",
         output_dir=actual_output,
-        environment_profile="ascendc" if domain == "custom_operator" else "host-cxx",
+        environment_profile="ascendc" if is_custom else "host-cxx",
         prepared_inputs=prepared_inputs,
         recipe_values=recipe_values or ["recipe=stable"],
         environment_values=environment_values or ["abi=test"],
@@ -147,12 +136,12 @@ def _run_cache(
             builder_mode,
             artifact_name,
         ],
-        soc=custom_soc,
-        operator=custom_operator,
-        action=custom_action,
-        operator_source=custom_operator_source,
-        publish_dir=custom_publish_dir,
-        publish_state_dir=custom_publish_state_dir,
+        soc="ascend910b" if is_custom else None,
+        operator="test_operator" if is_custom else None,
+        action=action if is_custom else None,
+        operator_source=operator_source if is_custom else None,
+        publish_dir=output_dir if is_custom else None,
+        publish_state_dir=publish_state_dir if is_custom else None,
     )
     return run_command(command)
 
@@ -1511,16 +1500,21 @@ def test_third_party_entry_without_artifact_model_uses_legacy_model(tmp_path: Pa
     assert counter.read_text() == "1"
 
 
-def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path):
+@pytest.mark.parametrize("blocker_kind", ["cache_root", "build_lock"])
+def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path, blocker_kind: str):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
     builder = _write_builder(tmp_path)
     counter = tmp_path / "counter"
 
-    blocker = tmp_path / "not-a-directory"
-    blocker.write_text("block cache mkdir", encoding="utf-8")
-    unusable_cache = blocker / "cache"
+    if blocker_kind == "cache_root":
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("block cache mkdir", encoding="utf-8")
+        unusable_cache = blocker / "cache"
+    else:
+        unusable_cache = tmp_path / "cache"
+        (unusable_cache / ".build.lock").mkdir(parents=True)
 
     proc = _run_cache(
         cache_root=unusable_cache,
@@ -1955,6 +1949,214 @@ def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
     _assert_success(warm)
     assert "[build-cache] HIT" in warm.stdout
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("trigger", ["HIT", "SAVED"])
+def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str):
+    engine = _load_engine("build_cache_version_limit_test")
+    source, prepared = _make_operator_inputs(tmp_path)
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+    options = dict(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=tmp_path / "output",
+        builder=builder,
+        counter=counter,
+    )
+    versions = []
+    # Start with two versions, or an oversized restored snapshot on the HIT path.
+    version_count = 3 if trigger == "HIT" else 2
+    for index in range(version_count):
+        (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
+        for action in ("a", "b"):
+            proc = _run_cache(**options, action=action, artifact_name=f"{action}.o")
+            _assert_success(proc)
+        operator_hash, _ = engine._hash_operator_text(source, None)
+        version = cache_root / "custom_operator" / "ascend910b" / "test_operator" / operator_hash
+        versions.append(version)
+        os.utime(version, (index + 1, index + 1))
+
+    marker = cache_root / ".updated"
+    # Either reuse the oldest version or build a third source version.
+    index = 0 if trigger == "HIT" else 2
+    (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
+    with engine.build_session(cache_root):
+        warm = _run_cache(**options, action="a", artifact_name="a.o")
+        _assert_success(warm)
+        assert f"[build-cache] {trigger}" in warm.stdout
+        assert "[build-cache] PRUNED" not in warm.stdout
+        assert all(version.is_dir() for version in versions)
+        assert len(list(versions[0].parent.glob("[0-9a-f]" * 64))) == 3
+        # A concurrent cleanup must also defer until this entire build finishes.
+        deferred = run_command([sys.executable, str(ENGINE), "prune", "--cache-root", str(cache_root)])
+        _assert_success(deferred)
+        assert "PRUNE skipped" in deferred.stdout
+        assert all(version.is_dir() for version in versions)
+        marker.unlink()
+    assert counter.read_text() == ("6" if trigger == "HIT" else "5")
+    assert versions[0].exists() == (trigger == "HIT")
+    assert versions[-1].is_dir()
+    assert not versions[1 if trigger == "HIT" else 0].exists()
+    current_hash, _ = engine._hash_operator_text(source, None)
+    current = versions[-1].parent / current_hash
+    assert len(list(current.rglob("manifest.json"))) == (2 if trigger == "HIT" else 1)
+    assert len(list(versions[-1].rglob("manifest.json"))) == 2
+    assert marker.is_file()
+    assert (tmp_path / "output" / "a.o").is_file()
+    assert (tmp_path / "output" / "b.o").is_file()
+    assert all(_manifest(path.parent)["schema"] == 4 for path in cache_root.rglob("manifest.json"))
+
+
+def _seed_operator_versions(operator_root: Path, count: int = 3) -> list[Path]:
+    versions = [operator_root / (str(index) * 64) for index in range(count)]
+    for index, version in enumerate(versions):
+        version.mkdir(parents=True)
+        (version / "artifact.o").write_text("cached", encoding="utf-8")
+        os.utime(version, (index + 1, index + 1))
+    return versions
+
+
+@pytest.mark.parametrize("fault", ["busy", "delete_error", "symlink"])
+def test_operator_version_cleanup_isolated_and_fail_open(tmp_path: Path, monkeypatch, fault: str):
+    engine = _load_engine("build_cache_version_cleanup_test")
+    cache_root = tmp_path / "cache"
+    operator_root = cache_root / "custom_operator" / "a3" / "test_op"
+    versions = _seed_operator_versions(operator_root)
+    other_operator = operator_root.parent / "other_op" / ("a" * 64)
+    other_operator.mkdir(parents=True)
+
+    if fault == "delete_error":
+
+        def refuse_delete(path):
+            raise PermissionError("injected cleanup failure")
+
+        monkeypatch.setattr(engine.shutil, "rmtree", refuse_delete)
+    elif fault == "symlink":
+        # A hash-shaped symlink must not make cleanup delete outside the root.
+        shutil.rmtree(versions[0])
+        versions[0].symlink_to(other_operator, target_is_directory=True)
+
+    lock_scope = (
+        engine._file_lock_or_error(cache_root / engine.BUILD_LOCK, shared=True)
+        if fault == "busy"
+        else contextlib.nullcontext(None)
+    )
+    with lock_scope as error:
+        assert error is None
+        start = time.monotonic()
+        assert engine.main(["prune", "--cache-root", str(cache_root)]) == 0
+        assert time.monotonic() - start < 2
+    assert all(version.is_dir() for version in versions)
+    assert other_operator.is_dir()
+    if fault == "busy":
+        # Once the entire competing build is gone, maintenance converges to two.
+        engine.prune(cache_root)
+        assert not versions[0].exists()
+        assert versions[1].is_dir() and versions[2].is_dir()
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "slot_setting", "retained"),
+    [
+        (None, None, 2),
+        (None, "", 2),
+        (None, "1", 1),
+        (None, "3", 3),
+        (None, "0", 3),
+        (None, "-1", 3),
+        (None, "invalid", 3),
+        ("aclnn", None, 3),
+        ("extensions", None, 3),
+        ("disabled", None, 3),
+        ("cache_lock", None, 3),
+        ("cache_path", None, 3),
+    ],
+)
+def test_project_build_prunes_only_after_all_native_stages_succeed(
+    tmp_path: Path, monkeypatch, failure_stage, slot_setting, retained
+):
+    engine = _load_engine("build_cache_project_session_test")
+    cache_root = tmp_path / "custom-cache"
+    events = []
+    versions = _seed_operator_versions(cache_root / "custom_operator" / "a3" / "op")
+    variable = "VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS"
+    if slot_setting is None:
+        monkeypatch.delenv(variable, raising=False)
+    else:
+        monkeypatch.setenv(variable, slot_setting)
+    env_values = runpy.run_path(str(REPO_ROOT / "vllm_ascend" / "envs.py"))["env_variables"]
+    configured_slots = env_values[variable]()
+    assert configured_slots == (slot_setting or "2")
+    # Check the shell entrypoint advertises the same default and preserves overrides.
+    build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
+    declaration = next(line for line in build_script.splitlines() if line.startswith(f"export {variable}="))
+    shell = run_command(["bash", "-c", f'{declaration}; printf "%s" "${variable}"'])
+    _assert_success(shell)
+    assert shell.stdout == configured_slots
+    if failure_stage == "cache_lock":
+        (cache_root / engine.BUILD_LOCK).mkdir()
+    elif failure_stage == "cache_path":
+        original_resolve = Path.resolve
+
+        def fail_cache_resolve(path, *args, **kwargs):
+            if path == cache_root:
+                raise OSError("injected cache path failure")
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", fail_cache_resolve)
+    # Execute the real setup.py hook without importing setuptools, torch or NPU
+    # packages. Native compilation is stubbed; the real build-session guard runs.
+    tree = ast.parse((REPO_ROOT / "setup.py").read_text(encoding="utf-8"))
+    build_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "cmake_build_ext")
+    build_class.body = [node for node in build_class.body if isinstance(node, ast.FunctionDef) and node.name == "run"]
+
+    class BuildBase:
+        def run_command(self, name):
+            assert name == "build_aclnn"
+            events.append("aclnn")
+            if failure_stage == "aclnn":
+                raise RuntimeError("injected native build failure")
+
+        def run(self):
+            events.append("extensions")
+            if failure_stage == "extensions":
+                raise RuntimeError("injected native build failure")
+
+    original_prune = engine.prune
+
+    def record_prune(root, max_versions):
+        assert root == cache_root
+        assert max_versions == configured_slots
+        events.append("prune")
+        return original_prune(root, max_versions)
+
+    monkeypatch.setattr(engine, "prune", record_prune)
+    namespace = {
+        "build_ext": BuildBase,
+        "ROOT_DIR": str(REPO_ROOT),
+        "envs": SimpleNamespace(
+            COMPILE_CUSTOM_KERNELS=failure_stage != "disabled",
+            VLLM_ASCEND_BUILD_CACHE_DIR=str(cache_root),
+            VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS=configured_slots,
+        ),
+        "os": os,
+        "load_module_from_path": lambda name, path: engine,
+    }
+    exec(compile(ast.Module(body=[build_class], type_ignores=[]), "setup.py", "exec"), namespace)
+    build = namespace["cmake_build_ext"]()
+    if failure_stage in {"aclnn", "extensions"}:
+        with pytest.raises(RuntimeError, match="injected native build failure"):
+            build.run()
+        assert "prune" not in events
+    else:
+        build.run()
+        expected = ["extensions"] if failure_stage == "disabled" else ["aclnn", "extensions"]
+        assert events == (expected + ["prune"] if failure_stage is None else expected)
+    assert sum(version.is_dir() for version in versions) == retained
+    assert versions[-1].is_dir()
 
 
 def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):

@@ -77,6 +77,10 @@ CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
 # Keep this csrc-relative default aligned with the CMake adapter and Docker
 # restore/export paths; those paths must refer to the same cache directory.
 BUILD_CACHE_DIR="${VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache}"
+# Source-hash slots per SOC/operator (2 by default; <=0 disables cleanup).
+# setup.py applies this only after the complete native build/install succeeds,
+# not here: this script finishes before the remaining extension build.
+export VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS="${VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS:-2}"
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
