@@ -36,6 +36,10 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental internal router: BF16 operands with FP32 output. Non-sensitive.
+    # Valid values: 0 (default, retain gate behavior), 1 (force BF16).
+    # Requires BF16 model weights and a bias-free 2D gate; restart/recapture to apply.
+    "VLLM_ASCEND_FORCE_ROUTER_BF16": lambda: _strict_binary_env("VLLM_ASCEND_FORCE_ROUTER_BF16"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

@@ -424,6 +424,7 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
 )
 def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_parallel, expected):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
     runner.ascend_shared_experts = SimpleNamespace(
         parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP)
@@ -458,6 +459,7 @@ def test_final_output_never_all_reduces_sequence_shards(
 ):
     runtime_moe_all_reduce.moe_comm_type = MoECommType.MC2 if output_is_reduced else MoECommType.ALLGATHER
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     runner.layer_name = "test.reduction"
     runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
     runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
@@ -505,6 +507,7 @@ def test_shared_output_reduction_depends_on_weight_layout(
 ):
     runtime_moe_all_reduce.moe_comm_type = MoECommType.MC2 if fused_output_is_reduced else MoECommType.ALLGATHER
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     runner.layer_name = "test.reduction"
     runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
     runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
@@ -547,6 +550,7 @@ def test_local_shared_expert_dp_reduces_partial_routed_output(
     reduce_routed,
 ):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     runner.layer_name = "test.reduction"
     runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
     runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
@@ -2183,6 +2187,7 @@ def test_runner_selects_sp_multistream_custom_op(
 
 def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     hidden_states = torch.randn(4, 4)
     gathered_states = torch.randn(8, 4)
     routed_states = torch.randn(4, 2)
@@ -2219,6 +2224,7 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
 
 def test_runner_without_routed_input_transform_keeps_original_shared_input_path():
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     hidden_states = torch.randn(4, 4)
     runner._shared_experts = object()
     runner.routed_input_transform = None
@@ -2237,6 +2243,7 @@ def test_runner_without_routed_input_transform_keeps_original_shared_input_path(
 
 def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     latent_states = torch.randn(4, 2)
     full_states = torch.randn(4, 4)
     operation_order = []
@@ -2261,6 +2268,7 @@ def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
 
 def test_runner_without_routed_output_transform_does_not_defer_shared_output_join():
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     fused_output = torch.randn(4, 4)
     runner.routed_output_transform = None
     runner.ascend_shared_experts = SimpleNamespace(
@@ -2465,6 +2473,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
 @pytest.mark.parametrize("has_shared_experts", [False, True])
 def test_set_lora_context_updates_experts(has_shared_experts):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.routed_experts = SimpleNamespace()
     shared_experts = MagicMock() if has_shared_experts else None
@@ -2481,6 +2490,7 @@ def test_set_lora_context_updates_experts(has_shared_experts):
 @pytest.mark.parametrize("has_shared_experts", [False, True])
 def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_experts):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.routed_input_transform = None
     runner.routed_output_transform = None
@@ -2541,6 +2551,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
 
 def test_forward_impl_gathers_sp_input_before_routed_collectives(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.routed_input_transform = None
     runner.routed_output_transform = None
@@ -2635,6 +2646,7 @@ def test_forward_impl_gathers_sp_input_before_routed_collectives(monkeypatch):
 
 def test_forward_impl_records_router_milestones(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.routed_input_transform = None
     runner.routed_output_transform = None
@@ -2676,6 +2688,7 @@ def test_forward_impl_records_router_milestones(monkeypatch):
 
 def test_internal_router_releases_shared_stream_after_input_cast(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     gate_weight = torch.randn(3, 4, dtype=torch.float32)
@@ -2768,6 +2781,7 @@ def test_internal_router_releases_shared_stream_after_input_cast(monkeypatch):
 
 def test_internal_router_without_precast_preserves_gate_forward_and_early_shared_prepare(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = MagicMock()
     hidden_states.float.side_effect = AssertionError("fallback must not allocate an unused FP32 input")
@@ -2830,6 +2844,7 @@ def test_internal_router_without_precast_preserves_gate_forward_and_early_shared
 @pytest.mark.parametrize("has_fp32_input", [False, True])
 def test_internal_router_reuses_fused_fp32_input(monkeypatch, has_shared_experts, has_fp32_input):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     router_input = hidden_states.float() if has_fp32_input else hidden_states
@@ -2877,6 +2892,7 @@ def test_internal_router_reuses_fused_fp32_input(monkeypatch, has_shared_experts
 @pytest.mark.parametrize("router_input_dtype", [torch.bfloat16, torch.float32])
 def test_compute_router_logits_bounds_fp32_cast_lifetime(monkeypatch, router_input_dtype):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.gate = SimpleNamespace(weight_fp32=torch.randn(3, 4, dtype=torch.float32))
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
@@ -2908,6 +2924,7 @@ def test_compute_router_logits_bounds_fp32_cast_lifetime(monkeypatch, router_inp
 
 def test_compute_router_logits_fallback_does_not_cast_unused_input():
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = MagicMock()
     hidden_states.float.side_effect = AssertionError("fallback must not allocate an unused FP32 input")
@@ -2929,6 +2946,7 @@ def test_compute_router_logits_fallback_does_not_cast_unused_input():
 
 def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     routed_hidden_states = torch.randn(2, 4)
     shared_hidden_states = torch.randn(4, 8)
@@ -3099,6 +3117,7 @@ def test_runner_skips_precast_without_internal_router(monkeypatch):
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     """The hot path uses an existing gate.weight_fp32 when provided."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
     # FP16 router_logits forces the path that uses hidden_states.float() + gate weight.
@@ -3142,6 +3161,7 @@ def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
     """Gates without weight_fp32 (no forced fp32 conversion) route through
     the gate's own forward, letting AscendGateLinear self-manage precision."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     # vllm#51838 wiring: internal-router models pass hidden_states as the
@@ -3187,6 +3207,7 @@ def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
 
 def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
     router_logits = torch.randn(2, 3, dtype=torch.float16)
@@ -3257,6 +3278,7 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
     is_sp = layout == "sp"
     has_shared = layout != "no_shared"
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner._force_router_bf16 = False
     nn.Module.__init__(runner)
     runner.layer_name = "test.runtime_maybe_all_reduce"
     context.no_compile_layers[runner.layer_name] = runner
@@ -3313,3 +3335,66 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("hidden_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("with_precast", [False, True])
+def test_force_router_bf16_uses_hidden_states_and_fp32_output(monkeypatch, hidden_dtype, with_precast):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._force_router_bf16 = True
+    gate = SimpleNamespace(weight=torch.randn(3, 4, dtype=torch.bfloat16), bias=None)
+    if with_precast:
+        gate.weight_fp32 = torch.randn(3, 4, dtype=torch.float32)
+    runner.gate = gate
+    hidden = torch.randn(2, 4, dtype=hidden_dtype)
+    logits = torch.randn(2, 3, dtype=torch.float32)
+    expected = torch.empty(2, 3, dtype=torch.float32)
+
+    def mock_mm(input_tensor, weight, *, out_dtype):
+        assert input_tensor.dtype == weight.dtype == torch.bfloat16
+        assert out_dtype == torch.float32
+        assert input_tensor is not logits
+        torch.testing.assert_close(input_tensor, hidden.to(torch.bfloat16))
+        assert weight.data_ptr() == gate.weight.data_ptr()
+        return expected
+
+    mm = MagicMock(side_effect=mock_mm)
+    monkeypatch.setattr(fused_moe_module.torch, "mm", mm)
+    assert runner._compute_router_logits(hidden, logits) is expected
+    mm.assert_called_once()
+
+
+@pytest.mark.parametrize("invalid", ["fp32_weight", "int8_weight", "bias", "input_rank", "weight_rank"])
+def test_force_router_bf16_rejects_unsupported_gate(monkeypatch, invalid):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._force_router_bf16 = True
+    weight = torch.zeros(3, 4, dtype=torch.bfloat16)
+    hidden = torch.zeros(2, 4, dtype=torch.bfloat16)
+    bias = None
+    if invalid == "fp32_weight":
+        weight = weight.float()
+    elif invalid == "int8_weight":
+        weight = weight.to(torch.int8)
+    elif invalid == "bias":
+        bias = torch.zeros(3)
+    elif invalid == "input_rank":
+        hidden = hidden.unsqueeze(0)
+    elif invalid == "weight_rank":
+        weight = weight.unsqueeze(0)
+    runner.gate = SimpleNamespace(weight=weight, bias=bias)
+    mm = MagicMock()
+    monkeypatch.setattr(fused_moe_module.torch, "mm", mm)
+    with pytest.raises(ValueError, match="Forced BF16 Router"):
+        runner._compute_router_logits(hidden, hidden)
+    mm.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_force_router_bf16_captured_at_runner_construction(monkeypatch, enabled):
+    monkeypatch.setenv("VLLM_ASCEND_FORCE_ROUTER_BF16", str(int(enabled)))
+    runner = _stub_moe_runner_init(monkeypatch)
+    assert runner._force_router_bf16 is enabled
+    monkeypatch.setenv("VLLM_ASCEND_FORCE_ROUTER_BF16", str(int(not enabled)))
+    assert runner._force_router_bf16 is enabled

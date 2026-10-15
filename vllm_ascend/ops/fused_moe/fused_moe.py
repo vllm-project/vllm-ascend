@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -110,6 +111,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_scaling_factor,
         )
         self._gate = gate
+        self._force_router_bf16 = envs.VLLM_ASCEND_FORCE_ROUTER_BF16
         self.hidden_size = moe_config.hidden_dim
 
         self.quant_type = routed_experts.quant_type
@@ -386,9 +388,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        """Prepare only the input needed by a pre-cast FP32 router gate."""
+        """Prepare the input for the selected internal router dtype."""
         gate = self.gate
         assert gate is not None
+        if self._force_router_bf16:
+            # Use the actual hidden states, never an existing FP32 logits buffer.
+            return hidden_states.to(torch.bfloat16)
         if not hasattr(gate, "weight_fp32"):
             return hidden_states
         return router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
@@ -397,6 +402,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Apply the internal router gate to an already prepared input."""
         gate = self.gate
         assert gate is not None
+        if self._force_router_bf16:
+            # Reuse the BF16 weight loaded by the model. Do not cast weights
+            # per forward or round a native FP32 router weight silently.
+            weight = gate.weight
+            if weight.dtype != torch.bfloat16 or router_input.dtype != torch.bfloat16:
+                raise ValueError("Forced BF16 Router requires BF16 input and BF16 model weights.")
+            if router_input.ndim != 2 or weight.ndim != 2 or getattr(gate, "bias", None) is not None:
+                raise ValueError("Forced BF16 Router supports only a 2D, bias-free internal gate.")
+            # Keep routing logits FP32; casting a BF16 output afterwards is
+            # not equivalent to requesting FP32 output from the matmul.
+            return torch.mm(router_input, weight.t(), out_dtype=torch.float32)
         # Models with pre-cast FP32 weights use the direct linear path; other
         # gates retain their registered forward and its dtype semantics.
         if hasattr(gate, "weight_fp32"):
