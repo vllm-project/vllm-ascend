@@ -292,7 +292,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
-        --data-parallel-start-rank 0 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12321 \
         --tensor-parallel-size 8 \
@@ -367,7 +366,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 2 --data-parallel-size-local 1`: Runs two DP ranks across the two nodes, one rank per node; each rank uses TP8 within its node.
-- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 uses `0`, node 1 uses `1`.
+- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 omits this option and automatically uses rank `0`; headless node 1 explicitly uses `1`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
@@ -737,7 +736,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
-      --data-parallel-rank "$4" \
+      --data-parallel-size-local 1 \
       --data-parallel-address "$5" \
       --data-parallel-rpc-port "$6" \
       --tensor-parallel-size "$7" \
@@ -792,7 +791,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export LOCAL_IP="<PREFILL_NODE1_IP>"
     export NIC_NAME="<PREFILL_NODE1_NIC>"
     export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export SERVER_ROLE_ARGS="--headless"
+    export SERVER_ROLE_ARGS="--headless --data-parallel-start-rank 1"
     exec bash ./run_p.sh "$@"
     ```
 
