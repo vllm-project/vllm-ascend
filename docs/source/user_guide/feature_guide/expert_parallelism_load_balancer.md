@@ -2,7 +2,7 @@
 
 ## Overview
 
-Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. Our solution aims to minimize the negative impacts caused by the operation.
+Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language Model) serving is essential for optimal performance. Dynamically rearranging experts during inference can negatively impact TTFT and TPOT because it requires global synchronization pauses that stall all in-flight requests until expert redistribution completes. Our solution aims to minimize the impact of such pauses.
 
 vLLM Ascend provides two EPLB integration paths:
 
@@ -34,16 +34,13 @@ initial MRv2 model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous
 EPLB. Validate accuracy and performance with the target model, topology, and
 traffic before production deployment.
 
-!!!IMPORTANT
-
-    950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
-    A2 does not support redundant experts.
+> [!IMPORTANT]
+> 950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
+> A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples using a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
 ### Model Runner V2 Weight Formats
 
-The following table describes the MRv2 EPLB code paths. W8A8 has an in-tree
-model-level NPU regression. Other enabled formats require model-level
-validation on the target hardware before production use.
+The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is covered by an in-repository model-level regression test that runs on Ascend NPUs. Other enabled formats have not undergone the same level of validation and must be validated with the target model and hardware configuration before production deployment.
 
 | Weight format | MRv2 EPLB | Notes |
 | --- | --- | --- |
@@ -72,12 +69,14 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 - P node workloads with input sequences shorter than `1024` tokens.
 - D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
 
-!!!WARNING
-
-    Meeting the above conditions may lead to performance degradation.
-    When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
+> [!WARNING]
+> Meeting the above conditions may lead to performance degradation.
+> When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
 
 ## How to Use EPLB
+
+> [!NOTE]
+> The examples below may use a non-zero `num_redundant_experts` to demonstrate redundant-expert placement. This setting is only valid on hardware that supports redundant experts, such as A3 or 950PR&950DT Products. A2 does not support redundant experts; on A2, set `num_redundant_experts` to `0`.
 
 ### Model Runner V2: Asynchronous EPLB
 
@@ -111,7 +110,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | --- | --- | --- |
 | `window_size` | `1000` | Number of recent steps used for expert-load recording. |
 | `step_interval` | `3000` | Interval between expert rearrangements. |
-| `num_redundant_experts` | `0` | Number of redundant physical experts. |
+| `num_redundant_experts` | `0` | Number of redundant physical experts. Must be `0` on A2. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
@@ -174,15 +173,11 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
-!!! IMPORTANT
-
-    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
-    asynchronous movement. It rejects elastic EP, legacy `dynamic_eplb`,
-    recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-    well as communicators other than Gloo and HIXL. HIXL requires the CANN HIXL
-    runtime and working device connectivity on every EPLB rank. Validate the
-    target model, topology, graph mode, and traffic independently before
-    production use.
+> [!IMPORTANT]
+> MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous movement.
+> It rejects elastic EP, legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as well as communicators other than Gloo and HIXL.
+> HIXL requires the CANN HIXL runtime and working device connectivity on every EPLB rank.
+> Validate the target model, topology, graph mode, and traffic independently before production use.
 
 ### Model Runner V1: Legacy EPLB
 
@@ -194,9 +189,8 @@ Legacy MRv1 EPLB has three usage modes:
 | **Recording** (generate expert map) | `expert_map_record_path` | `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true` |
 | **Static EPLB** (load pre-recorded map) | `expert_map_path` | none required |
 
-!!!IMPORTANT
-
-    For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
+> [!IMPORTANT]
+> For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
 
 #### Dynamic EPLB
 
@@ -208,10 +202,10 @@ We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-
 | expert_heat_collection_interval | Interval for collecting expert heat. | 600 |
 | algorithm_execution_interval | Interval for executing the balancing algorithm. | 50 |
 | eplb_policy_type | EPLB policy type. | 2 |
-| num_redundant_experts | Number of redundant experts. | 0 |
+| num_redundant_experts | Number of redundant experts. Must be `0` on A2. | 0 |
 | eplb_heat_collection_stage | Request stage used to collect expert heat. Available values: `all`, `prefill`, and `decode`. | `all` |
 
-```shell
+```mermaid
 graph TB
    A[start] --> B(collect_heat)
    B --> C(execute_algorithm)
@@ -222,7 +216,7 @@ graph TB
 
 ```shell
 # D node or colocation
-vllm serve Qwen/Qwen3-235B-A22 \
+vllm serve Qwen/Qwen3-235B-A22B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
@@ -234,7 +228,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
     }}'
 
 # P node
-vllm serve Qwen/Qwen3-235B-A22 \
+vllm serve Qwen/Qwen3-235B-A22B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
@@ -287,7 +281,7 @@ For example, to collect only prefill heat:
 ```shell
 export DYNAMIC_EPLB="true"
 
-vllm serve Qwen/Qwen3-235B-A22 \
+vllm serve Qwen/Qwen3-235B-A22B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
@@ -326,7 +320,7 @@ When an iteration does not match the selected stage, its expert load is not accu
 We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map. Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
 
 ```shell
-vllm serve Qwen/Qwen3-235B-A22 \
+vllm serve Qwen/Qwen3-235B-A22B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
@@ -342,7 +336,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 Load the pre-recorded expert map for consistent performance. This avoids recalculating distributions at runtime.
 
 ```shell
-vllm serve Qwen/Qwen3-235B-A22 \
+vllm serve Qwen/Qwen3-235B-A22B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{
