@@ -3,9 +3,10 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from importlib import import_module
 from typing import Any, cast
+from weakref import proxy
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -147,7 +148,10 @@ class AscendStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
-        self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(self._reachable_masks)
+        # Do not keep the coordinator alive through its cache while GC is frozen.
+        self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
+            partial(type(self)._reachable_masks, proxy(self))
+        )
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
