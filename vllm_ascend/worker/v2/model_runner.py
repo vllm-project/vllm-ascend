@@ -553,21 +553,6 @@ class NPUModelRunner(GPUModelRunner):
                 return super().capture_model()
             return super().capture_model(profile_only=profile_only)
 
-    def _should_sync_empty_external_dp_step(
-        self,
-        scheduler_output: SchedulerOutput,
-        dummy_run: bool,
-        is_profile: bool,
-    ) -> bool:
-        """True when this rank is idle but external DP siblings may still forward."""
-        if dummy_run or is_profile or scheduler_output.total_num_scheduled_tokens != 0:
-            return False
-        parallel_config = self.vllm_config.parallel_config
-        return (
-            getattr(parallel_config, "distributed_executor_backend", None) == "external_launcher"
-            and getattr(parallel_config, "data_parallel_size", 1) > 1
-        )
-
     # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
     # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
@@ -605,14 +590,9 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        skip_dp_allreduce = should_skip_allreduce_across_dp_group(self.vllm_config)
-        if self._should_sync_empty_external_dp_step(scheduler_output, dummy_run, is_profile) and not skip_dp_allreduce:
-            # Parent execute_model returns no_forward before dispatch_cg_and_sync_dp
-            # when this rank has no tokens. External DP still has to enter that
-            # collective, or busy ranks block for the whole KV wait. One dummy
-            # token reaches the same padding all_reduce Model Runner V1 covers.
-            self._dummy_run(1, skip_gdn_state_update=True)
-        dp_coordination_context = skip_dp_coordination() if skip_dp_allreduce else nullcontext()
+        dp_coordination_context = (
+            skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
+        )
         # Randomized profiling was added on the release branch after the verified main pin.
         profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
         forward_failed = True
