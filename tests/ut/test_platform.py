@@ -17,12 +17,12 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _validate_aux_output_config,
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
     _validate_pcp_dcp_config,
-    _validate_routing_replay_config,
     _validate_sfa_dcp_kv_sp,
 )
 from vllm_ascend.utils import (
@@ -301,19 +301,21 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
 
 
 @pytest.mark.parametrize(
-    "r3_requested,use_v2,expected_error",
-    [(True, False, "only supported by the V2 model runner"), (True, True, None), (False, False, None)],
+    "aux_output_config,use_v2,expected_error",
+    [
+        (SimpleNamespace(enabled=True), False, "only supported by Model Runner V2 on Ascend"),
+        (SimpleNamespace(enabled=True), True, None),
+        (SimpleNamespace(enabled=False), False, None),
+        (None, False, None),
+    ],
 )
-def test_routing_replay_requires_v2_model_runner(r3_requested, use_v2, expected_error):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(enable_return_routed_experts=r3_requested),
-        use_v2_model_runner=use_v2,
-    )
+def test_validate_aux_output_config(aux_output_config, use_v2, expected_error):
+    config = SimpleNamespace(aux_output_config=aux_output_config, use_v2_model_runner=use_v2)
     if expected_error is None:
-        _validate_routing_replay_config(config)
+        _validate_aux_output_config(config)
     else:
         with pytest.raises(ValueError, match=expected_error):
-            _validate_routing_replay_config(config)
+            _validate_aux_output_config(config)
 
 
 def test_visible_device_id_to_physical_device_id():
@@ -337,7 +339,6 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
-        mock_vllm_config.model_config.enable_return_routed_experts = False
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
