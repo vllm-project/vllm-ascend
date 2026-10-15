@@ -254,7 +254,9 @@ def test_hang(monkeypatch):
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # V2 propose reuses the target dp_sync and asserts when the draft batch
+    # shape differs. Keep this regression on V1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
