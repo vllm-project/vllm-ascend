@@ -31,6 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -999,9 +1000,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 "additional_config.eplb_config; unsupported fields: "
                 f"{', '.join(unsupported_eplb_fields)}."
             )
-        if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-            "EXPERT_MAP_RECORD", "false"
-        ).lower() in ("true", "1"):
+        if envs.DYNAMIC_EPLB or envs.EXPERT_MAP_RECORD.lower() in ("true", "1"):
             raise ValueError(
                 "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls. "
                 "Unset them and use --enable-eplb with Model Runner V2."

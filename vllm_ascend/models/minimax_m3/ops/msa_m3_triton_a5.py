@@ -13,7 +13,6 @@ expected by the migrated kernels.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -22,6 +21,8 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+
+from vllm_ascend import envs
 
 get_aicore_num: Callable[[], Any] | None
 init_device_properties_triton: Callable[[], Any] | None
@@ -95,7 +96,7 @@ def _sparse_attn_num_stages_kwarg() -> dict:
 
 
 # Set VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ=1 to use dot(k, q) with [N,D] K load.
-_USE_DECODE_INDEX_SCORE_KQ = os.environ.get("VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ", "0") == "1"
+_USE_DECODE_INDEX_SCORE_KQ = envs.VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ
 
 _DECODE_INDEX_SCORE_MAX_GRID = 512
 

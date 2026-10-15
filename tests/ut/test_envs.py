@@ -79,3 +79,53 @@ class TestEnvVariables(TestBase):
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = original_val
+
+    def test_env_accessors_match_previous_inline_semantics(self):
+        # These accessors replace expressions that were previously inlined at
+        # the call sites (ascend_config.py / platform.py / patch/platform /
+        # pool_worker.py / msa_m3_triton_a5.py). Each case pins the exact
+        # boundary behavior so the convergence stays behavior-preserving.
+        cases = {
+            # name: (value_when_unset, [(raw_value, expected), ...])
+            "DYNAMIC_EPLB": (
+                False,
+                [("true", True), ("TRUE", True), ("1", True), ("false", False), ("0", False), ("", False)],
+            ),
+            "EXPERT_MAP_RECORD": (
+                "false",
+                [("true", "true"), ("TRUE", "TRUE"), ("1", "1"), ("false", "false")],
+            ),
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1": (
+                False,
+                [
+                    ("1", True),
+                    ("true", True),
+                    ("TRUE", True),
+                    (" true ", True),
+                    ("0", False),
+                    ("false", False),
+                    ("", False),
+                ],
+            ),
+            "VLLM_ASCEND_LW_DEFER_LAST_SAVE": (
+                False,
+                [("1", True), ("true", False), ("0", False), ("", False)],
+            ),
+            "VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ": (
+                False,
+                [("1", True), ("true", False), ("0", False), ("", False)],
+            ),
+        }
+        for name, (unset_value, value_cases) in cases.items():
+            with self.subTest(name=name):
+                original_val = os.environ.pop(name, None)
+                try:
+                    self.assertEqual(getattr(envs_ascend, name), unset_value)
+                    for raw_value, expected in value_cases:
+                        os.environ[name] = raw_value
+                        self.assertEqual(getattr(envs_ascend, name), expected)
+                finally:
+                    if original_val is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = original_val

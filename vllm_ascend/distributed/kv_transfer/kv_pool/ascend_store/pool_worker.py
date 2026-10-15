@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import os
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
@@ -28,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -112,7 +112,7 @@ from vllm_ascend.distributed.utils import (
 # contract that layerwise tests (e.g. test_mooncake_pipeline) and downstream
 # readers rely on, and deferring widens the window in which a subsequent
 # request can observe a partially published prefix.
-_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
+_LW_DEFER_LAST_SAVE = envs_ascend.VLLM_ASCEND_LW_DEFER_LAST_SAVE
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous

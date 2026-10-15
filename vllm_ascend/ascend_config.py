@@ -28,6 +28,7 @@ from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
@@ -320,8 +321,7 @@ class EplbConfig:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
             assert (
-                os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-                or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
+                envs.DYNAMIC_EPLB or envs.EXPERT_MAP_RECORD == "true"
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
@@ -750,7 +750,7 @@ class AscendConfig:
         flashcomm_explicitly_enabled = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
-        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        ) or envs.VLLM_ASCEND_ENABLE_FLASHCOMM1
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
