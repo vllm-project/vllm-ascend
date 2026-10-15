@@ -33,6 +33,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     a bare MagicMock.
     """
     runner = object.__new__(NPUModelRunner)
+    runner.flashmla_executor = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.vllm_config = MagicMock()
@@ -278,6 +279,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
 
 def test_finegrained_tp_guard_contract():
     runner = object.__new__(NPUModelRunner)
+    runner.flashmla_executor = None
     runner._finegrained_tp_requires_graph = False
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
     runner._finegrained_tp_requires_graph = True

@@ -270,6 +270,31 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
     assert thread._get_layer_remote_tp_rank_groups.call_count == 1
 
 
+@pytest.mark.parametrize(
+    ("local_shape", "remote_shape", "compatible"),
+    [
+        ((128, 1, 576), (128, 1, 576), True),
+        ((128 * 576,), (128 * 576,), True),
+        ((128, 1, 576), (128 * 576,), False),
+        ((128 * 576,), (128, 1, 576), False),
+    ],
+)
+def test_build_remote_layout_checks_mla_page_representation(local_shape, remote_shape, compatible) -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    thread = make_thread(kv_cache_specs=[spec], block_shapes=[[local_shape]])
+    thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0]])  # type: ignore[method-assign]
+    groups = make_metadata_groups(pp_metadata=make_pp_metadata(block_shapes=[[remote_shape]]))
+
+    if compatible:
+        rank_groups, pairs = thread._build_remote_transfer_layout(groups)
+        assert pairs == {0: [(0, 0)]}
+        assert rank_groups == {0: {(0, 0): [[0]]}}
+    else:
+        with pytest.raises(ValueError, match="MLA page representation mismatch"):
+            thread._build_remote_transfer_layout(groups)
+        thread._get_layer_remote_tp_rank_groups.assert_not_called()
+
+
 def test_build_remote_layout_filters_kv_parallel_owners_and_keeps_mtp_replicas() -> None:
     thread = make_thread(
         layer_names=["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"],

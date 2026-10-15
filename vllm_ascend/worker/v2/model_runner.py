@@ -102,11 +102,12 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
-from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    flashmla_metadata_scope,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -192,6 +193,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
+        self.flashmla_executor: DeviceMetadataExecutor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -434,6 +436,12 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            if any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            ):
+                self.flashmla_executor = DeviceMetadataExecutor()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -584,11 +592,18 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
+        # Initial memory profiling skips attention before KV cache initialization
+        # creates the groups. Other runs still require initialized builders.
+        attn_groups = getattr(self, "attn_groups", None)
+        if attn_groups is None:
+            if self.flashmla_executor is not None and not (dummy_run and is_profile and skip_attn_for_dummy_run):
+                raise RuntimeError("MRv2 attention groups are unavailable outside initial memory profiling")
+            attn_groups = ()
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
         forward_failed = True
-        with dp_coordination_context:
+        with dp_coordination_context, flashmla_metadata_scope(attn_groups, self.flashmla_executor):
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -760,6 +775,32 @@ class NPUModelRunner(GPUModelRunner):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
                 batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
                 uniform_token_count = self._pd_uniform_decode_token_count(batch_state)
+        if self.flashmla_executor is not None and batch_state is not None:
+            # Reorder every per-request field before positions, slots, tables
+            # and sampling indices are constructed. A short prompt is prefill.
+            order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+            reordered_fields = dict(
+                req_ids=[batch_state.req_ids[index] for index in order],
+                num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
+                idx_mapping_np=batch_state.idx_mapping_np[order],
+                prefill_len_np=batch_state.prefill_len_np[order],
+                num_computed_prefill_tokens_np=batch_state.num_computed_prefill_tokens_np[order],
+                is_prefilling_np=batch_state.is_prefilling_np[order],
+            )
+            # vLLM main adds optional per-request arrays; v0.30.0 lacks them.
+            for field in ("num_draft_tokens_np", "prefill_runs_as_decode_np"):
+                if field in batch_state._fields:
+                    values = getattr(batch_state, field)
+                    reordered_fields[field] = values[order] if values is not None else None
+            batch_state = batch_state._replace(**reordered_fields)
+            # This backend retains FIA for real prefill, including prompt tails
+            # that upstream can execute as decode. Match graph dispatch to the
+            # same phase decision instead of replaying stale decode buffers.
+            has_fia_prefill = bool(batch_state.is_prefilling_np.any())
+            if "decode_graph_eligible" in batch_state._fields:
+                batch_state = batch_state._replace(decode_graph_eligible=not has_fia_prefill)
+            if has_fia_prefill:
+                uniform_token_count = None
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

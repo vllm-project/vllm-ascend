@@ -267,6 +267,22 @@ class MooncakePullRecvingThread(threading.Thread):
                 if remote_layer_index is None:
                     continue
 
+                spec = self.kv_cache_specs[self.spec_indices[local_layer_index]]
+                if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) and not isinstance(
+                    spec, AscendSFAIndexerCacheSpec
+                ):
+                    local_shapes = self.block_shapes[local_layer_index]
+                    remote_shapes = pp_metadata.block_shapes[remote_layer_index]
+                    # Component-major pages are published as flat slots;
+                    # FlashMLA publishes token-fused [tokens, heads, dim].
+                    # Equal byte lengths alone do not make them compatible.
+                    if local_shapes != remote_shapes:
+                        raise ValueError(
+                            f"Mooncake MLA page representation mismatch for layer {layer_name!r}: "
+                            f"local={local_shapes}, remote={remote_shapes}. "
+                            "Use matching MLA backends and cache layouts on both endpoints."
+                        )
+
                 layer_pair = (local_layer_index, remote_layer_index)
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
