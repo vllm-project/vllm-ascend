@@ -11,6 +11,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
+    _RegistrationCleanupError,
 )
 
 _MIB = 1024 * 1024
@@ -32,55 +33,57 @@ def _make_source(
     return tensor
 
 
-def test_plan_source_whole_direct():
+@pytest.mark.parametrize(
+    (
+        "storage_start",
+        "source_start",
+        "source_nbytes",
+        "expected",
+    ),
+    [
+        (
+            2 * _MIB,
+            5 * _MIB,
+            2 * _MIB,
+            (0, 5 * _MIB, 2 * _MIB, 4 * _MIB, 3 * _MIB),
+        ),
+        (
+            5 * _MIB,
+            11 * _MIB // 2,
+            5 * _MIB // 2,
+            (_MIB // 2, 6 * _MIB, 2 * _MIB, 6 * _MIB, 2 * _MIB),
+        ),
+        (
+            5 * _MIB,
+            11 * _MIB // 2,
+            _MIB // 4,
+            (_MIB // 4, None, 0, None, 0),
+        ),
+    ],
+    ids=("whole-direct", "prefix-and-suffix", "all-bounce"),
+)
+def test_plan_source(
+    storage_start: int,
+    source_start: int,
+    source_nbytes: int,
+    expected: tuple[int, int | None, int, int | None, int],
+):
     tensor = _make_source(
-        storage_start=2 * _MIB,
-        source_start=5 * _MIB,
-        source_nbytes=2 * _MIB,
+        storage_start=storage_start,
+        source_start=source_start,
+        source_nbytes=source_nbytes,
     )
 
     plan = _plan_source(tensor)
 
     assert plan.owner is tensor
-    assert plan.prefix_nbytes == 0
-    assert plan.direct_address == 5 * _MIB
-    assert plan.direct_nbytes == 2 * _MIB
-    assert plan.registration_address == 4 * _MIB
-    assert plan.registration_nbytes == 3 * _MIB
-
-
-def test_plan_source_prefix_and_suffix():
-    tensor = _make_source(
-        storage_start=5 * _MIB,
-        source_start=11 * _MIB // 2,
-        source_nbytes=5 * _MIB // 2,
-    )
-
-    plan = _plan_source(tensor)
-
-    assert plan.owner is tensor
-    assert plan.prefix_nbytes == _MIB // 2
-    assert plan.direct_address == 6 * _MIB
-    assert plan.direct_nbytes == 2 * _MIB
-    assert plan.registration_address == 6 * _MIB
-    assert plan.registration_nbytes == 2 * _MIB
-
-
-def test_plan_source_all_bounce():
-    tensor = _make_source(
-        storage_start=5 * _MIB,
-        source_start=11 * _MIB // 2,
-        source_nbytes=_MIB // 4,
-    )
-
-    plan = _plan_source(tensor)
-
-    assert plan.owner is tensor
-    assert plan.prefix_nbytes == _MIB // 4
-    assert plan.direct_address is None
-    assert plan.direct_nbytes == 0
-    assert plan.registration_address is None
-    assert plan.registration_nbytes == 0
+    assert (
+        plan.prefix_nbytes,
+        plan.direct_address,
+        plan.direct_nbytes,
+        plan.registration_address,
+        plan.registration_nbytes,
+    ) == expected
 
 
 def test_plan_registration_ranges_merges_chained_ranges_in_same_storage():
@@ -370,6 +373,32 @@ def test_acquire_registration_ranges_rolls_back_new_ranges_in_reverse():
         call(4 * _MIB),
     ]
     assert transfer._direct_registrations == {}
+
+
+def test_acquire_registration_ranges_reports_unconfirmed_rollback():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.side_effect = [0, 7]
+    engine.unregister_memory.return_value = 9
+    owner = MagicMock()
+    ranges = (
+        _RegistrationRangePlan(4 * _MIB, _MIB, (owner,)),
+        _RegistrationRangePlan(8 * _MIB, _MIB, (MagicMock(),)),
+    )
+
+    with (
+        patch.object(transfer, "_ensure_engine", return_value=engine),
+        pytest.raises(
+            _RegistrationCleanupError,
+            match="rollback could not be confirmed",
+        ),
+    ):
+        transfer.acquire_registration_ranges(ranges)
+
+    engine.unregister_memory.assert_called_once_with(4 * _MIB)
+    entry = transfer._direct_registrations[4 * _MIB]
+    assert entry.users == 0
+    assert entry.owners == (owner,)
 
 
 def test_release_registration_ranges_waits_for_last_user():

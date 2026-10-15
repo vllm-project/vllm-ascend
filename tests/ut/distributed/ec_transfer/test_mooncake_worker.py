@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
 from unittest.mock import MagicMock, call, patch
 
@@ -18,6 +18,9 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
     _flatten_transfer_wave,
     _resolve_bounce_arena_size,
     _TransferFragmentPlan,
+)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
+    PreparedStorePut,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
@@ -70,6 +73,16 @@ def _make_lifecycle_worker() -> AscendECMooncakeWorker:
     worker._transfer = MagicMock()
     worker._buffer_device = "npu"
     worker._shutdown = False
+    worker._dispatcher = None
+    worker._control_server = None
+    worker._producer_pushes = MagicMock()
+    worker._producer_pushes.cancel_requests.return_value = []
+    worker._control_executor = MagicMock()
+    worker._io_executor = MagicMock()
+    worker._shard_pool = None
+    worker._control_client = MagicMock()
+    worker._consumer_memory = MagicMock()
+    worker._flush_pending_pushes = MagicMock()
     return worker
 
 
@@ -83,6 +96,10 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
         assert worker._output_store is output_store
 
     with (
+        patch.dict(
+            worker_module.os.environ,
+            {"ASCEND_ENABLE_USE_FABRIC_MEM": "1"},
+        ),
         patch.object(worker_module.torch, "device", return_value=device),
         patch.object(store_client_module, "ensure_mooncake_store_imported") as import_store,
         patch.object(
@@ -131,6 +148,57 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
     worker._producer_memory.close.assert_not_called()
 
 
+def test_start_services_shared_roce_sets_up_store_before_registering_staging():
+    worker = _make_lifecycle_worker()
+    store_client = MagicMock()
+    output_store = MagicMock()
+    device = MagicMock()
+
+    with (
+        patch.dict(
+            worker_module.os.environ,
+            {"ASCEND_ENABLE_USE_FABRIC_MEM": "0"},
+        ),
+        patch.object(worker_module.torch, "device", return_value=device),
+        patch.object(store_client_module, "ensure_mooncake_store_imported") as import_store,
+        patch.object(
+            store_client_module,
+            "create_ascend_mooncake_embedding_store_client",
+            return_value=store_client,
+        ) as create_store_client,
+        patch.object(
+            worker_module,
+            "AscendDeferredStoreBackend",
+            return_value=output_store,
+        ) as create_backend,
+        patch.object(worker_module.ECMooncakeWorker, "start_services") as start_upstream,
+    ):
+        lifecycle = MagicMock()
+        lifecycle.attach_mock(import_store, "import_store")
+        lifecycle.attach_mock(create_store_client, "client")
+        lifecycle.attach_mock(worker._producer_memory.ensure_prepared, "prepare")
+        lifecycle.attach_mock(create_backend, "backend")
+        lifecycle.attach_mock(start_upstream, "upstream")
+        worker.start_services()
+
+    assert lifecycle.mock_calls == [
+        call.import_store(),
+        call.client(
+            worker._producer_memory.bounce_arena,
+            worker._transfer,
+            read_buffer_bytes=256,
+        ),
+        call.prepare(device),
+        call.backend(
+            store_client,
+            "namespace",
+            max_pending_items=4,
+            max_pending_bytes=1024,
+        ),
+        call.upstream(),
+    ]
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_cleanup"),
     [
@@ -150,6 +218,10 @@ def test_start_services_cleans_up_after_failure(failure_stage, expected_cleanup)
     cleanup.attach_mock(worker._producer_memory.close, "producer")
 
     with (
+        patch.dict(
+            worker_module.os.environ,
+            {"ASCEND_ENABLE_USE_FABRIC_MEM": "1"},
+        ),
         patch.object(worker_module.torch, "device"),
         patch.object(
             store_client_module,
@@ -187,18 +259,12 @@ def test_close_shuts_down_store_before_upstream_resources():
     events = []
     output_store.shutdown.side_effect = lambda: events.append("store")
 
-    def close_upstream():
-        assert worker._output_store is None
-        events.append("upstream")
+    worker._producer_memory.close.side_effect = lambda: events.append("producer")
+    worker.close()
 
-    with patch.object(
-        worker_module.ECMooncakeWorker,
-        "close",
-        side_effect=close_upstream,
-    ):
-        worker.close()
-
-    assert events == ["store", "upstream"]
+    assert events == ["store", "producer"]
+    worker._io_executor.shutdown.assert_called_once_with(wait=True)
+    worker._transfer.close.assert_called_once_with()
 
 
 def test_close_preserves_shared_memory_when_store_shutdown_fails():
@@ -207,16 +273,91 @@ def test_close_preserves_shared_memory_when_store_shutdown_fails():
     output_store.shutdown.side_effect = RuntimeError("shutdown failed")
     worker._output_store = output_store
 
-    with (
-        patch.object(
-            worker_module.ECMooncakeWorker,
-            "close",
-        ) as close_upstream,
-        pytest.raises(RuntimeError, match="shutdown failed"),
-    ):
+    with pytest.raises(RuntimeError, match="shutdown failed"):
         worker.close()
 
-    close_upstream.assert_not_called()
+    worker._producer_memory.close.assert_not_called()
+
+
+def test_close_keeps_dual_registered_staging_until_process_exit():
+    worker = _make_lifecycle_worker()
+    worker._retain_producer_slab = True
+    worker._output_store = MagicMock()
+    retained = worker_module._PROCESS_LIFETIME_EC_OWNERS
+    before = len(retained)
+
+    try:
+        worker.close()
+
+        assert worker._output_store is None
+        assert retained[before:] == [
+            (worker._transfer, worker._producer_memory)
+        ]
+        worker._producer_memory.close.assert_not_called()
+        worker._transfer.close.assert_not_called()
+    finally:
+        del retained[before:]
+
+
+def test_start_services_global_config_dual_registers_long_lived_staging():
+    worker = _make_lifecycle_worker()
+    store_client = MagicMock()
+    output_store = MagicMock()
+    device = MagicMock()
+    staging = worker._producer_memory.tensor
+
+    with (
+        patch.dict(
+            worker_module.os.environ,
+            {
+                "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}",
+            },
+            clear=True,
+        ),
+        patch.object(worker_module.torch, "device", return_value=device),
+        patch.object(store_client_module, "ensure_mooncake_store_imported") as import_store,
+        patch.object(
+            store_client_module,
+            "create_ascend_mooncake_embedding_store_client",
+            return_value=store_client,
+        ) as create_store_client,
+        patch.object(
+            worker_module,
+            "AscendDeferredStoreBackend",
+            return_value=output_store,
+        ) as create_backend,
+        patch.object(worker_module.ECMooncakeWorker, "start_services") as start_upstream,
+    ):
+        lifecycle = MagicMock()
+        lifecycle.attach_mock(import_store, "import_store")
+        lifecycle.attach_mock(create_store_client, "client")
+        lifecycle.attach_mock(worker._producer_memory.ensure_prepared, "prepare")
+        lifecycle.attach_mock(store_client.register_staging_buffer, "register")
+        lifecycle.attach_mock(create_backend, "backend")
+        lifecycle.attach_mock(start_upstream, "upstream")
+        worker.start_services()
+
+    assert lifecycle.mock_calls == [
+        call.import_store(),
+        call.client(
+            worker._producer_memory.bounce_arena,
+            worker._transfer,
+            read_buffer_bytes=256,
+        ),
+        call.prepare(device),
+        call.register(staging),
+        call.backend(
+            store_client,
+            "namespace",
+            max_pending_items=4,
+            max_pending_bytes=1024,
+        ),
+        call.upstream(),
+    ]
+    assert worker._use_store_independent_te is True
+    assert worker._retain_producer_slab is True
+    worker._transfer.close.assert_not_called()
     assert worker._output_store is output_store
     assert worker._shutdown is False
 
@@ -237,16 +378,6 @@ def test_flatten_transfer_wave_preserves_unified_fragment_order():
         _TransferFragmentPlan(1, 1000, 0, 3),
         _TransferFragmentPlan(1, 200, 3, 7),
         _TransferFragmentPlan(2, 1003, 0, 5),
-    ]
-
-
-def test_flatten_transfer_wave_allows_zero_bounce_wave():
-    direct = MagicMock(prefix_nbytes=0, direct_address=100, direct_nbytes=10)
-    wave = MagicMock()
-    wave.sources = (MagicMock(source=direct, bounce_offset=None),)
-
-    assert _flatten_transfer_wave(wave, None) == [
-        _TransferFragmentPlan(0, 100, 0, 10),
     ]
 
 
@@ -322,6 +453,56 @@ def test_acquire_transfer_wave_returns_fragments_and_resources():
     )
 
 
+def test_joint_wave_copies_prefix_once_and_reuses_registration_and_addresses():
+    worker = object.__new__(AscendECMooncakeWorker)
+    producer_memory = MagicMock()
+    lease = _BounceLease(offset=256, nbytes=56, allocated_nbytes=256)
+    producer_memory.bounce_arena.acquire.return_value = lease
+    producer_memory.bounce_arena.copy.return_value = 1000
+    transfer = MagicMock()
+    transfer.acquire_registration_ranges.return_value = [128]
+    worker._producer_memory = producer_memory
+    worker._transfer = transfer
+    header = MagicMock()
+    deferred = MagicMock()
+    deferred.store_client.prepare_put_header.return_value = header
+    worker._deferred_store = deferred
+    tensor = MagicMock()
+    ticket = MagicMock(tensor=tensor)
+    source = MagicMock(
+        owner=tensor,
+        prefix_nbytes=32,
+        direct_address=200,
+        direct_nbytes=96,
+    )
+    registration_ranges = (MagicMock(),)
+    wave = MagicMock(
+        bounce_nbytes=56,
+        sources=(
+            MagicMock(
+                source=source,
+                store_header_offset=0,
+                bounce_offset=24,
+            ),
+        ),
+        registration_ranges=registration_ranges,
+    )
+
+    acquired = worker._acquire_transfer_wave(wave, [ticket])
+
+    producer_memory.bounce_arena.copy.assert_called_once_with(
+        lease,
+        [(header, 0, 24), (tensor, 24, 32)],
+    )
+    transfer.acquire_registration_ranges.assert_called_once_with(registration_ranges)
+    assert acquired.fragments == [
+        _TransferFragmentPlan(0, 1024, 0, 32),
+        _TransferFragmentPlan(0, 200, 32, 96),
+    ]
+    assert acquired.store_puts[0].addresses == [1000, 1024, 200]
+    assert acquired.store_puts[0].sizes == [24, 32, 96]
+
+
 def test_acquire_transfer_wave_releases_bounce_on_registration_failure():
     worker = object.__new__(AscendECMooncakeWorker)
     producer_memory = MagicMock()
@@ -352,7 +533,7 @@ def test_acquire_transfer_wave_releases_bounce_on_registration_failure():
     producer_memory.bounce_arena.release.assert_called_once_with(lease)
 
 
-def test_release_transfer_wave_releases_bounce_when_registration_release_raises():
+def test_release_transfer_wave_retains_bounce_when_registration_release_raises():
     worker = object.__new__(AscendECMooncakeWorker)
     producer_memory = MagicMock()
     transfer = MagicMock()
@@ -362,11 +543,27 @@ def test_release_transfer_wave_releases_bounce_when_registration_release_raises(
     lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
     acquired = _AcquiredTransferWave([], [128], lease)
 
-    with pytest.raises(RuntimeError, match="release failed"):
+    with pytest.raises(RuntimeError, match="release raised an exception"):
         worker._release_transfer_wave(acquired)
 
     transfer.release_registration_ranges.assert_called_once_with([128])
-    producer_memory.bounce_arena.release.assert_called_once_with(lease)
+    producer_memory.bounce_arena.release.assert_not_called()
+
+
+def test_release_transfer_wave_rejects_unconfirmed_unregistration():
+    worker = object.__new__(AscendECMooncakeWorker)
+    worker._producer_memory = MagicMock()
+    worker._transfer = MagicMock()
+    worker._transfer.release_registration_ranges.return_value = False
+    acquired = _AcquiredTransferWave([], [128], None)
+
+    with pytest.raises(
+        worker_module._RegistrationReleaseError,
+        match="could not be confirmed",
+    ):
+        worker._release_transfer_wave(acquired)
+
+    worker._producer_memory.bounce_arena.release.assert_not_called()
 
 
 def test_write_transfer_wave_batches_fragments_once_per_session():
@@ -412,6 +609,47 @@ def test_write_transfer_wave_batches_fragments_once_per_session():
     )
 
 
+def test_joint_wave_settles_store_future_after_ec_failure_and_poisons_owners():
+    worker = object.__new__(AscendECMooncakeWorker)
+    worker._transfer = MagicMock()
+    worker._producer_pushes = MagicMock()
+    worker._run_fanout = MagicMock(side_effect=RuntimeError("EC failed"))
+    deferred = MagicMock()
+    store_future: Future[None] = Future()
+    store_future.set_result(None)
+    deferred.submit_prepared.return_value = store_future
+    worker._deferred_store = deferred
+    push = _make_push("first")
+    owner = MagicMock()
+    ticket = MagicMock(tensor=push.source_tensor)
+    acquired = _AcquiredTransferWave(
+        fragments=[_TransferFragmentPlan(0, 100, 0, 10)],
+        registration_addresses=[128],
+        bounce_lease=MagicMock(),
+        store_puts=[
+            PreparedStorePut(
+                ticket=ticket,
+                addresses=[10, 20],
+                sizes=[24, 10],
+                owners=[owner],
+            )
+        ],
+    )
+
+    reusable = worker._write_transfer_wave(
+        [push],
+        [(push, _make_writable_shard("session-a", 1000))],
+        acquired,
+    )
+
+    assert reusable is False
+    deferred.submit_prepared.assert_called_once()
+    deferred.store_client.retain_fallback_owners.assert_called_once()
+    retained = deferred.store_client.retain_fallback_owners.call_args.args[0]
+    assert owner in retained
+    assert push.source_tensor in retained
+
+
 def test_push_batch_preserves_staging_first_path():
     worker = object.__new__(AscendECMooncakeWorker)
     push = _make_push("first")
@@ -428,6 +666,7 @@ def test_push_batch_preserves_staging_first_path():
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
     worker._run_fanout = MagicMock(side_effect=lambda tasks, _on_submit: [task() for task in tasks])
+    worker._deferred_store = MagicMock()
 
     with patch.object(worker_module, "_plan_transfer_waves") as plan_waves:
         worker._push_batch([push])
@@ -441,9 +680,133 @@ def test_push_batch_preserves_staging_first_path():
         [10],
     )
     worker._producer_memory.release.assert_called_once_with(staged)
+    worker._deferred_store.submit_original.assert_called_once_with("hash-first")
     worker._producer_pushes.begin_notifying.assert_called_once_with([push])
     worker._notify_completions.assert_called_once_with([(push, shard)])
     worker._producer_pushes.complete.assert_called_once_with([push])
+
+
+def test_independent_store_uses_header_and_same_staged_payload():
+    worker = object.__new__(AscendECMooncakeWorker)
+    push = _make_push("first")
+    staged_tensor = MagicMock(nbytes=10)
+    staged_tensor.data_ptr.return_value = 500
+    staged = MagicMock(tensors=[staged_tensor])
+    ticket = MagicMock(identifier="hash-first", tensor=push.source_tensor)
+    lease = MagicMock()
+    bounce_arena = MagicMock()
+    bounce_arena.acquire.return_value = lease
+    bounce_arena.copy.return_value = 9000
+    worker._producer_memory = MagicMock()
+    worker._producer_memory.bounce_arena = bounce_arena
+    worker._deferred_store = MagicMock()
+    header = worker._deferred_store.store_client.prepare_put_header.return_value
+
+    acquired = worker._acquire_staged_wave(
+        [push],
+        staged,
+        {"hash-first": ticket},
+    )
+
+    bounce_arena.acquire.assert_called_once_with(24)
+    bounce_arena.copy.assert_called_once_with(
+        lease,
+        [(header, 0, 24)],
+    )
+    assert len(acquired.store_puts) == 1
+    assert acquired.fragments == [
+        _TransferFragmentPlan(0, 500, 0, 10),
+    ]
+    store_put = acquired.store_puts[0]
+    assert store_put.addresses == [9000, 500]
+    assert store_put.sizes == [24, 10]
+    assert staged_tensor in store_put.owners
+
+
+def test_push_batch_independent_store_releases_joint_staging_after_completion():
+    worker = object.__new__(AscendECMooncakeWorker)
+    worker._use_store_independent_te = True
+    push = _make_push("first")
+    shard = _make_writable_shard("session-a", 1000)
+    staged = MagicMock()
+    acquired = _AcquiredTransferWave([], [], MagicMock(), [])
+    worker._producer_memory = MagicMock()
+    worker._producer_pushes = MagicMock()
+    worker._producer_pushes.resolve_reservations.return_value = [shard]
+    worker._validate_push_source = MagicMock()
+    worker._notify_completions = MagicMock()
+    worker._abandon_pushes = MagicMock()
+    worker._deferred_store = MagicMock()
+    worker._push_store_independent_staging = MagicMock(
+        return_value=(staged, acquired, [])
+    )
+    worker._release_transfer_wave = MagicMock()
+    lifecycle = MagicMock()
+    lifecycle.attach_mock(worker._release_transfer_wave, "wave")
+    lifecycle.attach_mock(worker._producer_memory.release, "payload")
+    lifecycle.attach_mock(worker._producer_pushes.begin_notifying, "notify")
+
+    worker._push_batch([push])
+
+    assert lifecycle.mock_calls == [
+        call.wave(acquired),
+        call.payload(staged),
+        call.notify([push]),
+    ]
+    worker._notify_completions.assert_called_once_with([(push, shard)])
+    worker._producer_pushes.complete.assert_called_once_with([push])
+    worker._deferred_store.submit_original.assert_not_called()
+
+
+def test_independent_store_rejection_runs_ec_without_store_put():
+    worker = object.__new__(AscendECMooncakeWorker)
+    push = _make_push("first")
+    ready = [(push, _make_writable_shard("session-a", 1000))]
+    staged = MagicMock()
+    worker._deferred_store = MagicMock()
+    worker._deferred_store.prepare_fallback.return_value = None
+    worker._producer_memory = MagicMock()
+    worker._producer_memory.stage_wait.return_value = staged
+    acquired = _AcquiredTransferWave([], [], None, [])
+    worker._acquire_staged_wave = MagicMock(return_value=acquired)
+    worker._write_transfer_wave = MagicMock(return_value=True)
+
+    result_staged, result_acquired, prepared = (
+        worker._push_store_independent_staging(
+            [push],
+            ready,
+            [push],
+        )
+    )
+
+    assert result_staged is staged
+    assert result_acquired is acquired
+    assert prepared == []
+    worker._acquire_staged_wave.assert_called_once_with([push], staged, {})
+    worker._write_transfer_wave.assert_called_once_with(
+        [push],
+        ready,
+        acquired,
+    )
+
+
+def test_independent_store_poisons_staging_when_wave_is_unconfirmed():
+    worker = object.__new__(AscendECMooncakeWorker)
+    push = _make_push("first")
+    staged = MagicMock()
+    acquired = _AcquiredTransferWave([], [], None, [])
+    worker._deferred_store = MagicMock()
+    worker._deferred_store.prepare_fallback.return_value = None
+    worker._producer_memory = MagicMock()
+    worker._producer_memory.stage_wait.return_value = staged
+    worker._acquire_staged_wave = MagicMock(return_value=acquired)
+    worker._write_transfer_wave = MagicMock(return_value=False)
+
+    with pytest.raises(RuntimeError, match="completion is unconfirmed"):
+        worker._push_store_independent_staging([push], [], [push])
+
+    worker._producer_memory.poison.assert_called_once_with()
+    worker._producer_memory.release.assert_not_called()
 
 
 def test_push_batch_rejects_staging_failure_when_fallback_is_disabled():
@@ -561,7 +924,6 @@ def test_push_batch_later_wave_failure_releases_without_notifying():
 
     assert worker._release_transfer_wave.call_args_list == [
         call(first_acquired),
-        call(second_acquired),
     ]
     worker._producer_pushes.begin_notifying.assert_not_called()
     worker._notify_completions.assert_not_called()
@@ -573,7 +935,7 @@ def test_push_batch_later_wave_failure_releases_without_notifying():
     assert str(failure) == "write failed"
 
 
-def test_push_batch_waits_for_delayed_session_before_releasing_failed_wave():
+def test_push_batch_waits_for_delayed_session_and_retains_failed_wave():
     worker = object.__new__(AscendECMooncakeWorker)
     push = _make_push("first")
     first_shard = _make_writable_shard("session-a", 1000)
@@ -636,7 +998,7 @@ def test_push_batch_waits_for_delayed_session_before_releasing_failed_wave():
             finish_delayed.set()
         batch_future.result(timeout=1)
 
-    worker._release_transfer_wave.assert_called_once_with(acquired)
+    worker._release_transfer_wave.assert_not_called()
     worker._producer_pushes.begin_notifying.assert_not_called()
     worker._notify_completions.assert_not_called()
     worker._producer_pushes.fail.assert_called_once()
@@ -747,8 +1109,20 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks():
     push_manager = MagicMock()
 
     with (
+        patch.dict(
+            worker_module.os.environ,
+            {
+                "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}",
+            },
+            clear=True,
+        ),
         patch.object(worker_module, "_resolve_ascend_config", return_value=config),
         patch.object(worker_module, "_resolve_bounce_arena_size", return_value=4096),
+        patch.object(
+            worker_module,
+            "configure_non_fabric_roce",
+        ) as configure_roce,
         patch.object(worker_module, "ensure_mooncake_available") as ensure_available,
         patch.object(worker_module, "get_ip", return_value="127.0.0.1"),
         patch.object(worker_module.torch.npu, "current_device", return_value=3),
@@ -761,8 +1135,17 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks():
         patch.object(worker_module, "ThreadPoolExecutor"),
         patch.object(worker_module.threading.Thread, "start"),
     ):
+        lifecycle = MagicMock()
+        lifecycle.attach_mock(configure_roce, "configure_roce")
+        lifecycle.attach_mock(ensure_available, "ensure_mooncake")
+        lifecycle.attach_mock(transfer_class, "create_transfer")
         worker = AscendECMooncakeWorker(vllm_config)
 
+    assert lifecycle.mock_calls[:3] == [
+        call.configure_roce(),
+        call.ensure_mooncake(),
+        call.create_transfer("127.0.0.1", 3),
+    ]
     ensure_available.assert_called_once_with()
     transfer_class.assert_called_once_with("127.0.0.1", 3)
     consumer_class.assert_called_once()

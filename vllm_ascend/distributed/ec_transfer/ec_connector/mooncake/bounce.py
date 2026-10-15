@@ -201,6 +201,7 @@ class _RegistrationRangePlan:
 class _WaveSourcePlan:
     source: _SourceFragmentPlan
     bounce_offset: int | None
+    store_header_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -361,22 +362,39 @@ def _make_transfer_wave(
 def _plan_transfer_waves(
     tensors: list[torch.Tensor],
     bounce_capacity: int,
+    store_sources: list[bool] | None = None,
+    store_header_nbytes: int = 0,
 ) -> list[_TransferWavePlan]:
+    if store_sources is None:
+        store_sources = [False] * len(tensors)
+    if len(store_sources) != len(tensors):
+        raise ValueError("Store source mask must match transfer tensors")
     waves: list[_TransferWavePlan] = []
     wave_sources: list[_WaveSourcePlan] = []
     wave_bounce_nbytes = 0
 
-    for tensor in tensors:
+    for tensor, include_store in zip(tensors, store_sources, strict=True):
         source = _plan_source(tensor)
-        if wave_sources and (wave_bounce_nbytes + source.prefix_nbytes > bounce_capacity):
+        required = source.prefix_nbytes + (
+            store_header_nbytes if include_store else 0
+        )
+        if required > bounce_capacity:
+            raise ValueError(
+                f"fallback source requires {required} bounce bytes but arena "
+                f"capacity is {bounce_capacity} bytes"
+            )
+        if wave_sources and wave_bounce_nbytes + required > bounce_capacity:
             waves.append(_make_transfer_wave(wave_sources, wave_bounce_nbytes))
             wave_sources = []
             wave_bounce_nbytes = 0
 
+        header_offset = wave_bounce_nbytes if include_store else None
+        wave_bounce_nbytes += store_header_nbytes if include_store else 0
         wave_sources.append(
             _WaveSourcePlan(
                 source=source,
                 bounce_offset=(wave_bounce_nbytes if source.prefix_nbytes else None),
+                store_header_offset=header_offset,
             )
         )
         wave_bounce_nbytes += source.prefix_nbytes
