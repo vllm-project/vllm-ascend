@@ -96,12 +96,11 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
-from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, TargetDeviceMetadata
+from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
-    flashmla_metadata_scope,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -199,7 +198,6 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
-        self.flashmla_executor: DeviceMetadataExecutor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -447,8 +445,6 @@ class NPUModelRunner(GPUModelRunner):
                 for groups in self.attn_groups
                 for group in groups
             )
-            if self._uses_flashmla:
-                self.flashmla_executor = DeviceMetadataExecutor()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -577,18 +573,11 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        # Initial memory profiling skips attention before KV cache initialization
-        # creates the groups. Other runs still require initialized builders.
-        attn_groups = getattr(self, "attn_groups", None)
-        if attn_groups is None:
-            if self.flashmla_executor is not None and not (dummy_run and is_profile and skip_attn_for_dummy_run):
-                raise RuntimeError("MRv2 attention groups are unavailable outside initial memory profiling")
-            attn_groups = ()
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
         forward_failed = True
-        with dp_coordination_context, flashmla_metadata_scope(attn_groups, self.flashmla_executor):
+        with dp_coordination_context:
             try:
                 output = super().execute_model(
                     scheduler_output,

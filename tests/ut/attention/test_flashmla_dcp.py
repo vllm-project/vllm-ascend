@@ -298,6 +298,80 @@ def addresses(flash):
     return {key: value.data_ptr() for key, value in tensors.items()}
 
 
+def test_inline_refreshes_repeated_and_alternating_captured_capacities(runtime):
+    builder = runtime.builder(rank=3, interleave=4, use_rope=True)
+    captured = {}
+    for step, capacity in enumerate((4, 4, 16, 4, 16)):
+        inputs = common([37 + step, 15 - step], [1, 1], tokens=capacity)
+        inputs.positions.add_(step * 10)
+        inputs.slot_mapping.copy_(torch.tensor([step * 2, step * 2 + 1]))
+        flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
+        if capacity not in captured:
+            captured[capacity] = (flash, addresses(flash))
+        previous, pointers = captured[capacity]
+        assert flash is previous and addresses(flash) == pointers
+        expected = local_lengths(inputs.seq_lens - 1, dcp_size=8, dcp_rank=3, cp_kv_cache_interleave_size=4)
+        torch.testing.assert_close(flash.cache_lens[:2], expected)
+        torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+        torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
+        assert flash.used_q.tolist() == [1, 1] + [0] * (flash.used_q.numel() - 2)
+        assert flash.slots.tolist() == inputs.slot_mapping.tolist() + [-1] * (capacity - 2)
+        assert flash.positions.tolist() == inputs.positions.tolist() + [0] * (capacity - 2)
+        torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
+        assert builder.take_tasks() == () and not builder.defer
+    assert len(builder.buffers) == 2
+
+
+@pytest.mark.parametrize("failed_schedule", [1, 2])
+def test_inline_refresh_failure_leaves_no_deferred_task_and_can_rebuild(runtime, failed_schedule):
+    builder = runtime.builder(rank=3, use_rope=True)
+    inputs = common([37, 15], [1, 1], tokens=4)
+    flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
+    pointers = addresses(flash)
+    schedule = runtime.metadata_op.side_effect
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == failed_schedule:
+            raise ValueError("metadata refresh failed")
+        return schedule(*args, **kwargs)
+
+    runtime.metadata_op.side_effect = fail
+    with pytest.raises(ValueError, match="metadata refresh failed"):
+        builder.build(inputs, 2, 2, False)
+    assert not builder.defer and builder.take_tasks() == ()
+    runtime.metadata_op.side_effect = schedule
+    inputs.seq_lens.add_(8)
+    assert builder.build(inputs, 2, 2, False) is flash
+    assert addresses(flash) == pointers
+    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+    torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
+    assert builder.take_tasks() == ()
+
+
+def test_explicit_defer_owner_consumes_each_refresh_once(runtime):
+    builder = runtime.builder(rank=3)
+    inputs = common([37, 15], [1, 1], tokens=4)
+    flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
+    previous = flash.schedule.clone()
+    builder.defer = True
+    inputs.seq_lens.add_(8)
+    assert builder.build(inputs, 2, 2, False) is flash
+    torch.testing.assert_close(flash.schedule, previous)
+    runtime.metadata_op.reset_mock()
+    for _ in range(2):
+        for task in builder.take_tasks():
+            task.run()
+    assert runtime.metadata_op.call_count == 2  # One history and one current schedule.
+    assert not torch.equal(flash.schedule, previous)
+    assert builder.take_tasks() == ()
+    builder.defer = False
+    inputs.seq_lens.add_(8)
+    assert builder.build(inputs, 2, 2, False) is flash
+    assert builder.take_tasks() == ()
+
+
 def test_two_schedules_refresh_after_rejection_without_changing_graph_addresses(runtime, monkeypatch):
     builder = runtime.builder(rank=3, interleave=4, use_rope=True)
     inputs = common([37, 15], [4, 3], tokens=16)

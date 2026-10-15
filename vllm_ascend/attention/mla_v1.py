@@ -364,9 +364,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
             )
 
-    def take_device_metadata_tasks(self):
-        return self.flashmla_state.take_tasks() if self.flashmla_state is not None else ()
-
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
         state = self.flashmla_state

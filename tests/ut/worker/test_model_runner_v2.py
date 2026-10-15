@@ -46,7 +46,6 @@ def _make_runner(need_timing: bool = True):
     runner.debugger = None
     runner._debugger_started = False
     runner.attn_groups = []
-    runner.flashmla_executor = None
     runner._uses_flashmla = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)

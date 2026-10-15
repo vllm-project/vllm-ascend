@@ -84,8 +84,6 @@ def contract():
         transfer = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False) if pd else None
         runner.vllm_config = SimpleNamespace(kv_transfer_config=transfer)
         runner._uses_flashmla = external
-        # Selection is independent of the metadata executor's lifecycle.
-        runner.flashmla_executor = None if external else object()
         scheduler = SimpleNamespace(
             num_scheduled_tokens={row[0]: row[2] for row in rows},
             total_num_scheduled_tokens=sum(row[2] for row in rows),

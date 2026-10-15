@@ -102,7 +102,6 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
 )
-from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
@@ -111,34 +110,6 @@ from vllm_ascend.worker.utils import (
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
-
-
-@contextmanager
-def flashmla_metadata_scope(attn_groups, executor: DeviceMetadataExecutor | None):
-    """Bind a worker's executor to its MLA builders, without global state.
-
-    Keep ownership until target/draft consumers have been queued. Nested scopes
-    using the same builders leave release to the owner of the outer scope.
-    """
-    if executor is None:
-        yield
-        return
-    changed = []
-    try:
-        for groups in attn_groups:
-            for group in groups:
-                state = getattr(group.get_metadata_builder(0), "flashmla_state", None)
-                if state is not None and state.executor is not executor:
-                    changed.append((state, state.executor, state.defer))
-                    state.executor, state.defer = executor, True
-        yield
-    finally:
-        try:
-            if changed and executor.submission_in_flight:
-                executor.release()
-        finally:
-            for state, previous_executor, previous_defer in changed:
-                state.executor, state.defer = previous_executor, previous_defer
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
@@ -430,19 +401,6 @@ def build_attn_metadata(
     draft_layer_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
-    flashmla_executors = {
-        state.executor
-        for groups in attn_groups
-        for group in groups
-        if (state := getattr(group.get_metadata_builder(0), "flashmla_state", None)) is not None
-        and state.executor is not None
-    }
-    if len(flashmla_executors) > 1:
-        raise RuntimeError("One attention build cannot share buffers across multiple FlashMLA executors")
-    executor = next(iter(flashmla_executors), None)
-    if executor is not None and executor.submission_in_flight:
-        executor.release()
-    flashmla_tasks = []
     if skip_ring_state_update is None:
         skip_ring_state_update = ring_state_update_skipped()
     if seq_lens_np is None:
@@ -647,17 +605,8 @@ def build_attn_metadata(
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
-                if executor is not None and getattr(attn_metadata_builder, "flashmla_state", None) is not None:
-                    flashmla_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
-    if flashmla_tasks:
-        if torch.npu.is_current_stream_capturing():
-            raise RuntimeError("FlashMLA metadata must be refreshed outside model capture/replay")
-        assert executor is not None
-        executor.submit(flashmla_tasks)
-        for task in flashmla_tasks:
-            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 
