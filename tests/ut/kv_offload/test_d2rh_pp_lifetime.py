@@ -114,6 +114,7 @@ class TestH2DCompletionOwnership(unittest.TestCase):
         obj.invalid_block_ids = set()
         obj.pending_reformat = {}
         obj.pending_reformat_lock = threading.Lock()
+        obj.reformat_error = None
         obj.proc_not_transfer_request = {}
         obj.proc_not_transfer_request_lock = threading.Lock()
         obj.side_channel_port = obj.local_handshake_port = 47010
