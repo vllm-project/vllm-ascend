@@ -102,7 +102,7 @@ ShortRequestFirst also emits an aggregate stats log every 5s so queue behavior i
 
 ## Scheduler compatibility
 
-ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling. It can be combined with profiling-chunk scheduling; enabling ShortRequestFirst does not otherwise narrow CPP's supported feature combinations. ShortRequestFirst is not supported with batch-job-aware scheduling or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
+ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling, including in combination with profiling-chunk scheduling. It is not supported with batch-job-aware scheduling or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
 
 When combining ShortRequestFirst with CPP, prefer Model Runner V2 because it supports both the synchronous and asynchronous CPP schedulers. Model Runner V1 has not been adapted to the asynchronous CPP scheduler.
 
