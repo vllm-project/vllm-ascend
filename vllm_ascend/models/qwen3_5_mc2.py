@@ -22,9 +22,10 @@ architecture overrides do not fight over the ModelRegistry mapping:
 - MC2: torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) fuses the
   matmul and the all-reduce of row-parallel linears under TP into one kernel:
   the activation crosses the HCCL link once and comm overlaps the matmul
-  tail. Ineligible calls delegate to the stock forward captured at install
-  time; during ACL graph capture the op falls back to stock matmul+allreduce
-  (EE1016).
+  tail. Supports BF16 (dense matmul) and quantized weights (W8A8 int8 /
+  MXFP8) via the op's antiquant_scale / pertoken_scale parameters. Ineligible
+  calls delegate to the stock forward captured at install time; during ACL
+  graph capture the op falls back to stock matmul+allreduce (EE1016).
 - VL preprocessing (from qwen3_5_vl): the front-end emits flat raw uint8 and
   resize/patchify/rescale+normalize run on the NPU worker; falls back to the
   stock CPU pipeline for unsupported settings, non-uint8 pixels or
@@ -97,6 +98,65 @@ direct_register_custom_op(
 )
 
 
+def _mm_all_reduce_quant_impl(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    antiquant_scale: torch.Tensor,
+    antiquant_offset: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    antiquant_group_size: int,
+) -> torch.Tensor:
+    """Fused quantized matmul + allreduce (W8A8 / MXFP8).
+
+    npu_mm_all_reduce_base natively supports quantized operands through the
+    antiquant_scale / antiquant_offset (weight dequant) and pertoken_scale
+    (activation dequant) parameters; antiquant_group_size selects per-channel
+    (0) vs per-block (MXFP8=128) scaling.
+    """
+    if torch.npu.is_current_stream_capturing():
+        return tensor_model_parallel_all_reduce(
+            torch.matmul(
+                x1.to(pertoken_scale.dtype) * pertoken_scale,
+                x2.to(antiquant_scale.dtype) * antiquant_scale,
+            )
+        )
+    global _ascend_hcomm
+    if _ascend_hcomm is None:
+        rank = torch.distributed.get_rank(group=_ascend_tp_group)
+        _ascend_hcomm = _ascend_tp_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
+    return torch_npu.npu_mm_all_reduce_base(
+        x1,
+        x2,
+        _ascend_hcomm,
+        bias=None,
+        antiquant_scale=antiquant_scale,
+        antiquant_offset=antiquant_offset if antiquant_offset.numel() > 0 else None,
+        pertoken_scale=pertoken_scale,
+        antiquant_group_size=antiquant_group_size,
+    )
+
+
+def _mm_all_reduce_quant_fake(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    antiquant_scale: torch.Tensor,
+    antiquant_offset: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    antiquant_group_size: int,
+) -> torch.Tensor:
+    # Output dtype follows the dequantized (scale) dtype.
+    return torch.empty((x1.shape[0], x2.shape[1]), dtype=antiquant_scale.dtype, device=x1.device)
+
+
+direct_register_custom_op(
+    op_name="ascend_mm_all_reduce_quant",
+    op_func=_mm_all_reduce_quant_impl,
+    fake_impl=_mm_all_reduce_quant_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
 def _fused_forward_factory(orig_forward):
     # Fused matmul+allreduce fast path for one RowParallelLinear instance.
     # Ineligible calls delegate to `orig_forward` (the stock bound method
@@ -104,19 +164,37 @@ def _fused_forward_factory(orig_forward):
     # not a copy that can drift. `self` is the bound RowParallelLinear.
 
     def forward(self, input_):
-        if (
-            self.reduce_results
-            and self.tp_size > 1
-            and self.bias is None
-            and isinstance(self.quant_method, UnquantizedLinearMethod)
-            and input_.shape[0] > 1000
-        ):
+        if self.reduce_results and self.tp_size > 1 and self.bias is None and input_.shape[0] > 1000:
             input_parallel = input_
             if not self.input_is_parallel:
                 input_parallel = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)[
                     self.tp_rank
                 ].contiguous()
-            output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t())
+
+            if isinstance(self.quant_method, UnquantizedLinearMethod):
+                # BF16: dense matmul + allreduce fused directly.
+                output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t())
+            elif hasattr(self, "weight_scale") and hasattr(self.quant_method, "act_quant_type"):
+                # W8A8 / MXFP8: quantize the activation, then fused
+                # quantized matmul + allreduce via antiquant parameters.
+                quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(
+                    input_parallel, dst_type=self.quant_method.act_quant_type
+                )
+                antiquant_offset = getattr(self, "weight_offset", None)
+                if antiquant_offset is None:
+                    antiquant_offset = torch.empty(0, device=input_parallel.device)
+                antiquant_group_size = getattr(self.quant_method, "group_size", 0) or 0
+                output = torch.ops.vllm.ascend_mm_all_reduce_quant(
+                    quantized_x,
+                    self.weight,
+                    self.weight_scale,
+                    antiquant_offset,
+                    pertoken_scale,
+                    antiquant_group_size,
+                )
+            else:
+                # Unsupported quantization scheme: stock path.
+                return orig_forward(input_)
             return (output, None) if self.return_bias else output
         return orig_forward(input_)
 
