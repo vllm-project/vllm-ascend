@@ -246,6 +246,55 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        backend = cls._select_attn_backend_cls(attn_selector_config)
+        # Upstream rejects a dtype the selected backend cannot store from
+        # get_valid_backends, which get_attn_backend_cls calls
+        # (vllm/platforms/rocm.py:594). Ascend selects its backend with a lookup
+        # table instead, so the same questions are asked here, against the backend
+        # the table just returned.
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+
+        try:
+            backend_cls = resolve_obj_by_qualname(backend)
+        except ImportError:
+            # The backend's own module can need a package this install may not have:
+            # the FA3 backend imports ``flash_attn_npu_v3``. A backend that cannot be
+            # imported declares nothing, and selecting it will report the missing
+            # package far more clearly than a dtype check could.
+            return backend
+        # Only a backend that states the set itself is checked. The inherited
+        # upstream default is a CUDA-oriented one that would reject configurations
+        # working today, so a backend that stays silent must not be judged by it.
+        # The DeepSeek sparse subclasses do not state it either, but they pick their
+        # backend in the layer and ask there, so nothing is lost by looking only at
+        # this class. This runs before anything is read off the selector config,
+        # which not every caller fills in.
+        if "supported_kv_cache_dtypes" not in backend_cls.__dict__:
+            return backend
+
+        # Only the kv cache dtype is acted on: the selection table above already
+        # decided every other axis, so the backend's own answer to that one question
+        # is all this needs. ``validate_configuration`` would answer for all 22 axes
+        # and needs the whole selector config through ``_asdict()``, which is not
+        # guaranteed here -- ``use_compress`` is not a field of
+        # ``AttentionSelectorConfig``, so callers that set it build a
+        # ``SimpleNamespace`` instead (tests/ut/attention/test_flash_attn.py).
+        cache_dtype = attn_selector_config.kv_cache_dtype
+        if not backend_cls.supports_kv_cache_dtype(cache_dtype):
+            # List what this backend accepts *here*: the device narrows the declared
+            # set, and naming a dtype that was just refused would contradict it.
+            supported = sorted(
+                dtype for dtype in backend_cls.supported_kv_cache_dtypes if backend_cls.supports_kv_cache_dtype(dtype)
+            )
+            hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+            raise ValueError(
+                f"KV cache dtype {cache_dtype!r} is not supported by the attention backend "
+                f"{backend_cls.__name__}. Reasons: kv_cache_dtype not supported.{hint}"
+            )
+        return backend
+
+    @classmethod
+    def _select_attn_backend_cls(cls, attn_selector_config) -> str:
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
