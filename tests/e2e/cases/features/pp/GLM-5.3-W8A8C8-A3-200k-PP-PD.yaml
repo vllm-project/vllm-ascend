@@ -323,7 +323,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 24
     request_rate: 1.4
-    baseline: 0
+    baseline: 877.3186
     threshold: 0.97
   acc_aime2025:
     case_type: accuracy
