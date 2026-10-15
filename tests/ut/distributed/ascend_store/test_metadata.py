@@ -300,30 +300,19 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
+        predicate = MagicMock(return_value=True)
         result = list(
             self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                chunk_filter=lambda start: store_mask[start // 16],
+                chunk_mask=store_mask,
+                chunk_filter=predicate,
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
-
-    def test_sparse_mask_does_not_call_filter_for_disallowed_chunks(self):
-        num_blocks = 32
-        mask = [False] * num_blocks
-        for i in (1, 17, num_blocks - 1):
-            mask[i] = True
-        predicate = MagicMock(return_value=True)
-        result = list(
-            self.db.process_token_key_strings(
-                num_blocks * 16, ["hash"] * num_blocks, chunk_mask=mask, chunk_filter=predicate
-            )
-        )
-        self.assertEqual([item[0] for item in result], [16, 17 * 16, (num_blocks - 1) * 16])
         self.assertEqual(predicate.call_count, 3)
 
     def test_lookup_mask_start_and_short_mask_bounds(self):
