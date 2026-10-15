@@ -556,11 +556,9 @@ jobs:
           import sys
           from pathlib import Path
 
-          # Each invocation keeps the public selector's image/cache/device configuration intact.
-          # Combining both files before applying an override would collapse them into one job.
+          # Keep the public selector's image/cache/device configuration; run only this validation slice.
           routes = (
-              ("tests/e2e/pull_request/one_card/test_ascendstore_v1.py", "linux-aarch64-a2b3-1"),
-              ("tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py", "linux-aarch64-a2b3-4"),
+              ("tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py", "linux-aarch64-a2b3-1"),
           )
           selection_env = dict(os.environ)
           selection_env.pop("GITHUB_OUTPUT", None)
@@ -717,6 +715,8 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      # Allow dependency/setup time in addition to the bounded Layerwise test step.
+      timeout-minutes: 120
 
   run-selected-tests-upstream:
     needs:
