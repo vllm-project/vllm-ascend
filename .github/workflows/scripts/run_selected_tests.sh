@@ -176,7 +176,6 @@ run_pytest_target() {
   log_name="${log_name%.py}"
   log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
-  local report_args=()
   case "${target}" in
     tests/e2e/nightly/single_node/ops/singlecard_ops/*)
       # Set the mask before pytest imports accelerator packages or conftest.
@@ -188,7 +187,6 @@ run_pytest_target() {
       fi
       ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES%%,*}"
       ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES//[[:space:]]/}"
-      report_args=(-rs "--junitxml=${log_file%.log}.xml")
       ;;
   esac
   echo "::group::${target}"
@@ -200,10 +198,10 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${report_args[@]}" "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${report_args[@]}" "${target}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
   fi
   local status=$?
   set -e

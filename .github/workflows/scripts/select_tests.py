@@ -91,7 +91,6 @@ class RunnerInfo:
 class PartitionInfo:
     runner_label: str
     count: int
-    single_npu: bool = False
 
 
 PartitionKey = str
@@ -420,7 +419,6 @@ def _load_partition_config(meta: dict) -> dict[PartitionKey, PartitionInfo]:
         result[str(key)] = PartitionInfo(
             runner_label=runner_label,
             count=count,
-            single_npu=bool(value.get("single_npu", False)),
         )
     return result
 
@@ -510,7 +508,7 @@ def _prefer_560t_partitions(
     for key, info in updated.items():
         target_label = _A3_560T_LABEL_MAP.get(info.runner_label)
         if target_label is not None:
-            updated[key] = PartitionInfo(runner_label=target_label, count=info.count, single_npu=info.single_npu)
+            updated[key] = PartitionInfo(runner_label=target_label, count=info.count)
     return updated
 
 
@@ -533,18 +531,19 @@ def _apply_runner_label_override(
 
     override_key = f"{override_runner.npu_type.value}-{override_runner.num_npus}"
     overridden: dict[PartitionKey, list[str]] = {}
-    updated_partition_config = dict(partition_config)
     for partition_key, tests in all_groups.items():
         partition_info = partition_config.get(partition_key)
         runner = runners.get(partition_info.runner_label) if partition_info else None
         if runner is not None and runner.npu_type == NpuType.CPU:
             overridden[partition_key] = tests
         else:
-            single_npu = partition_info.single_npu if partition_info else False
-            key = f"ops-{override_runner.npu_type.value}-1" if single_npu else override_key
-            overridden.setdefault(key, []).extend(tests)
-            updated_partition_config[key] = PartitionInfo(runner_label=runner_label, count=1, single_npu=single_npu)
+            overridden.setdefault(override_key, []).extend(tests)
 
+    updated_partition_config = dict(partition_config)
+    updated_partition_config[override_key] = PartitionInfo(
+        runner_label=runner_label,
+        count=1,
+    )
     _dedup_groups(overridden)
     return overridden, updated_partition_config
 
@@ -608,10 +607,9 @@ def _build_test_group(
     tests: list[str],
     partition_name: str,
     partition: str,
-    single_npu: bool = False,
 ) -> dict:
     group: dict = {
-        "num_npus": 1 if single_npu else runner.num_npus,
+        "num_npus": runner.num_npus,
         "npu_type": runner.npu_type.value,
         "runner": runner.label,
         "tests": " ".join(sorted(tests)),
@@ -658,11 +656,10 @@ def _resolve_to_runners(
                         bucket,
                         partition_key,
                         f"{i + 1}-{psize}",
-                        partition_info.single_npu,
                     )
                 )
         else:
-            result.append(_build_test_group(runner, tests, partition_key, "1-1", partition_info.single_npu))
+            result.append(_build_test_group(runner, tests, partition_key, "1-1"))
 
     return result
 

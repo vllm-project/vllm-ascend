@@ -26,8 +26,6 @@
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
-#                        single_npu reports one test device even when the
-#                        runner allocates more cards (masked before pytest).
 #
 # Per-file estimated execution times live in ``estimated_times.yaml`` so
 # timing-only updates do not force the full PR suite.
@@ -43,8 +41,6 @@
 # === Curated Test Suites ===
 # Named test lists selected via ``select_tests.py --curated <name>``.
 curated_tests:
-  singlecard-ops:
-    - tests/e2e/nightly/single_node/ops/singlecard_ops
   kvpp:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
@@ -119,7 +115,7 @@ runner_mapping:
     default: ops-a5-1
   # Preserve the two existing 310P files without creating backend/310p dirs.
   tests/e2e/nightly/single_node/ops/singlecard_ops/(test_causal_conv1d_310|test_recurrent_gated_delta_rule_310)\.py$:
-    default: ops-310p-1
+    default: 310p-1
   # These local kernels/host helpers require the A3 build or offload path.
   tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_(attn_res_fwd|gmm_dequant_situ_quant_msd|copy_sfa_offload_metadata|lim_mtp_index_reuse|sparse_kv_offload)\.py$:
     default: ops-a3-1
@@ -139,24 +135,17 @@ runner_mapping:
 # Maps logical test buckets to exact labels from runner_label.json and controls
 # how many load-balanced groups are created for each bucket.
 partition:
-  # A3/A5 runners currently allocate 2/4 cards. The singlecard test launcher
-  # exposes exactly one logical device; num_npus in the matrix is one.
+  # Singlecard targets use one assigned device in run_selected_tests.sh,
+  # while matrix num_npus retains the runner's allocation.
   ops-a2-1:
     runner_label: linux-aarch64-a2b3-1
     count: 12
-    single_npu: true
   ops-a3-1:
     runner_label: linux-aarch64-a3-800i-2
     count: 2
-    single_npu: true
   ops-a5-1:
     runner_label: linux-aarch64-a5-4
     count: 4
-    single_npu: true
-  ops-310p-1:
-    runner_label: linux-aarch64-310p-1
-    count: 1
-    single_npu: true
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 1
