@@ -311,7 +311,7 @@ templates:
 
 benchmarks:
 
-  perf_warmup:
+#  perf_warmup:
 #    case_type: performance
 #    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_kv
 #    request_conf: vllm_api_stream_chat
