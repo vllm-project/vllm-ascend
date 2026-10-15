@@ -126,7 +126,8 @@ def _read_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
+@pytest.mark.parametrize("build_busy", [False, True])
+def test_entry_lock_timeout_bypasses_cache(tmp_path: Path, build_busy: bool):
     _, _, _, cache, _, _, _, counter, command = _seed_one(tmp_path)
     manifest = next((cache / "custom_operator").rglob("manifest.json"))
     entry = manifest.parent
@@ -134,6 +135,7 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
     lock_path = cache / "custom_operator" / ".locks" / f"{lock_name}.lock"
     event_log = tmp_path / "events.jsonl"
     lock = _hold_lock(lock_path)
+    build_lock = _hold_lock(cache / ".build.lock") if build_busy else None
     try:
         start = time.monotonic()
         bypass = run_command(
@@ -146,13 +148,17 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
         elapsed = time.monotonic() - start
     finally:
         lock.close()
+        if build_lock is not None:
+            build_lock.close()
 
     assert bypass.returncode == 0, bypass.stdout + bypass.stderr
     assert "[build-cache] BYPASS" in bypass.stdout
     assert elapsed < 2.0
     assert counter.read_text() == "2"
     events = _read_events(event_log)
-    assert any(e["event"] == "lock_timeout" and e["lock"] == "entry" for e in events)
+    timeouts = [e for e in events if e["event"] == "lock_timeout" and e["lock"] == "entry"]
+    assert len(timeouts) == 1
+    assert timeouts[0]["path"] == str(cache / ".build.lock" if build_busy else lock_path)
     assert any(e["event"] == "cache_result" and e["status"] == "BYPASS" for e in events)
 
 

@@ -1584,9 +1584,10 @@ def run(args: argparse.Namespace) -> int:
     with (
         action_scope,
         _file_lock_or_error(cache_root / BUILD_LOCK, shared=True, timeout_seconds=0) as build_error,
-        _file_lock_or_error(entry_lock) as entry_error,
+        (
+            contextlib.nullcontext(build_error) if build_error is not None else _file_lock_or_error(entry_lock)
+        ) as lock_error,
     ):
-        lock_error = build_error or entry_error
         # --------------------------------------------------------------
         # 4A. BYPASS: cache entry cannot be safely locked.
         #     Build normally, but do not read/write this cache entry.
