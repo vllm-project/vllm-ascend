@@ -33,6 +33,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -889,3 +890,81 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
 
     ptrs = [w[1].storage().data_ptr() for w in weights]
     assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
+
+
+@pytest.mark.parametrize("shape", [[], [0], [1], [2, 2]])
+def test_packed_npu_ipc_roundtrip_shapes(shape):
+    """Packed IPC preserves scalar, empty, single-element and matrix shapes."""
+    original = torch.ones(shape, dtype=torch.float32)
+    sentinel = (None,) * 6 + (0,)
+    buffers = []
+
+    def reduce(tensor):
+        buffers.append(tensor)
+        return None, sentinel
+
+    importer = NPUPackedBufferImporter()
+    fake_mod = types.ModuleType("torch_npu.multiprocessing.reductions")
+    fake_mod.rebuild_npu_tensor = lambda *args: buffers[0]
+    with (
+        patch(f"{_MODULE}.reduce_tensor", new=reduce),
+        patch.dict("sys.modules", {"torch_npu.multiprocessing.reductions": fake_mod}),
+    ):
+        chunks = packed_npu_ipc_producer(iter([("w", original)]), "node-0", lambda item: item[1], buffer_size_bytes=16)
+        received = []
+        for chunk in chunks:
+            received.extend(
+                packed_npu_ipc_consumer(
+                    ipc_handle=chunk["ipc_handle"],
+                    physical_npu_id="node-0",
+                    names=chunk["names"],
+                    shapes=chunk["shapes"],
+                    dtype_names=chunk["dtype_names"],
+                    tensor_sizes=chunk["tensor_sizes"],
+                    device_index=0,
+                    importer=importer,
+                )
+            )
+    assert len(received) == 1
+    assert received[0][1].shape == original.shape
+    assert torch.equal(received[0][1], original)
+
+
+def test_packed_importer_reuses_mapping_but_not_weight_storage():
+    """One buffer export is rebuilt once; each chunk retains its own bytes."""
+    buffer = torch.tensor([1.0, 2.0]).view(torch.uint8)
+    args = (None,) * 6 + (9,)
+    importer = NPUPackedBufferImporter()
+    patcher = _install_fake_rebuild_npu_tensor(buffer)
+    with patcher:
+        import sys
+
+        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
+        kwargs = dict(
+            ipc_handle={"node-0": args},
+            physical_npu_id="node-0",
+            names=["w"],
+            shapes=[[2]],
+            dtype_names=["float32"],
+            tensor_sizes=[8],
+            device_index=1,
+            importer=importer,
+        )
+        first = packed_npu_ipc_consumer(**kwargs)[0][1]
+        buffer.copy_(torch.tensor([3.0, 4.0]).view(torch.uint8))
+        second = packed_npu_ipc_consumer(**kwargs)[0][1]
+        assert rebuild.call_count == 1
+        assert torch.equal(first, torch.tensor([1.0, 2.0]))
+        assert torch.equal(second, torch.tensor([3.0, 4.0]))
+        assert args[6] == 9
+        assert rebuild.call_args.args[6] == 1
+
+        importer.close()
+        packed_npu_ipc_consumer(**kwargs)
+        assert rebuild.call_count == 2
+        # A new export replaces the old mapping even before finish/shutdown.
+        kwargs["ipc_handle"] = {"node-0": ("new",) + args[1:]}
+        packed_npu_ipc_consumer(**kwargs)
+        assert rebuild.call_count == 3
+    importer.close()
+    assert importer._entry is None
