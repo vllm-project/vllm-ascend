@@ -171,7 +171,7 @@ choose how the trainer exports weights to the rollout engine:
 
 | Mode | Weights sent to rollout | Rollout requirements | Trade-off |
 | --- | --- | --- | --- |
-| Non-merged (`merge=False`, default) | Separate adapter weights after base-weight synchronization | Runtime LoRA support for the actual target modules and deployment configuration | Smaller subsequent updates; inference computes the adapter contribution |
+| Non-merged (`merge=False`, default) | Separate adapter weights after base-weight synchronization in the direct/naive rollout path | Runtime LoRA support for the actual target modules and deployment configuration | Smaller subsequent updates; inference computes the adapter contribution |
 | Merged (`merge=True`) | Full model weights with the adapter merged into the base | Ordinary inference and full-weight updates for the deployment; runtime LoRA support is not required | Larger updates and merge cost; inference uses ordinary model weights; merging can introduce rounding differences |
 
 Both modes train LoRA adapters. Merging for synchronization does not turn the
@@ -217,19 +217,30 @@ configuration: FSDP uses `actor_rollout_ref.model.target_modules`, while Megatro
 uses `actor_rollout_ref.model.lora.target_modules`. Their module names differ;
 use names supported by the selected training backend and model.
 
-With `merge=False`, verl enables LoRA on its vLLM rollout server and selects the
-loaded adapter for generation. The base weights must be available before
-adapter-only updates. Check [LoRA Adapters](./lora.md) for Ascend runtime
-restrictions; model inference support alone does not establish adapter support.
+With `merge=False`, verl passes the PEFT configuration to the vLLM rollout in
+the direct/naive update path and selects the synchronized adapter for
+generation. The base weights must be available before adapter-only updates.
+Check [LoRA Adapters](./lora.md) for Ascend runtime restrictions; model
+inference support alone does not establish adapter support. The standalone HTTP
+example below demonstrates the same adapter replacement idea through the
+runtime LoRA API.
+
+For the disaggregated checkpoint-engine path, the referenced verl revision
+sends the tensor stream without the PEFT configuration. Therefore,
+`merge=False` with `nccl`/HCCL checkpoint-engine synchronization requires a
+separate integration validation and must not be treated as supported by the
+LoRA inference tests alone.
 
 With `merge=True`, the trainer exports merged weights and verl disables its
 rollout adapter mode. The rollout engine uses its full-weight update path;
-there is no need to add `--enable-lora` or manually load an adapter. The trainer
-must support merging and exporting every target module, and rollout must support
-updating the resulting weights, including packed or sharded MoE layouts.
+there is no need to add `--enable-lora` or manually load an adapter. This is the
+recommended path for the disaggregated `nccl`/HCCL checkpoint-engine flow in
+the referenced verl revision. The trainer must support merging and exporting
+every target module, and rollout must support updating the resulting weights,
+including packed or sharded MoE layouts.
 
-For a deployment using verl's HCCL checkpoint engine, add this override to the
-training command:
+For merged synchronization through verl's HCCL checkpoint engine, add this
+override to the training command:
 
 ```text
 actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
@@ -238,8 +249,11 @@ actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
 On Ascend, verl registers its
 [HCCL checkpoint engine](https://github.com/verl-project/verl/blob/2bc6ac46043e31855cea194236ff7548c91817c8/verl/checkpoint_engine/hccl_checkpoint_engine.py)
 under `nccl`. This is a verl option. The standalone vLLM-Ascend server examples
-above use `--weight-transfer-config '{"backend": "hccl"}'` instead. Configure
-the checkpoint engine for the deployment independently of the merge setting.
+above use `--weight-transfer-config '{"backend": "hccl"}'` instead. Although
+the backend and merge setting are separate configuration fields, their
+compatibility depends on the synchronization path. Use `merge=True` for the
+documented HCCL full-weight flow; validate any separate-adapter HCCL flow
+against the selected verl revision before deployment.
 
 #### Standalone adapter-update example
 
