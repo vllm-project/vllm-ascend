@@ -7,7 +7,7 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
 fi
 
 # Set to true temporarily to run all selected targets before reporting failure.
-continue_on_error=false
+continue_on_error=true
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
