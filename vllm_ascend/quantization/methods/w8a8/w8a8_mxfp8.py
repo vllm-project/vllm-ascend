@@ -32,7 +32,14 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, _should_trans_nz, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    FP8_METHOD,
+    _should_trans_nz,
+    dispose_tensor,
+    maybe_trans_nz,
+    maybe_trans_nz_with_scale,
+)
 
 from ..base import (
     AscendLinearScheme,
@@ -120,7 +127,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     ) -> torch.Tensor:
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
-            assert x.scale is not None
+            if x.scale is None:
+                raise ValueError("PreparedLinearInput scale must not be None for MXFP8 linear projection.")
             pertoken_scale = x.scale
             original_shape = quantized_x.shape
             output_dtype = x.output_dtype
@@ -164,7 +172,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         """Run a single MXFP8 projection through grouped matmul in eager mode."""
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
-            assert x.scale is not None
+            if x.scale is None:
+                raise ValueError("PreparedLinearInput scale must not be None for single-group GMM.")
             pertoken_scale = x.scale
             output_dtype = x.output_dtype
         elif isinstance(x, tuple):
@@ -188,9 +197,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             # NZ weights were format-cast from [1, K, N] and already carry
             # the leading group dimension required by WeightNz.
             if weight_scale.dim() != 4 or weight_scale.shape[0] != 1:
-                raise RuntimeError("Kimi MXFP8 single-group NZ weight requires a matching [1, K/64, N, 2] scale")
+                raise RuntimeError("MXFP8 single-group NZ weight requires a matching [1, K/64, N, 2] scale")
         else:
-            raise RuntimeError(f"Unsupported Kimi MXFP8 single-group weight rank: {weight.dim()}")
+            raise RuntimeError(f"Unsupported MXFP8 single-group weight rank: {weight.dim()}")
         group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
         return torch_npu.npu_grouped_matmul(
             x=[quantized_x],
@@ -260,36 +269,35 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
 
-        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        target_weight = padded_weight.transpose(0, 1).contiguous()
         use_gmm_nz_layout = (
-            getattr(layer, "_kimi_single_group_gmm_nz", False)
+            getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
-            and _should_trans_nz(transposed_weight)
+            and _should_trans_nz(target_weight)
         )
         layer._mxfp8_gmm_nz_layout = use_gmm_nz_layout
+        if use_gmm_nz_layout:
+            # Add the group dimension before casting: WeightNz GMM needs
+            # physical rank-5 NZ storage, not a view of rank-4 NZ storage.
+            target_weight = target_weight.unsqueeze(0)
+            target_scale = target_scale.unsqueeze(0)
+        target_scale = target_scale.contiguous()
+
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            # WeightNz GMM requires the singleton expert dimension to be
-            # present before format casting; a post-cast unsqueeze is only a
-            # logical view and remains rank-4 at the ACL boundary.
             if use_gmm_nz_layout:
-                layer._mxfp8_weight_buf = maybe_trans_nz(
-                    transposed_weight.unsqueeze(0), customize_dtype=torch.float8_e4m3fn
+                # NZ policy was checked on the original 2-D weight above.
+                target_weight = torch_npu.npu_format_cast(
+                    target_weight, ACL_FORMAT_FRACTAL_NZ, customize_dtype=torch.float8_e4m3fn
                 )
-                layer._mxfp8_scale_buf = target_scale.unsqueeze(0).contiguous()
-            else:
-                layer._mxfp8_weight_buf = transposed_weight
-                if not getattr(layer, "_fused_preprocess_managed", False):
-                    layer._mxfp8_weight_buf = maybe_trans_nz(
-                        layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn
-                    )
-                layer._mxfp8_scale_buf = target_scale.contiguous()
+            elif not getattr(layer, "_fused_preprocess_managed", False):
+                target_weight = maybe_trans_nz(target_weight, customize_dtype=torch.float8_e4m3fn)
+            layer._mxfp8_weight_buf = target_weight
+            layer._mxfp8_scale_buf = target_scale
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            source_weight = transposed_weight.unsqueeze(0) if use_gmm_nz_layout else transposed_weight
-            source_scale = target_scale.unsqueeze(0) if use_gmm_nz_layout else target_scale
-            layer._mxfp8_weight_buf.copy_(source_weight)
-            layer._mxfp8_scale_buf.copy_(source_scale.contiguous())
+            layer._mxfp8_weight_buf.copy_(target_weight)
+            layer._mxfp8_scale_buf.copy_(target_scale)
 
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf

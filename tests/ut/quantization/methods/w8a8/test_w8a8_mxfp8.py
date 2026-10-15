@@ -93,20 +93,24 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         side_effect=lambda weight, **kwargs: weight.clone(),
     )
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
-    def test_kimi_single_group_nz_layout_round_trip(self, mock_cast, mock_trans_nz, mock_should_trans_nz):
+    def test_single_group_nz_layout_round_trip(self, mock_cast, mock_trans_nz, mock_should_trans_nz):
         layer = nn.Module()
         original_weight = torch.randn(128, 256).to(torch.float8_e4m3fn)
         original_scale = torch.randint(0, 255, (128, 8), dtype=torch.uint8)
         layer.weight = nn.Parameter(original_weight.clone(), requires_grad=False)
         layer.weight_scale = nn.Parameter(original_scale.clone(), requires_grad=False)
-        layer._kimi_single_group_gmm_nz = True
+        layer._single_group_gmm_nz = True
 
         self.scheme.process_weights_after_loading(layer)
 
         self.assertEqual(layer.weight.shape, (1, 256, 128))
         self.assertEqual(layer.weight_scale.shape, (1, 4, 128, 2))
         self.assertTrue(layer._mxfp8_gmm_nz_layout)
-        self.assertEqual(mock_trans_nz.call_args.args[0].shape, (1, 256, 128))
+        self.assertEqual(mock_should_trans_nz.call_args.args[0].shape, (256, 128))
+        mock_cast.assert_called_once()
+        self.assertEqual(mock_cast.call_args.args[0].shape, (1, 256, 128))
+        self.assertEqual(mock_cast.call_args.args[1], 29)
+        self.assertEqual(mock_cast.call_args.kwargs["customize_dtype"], torch.float8_e4m3fn)
         weight_ptr = layer.weight.data_ptr()
         scale_ptr = layer.weight_scale.data_ptr()
 
@@ -127,7 +131,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertEqual(layer.weight_scale.data_ptr(), scale_ptr)
             torch.testing.assert_close(layer.weight.squeeze(0).float(), original_weight.T.float(), rtol=0, atol=0)
             torch.testing.assert_close(layer.weight_scale.squeeze(0), original_scale.reshape(128, 4, 2).transpose(0, 1))
-        mock_trans_nz.assert_called_once()
+        mock_trans_nz.assert_not_called()
+        # One initial NZ cast; reloads only convert the checkpoint view to ND.
+        self.assertEqual([call.args[1] for call in mock_cast.call_args_list], [29, 2, 2])
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
@@ -203,6 +209,23 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         mock_cast.assert_called_once()
         self.assertEqual(mock_cast.call_args.args[0].shape, (544, 2))
         self.assertTrue(mock_cast.call_args.args[0].is_contiguous())
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
+    def test_prepared_input_requires_scale(self, mock_torch_npu):
+        x = PreparedLinearInput(
+            quantized=torch.empty(4, 128, dtype=torch.float8_e4m3fn),
+            scale=None,
+            output_dtype=torch.bfloat16,
+        )
+        for method in (self.scheme.apply, self.scheme.apply_single_group_gmm):
+            with (
+                self.subTest(method=method.__name__),
+                self.assertRaisesRegex(ValueError, "PreparedLinearInput scale must not be None"),
+            ):
+                method(nn.Module(), x)
+        mock_torch_npu.npu_dynamic_mx_quant.assert_not_called()
+        mock_torch_npu.npu_quant_matmul.assert_not_called()
+        mock_torch_npu.npu_grouped_matmul.assert_not_called()
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
