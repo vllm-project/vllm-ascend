@@ -331,7 +331,11 @@ def _select_capacity_and_expert_density_moe_comm_method(
             _attn_meta = list(attn_metadata.values())[0] if attn_metadata else None
         else:
             _attn_meta = attn_metadata
-    is_prefill = _attn_meta is not None and getattr(_attn_meta, "num_prefills", 0) > 0
+    num_prefills = getattr(_attn_meta, "num_prefills", 0) if _attn_meta is not None else 0
+    num_decode_tokens = getattr(_attn_meta, "num_decode_tokens", 0) if _attn_meta is not None else 0
+    # Only use MegaMoe for pure prefill batches. Mixed prefill/decode batches
+    # should keep the original MC2/ALLGATHER path to avoid decode degradation.
+    is_pure_prefill = num_prefills > 0 and num_decode_tokens == 0
 
     # MegaMoe has high host-side tiling overhead (~16ms/call). Only use it for
     # prefill batches where the communication savings outweigh the overhead.
@@ -340,13 +344,14 @@ def _select_capacity_and_expert_density_moe_comm_method(
     if (
         use_cann_megamoe(vllm_config)
         and get_ascend_config().enable_fused_mc2 == 1
-        and (is_prefill or in_profile_run)
+        and (is_pure_prefill or in_profile_run)
         and (in_profile_run or (num_tokens is not None and num_tokens > _MEGAMOE_PREFILL_TOKEN_THRESHOLD))
     ):
         logger.info_once(
-            "A2 MegaMoe fused prefill selected (num_tokens=%s, is_prefill=%s, in_profile_run=%s)",
+            "A2 MegaMoe fused prefill selected (num_tokens=%s, num_prefills=%s, num_decode_tokens=%s, in_profile_run=%s)",
             num_tokens,
-            is_prefill,
+            num_prefills,
+            num_decode_tokens,
             in_profile_run,
         )
         return MoECommType.FUSED_MC2
