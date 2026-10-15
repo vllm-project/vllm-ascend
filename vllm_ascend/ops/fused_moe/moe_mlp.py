@@ -690,6 +690,12 @@ def unquant_apply_mlp(
         w1 = _maybe_transpose_moe_weights(w1)
         w2 = _maybe_transpose_moe_weights(w2)
 
+    from vllm_ascend.ops.weight_prefetch_qwen35 import current_controller
+
+    prefetch = current_controller() if lora_context is None else None
+    prefetch_started = prefetch is not None and prefetch.begin_routed(
+        w2, group_list, hidden_states, "after_dispatch", group_list_type
+    )
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=_as_grouped_matmul_weights(w1),
@@ -699,6 +705,9 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    if prefetch is not None and not prefetch_started:
+        prefetch_started = prefetch.begin_routed(w2, group_list, gate_up_out, "after_gmm1", group_list_type)
 
     # MoE LoRA: only attempt injection when an adapter wraps this layer and
     # the comm method provided routing metadata in lora_context.
@@ -770,6 +779,9 @@ def unquant_apply_mlp(
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
+
+    if prefetch_started:
+        prefetch.join()
 
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],

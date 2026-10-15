@@ -75,6 +75,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        # Deferred next_input prefetch: join the side stream before this layer's
+        # input projections read the prefetched weight. Identity return keeps the
+        # op alive without declaring a mutation of the residual stream.
+        next_input_join_key = getattr(self, "_qwen35_next_input_prefetch_join_key", "")
+        if next_input_join_key:
+            hidden_states = torch.ops.vllm.qwen35_next_input_prefetch_join(hidden_states, next_input_join_key)
+
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
@@ -111,6 +118,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.head_v_dim,
                 )
 
+        # Bind-time identity keeps this path inert unless the main-model GDN
+        # out_proj target was validated before graph capture.
+        prefetch_layer_name = getattr(self, "_qwen35_gdn_out_prefetch_layer_name", "")
+        if prefetch_layer_name:
+            a = torch.ops.vllm.qwen35_gdn_out_prefetch_commit(a, prefetch_layer_name)
+
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
@@ -139,6 +152,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
+        if prefetch_layer_name:
+            core_attn_out = torch.ops.vllm.qwen35_gdn_out_prefetch_join(core_attn_out, prefetch_layer_name)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
