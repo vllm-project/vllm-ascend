@@ -111,6 +111,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -481,6 +482,14 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.static_forward_context,
             self.vllm_config.scheduler_config.max_num_seqs,
         )
+
+        copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
+        if (
+            callable(copy_mamba_state)
+            and has_kv_transfer_group()
+            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+        ):
+            self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
