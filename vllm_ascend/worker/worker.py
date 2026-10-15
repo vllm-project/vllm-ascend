@@ -19,7 +19,6 @@
 
 import copy
 import gc
-import inspect
 import logging
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
@@ -249,6 +248,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -263,6 +263,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
+        self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -302,6 +303,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+        self.synchronize_device()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -1023,23 +1025,13 @@ class NPUWorker(WorkerBase):
 
         # Run a real model forward with attention enabled in eager mode.
         # _dummy_run handles PP internally (intermediate tensors, etc.).
-        old_max_num_reqs = self.model_runner.max_num_reqs
-        try:
-            self.model_runner.max_num_reqs = 1
-
-            dummy_run_kwargs = {
-                "num_tokens": num_tokens,
-                "force_attention": True,
-                "is_profile": False,
-                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
-            }
-
-            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
-                dummy_run_kwargs["profile_cpp"] = True
-
-            self.model_runner._dummy_run(**dummy_run_kwargs)
-        finally:
-            self.model_runner.max_num_reqs = old_max_num_reqs
+        self.model_runner._dummy_run(
+            num_tokens=num_tokens,
+            force_attention=True,
+            is_profile=False,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            profile_cpp=True,
+        )
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
@@ -1274,6 +1266,9 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        torch.npu.synchronize()
 
     def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
         """Return serializable encoder graph state for diagnostics.

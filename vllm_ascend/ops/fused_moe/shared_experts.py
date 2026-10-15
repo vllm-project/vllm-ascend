@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.activation import AscendSiluAndMul
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
@@ -42,6 +43,10 @@ from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stre
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
+MXFP8_ACTIVATION_GROUP_SIZE = 32
+# SwiGLU halves the input width; MX scales are stored in pairs of groups.
+SWIGLU_MX_INPUT_ALIGNMENT = 4 * MXFP8_ACTIVATION_GROUP_SIZE
+SWIGLU_MX_QUANT_MODE = 2
 
 
 class SharedExpertParallelMode(Enum):
@@ -58,6 +63,7 @@ class SharedExpertMLPPath(Enum):
 
     A8_INT_FUSED = auto()  # W8A8/W4A8: explicit A8 quant + fused activation quant.
     A8_MXFP_FUSED = auto()  # W4A8MXFP: explicit MXFP8 activation pipeline.
+    W8A8_MXFP_LINEAR = auto()  # Preserve linears; fuse activation quant when supported.
     LINEAR_WRAPPER = auto()  # Dense, other quant schemes, or any active LoRA.
 
 
@@ -158,8 +164,11 @@ class AscendSharedExperts:
 
         integrated_out = self.layer(test_input)
         part1_out = self.part1(test_input)
-        shared_act = self.apply_activation(part1_out)
-        split_out = self.part2(test_input, shared_act)
+        if self._select_mlp_path() is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
+            down_input = self._prepare_w8a8_mxfp_down_input(part1_out)
+        else:
+            down_input = self.apply_activation(part1_out)
+        split_out = self.part2(test_input, down_input)
 
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
@@ -607,6 +616,48 @@ class AscendSharedExperts:
         )
         return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
 
+    def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
+        if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
+            return False
+
+        # Lazy import: the quantization module imports routed/shared MoE code.
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+        down_proj = self.layer.down_proj
+        scheme = getattr(getattr(down_proj, "quant_method", None), "quant_method", None)
+        # Prepared input bypasses the scheme's input padding and quantization.
+        # Limit fusion to the existing kernel's BF16/default-MX contract.
+        return (
+            type(scheme) is AscendW8A8MXFP8DynamicLinearMethod
+            and type(self.layer.act_fn) is AscendSiluAndMul
+            and self.swiglu_limit == 0.0
+            and scheme.dynamic_mx_quant_scale_alg == 0
+            and scheme.group_size == MXFP8_ACTIVATION_GROUP_SIZE
+            and not any(getattr(down_proj, "mxfp8_tp_padding", (0, 0)))
+            and getattr(down_proj, "input_is_parallel", False)
+            and gate_up.dtype == torch.bfloat16
+            and gate_up.ndim == 2
+            and gate_up.shape[-1] > 0
+            and gate_up.shape[-1] % SWIGLU_MX_INPUT_ALIGNMENT == 0
+            and hasattr(torch.ops._C_ascend, "npu_swiglu_group_quant")
+        )
+
+    def _prepare_w8a8_mxfp_down_input(self, gate_up: torch.Tensor) -> LinearInput:
+        """Try fused SwiGLU/MX quant, otherwise use the scheme's preparation."""
+        if self._can_fuse_w8a8_mxfp_activation(gate_up):
+            quantized_x, scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                gate_up,
+                topk_weight=None,
+                group_index=None,
+                dst_type=torch.float8_e4m3fn,
+                quant_mode=SWIGLU_MX_QUANT_MODE,
+                clamp_value=0.0,
+            )
+            return PreparedLinearInput(quantized_x, scale, gate_up.dtype)
+
+        shared_act = self.apply_activation(gate_up)
+        return self._prepare_linear_input_for_overlap(self.layer.down_proj, shared_act)
+
     def _finish_linear_wrapped_mlp(
         self,
         submitted_gate_up: SubmittedSharedExpertGateUp,
@@ -617,10 +668,13 @@ class AscendSharedExperts:
             milestones.shared_activation_overlap_start,
             "shared_activation_overlap_start",
         )
-        shared_act = self.apply_activation(submitted_gate_up.gate_up)
         # MC2 and All2All prepare Down during routed GMM1/GMM2; AllGather
         # starts at GMM2. The Down matmul remains behind combine.
-        down_input = self._prepare_linear_input_for_overlap(self.layer.down_proj, shared_act)
+        if submitted_gate_up.path is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
+            down_input = self._prepare_w8a8_mxfp_down_input(submitted_gate_up.gate_up)
+        else:
+            shared_act = self.apply_activation(submitted_gate_up.gate_up)
+            down_input = self._prepare_linear_input_for_overlap(self.layer.down_proj, shared_act)
         self._wait_for_routed_stage(
             milestones,
             milestones.routed_combine_start,
@@ -643,9 +697,10 @@ class AscendSharedExperts:
         """Select a path without changing the quantization scheme's math.
 
         Only schemes with a proven split activation-quant pipeline bypass the
-        registered linear wrappers.  W8A8MXFP, W8A8FP, W4A4MXFP and other
-        schemes continue through those wrappers.  Active LoRA always needs the
-        wrapper path so its adapter computation is preserved.
+        registered linear wrappers. W8A8MXFP keeps both linears and selects
+        a path that checks activation-fusion compatibility after Gate-Up.
+        W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
+        Active LoRA always uses that generic path to preserve its adapters.
         """
         has_quantized_shared_without_lora = (
             not has_lora(self.lora_context)
@@ -657,10 +712,13 @@ class AscendSharedExperts:
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
         # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
-        # with MXFP8 activations). W8A8MXFP keeps its registered linear
-        # wrapper and uses prepare_input_for_overlap when it is safe.
+        # with MXFP8 activations).
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
             return SharedExpertMLPPath.A8_MXFP_FUSED
+        # Selecting this path does not guarantee fusion: tensor metadata and
+        # the Down scheme are checked after the registered Gate-Up linear.
+        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
+            return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def wait_for_output(self) -> None:
