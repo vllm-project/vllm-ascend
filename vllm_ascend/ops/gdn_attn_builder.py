@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import VllmConfig
@@ -346,6 +347,21 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.supports_update_block_table = (
+            type(self) in (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder)
+            and vllm_config.use_v2_model_runner
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+        )
+        # One layout only: a fallback build may overwrite the graph inputs.
+        self._decode_layout_key: tuple | None = None
+        self._decode_layout_metadata: GDNAttentionMetadata | None = None
+        self._spec_state_view: torch.Tensor | None = None
+        if self.supports_update_block_table:
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
+            # Lazy load for MRV2; MRV1 keeps its existing graph input path.
+            from vllm_ascend.ops.triton.v2.mamba.graph_state import GDNGraphStateUpdater
+
+            self.graph_state_updater = GDNGraphStateUpdater()
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -638,6 +654,43 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT,
         )
 
+    def _materialize_cached_spec_decode(self, metadata: GDNAttentionMetadata, graph_request_count: int) -> None:
+        """Refresh graph-owned pure decode buffers in one NPU launch."""
+        from vllm_ascend.ops.triton.v2.mamba.cached_decode import materialize_cached_gdn_decode
+
+        assert self.spec_actual_seq_lengths is not None
+        actual_request_count = metadata.num_spec_decodes
+        token_count = metadata.spec_token_indx.numel()
+        assert metadata.non_spec_token_indx.numel() == 0
+        materialize_cached_gdn_decode(
+            metadata.spec_state_indices_tensor,
+            metadata.spec_query_start_loc,
+            metadata.num_accepted_tokens,
+            metadata.spec_token_indx,
+            self.spec_state_indices_tensor,
+            self.spec_query_start_loc,
+            self.num_accepted_tokens,
+            self.spec_token_indx,
+            self.spec_sequence_masks,
+            self.spec_actual_seq_lengths,
+            actual_request_count,
+            graph_request_count,
+        )
+        metadata.spec_state_indices_tensor = self.spec_state_indices_tensor[:graph_request_count]
+        metadata.spec_query_start_loc = self.spec_query_start_loc[: graph_request_count + 1]
+        metadata.num_accepted_tokens = self.num_accepted_tokens[:graph_request_count]
+        metadata.spec_sequence_masks = self.spec_sequence_masks[:graph_request_count]
+        metadata.spec_token_indx = self.spec_token_indx[:token_count]
+        metadata.non_spec_token_indx = self.non_spec_token_indx[:0]
+        metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+            spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                query_start_loc=metadata.spec_query_start_loc,
+                cache_indices=metadata.spec_state_indices_tensor,
+                num_accepted_tokens=metadata.num_accepted_tokens,
+            ),
+            actual_seq_lengths=self.spec_actual_seq_lengths[: graph_request_count + 1],
+        )
+
     def _pad_decode_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
@@ -666,6 +719,39 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             graph_request_count,
         )
 
+    def _get_decode_layout_key(
+        self,
+        common: CommonAttentionMetadata,
+        draft_tokens: torch.Tensor | None,
+        accepted_tokens: torch.Tensor | None,
+        num_actual_reqs: int | None,
+    ) -> tuple | None:
+        """Identify a pure MRV2 decode layout using host metadata only."""
+        if not (self.supports_update_block_table and self.use_full_cuda_graph and self.use_spec_decode):
+            return None
+        if draft_tokens is None or accepted_tokens is None or draft_tokens.device.type != "cpu":
+            return None
+        graph_reqs = common.num_reqs
+        actual_reqs = graph_reqs if num_actual_reqs is None else num_actual_reqs
+        if not 0 < actual_reqs <= graph_reqs or draft_tokens.numel() < graph_reqs:
+            return None
+        prefilling = common.is_prefilling
+        if prefilling is not None:
+            if prefilling.device.type != "cpu" or any(prefilling[:actual_reqs].tolist()):
+                return None
+        drafts = tuple(draft_tokens[:graph_reqs].tolist())
+        if any(count < 0 for count in drafts[:actual_reqs]):
+            return None
+        queries = tuple(common.query_start_loc_cpu[: graph_reqs + 1].tolist())
+        if len(queries) != graph_reqs + 1 or any(
+            not 0 < queries[i + 1] - queries[i] <= self.num_spec + 1 for i in range(actual_reqs)
+        ):
+            return None
+        host_lengths = common.seq_lens_cpu_upper_bound
+        # Padding normalization depends on zero host lengths, not their values.
+        padding = None if host_lengths is None else tuple(length == 0 for length in host_lengths[:graph_reqs].tolist())
+        return (graph_reqs, actual_reqs, queries, drafts, padding, common.num_actual_tokens)
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -675,13 +761,61 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         fast_build: bool = False,
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
-        # Normalize FIA's full-width dummy queries before slicing requests:
-        # its common token count may still include those inactive rows.
+        layout_key = self._get_decode_layout_key(
+            common_attn_metadata, num_decode_draft_tokens_cpu, num_accepted_tokens, num_actual_reqs
+        )
+        # Preserve padding normalization and its current query Tensor before
+        # reusing a host layout. Captured inputs can be overwritten by other
+        # executions even when the next batch has the same host shape.
         if self.use_full_cuda_graph and self.use_spec_decode:
             common_attn_metadata = _remove_spec_graph_padding_queries(
                 common_attn_metadata,
                 num_decode_draft_tokens_cpu,
             )
+        if layout_key is not None and layout_key == self._decode_layout_key:
+            assert self._decode_layout_metadata is not None
+            assert num_accepted_tokens is not None
+            # Ascend descriptors are attached dynamically on older vLLM
+            # releases, so dataclasses.replace would discard those fields.
+            metadata = copy(self._decode_layout_metadata)
+            num_reqs = metadata.gdn_num_reqs
+            metadata.gdn_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            metadata.spec_query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+            # A cached pure decode layout has an identity speculative row map.
+            # Keep current accepted counts in the graph-owned buffer below.
+            metadata.num_accepted_tokens = num_accepted_tokens[:num_reqs]
+            aligned = self.mamba_aligned_state_indices
+            block_table = (
+                aligned[:num_reqs]
+                if aligned is not None
+                else mamba_get_block_table_tensor(
+                    common_attn_metadata.block_table_tensor[:num_reqs],
+                    metadata.gdn_seq_lens,
+                    self.kv_cache_spec,
+                    self.vllm_config.cache_config.mamba_cache_mode,
+                )
+            )
+            metadata.spec_state_indices_tensor = block_table[:, : self.num_spec + 1]
+            if (
+                self._USE_COMMON_KERNEL_METADATA
+                and metadata.spec_state_indices_tensor.device.type == "npu"
+                and all(
+                    value.dtype == torch.int32
+                    for value in (
+                        metadata.spec_state_indices_tensor,
+                        metadata.spec_query_start_loc,
+                        metadata.num_accepted_tokens,
+                        metadata.spec_token_indx,
+                    )
+                )
+            ):
+                self._materialize_cached_spec_decode(metadata, common_attn_metadata.num_reqs)
+            else:
+                self._pad_spec_decode_metadata(metadata, common_attn_metadata.num_reqs)
+                self._attach_spec_decode_metadata(metadata)
+            return metadata
+        self._decode_layout_key = None
+        self._decode_layout_metadata = None
         m = common_attn_metadata
         # Common metadata follows the padded graph shape. Build request-phase
         # metadata from the logical batch, then materialize graph-sized buffers.
@@ -703,12 +837,20 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        block_table_tensor = mamba_get_block_table_tensor(
-            m.block_table_tensor,
-            m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
+        aligned_indices = getattr(self, "mamba_aligned_state_indices", None)
+        if aligned_indices is not None:
+            block_table_tensor = aligned_indices[: m.num_reqs]
+        elif (
+            self.vllm_config.use_v2_model_runner
+            and m.num_reqs == 0
+            and self.vllm_config.cache_config.mamba_cache_mode == "align"
+        ):
+            # Match the helper's (0, state_slots) shape without device work.
+            block_table_tensor = m.block_table_tensor[:0, : 1 + self.kv_cache_spec.num_speculative_blocks]
+        else:
+            block_table_tensor = mamba_get_block_table_tensor(
+                m.block_table_tensor, m.seq_lens, self.kv_cache_spec, self.vllm_config.cache_config.mamba_cache_mode
+            )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
@@ -720,18 +862,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             num_reqs = num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
-            runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            if runtime_draft_tokens.sum().item() > 0:
-                torch.ge(
-                    num_decode_draft_tokens_cpu,
-                    0,
-                    out=spec_sequence_masks_cpu,
-                )
+            # V2 follows upstream: zero-draft decode rows still need the previous
+            # step's accepted-token offset in conv and recurrent state selection.
+            # Keep the V1 classification unchanged.
+            if (
+                self.vllm_config.use_v2_model_runner
+                or num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0].sum().item() > 0
+            ):
+                torch.ge(num_decode_draft_tokens_cpu, 0, out=spec_sequence_masks_cpu)
+                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             else:
-                # Dynamic speculative decoding can be enabled while this batch
-                # carries no draft tokens. Keep the normal prefill/decode split.
-                spec_sequence_masks_cpu.zero_()
-            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+                num_spec_decodes = 0
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
@@ -744,11 +885,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
 
         if spec_sequence_masks is None:
-            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-                m,
-                decode_threshold=1,
-                treat_short_extends_as_decodes=False,
-            )
+            if m.num_reqs == 0:
+                num_decodes = num_prefills = num_decode_tokens = num_prefill_tokens = 0
+            else:
+                num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+                    m,
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
@@ -955,6 +1099,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.use_full_cuda_graph
             and num_prefills == 0
             and num_decodes == 0
+            and num_spec_decodes > 0
             and self._can_pad_spec_decode(graph_request_count, num_spec_decode_tokens)
         ):
             self._pad_spec_decode_metadata(attn_metadata, graph_request_count)
@@ -972,7 +1117,232 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
+        # NPU gathers must use device indices, avoiding host-mask transfers on
+        # every cache group. These request-level results remain shared on update.
+        attn_metadata.gdn_num_reqs = m.num_reqs
+        attn_metadata.gdn_seq_lens = m.seq_lens
+        attn_metadata.spec_sequence_indices = spec_sequence_indices
+        attn_metadata.non_spec_sequence_indices = non_spec_sequence_indices
+        if (
+            layout_key is not None
+            and num_spec_decodes == num_actual_reqs
+            and num_prefills == 0
+            and num_decodes == 0
+            and self._can_pad_spec_decode(graph_request_count, num_spec_decode_tokens)
+            and getattr(attn_metadata, "checkpoint", None) is None
+        ):
+            self._decode_layout_key = layout_key
+            # The template owns immutable layout sources, not captured inputs.
+            # Every hit copies them back into the current graph buffers.
+            template = copy(attn_metadata)
+            for name in (
+                "spec_sequence_masks",
+                "spec_token_indx",
+                "non_spec_token_indx",
+                "spec_sequence_indices",
+                "non_spec_sequence_indices",
+            ):
+                setattr(template, name, getattr(attn_metadata, name).clone())
+            self._decode_layout_metadata = template
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: GDNAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor | None = None,
+        graph_state_updates: list | None = None,
+    ) -> GDNAttentionMetadata:
+        """Follow upstream's update contract: replace only group-local inputs.
+
+        Request tensors, graph buffers, chunks and recurrent lengths stay shared
+        with the first group. Ascend's conv descriptors must rebind cache IDs.
+        GDN does not consume slot_mapping.
+        """
+        assert self.supports_update_block_table
+        m = metadata
+        if (
+            graph_state_updates is not None
+            and self.use_full_cuda_graph
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+            and m.num_spec_decodes > 0
+            and getattr(m, "checkpoint", None) is None
+            and self._can_pad_spec_decode(m.spec_query_start_loc.size(0) - 1, m.num_spec_decode_tokens)
+        ):
+            # The batched writer already bounds live rows and state columns.
+            # Pass the full current table instead of rebuilding prefix views
+            # for every cache group, and reuse only the captured output view.
+            source = blk_table
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+                source = self.mamba_aligned_state_indices
+                if source is None:
+                    source = mamba_get_block_table_tensor(
+                        blk_table[: m.gdn_num_reqs], m.gdn_seq_lens, self.kv_cache_spec, "align"
+                    )
+            graph_rows = m.spec_query_start_loc.size(0) - 1
+            view = self._spec_state_view
+            if (
+                view is None
+                or view.size(0) != graph_rows
+                or view.data_ptr() != self.spec_state_indices_tensor.data_ptr()
+            ):
+                view = self.spec_state_indices_tensor[:graph_rows]
+                self._spec_state_view = view
+            graph_state_updates.append(
+                (
+                    source,
+                    self.spec_state_indices_tensor,
+                    m.num_spec_decodes,
+                    graph_rows,
+                    self._SPEC_GRAPH_PAD_SLOT_ID,
+                    None,
+                )
+            )
+            result = copy(m)
+            result.spec_state_indices_tensor = view
+            result.non_spec_state_indices_tensor = result.prefill_state_indices = None
+            if m.spec_decode_metadata is not None:
+                spec = m.spec_decode_metadata
+                conv = spec.spec_causal_conv1d
+                result.spec_decode_metadata = GDNSpecDecodeMetadata(
+                    spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                        query_start_loc=conv.query_start_loc,
+                        cache_indices=view,
+                        num_accepted_tokens=conv.num_accepted_tokens,
+                    ),
+                    actual_seq_lengths=spec.actual_seq_lengths,
+                )
+            return result
+        block_table = blk_table[: m.gdn_num_reqs]
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            aligned = self.mamba_aligned_state_indices
+            if aligned is not None:
+                block_table = aligned[: m.gdn_num_reqs]
+            elif m.gdn_num_reqs == 0:
+                block_table = block_table[:, : 1 + self.kv_cache_spec.num_speculative_blocks]
+            else:
+                block_table = mamba_get_block_table_tensor(block_table, m.gdn_seq_lens, self.kv_cache_spec, "align")
+        spec_indices = non_spec_indices = prefill_indices = conv_cache_indices = None
+        if m.spec_sequence_masks is None:
+            non_spec_indices = block_table[:, 0]
+            conv_cache_indices = block_table
+            if m.num_prefills > 0:
+                prefill_indices = non_spec_indices[m.num_decodes :]
+        elif m.num_prefills == 0:
+            # Like upstream, pure decode rows form a prefix before graph padding.
+            spec_indices = block_table[: m.num_spec_decodes, : self.num_spec + 1]
+        else:
+            spec_indices = torch.index_select(block_table[:, : self.num_spec + 1], 0, m.spec_sequence_indices)
+            non_spec_indices = torch.index_select(block_table[:, 0], 0, m.non_spec_sequence_indices)
+            prefill_indices = conv_cache_indices = non_spec_indices
+
+        clear_spec = self.use_full_cuda_graph and self.use_spec_decode and m.num_spec_decodes == 0
+        if clear_spec and (graph_state_updates is None or m.num_prefills > 0):
+            # The first build already clears shared query/accepted/length inputs.
+            # Each group's captured physical state input still needs clearing.
+            self.spec_state_indices_tensor[: m.non_spec_query_start_loc.size(0) - 1].fill_(PAD_SLOT_ID)
+        if (
+            self.use_full_cuda_graph
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+            and m.num_spec_decodes > 0
+            and self._can_pad_spec_decode(m.spec_query_start_loc.size(0) - 1, m.num_spec_decode_tokens)
+        ):
+            graph_rows = m.spec_query_start_loc.size(0) - 1
+            if graph_state_updates is None:
+                spec_indices = _materialize_graph_request_tensor(
+                    self.spec_state_indices_tensor,
+                    spec_indices,
+                    m.num_spec_decodes,
+                    graph_rows,
+                    self._SPEC_GRAPH_PAD_SLOT_ID,
+                )
+            else:
+                graph_state_updates.append(
+                    (
+                        spec_indices,
+                        self.spec_state_indices_tensor,
+                        m.num_spec_decodes,
+                        graph_rows,
+                        self._SPEC_GRAPH_PAD_SLOT_ID,
+                        None,
+                    )
+                )
+                spec_indices = self.spec_state_indices_tensor[:graph_rows]
+        elif (
+            self.use_full_cuda_graph
+            and m.num_prefills == 0
+            and m.num_spec_decodes == 0
+            and m.non_spec_query_start_loc.size(0) - 1 <= self.decode_cudagraph_max_bs
+        ):
+            graph_rows = m.non_spec_query_start_loc.size(0) - 1
+            if graph_state_updates is None:
+                non_spec_indices = _materialize_graph_request_tensor(
+                    self.non_spec_state_indices_tensor,
+                    non_spec_indices,
+                    m.num_decode_tokens,
+                    graph_rows,
+                    NULL_BLOCK_ID,
+                )
+            else:
+                graph_state_updates.append(
+                    (
+                        non_spec_indices,
+                        self.non_spec_state_indices_tensor,
+                        m.num_decode_tokens,
+                        graph_rows,
+                        NULL_BLOCK_ID,
+                        self.spec_state_indices_tensor if clear_spec else None,
+                    )
+                )
+                non_spec_indices = self.non_spec_state_indices_tensor[:graph_rows]
+            conv_cache_indices = non_spec_indices
+        elif clear_spec and graph_state_updates is not None and m.num_prefills == 0:
+            self.spec_state_indices_tensor[: m.non_spec_query_start_loc.size(0) - 1].fill_(PAD_SLOT_ID)
+        result = replace(
+            m,
+            spec_state_indices_tensor=spec_indices,
+            non_spec_state_indices_tensor=non_spec_indices,
+            prefill_state_indices=prefill_indices,
+        )
+        # Checkpoint metadata is optional and absent from vLLM v0.30.0.
+        checkpoint = getattr(m, "checkpoint", None)
+        if checkpoint is not None:
+            result.checkpoint = checkpoint.regather_state_indices(blk_table)
+        for name in ("gdn_num_reqs", "gdn_seq_lens", "spec_sequence_indices", "non_spec_sequence_indices"):
+            setattr(result, name, getattr(m, name))
+        result.non_spec_prefill_metadata = m.non_spec_prefill_metadata
+        if m.non_spec_prefill_metadata is not None:
+            assert conv_cache_indices is not None, "Prefill metadata requires cache indices"
+            prefill = m.non_spec_prefill_metadata
+            result.non_spec_prefill_metadata = replace(
+                prefill,
+                causal_conv1d=replace(
+                    prefill.causal_conv1d, cache_indices=conv_cache_indices[: m.non_spec_query_start_loc.size(0) - 1]
+                ),
+            )
+        result.spec_decode_metadata = m.spec_decode_metadata
+        if m.spec_decode_metadata is not None:
+            assert spec_indices is not None, "Speculative metadata requires state indices"
+            spec = m.spec_decode_metadata
+            result.spec_decode_metadata = replace(
+                spec,
+                spec_causal_conv1d=replace(
+                    spec.spec_causal_conv1d, cache_indices=spec_indices[: m.spec_query_start_loc.size(0) - 1]
+                ),
+            )
+        result.non_spec_decode_metadata = m.non_spec_decode_metadata
+        if m.non_spec_decode_metadata is not None:
+            assert conv_cache_indices is not None, "Decode metadata requires cache indices"
+            decode = m.non_spec_decode_metadata
+            result.non_spec_decode_metadata = replace(
+                decode,
+                causal_conv1d=replace(
+                    decode.causal_conv1d, cache_indices=conv_cache_indices[: m.non_spec_query_start_loc.size(0) - 1]
+                ),
+            )
+        return result
 
     def _build_prefill_has_initial_state(
         self,
