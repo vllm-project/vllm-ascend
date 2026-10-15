@@ -321,8 +321,8 @@ update code
 
 PR titles should follow the format: `[Type][Module] Description`
 
-- **Type**: The type of change (e.g., `CI`, `Doc`, `BugFix`, `Feat`, `Platform`, `Refactor`)
-- **Module**: The affected module (optional, e.g., `Misc`, `Model`, `Worker`)
+- **Type**: One of `BugFix`, `Performance`, `Feature`, `Refactor`, `Test`, `CI`, `Doc`, `Community`, `Misc`. CI validates that the title contains one of these.
+- **Module**: The affected module (optional, e.g., `Attention`, `Model`, `Worker`, `Ops`)
 - **Description**: Brief description of the change
 
 **Examples:**

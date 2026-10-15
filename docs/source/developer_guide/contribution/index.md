@@ -95,24 +95,31 @@ Using `-s` with `git commit` will automatically add this header.
 
 ## PR Title and Classification
 
-Only specific types of PRs will be reviewed. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
+Only specific types of PRs will be reviewed. The PR title must contain one of the following type prefixes. This is enforced by CI in [pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml): a PR whose title contains none of them fails before any test runs.
 
-- `[Attention]` for new features or optimization in attention.
-- `[Communicator]` for new features or optimization in communicators.
-- `[ModelRunner]` for new features or optimization in model runner.
-- `[Platform]` for new features or optimization in platform.
-- `[Worker]` for new features or optimization in worker.
-- `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
-- `[Kernel]` for changes affecting compute kernels and ops.
 - `[BugFix]` for bug fixes.
-- `[Doc]` for documentation fixes and improvements.
+- `[Performance]` for performance optimization.
+- `[Feature]` for new features.
+- `[Refactor]` for refactoring that does not change behavior.
 - `[Test]` for tests (such as unit tests).
 - `[CI]` for build or continuous integration improvements.
+- `[Doc]` for documentation fixes and improvements.
+- `[Community]` for community related changes.
 - `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
+
+A module prefix may be added alongside the type prefix to indicate the affected area, such as `[BugFix][Attention]` or `[Feature][Worker]`. Module prefixes are free-form and are not checked by CI. Commonly used ones are:
+
+- `[Attention]` for attention.
+- `[Communicator]` for communicators.
+- `[ModelRunner]` for model runner.
+- `[Platform]` for platform.
+- `[Worker]` for worker.
+- `[Core]` for the core vllm-ascend logic (such as platform, attention, communicators, model runner).
+- `[Kernel]` for compute kernels and ops.
 
 !!! note
 
-    If the PR spans more than one category, please include all relevant prefixes.
+    If the PR spans more than one category, please include all relevant prefixes. At least one of the type prefixes listed above must be present, otherwise CI rejects the PR.
 
 ## Others
 
