@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
@@ -100,7 +101,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     target = nn.Linear(2, 2)
                     model_config = SimpleNamespace(model="target")
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
-                        added = controller.maybe_register_model(target, model_config, False)
+                        if vllm_version_is("0.31.0"):
+                            added = controller.maybe_register_model(target, model_config, False)
+                        else:
+                            added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)
                     self.assertTrue(added)
                     controller.maybe_start_async_loop(added)
@@ -203,6 +207,7 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertFalse(state.should_record_tensor.item())
         self.assertFalse(state._has_fresh_recorded_load)
 
+    @unittest.skipUnless(vllm_version_is("0.31.0"), "release constructs the mapping state")
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
         controller = self._make_controller()
         model = nn.Linear(2, 2)
@@ -244,6 +249,7 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
+    @unittest.skipUnless(vllm_version_is("0.31.0"), "release constructs the mapping state")
     def test_setup_from_mapping_rejects_non_moe_model(self):
         controller = self._make_controller()
         model = nn.Linear(2, 2)
@@ -265,6 +271,19 @@ class TestAscendEPLBController(unittest.TestCase):
                 expanded_physical_to_logical=torch.tensor([0]),
                 old_num_physical_experts=1,
             )
+
+    @unittest.skipIf(vllm_version_is("0.31.0"), "verified main updates the live state")
+    def test_setup_from_mapping_preserves_live_state_and_communicator(self):
+        controller = self._make_controller()
+        state = MagicMock()
+        controller.state = state
+        model_config = SimpleNamespace()
+        mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
+        self.assertIs(controller.state, state)
 
 
 class TestUnwrapMoe(unittest.TestCase):

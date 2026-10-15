@@ -118,6 +118,7 @@ _LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
 # multi-layer load time.
 LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+MEMCACHE_SSD_HIT_GVA = (1 << 64) - 1
 
 # A partial snapshot can be visible to readers before the rank responsible for
 # saving it has published its final layer.
@@ -769,6 +770,7 @@ class KVPoolWorker:
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
+                    raise_on_transfer_failure=self.layerwise_offload,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -817,6 +819,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -1807,7 +1810,7 @@ class KVPoolWorker:
                         )
                     if any(gva <= 0 for gva in transfer_gvas):
                         logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s zero_count=%d",
+                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
                             request.req_id,
                             group_id,
                             alloc_size,
@@ -1815,12 +1818,10 @@ class KVPoolWorker:
                             transfer_gvas[:5],
                             sum(1 for g in transfer_gvas if g <= 0),
                         )
-                    # Clamp failed allocations (0 or negative error codes) to
-                    # 0: block_gvas_by_group_np keeps a single "invalid"
-                    # representation, matching skipped blocks; the raw error
-                    # codes stay in the error log above.
-                    block_gvas = [gva if gva > 0 else 0 for gva in transfer_gvas]
-                    for key, gva in zip(transfer_keys, transfer_gvas):
+                    # 0 means allocation failed; UINT64_MAX means a readable
+                    # SSD hit. Filter both before converting GVAs to np.int64.
+                    block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in transfer_gvas]
+                    for key, gva in zip(transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
 
@@ -1844,9 +1845,9 @@ class KVPoolWorker:
                         LAYERWISE_READ_LEASE_TTL_MS,
                     )
                     partial_gva = allocated[0] if allocated else 0
-                    if partial_gva > 0:
+                    if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
                         all_group_save_keys.append(partial_key)
-                    else:
+                    elif partial_gva <= 0:
                         logger.error(
                             "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
                             request.req_id,
@@ -1854,10 +1855,9 @@ class KVPoolWorker:
                             partial_block_index,
                             partial_gva,
                         )
-                    # Clamp negative error codes to 0 so downstream consumers
-                    # only ever see a valid GVA or 0; the raw code is logged
-                    # above.
-                    request.partial_save_gva_per_group[group_id] = max(0, partial_gva)
+                    request.partial_save_gva_per_group[group_id] = (
+                        partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
+                    )
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "

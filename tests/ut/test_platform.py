@@ -30,7 +30,6 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
-    vllm_version_is,
 )
 
 
@@ -298,11 +297,7 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
         patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
     ):
-        if device_type == AscendDeviceType.A5 and enable_sfa_c8:
-            with pytest.raises(NotImplementedError, match="SFA C8 DCP"):
-                _validate_parallel_config(config)
-        else:
-            _validate_parallel_config(config)
+        _validate_parallel_config(config)
 
 
 @pytest.mark.parametrize(
@@ -355,7 +350,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
         # vLLM main exposes aux_output_config; the release has no such field.
-        mock_vllm_config.aux_output_config = None if vllm_version_is("0.30.0") else MagicMock(enabled=False)
+        mock_vllm_config.aux_output_config = MagicMock(enabled=False)
         mock_vllm_config.parallel_config.enable_eplb = False
         mock_vllm_config.offload_config.uva.cpu_offload_gb = 0
         mock_vllm_config.offload_config.prefetch.offload_group_size = 0

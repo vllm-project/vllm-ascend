@@ -1158,12 +1158,15 @@ def _make_shared_expert_events():
         (QuantType.W4A8, True, False, SharedExpertMLPPath.A8_INT_FUSED),
         (QuantType.W4A8MXFP, True, False, SharedExpertMLPPath.A8_MXFP_FUSED),
         # These schemes retain their registered linear implementation.
-        (QuantType.W8A8MXFP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8MXFP, True, False, SharedExpertMLPPath.W8A8_MXFP_LINEAR),
         (QuantType.W8A8FP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         (QuantType.W4A4MXFP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         (QuantType.NONE, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         # LoRA must not bypass the linear wrappers even for A8 quantization.
         (QuantType.W8A8, True, True, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8MXFP, True, True, SharedExpertMLPPath.LINEAR_WRAPPER),
+        # W8A8MXFP also preserves both linears before scales are initialized.
+        (QuantType.W8A8MXFP, False, False, SharedExpertMLPPath.W8A8_MXFP_LINEAR),
         # A partially initialized quant layer must fail closed to wrappers.
         (QuantType.W8A8, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
     ],
@@ -1502,7 +1505,7 @@ def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch):
     gate_up_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_scheme), mxfp8_tp_padding=(1, 1))
     down_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_scheme))
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    shared_experts.layer = SimpleNamespace(gate_up_proj=gate_up_proj, down_proj=down_proj)
+    shared_experts.layer = SimpleNamespace(gate_up_proj=gate_up_proj, down_proj=down_proj, act_fn=MagicMock())
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = QuantType.W8A8MXFP
     shared_experts.lora_context = None

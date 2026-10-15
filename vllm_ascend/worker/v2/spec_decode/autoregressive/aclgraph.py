@@ -30,7 +30,7 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
@@ -119,13 +119,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
                     # vLLM #58275 makes mixed FULL graphs capture prefill kernels
                     # by bounding the dummy query length to the capture
-                    # descriptor. v0.30.0 has no such default and keeps its own
-                    # (unbounded) behaviour.
-                    **(
-                        {"max_query_len": desc.max_query_len or desc.uniform_token_count}
-                        if not vllm_version_is("0.30.0")
-                        else {}
-                    ),
+                    # descriptor.
+                    max_query_len=desc.max_query_len or desc.uniform_token_count,
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(

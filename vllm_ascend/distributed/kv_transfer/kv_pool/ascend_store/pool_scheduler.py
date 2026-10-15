@@ -697,7 +697,7 @@ class KVPoolScheduler:
             else:
                 if num_computed_tokens >= token_len:
                     return 0, False
-                if self.client is None:
+                if self.client is None or self.client.closed:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
@@ -1239,6 +1239,8 @@ class LookupKeyClient:
             zmq.REQ,  # type: ignore[attr-defined]
             bind=False,
         )
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
+        self._closed = False
 
     def lookup(
         self,
@@ -1247,6 +1249,9 @@ class LookupKeyClient:
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
     ) -> int:
+        if self._closed:
+            return 0
+
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
@@ -1257,13 +1262,30 @@ class LookupKeyClient:
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
             *hash_frames,
         ]
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
+        try:
+            self.socket.send_multipart(all_frames, copy=False)
+            resp = self.socket.recv()
+        except zmq.ZMQError:  # type: ignore[attr-defined]
+            logger.exception("KV pool lookup failed; reporting 0 hit tokens")
+            self.close()
+            return 0
+
+        return int.from_bytes(resp, "big")
 
     def close(self):
-        self.socket.close(linger=0)
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.socket.close(linger=0)
+        finally:
+            # Each client owns a private context. Close it too so repeated
+            # lookup failures do not leak ZeroMQ IO threads.
+            self.ctx.term()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:

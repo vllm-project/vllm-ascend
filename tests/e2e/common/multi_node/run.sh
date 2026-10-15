@@ -28,6 +28,9 @@ if [ ! -f "$BISECT_ARGS_HELPER" ]; then
 fi
 # shellcheck source=../../nightly/scripts/bisect_args.sh
 source "$BISECT_ARGS_HELPER"
+DOWNLOAD_ARCHIVE_HELPER="${SCRIPT_DIR}/download_archive.sh"
+# shellcheck source=download_archive.sh
+source "$DOWNLOAD_ARCHIVE_HELPER"
 
 # The CANN install directory varies between release (cann-9.1.0) and daily
 # (e.g. cann-2026.08.03) images, so discover it dynamically instead of
@@ -528,6 +531,14 @@ finish_run() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ] && [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         echo "AOP_RUN_FINISHED:${LOG_PREFIX}:${rc}"
     fi
+    backup_requested_directory || true
+    return "$rc"
+}
+
+finish_without_aop() {
+    local rc=$?
+    backup_ascend_logs || true
+    backup_requested_directory || true
     return "$rc"
 }
 
@@ -535,7 +546,7 @@ main() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         trap finish_run EXIT
     else
-        trap backup_ascend_logs EXIT
+        trap finish_without_aop EXIT
     fi
     check_npu_info
     clear_logs
