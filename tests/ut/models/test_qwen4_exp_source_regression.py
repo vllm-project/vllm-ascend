@@ -2,12 +2,6 @@
 """Source-level ownership and integration guards for Qwen4Exp on Ascend."""
 
 from pathlib import Path
-from types import SimpleNamespace
-
-import torch
-from vllm.models.qwen4_exp.amd import indexer_qsa as upstream_indexer
-
-from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -91,51 +85,21 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     assert "torch.equal(" not in qsa_sources
 
 
-def test_qsa_normalization_uses_upstream_public_helper() -> None:
+def test_qsa_uses_only_fused_runtime_backends() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
-    assert "upstream_indexer.apply_qsa_rmsnorm(" in qsa
-    assert "upstream_indexer._gemma_rmsnorm(" not in qsa
-    assert "envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE" in qsa
-    assert "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE" not in qsa
-
-
-def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
-    indexer = object.__new__(ascend_qsa.AscendQSAIndexer)
-    torch.nn.Module.__init__(indexer)
-    indexer.index_head_dim = 4
-    indexer.k_layernorm = torch.nn.Identity()
-    indexer.rotary_emb = SimpleNamespace(mrope_section=None)
-
-    monkeypatch.setattr(
-        ascend_qsa.envs,
+    assert "return qsa_select_paged_tokens_lightning(" in qsa
+    assert "return qsa_gbsa_attention(" in qsa
+    assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
+    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" in qsa
+    for fallback in (
+        "qsa_select_paged_tokens_reference",
+        "qsa_select_paged_tokens_triton",
+        "qsa_sparse_paged_attention_reference",
+        "qsa_sparse_paged_attention(",
+        "VLLM_ASCEND_FORCE_QSA_REFERENCE",
+        "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER",
         "VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE",
-        False,
-    )
-    monkeypatch.setattr(
-        ascend_qsa,
-        "apply_qsa_rope",
-        lambda _rotary_emb, _positions, tensor: tensor,
-    )
-
-    pooled = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
-    first_positions = torch.zeros(2, 3, dtype=torch.int64)
-    actual = indexer.normalize_compressed_keys(pooled, first_positions)
-    expected = upstream_indexer.apply_qsa_rmsnorm(
-        indexer.k_layernorm,
-        pooled.reshape(-1, indexer.index_head_dim),
-    ).reshape(-1, 1, indexer.index_head_dim)
-
-    torch.testing.assert_close(actual, expected)
-
-
-def test_qsa_e3_custom_op_is_a3_scoped_and_has_meta_binding() -> None:
-    build = _source("csrc/build_aclnn.sh")
-    a3_start = build.index('elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]')
-    a5_start = build.index('elif [[ "$SOC_VERSION" =~ ^ascend950')
-    assert '"qsa_expand_e3"' in build[a3_start:a5_start]
-    assert '"qsa_expand_e3"' not in build[a5_start:]
-
-    binding = _source("csrc/torch_binding.cpp")
-    meta = _source("csrc/torch_binding_meta.cpp")
-    assert "qsa_expand_e3_out" in binding
-    assert "qsa_expand_e3_out_meta" in meta
+        "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE",
+        "super()._project_qkv_gate",
+    ):
+        assert fallback not in qsa
