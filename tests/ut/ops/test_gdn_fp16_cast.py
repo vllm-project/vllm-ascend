@@ -33,7 +33,10 @@ class TestChunkGatedDeltaRuleFusedCast:
             final_state = torch.zeros((1, nv, dk, dk), dtype=torch.bfloat16)
             return o, final_state
 
-        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op):
+        # create=True: the CI torch_npu build may not ship the op at all (the
+        # availability probe exists precisely for that), so the patch must be
+        # allowed to synthesize the attribute.
+        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True):
             o, final_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 q=q,
                 k=k,
@@ -70,7 +73,10 @@ class TestChunkGatedDeltaRuleFusedCast:
             final_state = torch.zeros((1, nv, dk, dk), dtype=torch.bfloat16)
             return o, final_state
 
-        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op):
+        # create=True: the CI torch_npu build may not ship the op at all (the
+        # availability probe exists precisely for that), so the patch must be
+        # allowed to synthesize the attribute.
+        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True):
             o, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 q=q,
                 k=k,
