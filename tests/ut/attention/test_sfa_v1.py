@@ -56,7 +56,9 @@ def test_v_up_proj_uses_direct_transpose_batchmatmul(num_heads, kv_lora_rank):
         assert x1.data_ptr() == x.data_ptr()
         return torch.bmm(x1.transpose(0, 1), x2).transpose(0, 1)
 
-    with patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm) as fused:
+    with patch(
+        "vllm_ascend.attention.sfa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm, create=True
+    ) as fused:
         result = AscendSFAImpl._v_up_proj(impl, x)
 
     expected = torch.bmm(x.view(batch_size, num_heads, kv_lora_rank).transpose(0, 1), weight)
