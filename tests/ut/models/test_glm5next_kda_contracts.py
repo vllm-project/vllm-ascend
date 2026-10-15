@@ -14,11 +14,12 @@ import vllm_ascend.ops.kda as kda_ops
     "accepted,qkv_padding,direct_output",
     [(None, 0, False), (None, 64, False), ([1, 2, 1], 0, False), ([1, 2, 1], 64, False), (None, 64, True)],
 )
-def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output):
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output, state_dtype):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
     gate = q * 2
     beta = torch.zeros(1, 4, 1, dtype=torch.bfloat16)
-    state = torch.zeros(8, 1, 128, 128)
+    state = torch.zeros(8, 1, 128, 128, dtype=state_dtype)
     starts = torch.tensor([0, 1, 3], dtype=torch.int32)
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
