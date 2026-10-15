@@ -762,6 +762,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --quantization ascend \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --async-scheduling \
       --enforce-eager \
