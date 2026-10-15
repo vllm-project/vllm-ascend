@@ -273,7 +273,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
 === "A3 series(BF16)"
 
@@ -283,13 +283,11 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export IFNAME="${NETWORK_INTERFACE}"
-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -321,13 +319,11 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export IFNAME="${NETWORK_INTERFACE}"
-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -362,13 +358,11 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE0_IP}"
     node0_ip="${NODE0_IP}"
 
-    export IFNAME="${NETWORK_INTERFACE}"
-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -401,13 +395,11 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     local_ip="${NODE1_IP}"
     node0_ip="${NODE0_IP}"
 
-    export IFNAME="${NETWORK_INTERFACE}"
-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
