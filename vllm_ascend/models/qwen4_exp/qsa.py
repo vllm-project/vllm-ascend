@@ -35,55 +35,20 @@ from vllm.utils.torch_utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from vllm_ascend import envs
-from vllm_ascend.device.hardware_profile import (
-    HardwareCapability,
-    get_current_hardware_profile,
-)
 from vllm_ascend.ops.gbsa_qsa import (
-    is_qsa_gbsa_cache_compatible,
     qsa_gbsa_attention,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_triton,
+    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_sparse_paged_attention,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_store_cache_rows as qsa_store_cache_rows_triton,
+    qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 
-from .lightning_indexer import (
-    is_qsa_lightning_cache_compatible,
-    qsa_select_paged_tokens_lightning,
-)
-from .ops import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_reference,
-)
-from .ops import (
-    qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
-)
-from .ops import (
-    qsa_sparse_paged_attention as qsa_sparse_paged_attention_reference,
-)
-from .ops import (
-    qsa_store_cache_rows as qsa_store_cache_rows_reference,
-)
-from .ops import (
-    reshape_and_cache_qsa,
-)
+from .lightning_indexer import qsa_select_paged_tokens_lightning
 
 QSAKVCache: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
-
-
-def _is_unit_stride_1d(tensor: torch.Tensor) -> bool:
-    """Return whether metadata matches the Triton pointer contract."""
-    return tensor.ndim == 1 and tensor.stride(0) == 1
 
 
 def _store_qsa_cache_rows(
@@ -91,19 +56,9 @@ def _store_qsa_cache_rows(
     slot_mapping: torch.Tensor,
     rows: torch.Tensor,
 ) -> None:
-    """Store rows through Triton without compacting a strided cache view."""
+    """Store rows with the fused kernel without compacting a strided cache."""
     flat_slots = slot_mapping.reshape(-1)
-    use_triton = (
-        not envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
-        and cache.device.type == "npu"
-        and cache.ndim == 4
-        and cache.shape[2] == 1
-        and _is_unit_stride_1d(flat_slots)
-    )
-    if use_triton:
-        qsa_store_cache_rows_triton(cache, flat_slots, rows)
-    else:
-        qsa_store_cache_rows_reference(cache, flat_slots, rows)
+    qsa_store_cache_rows_fused(cache, flat_slots, rows)
 
 
 def _compress_qsa_groups(
@@ -118,22 +73,8 @@ def _compress_qsa_groups(
     compress_ratio: int,
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Use fused Triton compression when its metadata inputs are dense."""
-    use_triton = (
-        not envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
-        and raw_keys.device.type == "npu"
-        and all(
-            _is_unit_stride_1d(tensor)
-            for tensor in (
-                token_to_req,
-                query_start_loc,
-                logical_positions,
-                compressed_slots,
-            )
-        )
-    )
-    op = qsa_compress_groups_with_ratio_triton if use_triton else qsa_compress_groups_with_ratio_reference
-    return op(
+    """Pool completed groups with the fused QSA compression kernel."""
+    return qsa_compress_groups_with_ratio_fused(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -258,8 +199,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> bool:
         section = getattr(self.rotary_emb, "mrope_section", None)
         return bool(
-            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE
-            and tensor.dtype == torch.bfloat16
+            tensor.dtype == torch.bfloat16
             and tensor.ndim == 3
             and tensor.shape[-1] == self.index_head_dim == 128
             and self.k_layernorm.weight.dtype == tensor.dtype
@@ -278,7 +218,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         norm: torch.nn.Module,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        logger.info_once("QSA indexer is using fused Triton RMSNorm + MRoPE.")
+        logger.info_once("QSA indexer is using fused RMSNorm + MRoPE.")
         cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
         safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
         cos_sin = cache[safe_positions]
@@ -302,21 +242,12 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
-        if self._fused_norm_rope_eligible(pooled, first_positions):
-            return self._fused_norm_rope(
-                pooled,
-                self.k_layernorm,
-                first_positions,
-            )
-
-        compressed_keys = upstream_indexer.apply_qsa_rmsnorm(
+        if not self._fused_norm_rope_eligible(pooled, first_positions):
+            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+        return self._fused_norm_rope(
+            pooled,
             self.k_layernorm,
-            pooled.reshape(-1, self.index_head_dim),
-        ).reshape(-1, 1, self.index_head_dim)
-        return apply_qsa_rope(
-            self.rotary_emb,
             first_positions,
-            compressed_keys,
         )
 
     def forward(
@@ -325,7 +256,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run the portable Ascend path instead of upstream Triton kernels."""
+        """Run the fused Ascend QSA path."""
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
@@ -374,8 +305,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        q = self.q_layernorm(q.reshape(-1, self.index_head_dim)).reshape_as(q)
-        q = apply_qsa_rope(self.rotary_emb, positions, q)
+        if not self._fused_norm_rope_eligible(q, positions):
+            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+        q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def _update_and_compress(
@@ -420,92 +352,25 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 position_rows,
             )
 
-    def _lightning_indexer_eligible(
-        self,
-        query: torch.Tensor,
-        metadata: QSAForwardMetadata,
-    ) -> bool:
-        cache = self.compressed_key_cache.kv_cache
-        return (
-            query.dtype == torch.bfloat16
-            and query.ndim == 3
-            and query.shape[1] <= 64
-            and query.shape[2] == 128
-            and cache.ndim == 4
-            and cache.shape[1] in (192, 384)
-            and cache.shape[2:] == (1, 128)
-            and self.compress_ratio == 4
-            and self.token_topk == 2048
-            and metadata.query_start_loc.ndim == 1
-            and metadata.query_start_loc.shape[0] == metadata.seq_lens.shape[0] + 1
-        )
-
     def _select(
         self,
         query: torch.Tensor,
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
-            return qsa_select_paged_tokens_reference(
-                query,
-                self.compressed_key_cache.kv_cache,
-                metadata.block_table,
-                metadata.token_to_req,
-                metadata.logical_positions,
-                metadata.seq_lens,
-                self.token_topk,
-                self.compress_ratio,
-                out,
-            )
-        profile = get_current_hardware_profile()
-        use_lightning = profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER)
-        packed_width = (
-            self.token_topk // self.compress_ratio + self.compress_ratio - 1
-        )
-        compact_out = None if out is None else out[:, :packed_width]
-        use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V and profile.supports(HardwareCapability.QSA_E3_EXPAND)
-        lightning_eligible = use_lightning and (
-            profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER_FULL_SHAPES)
-            or self._lightning_indexer_eligible(query, metadata)
-        )
-        if lightning_eligible:
-            logger.info_once("QSA LI-v2 is using the Lightning paged-token selector.")
-            return qsa_select_paged_tokens_lightning(
-                query,
-                self.compressed_key_cache.kv_cache,
-                metadata.block_table,
-                metadata.token_to_req,
-                metadata.logical_positions,
-                metadata.seq_lens,
-                metadata.query_start_loc,
-                self.token_topk,
-                self.compress_ratio,
-                out,
-                use_e3=use_e3,
-            )
-        if out is None:
-            out = torch.empty(
-                (query.shape[0], self.output_width),
-                dtype=torch.int32,
-                device=query.device,
-            )
-            compact_out = out[:, :packed_width]
-        # The upper vLLM ABI owns a 2051-column buffer. Compact QSA backends
-        # consume only 512 group ids plus three residual-token columns.
-        out.fill_(-1)
-        qsa_select_paged_tokens_triton(
+        logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
+        return qsa_select_paged_tokens_lightning(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
             metadata.token_to_req,
             metadata.logical_positions,
             metadata.seq_lens,
+            metadata.query_start_loc,
             self.token_topk,
             self.compress_ratio,
-            compact_out,
+            out,
         )
-        return out
 
 
 class AscendQSAImpl:
@@ -536,12 +401,9 @@ class AscendQSAImpl:
         slot_mapping: torch.Tensor,
     ) -> None:
         del layer
-        if isinstance(kv_cache, tuple):
-            key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
-            _store_qsa_cache_rows(key_cache, slot_mapping, key)
-            _store_qsa_cache_rows(value_cache, slot_mapping, value)
-        else:
-            reshape_and_cache_qsa(key, value, kv_cache, slot_mapping, self.head_size)
+        key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+        _store_qsa_cache_rows(key_cache, slot_mapping, key)
+        _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
     def forward_qsa(
         self,
@@ -567,58 +429,21 @@ class AscendQSAImpl:
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
-            return qsa_sparse_paged_attention_reference(
-                query[:num_tokens],
-                key_cache,
-                value_cache,
-                selected_indices,
-                attn_metadata.block_table,
-                token_to_req[:num_tokens],
-                output[:num_tokens],
-            )
         packed_width = (
             layer.indexer.token_topk // layer.indexer.compress_ratio
             + layer.indexer.compress_ratio
             - 1
         )
         compact_indices = selected_indices[:, :packed_width]
-        profile = get_current_hardware_profile()
-        use_gbsa = (
-            profile.supports(HardwareCapability.QSA_GBSA_ATTENTION)
-            and is_qsa_gbsa_cache_compatible(key_cache)
-            and is_qsa_gbsa_cache_compatible(value_cache)
-        )
-        if use_gbsa:
-            logger.info_once("QSA attention is using the CANN GBSA backend.")
-            return qsa_gbsa_attention(
-                query[:num_tokens],
-                key_cache,
-                value_cache,
-                compact_indices,
-                attn_metadata.block_table,
-                token_to_req[:num_tokens],
-                attn_metadata.seq_lens,
-                output[:num_tokens],
-            )
-        if profile.supports(HardwareCapability.QSA_GBSA_ATTENTION):
-            logger.warning_once(
-                "QSA cache cannot be represented as non-overlapping GBSA "
-                "pages without copying; falling back to the stride-aware "
-                "Triton backend. key shape=%s stride=%s, "
-                "value shape=%s stride=%s",
-                tuple(key_cache.shape),
-                key_cache.stride(),
-                tuple(value_cache.shape),
-                value_cache.stride(),
-            )
-        return qsa_sparse_paged_attention(
+        logger.info_once("QSA attention is using the CANN GBSA backend.")
+        return qsa_gbsa_attention(
             query[:num_tokens],
             key_cache,
             value_cache,
             compact_indices,
             attn_metadata.block_table,
             token_to_req[:num_tokens],
+            attn_metadata.seq_lens,
             output[:num_tokens],
         )
 
@@ -716,10 +541,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         qkv: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if not envs.VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE:
-            return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
-            return super()._project_qkv_gate(qkv, positions)
+            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
 
         # Index the same rotary cache with the original scheduler positions.
         # This preserves 1-D text positions, 3-axis interleaved MRoPE, and any
