@@ -173,7 +173,6 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --safetensors-load-strategy prefetch \
         --api-server-count 1 \
         --data-parallel-size 8 \
-        --data-parallel-start-rank 0 \
         --data-parallel-size-local 4 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12980 \
@@ -404,7 +403,7 @@ Only the key parameters specific to this model/scenario are described below. max
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
 - `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.
-- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Omit it on node 0 (the master): its start rank is inferred as `0`, so the flag is redundant there, and passing it would auto-enable hybrid load balancing, which is incompatible with the headless peer nodes and makes node 0 exit with `Remote engine 1 must not use --headless in external or hybrid dp lb mode`. Set it on each headless node, e.g. node 1 uses `4` in the A3 scenario and `1`, `2`, `3` in the A2 scenario.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Used on node 1. Node 0 hosts the API server.
