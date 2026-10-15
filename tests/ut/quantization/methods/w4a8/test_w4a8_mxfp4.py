@@ -3,13 +3,16 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 import torch.nn as nn
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
+from vllm_ascend.weight_switch import WeightLoadPartition, WeightSwitchConfig
 
 
 class TestAscendW4A8MXFP4LinearMethod(TestBase):
@@ -23,6 +26,10 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
             result = self.scheme.get_weight(input_size, 128, torch.bfloat16)
             self.assertEqual(result["weight"].shape, (128, input_size // 2))
             self.assertEqual(result["weight"].dtype, torch.uint8)
+
+    def test_get_weight_rejects_split_fp4_byte(self):
+        with self.assertRaisesRegex(ValueError, "even input size"):
+            self.scheme.get_weight(1077, 128, torch.bfloat16)
 
     def test_get_pergroup_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
@@ -41,26 +48,26 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
     def test_partial_scale_group_round_trip(self, mock_npu):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = nn.Module()
-        layer.weight = nn.Parameter(torch.zeros(4, 2152, dtype=torch.uint8), requires_grad=False)
-        scales = torch.randint(0, 255, (4, 135), dtype=torch.uint8)
+        layer.weight = nn.Parameter(torch.zeros(8, 2152, dtype=torch.uint8), requires_grad=False)
+        scales = torch.randint(0, 255, (8, 135), dtype=torch.uint8)
         layer.weight_scale = nn.Parameter(scales.clone(), requires_grad=False)
         for _ in range(2):
             self.scheme.process_weights_after_loading(layer)
-            unpacked = layer.weight_scale.transpose(-3, -2).reshape(4, 136)
+            unpacked = layer.weight_scale.transpose(-3, -2).reshape(8, 136)
             self.assertTrue(torch.equal(unpacked[:, :135], scales))
-            self.assertTrue(torch.equal(unpacked[:, 135], torch.zeros(4, dtype=torch.uint8)))
+            self.assertTrue(torch.equal(unpacked[:, 135], torch.zeros(8, dtype=torch.uint8)))
             self.scheme.restore_weights_for_rl_loading(layer)
             self.assertTrue(torch.equal(layer.weight_scale, scales))
             self.assertTrue(layer.weight_scale.is_contiguous())
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_apply_restores_activation_shape_and_expands_bias(self, mock_npu):
-        for shape in [(64,), (6, 64), (2, 3, 64), (2, 2, 3, 64)]:
+        for shape in [(128,), (6, 128), (2, 3, 128), (2, 2, 3, 128)]:
             with self.subTest(shape=shape):
                 x = torch.randn(*shape, dtype=torch.bfloat16)
                 flat_x = x.reshape(-1, shape[-1])
-                quantized = torch.zeros_like(flat_x, dtype=torch.uint8)
-                scale = torch.zeros(flat_x.shape[0], 2, dtype=torch.uint8)
+                quantized = torch.zeros_like(flat_x, dtype=torch.float8_e4m3fn)
+                scale = torch.zeros(flat_x.shape[0], 2, 2, dtype=torch.uint8)
                 mock_npu.npu_dynamic_mx_quant.return_value = (quantized, scale)
                 projected = torch.randn(flat_x.shape[0], 16, dtype=x.dtype)
                 mock_npu.npu_quant_matmul.return_value = projected
@@ -73,6 +80,126 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
                 self.assertTrue(torch.equal(matmul_bias[0], bias))
                 self.assertEqual(output.shape, (*shape[:-1], 16))
                 self.assertTrue(torch.equal(output.reshape(-1, 16), projected))
+
+    def _make_row_layer(self, input_size, tp_size, tp_rank):
+        layer = RowParallelLinear.__new__(RowParallelLinear)
+        nn.Module.__init__(layer)
+        layer.tp_size = tp_size
+        layer.tp_rank = tp_rank
+        layer.input_size = input_size
+        layer.input_size_per_partition = input_size // tp_size
+        layer.output_size = layer.output_size_per_partition = 8
+        AscendLinearMethod(self.scheme).create_weights(
+            layer,
+            input_size_per_partition=layer.input_size_per_partition,
+            output_partition_sizes=[8],
+            input_size=input_size,
+            output_size=8,
+            params_dtype=torch.bfloat16,
+            weight_loader=layer.weight_loader,
+        )
+        return layer
+
+    @staticmethod
+    def _dequantize_weight(packed_weight, scales):
+        values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+        codes = torch.stack((packed_weight & 15, packed_weight >> 4), dim=-1).flatten(-2).long()
+        expanded_scales = torch.exp2(scales.float() - 127).repeat_interleave(32, dim=-1)
+        return values[codes] * expanded_scales[:, : codes.shape[-1]]
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_checkpoint_tp_shards_preserve_dequantized_projection_and_restore(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        input_size = 4304
+        checkpoint_weight = torch.randint(0, 256, (8, input_size // 2), dtype=torch.uint8)
+        checkpoint_scales = torch.randint(125, 130, (8, 135), dtype=torch.uint8)
+        x = torch.randint(-2, 3, (2, input_size), dtype=torch.int32).float()
+        expected = x @ self._dequantize_weight(checkpoint_weight, checkpoint_scales).T
+        for tp_size in (1, 2, 4, 8):
+            actual = torch.zeros_like(expected)
+            for tp_rank in range(tp_size):
+                with self.subTest(tp_size=tp_size, tp_rank=tp_rank):
+                    layer = self._make_row_layer(input_size, tp_size, tp_rank)
+                    layer.weight.weight_loader(layer.weight, checkpoint_weight)
+                    layer.weight_scale.weight_loader(layer.weight_scale, checkpoint_scales)
+                    local_weight = layer.weight.clone()
+                    local_scales = layer.weight_scale.clone()
+                    start = tp_rank * layer.input_size_per_partition
+                    end = start + layer.input_size_per_partition
+                    torch.testing.assert_close(local_scales, checkpoint_scales[:, start // 32 : (end + 31) // 32])
+                    for _ in range(2):
+                        self.scheme.process_weights_after_loading(layer)
+                        prefix, suffix = layer.mxfp4_tp_padding
+                        padded_x = torch.nn.functional.pad(x[:, start:end], (prefix, suffix))
+                        weight = layer.weight.T
+                        scales = layer.weight_scale.transpose(0, 1).reshape(8, -1)
+                        projection = padded_x @ self._dequantize_weight(weight, scales).T
+                        self.scheme.restore_weights_for_rl_loading(layer)
+                        torch.testing.assert_close(layer.weight, local_weight)
+                        torch.testing.assert_close(layer.weight_scale, local_scales)
+                        self.assertTrue(layer.weight.is_contiguous())
+                    actual += projection
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_tp_padding_reaches_plain_and_overlap_quantization(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_row_layer(4304, 4, 3)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.mxfp4_tp_padding, (28, 16))
+        x = torch.randn(2, 1076, dtype=torch.bfloat16)
+        padded_x = torch.nn.functional.pad(x, (28, 16))
+        quantized = torch.zeros(2, 1120, dtype=torch.float8_e4m3fn)
+        scale = torch.zeros(2, 18, 2, dtype=torch.uint8)
+        mock_npu.npu_dynamic_mx_quant.return_value = (quantized, scale)
+        mock_npu.npu_quant_matmul.return_value = torch.zeros(2, 8, dtype=x.dtype)
+        self.scheme.apply(layer, x)
+        torch.testing.assert_close(mock_npu.npu_dynamic_mx_quant.call_args.args[0], padded_x)
+        prepared = self.scheme.prepare_input_for_overlap(layer, x)
+        torch.testing.assert_close(mock_npu.npu_dynamic_mx_quant.call_args.args[0], padded_x)
+        mock_npu.npu_dynamic_mx_quant.reset_mock()
+        self.scheme.apply(layer, prepared)
+        mock_npu.npu_dynamic_mx_quant.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "TP group padding"):
+            self.scheme.apply(layer, (torch.zeros(2, 1076, dtype=torch.float8_e4m3fn), scale))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_weight_switch_rejects_padded_input_shards(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        for input_size in (8640, 4304):
+            layer = self._make_row_layer(input_size, 2, 0)
+            self.scheme.process_weights_after_loading(layer)
+            with self.assertRaisesRegex(ValueError, "input-axis weight switching"):
+                self.scheme.enable_weight_switch(layer, config)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_weight_switch_accepts_aligned_input_and_partial_output_shards(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        layer = self._make_row_layer(8704, 2, 0)
+        self.scheme.process_weights_after_loading(layer)
+        state = self.scheme.enable_weight_switch(layer, config)
+        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (136, 8, 2))
+        layer = nn.Module()
+        layer.input_size = layer.input_size_per_partition = 4304
+        layer.output_size, layer.output_size_per_partition = 16, 8
+        layer.weight = nn.Parameter(torch.zeros(8, 2152, dtype=torch.uint8), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.zeros(8, 135, dtype=torch.uint8), requires_grad=False)
+        self.scheme.process_weights_after_loading(layer)
+        state = self.scheme.enable_weight_switch(layer, config)
+        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (68, 16, 2))
+
+    def test_nested_weight_load_rejects_padding_before_resizing(self):
+        layer = self._make_row_layer(8640, 1, 0)
+        original_weight = layer.weight
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        partition = WeightLoadPartition(world_size=2, rank=0)
+        with self.assertRaisesRegex(ValueError, "input-axis weight switching"):
+            self.scheme.prepare_layer_for_parallel_weight_load(layer, config, partition)
+        self.assertIs(layer.weight, original_weight)
+        self.assertEqual(layer.weight.shape, (8, 4320))
+        self.assertEqual(layer.input_size_per_partition, 8640)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_weights_after_loading_transposes(self, mock_npu):

@@ -138,8 +138,13 @@ class AscendLinearMethod(LinearMethodBase):
         # others are [output_size, 1]
         layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
 
+        pergroup_input_size = input_size_per_partition
+        if isinstance(layer, RowParallelLinear) and getattr(self.quant_method, "supports_unaligned_tp_groups", False):
+            # A shard can start inside a checkpoint group and cover one more
+            # scale than ceil(local K / group_size), depending on its TP rank.
+            pergroup_input_size += (layer.tp_rank * input_size_per_partition) % self.quant_method.group_size
         pergroup_dict = self.quant_method.get_pergroup_param(
-            input_size_per_partition, output_size_per_partition, params_dtype, layer_type=layer_type
+            pergroup_input_size, output_size_per_partition, params_dtype, layer_type=layer_type
         )
         scale_packed_dim = pergroup_dict.pop("_packed_dim", None)
         scale_packed_factor = pergroup_dict.pop("_packed_factor", None)

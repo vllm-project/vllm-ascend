@@ -208,6 +208,16 @@ class TestSharedMXFPActivation(unittest.TestCase):
                     self.executor._can_fuse_w8a8_mxfp_activation(self.gate_up), quant is self.quant.W8A8MXFP
                 )
 
+    def test_mxfp4_padding_selects_scheme_owned_quantization(self):
+        self.executor.quant_type = self.quant.W4A8MXFP
+        for linear in (self.executor.layer.gate_up_proj, self.executor.layer.down_proj):
+            with self.subTest(linear=linear), patch.object(linear, "mxfp4_tp_padding", (28, 16), create=True):
+                self.assertIs(self.executor._select_mlp_path(), self.paths.LINEAR_WRAPPER)
+                self.executor._prepare_gate_up_input("input")
+                self.executor._prepare_linear_input_for_overlap.assert_called_with(
+                    self.executor.layer.gate_up_proj, "input"
+                )
+
     def test_lora_selects_generic_wrapper_for_every_quantization(self):
         self.executor.lora_context = object()
         for quant in self.quant:
