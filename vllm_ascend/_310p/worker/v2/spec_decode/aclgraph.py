@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host, update_draft_inputs_cpu
 from vllm_ascend.compilation.updatable_graph import SharedSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -164,6 +164,8 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             "(CPU slot_mapping updated between steps, outside capture)."
         )
 
+        self._decode_outputs: dict[BatchExecutionDescriptor, tuple[torch.Tensor, torch.Tensor]] = {}
+
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
@@ -214,11 +216,11 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
 
                 def run(cg_mode: CUDAGraphMode) -> None:
                     del cg_mode
-                    # Record model forward + sample + device-only draft write.
+                    # Record model forward and sampling; update inputs after replay.
                     # Do NOT call update_draft_inputs_cpu / attn metadata H2D
                     # (pageable memcpy is banned under NPU GLOBAL capture).
                     self.speculator._prepare_eplb_forward(num_reqs)
-                    last_hidden_states, _hidden_states = self.speculator._run_model(
+                    last_hidden_states, hidden_states = self.speculator._run_model(
                         num_tokens,
                         attn_metadata,
                         slot_by_layer,
@@ -237,14 +239,18 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         self.speculator.current_draft_step,
                         self.speculator.draft_logits,
                     )
-                    # Persist sampled drafts into the capture-stable buffer.
-                    self.speculator.draft_tokens[:num_reqs, 1].copy_(draft_tokens[:num_reqs])
+                    # Retain capture-stable outputs. Runtime updates use the
+                    # host step and K outside the graph, so a single graph can
+                    # serve every decode step without fixing its output column.
+                    self._decode_outputs[desc] = (draft_tokens, hidden_states)
 
                 return run
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+    def run_fullgraph(
+        self, desc: BatchExecutionDescriptor, num_speculative_steps: int | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         logger.info_once(
             "ACL graph replay is active for the 310P draft model (%s, logged once).",
             "prefill" if self.is_draft_model_prefill else "per-step decode",
@@ -266,4 +272,20 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         pending_attn = getattr(self.speculator, "_pending_draft_attn_metadata", None)
         if pending_attn is not None:
             ms.attn_metadata = pending_attn
-        return CudaGraphManager.run_fullgraph(self, desc)
+        ret = CudaGraphManager.run_fullgraph(self, desc)
+        draft_tokens, hidden_states = self._decode_outputs[desc]
+        speculator = self.speculator
+        update_draft_inputs_cpu(
+            draft_tokens,
+            speculator.current_draft_step,
+            hidden_states,
+            speculator.draft_tokens,
+            speculator.hidden_states,
+            speculator.input_buffers,
+            speculator.sample_src_positions,
+            speculator.input_batch.num_reqs,
+            speculator.max_model_len,
+            speculator.num_speculative_steps if num_speculative_steps is None else num_speculative_steps,
+            advance_draft_positions=speculator.advance_draft_positions,
+        )
+        return ret
