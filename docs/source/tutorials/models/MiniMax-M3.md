@@ -432,7 +432,7 @@ We'd like to show the deployment guide of MiniMax-M3 on a multi-node environment
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, while the 950DT products MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
+The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses `DP=1`, `TP=4`, and pipeline parallel (`PP=4`) with a `16,15,15,14` split of the 60 transformer layers, while the 950DT products MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
 
 **Common Issues Tip:** For PD disaggregation issues such as KV transfer timeouts or Mooncake connection errors, refer to the [Public FAQs](../../faqs.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -574,7 +574,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_PP_LAYER_PARTITION="30,30"
+    export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -588,6 +588,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
+    # For better prefill performance, keep max_num_batched_tokens at 8192 for input
+    # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -604,8 +606,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --seed 1024 \
         --max-model-len 263000 \
         --max-num-seqs 32 \
-        --max-num-batched-tokens 32768 \
-        --long-prefill-token-threshold 2048 \
+        --max-num-batched-tokens 8192 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --trust-remote-code \
@@ -623,7 +624,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
                 "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
             }
         }'
@@ -685,7 +686,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "engine_id":"1",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
                 "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
             }
         }'
@@ -697,13 +698,13 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     python launch_online_dp.py \
-        --dp-size 2 --tp-size 4 --pp-size 2 \
-        --dp-size-local 2 --dp-rank-start 0 \
+        --dp-size 1 --tp-size 4 --pp-size 4 \
+        --dp-size-local 1 --dp-rank-start 0 \
         --dp-address $node_p_ip --dp-rpc-port 6884 \
         --vllm-start-port 31050
     ```
 
-    This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
+    This starts one Prefill API server on port `31050`. Wait until it prints `Application startup complete`.
 
     2. Decode node
 
@@ -717,7 +718,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This starts four Decode API servers on ports `31060` through `31063`.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to 2 Prefill ranks and 4 Decode ranks.
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to 1 Prefill rank and 4 Decode ranks.
 
     ```bash
     unset http_proxy
@@ -728,9 +729,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --port 8009 \
     --host $node_p_ip \
     --prefiller-hosts \
-        $node_p_ip $node_p_ip \
+        $node_p_ip \
     --prefiller-ports \
-        31050 31051 \
+        31050 \
     --decoder-hosts \
         $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
     --decoder-ports \
@@ -933,7 +934,8 @@ Key Parameter Descriptions:
 **Prefill node-specific configurations:**
 
 - `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing. Follow the FLASHCOMM1 compatibility guidance in [Section 5.5](#55-multimodal-and-vit-dp-optional) when enabling this flag.
-- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
+- `--pipeline-parallel-size` (A3 Prefill: `4`): Splits the 60 MiniMax-M3 layers across four pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=16,15,15,14` and also writes `pp_layer_partition` into the Mooncake extra config. With `TP=4`, use `DP=1` to fit all four stages on one 16-NPU node. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
+- `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.4.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
@@ -950,7 +952,7 @@ Key Parameter Descriptions:
 - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT products `30000`/`26900`.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
 - `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT products only): Required for UBOE / Ascend direct communication on 950DT products.
-- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp1 tp4 pp4` and `decode: dp4 tp4 pp1`. 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
 
 **Request forwarding (proxy):**
 
@@ -1045,7 +1047,7 @@ Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donate
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on every Prefill and Decode rank:
 
@@ -1083,7 +1085,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
-    export VLLM_PP_LAYER_PARTITION="30,30"
+    export VLLM_PP_LAYER_PARTITION="16,15,15,14"
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1101,6 +1103,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
+    # For better prefill performance, keep max_num_batched_tokens at 8192 for input
+    # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -1117,8 +1121,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --seed 1024 \
         --max-model-len 263000 \
         --max-num-seqs 32 \
-        --max-num-batched-tokens 32768 \
-        --long-prefill-token-threshold 2048 \
+        --max-num-batched-tokens 8192 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --trust-remote-code \
@@ -1141,7 +1144,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_port":"36000",
                         "kv_connector_extra_config":{
                             "use_ascend_direct":true,
-                            "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
                             "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
                         }
                     },
@@ -1223,7 +1226,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
                         "kv_port":"36100",
                         "kv_connector_extra_config":{
                             "use_ascend_direct":true,
-                            "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
                             "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
                         }
                     },

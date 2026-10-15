@@ -17,7 +17,32 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbState,
 )
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
-from vllm_ascend.utils import vllm_version_is
+
+
+def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
+    model_config = MagicMock()
+    model_config.compute_hash.return_value = "target"
+    model_state = object()
+    state.model_states = {"target": model_state}
+    mapping = torch.tensor([[1, 0]], dtype=torch.int32)
+    events = []
+    with (
+        patch.object(
+            upstream_eplb_state.EplbState, "update_mapping", side_effect=lambda *_: events.append("update")
+        ) as update,
+        patch.object(
+            eplb_state, "refresh_model_routing_tables", side_effect=lambda *_: events.append("refresh")
+        ) as refresh,
+    ):
+        state.update_mapping(model_config, mapping)
+    update.assert_called_once_with(model_config, mapping)
+    refresh.assert_called_once_with(model_state)
+    assert events == ["update", "refresh"]
+    assert state.model_states["target"] is model_state
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
@@ -299,10 +324,7 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
-    if vllm_version_is("0.30.0"):
-        assert state.cuda_device_index == 5
-    else:
-        assert state.device_index == 5
+    assert state.device_index == 5
 
 
 def _shutdown_state():

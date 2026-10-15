@@ -79,7 +79,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 ## 访问昇腾NPU
 
-如果您需要访问昇腾NPU算力资源进行开发或测试，请进入华为HiDevLab平台的[HiDevLab-在线开发](https://hidevlab.huawei.com/online-develop-intro) 页面申请并使用算力。
+如果您需要访问昇腾NPU算力资源进行开发或测试，请进入HiDevLab平台的[HiDevLab-在线开发](https://hidevlab.huawei.com/online-develop-intro) 页面申请并使用算力。
 
 ## 开始使用
 
@@ -102,7 +102,7 @@ vllm-ascend有主干分支和开发分支。
 
 | 分支              | 状态         | 备注                  |
 |------------------|--------------|----------------------|
-| main             | Maintained   | 基于vLLM main分支和vLLM最新版本（v0.30.0）CI看护   |
+| main             | Maintained   | 基于vLLM main分支和vLLM最新版本（v0.31.0）CI看护   |
 | releases/v0.13.0 | Maintained   | 只允许Bug修复，不会再发布新版本 |
 | releases/v0.18.0 | Maintained   | 基于vLLM v0.18.0版本CI看护 |
 | releases/v0.23.0 | Maintained   | 基于vLLM v0.23.0版本CI看护 |

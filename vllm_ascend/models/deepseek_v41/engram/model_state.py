@@ -143,14 +143,19 @@ class EngramModelState(AscendModelState):
             )
         replay_window, cacheable_groups = self._replay_groups
         num_reqs = input_batch.num_reqs
+        # Attention metadata uses the padded request shape for FULL graphs. Keep
+        # replay_start the same length as query_start_loc/seq_lens so padded rows
+        # are explicit zero boundaries instead of indexing past the actual batch.
+        metadata_num_reqs = input_batch.num_reqs_after_padding if cudagraph_mode == CUDAGraphMode.FULL else num_reqs
         replay_np = np.where(
             input_batch.is_prefilling_np[:num_reqs],
             self._replay_start_np[input_batch.idx_mapping_np[:num_reqs]],
             0,
         ).astype(np.int32)
+        self._replay_start.np[:metadata_num_reqs].fill(0)
         self._replay_start.np[:num_reqs] = replay_np
-        self._replay_start.copy_to_gpu(num_reqs)
-        replay_start = self._replay_start.gpu[:num_reqs]
+        self._replay_start.copy_to_gpu(metadata_num_reqs)
+        replay_start = self._replay_start.gpu[:metadata_num_reqs]
         if replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
             _pad_v2_replayed_slots_kernel[(num_reqs,)](
                 slot_mappings,
@@ -164,7 +169,12 @@ class EngramModelState(AscendModelState):
                 NUM_GROUPS=cacheable_groups.numel(),
                 BLOCK=1024,
             )
-        if model_specific_attn_metadata is None:
+        # No prefix-cache replay is active for the ordinary request path. Do
+        # not opt every FULL graph step into the bounded-replay band metadata:
+        # the optional ori_topk_length input changes the graph attention path
+        # even when every boundary is zero. Real replay steps still carry the
+        # padded, graph-shaped buffer above.
+        if model_specific_attn_metadata is None and replay_np.any():
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
         return super().prepare_attn(
             input_batch,

@@ -94,6 +94,12 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         assert torch.equal(cache.cpu().view(blocks * block_size, -1)[untouched], gold[untouched])
 
 
+@pytest.mark.parametrize("tokens", [1024, 2048, 4096, 8192])
+@torch.inference_mode()
+def test_minimax_qknorm_rope_cache_prefill(tokens):
+    test_minimax_qknorm_rope_cache(tokens, (8, 1, 1), 64)
+
+
 @torch.inference_mode()
 def test_empty_minimax_qknorm_rope_cache():
     device = "npu"
@@ -174,17 +180,20 @@ def test_dynamic_cache_capacity_and_strided_positions(blocks, tokens):
     assert torch.count_nonzero(key[0].float()).item() == 0
 
 
-@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("cache_fp8", [False, True])
+@pytest.mark.parametrize("index_fp8", [False, True])
 @pytest.mark.parametrize("tokens", [8, 192])
 @torch.inference_mode()
-def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
-    if fp8 and not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
+def test_cache_graph_replay_updates_slots_and_preserves_strides(cache_fp8, index_fp8, tokens):
+    if (cache_fp8 or index_fp8) and not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
         pytest.skip("FP8 cache conversion requires A5")
     torch.manual_seed(29)
     qh, kh, ih, hd, actual = 8, 1, 1, 128, 5
-    cache_dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
+    # Compile both FP8 branches independently as well as together.
+    cache_dtype = torch.float8_e4m3fn if cache_fp8 else torch.bfloat16
+    index_dtype = torch.float8_e4m3fn if index_fp8 else torch.bfloat16
     packed = torch.randn(tokens, 12 * hd, dtype=torch.bfloat16, device="npu")
-    if fp8:
+    if cache_fp8:
         # V saturation is independent of normalization.
         packed[:, 9 * hd : 10 * hd] *= 1000
     weights = [torch.randn(hd, dtype=packed.dtype, device="npu") * 0.1 for _ in range(4)]
@@ -193,7 +202,7 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
     # Different main/index block sizes and padded block strides.
     key = torch.zeros((3, 17, kh, hd), dtype=cache_dtype, device="npu")[:, :16]
     value = torch.zeros((3, 18, kh, hd), dtype=cache_dtype, device="npu")[:, :16]
-    index = torch.zeros((6, 9, hd), dtype=cache_dtype, device="npu")[:, :8]
+    index = torch.zeros((6, 9, hd), dtype=index_dtype, device="npu")[:, :8]
     slots = torch.full((tokens,), -1, dtype=torch.int64, device="npu")
     index_slots = slots.clone()
 
@@ -232,23 +241,25 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
     torch.npu.synchronize()
     expected = reference(packed.cpu(), cs.cpu(), positions.cpu(), [w.cpu() for w in weights], qh, kh, ih, 1e-6)
     torch.testing.assert_close(q.cpu().float(), expected[0].to(q.dtype).float(), atol=0.032, rtol=0.01)
-    expected_iq = expected[3].clamp(-448, 448) if fp8 else expected[3]
+    expected_iq = expected[3].clamp(-448, 448) if index_fp8 else expected[3]
     torch.testing.assert_close(
-        iq.cpu().float(), expected_iq.to(iq.dtype).float(), atol=0.25 if fp8 else 0.032, rtol=0.01
+        iq.cpu().float(), expected_iq.to(iq.dtype).float(), atol=0.25 if index_fp8 else 0.032, rtol=0.01
     )
     for cache, part, mapping in (
         (key, expected[1], slots),
         (value, expected[2], slots),
         (index, expected[4], index_slots),
     ):
-        gold = torch.zeros(cache.shape, dtype=cache_dtype)
+        gold = torch.zeros(cache.shape, dtype=cache.dtype)
         part = part.to(packed.dtype) if cache is not index else part
-        if fp8:
+        if cache.dtype == torch.float8_e4m3fn:
             part = part.float().clamp(-448, 448)
         for token, slot in enumerate(mapping.cpu().tolist()[:actual]):
             if slot >= 0:
-                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0]).to(cache_dtype)
-        torch.testing.assert_close(cache.cpu().float(), gold.float(), atol=0.25 if fp8 else 0.032, rtol=0.01)
+                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0]).to(cache.dtype)
+        torch.testing.assert_close(
+            cache.cpu().float(), gold.float(), atol=0.25 if cache.dtype == torch.float8_e4m3fn else 0.032, rtol=0.01
+        )
     # Replay repeatedly while another stream generates memory traffic.
     traffic = torch.empty(1 << 20, device="npu")
     stream = torch.npu.Stream()

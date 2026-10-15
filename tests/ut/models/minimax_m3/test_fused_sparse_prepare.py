@@ -49,7 +49,7 @@ def test_fusion_guard(unsupported):
     elif unsupported == "eps":
         layer.k_norm = SimpleNamespace(variance_epsilon=1e-5)
     elif unsupported == "large_batch":
-        hidden.shape = (513, 128)
+        hidden.shape = (262145, 128)
     elif unsupported == "cache_dtype":
         layer.kv_cache_torch_dtype = torch.float8_e5m2
     with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", unsupported != "triton"):
@@ -77,7 +77,19 @@ def test_fused_forward_skips_materialized_prepare_and_insert():
     layer._sparse_prepare.assert_not_called()
 
 
-@pytest.mark.parametrize("tokens, supported", [(512, True), (513, False)])
+@pytest.mark.parametrize(
+    "tokens, supported",
+    [
+        (512, True),
+        (513, True),
+        (8192, True),
+        (32768, True),
+        (65536, True),
+        (131072, True),
+        (262144, True),
+        (262145, False),
+    ],
+)
 def test_fusion_token_limit(tokens, supported):
     hidden = SimpleNamespace(device=SimpleNamespace(type="npu"), dtype=torch.bfloat16, shape=(tokens, 128))
     with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", True):

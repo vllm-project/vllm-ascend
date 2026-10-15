@@ -45,7 +45,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ## 4 Installation
 
 - You can use our official docker image to run GLM-5.2 directly.
-- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
+- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html)
 
 === "A3 series"
 
