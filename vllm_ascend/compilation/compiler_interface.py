@@ -134,10 +134,10 @@ def _configure_backend(
 
             # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
             incompatible_ops = [
-                "TopKV2", # minimax-m3 910C
-                "GenericBlockSparseAttn", # minimax-m3 910C
-                "QuantBatchMatmulV3", # glm5.2 910C
-                "TransposeQuantBatchMatMul", # dsv4 950
+                "TopKV2",  # minimax-m3 910C
+                "GenericBlockSparseAttn",  # minimax-m3 910C
+                "QuantBatchMatmulV3",  # glm5.2 910C
+                "TransposeQuantBatchMatMul",  # dsv4 950
             ]
             logger.info_once(
                 "Skipping static kernel compilation for incompatible ops: %s.",
