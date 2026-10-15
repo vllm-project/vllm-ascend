@@ -1919,19 +1919,16 @@ MiniMax-M3 supports a 1M-token context on a single Atlas 800 A3 node with W8A8 w
 
 All three configurations use Model Runner V2, `max-num-seqs=1`, eager execution, and chunked prefill. Prefix caching, asynchronous scheduling, and static kernels are disabled; no speculative model is loaded. The smaller batched-token budget controls the size of each prefill chunk rather than the total context length.
 
-Prepare the container and weights as described in Sections 3 and 4. Replace `<MODEL_PATH>` and `<NIC_NAME>` with the local weight directory and communication interface. Set `CANN_PATH` to the installed CANN directory. The 950DT examples also require the matching `experimental_950_transformer` vendor package to be installed under that directory before sourcing its environment script.
+Prepare the container and weights as described in Sections 3 and 4. Replace `<MODEL_PATH>` (A3) or `<WEIGHT_PATH>` (950DT) with the local weight directory. Replace `<NIC_NAME>` in both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` with the same local communication interface. The commands use the CANN environment-script paths from the deployment configurations; adjust these paths to the installed CANN directory. The 950DT examples also require the matching `experimental_950_transformer` vendor package before sourcing its environment script.
 
 #### 5.6.1 Atlas 800 A3 (W8A8)
 
 Use one 16-NPU node with TP4/PP4/DP1. This long-context configuration splits the 60 transformer layers evenly as `15,15,15,15`. The `1049600` context limit leaves room for 1,048,576 input tokens and up to 1024 generated tokens. `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` permits the configured limit when it exceeds the checkpoint's declared maximum.
 
 ```bash
-export MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 W8A8 weights
-export NIC_NAME="<NIC_NAME>"
-export CANN_PATH=/usr/local/Ascend/cann-9.1.0
-export LOG_PATH=./minimax-m3-1m-a3.log
+MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 W8A8 weights
 
-source "${CANN_PATH}/set_env.sh"
+source /usr/local/Ascend/cann-9.1.0/set_env.sh
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
@@ -1939,9 +1936,9 @@ export VLLM_PP_LAYER_PARTITION="15,15,15,15"
 export VLLM_USE_V2_MODEL_RUNNER=1
 export HCCL_BUFFSIZE=256
 export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_SOCKET_IFNAME=$NIC_NAME
+export HCCL_SOCKET_IFNAME="<NIC_NAME>"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export GLOO_SOCKET_IFNAME=$NIC_NAME
+export GLOO_SOCKET_IFNAME="<NIC_NAME>"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve "$MODEL_PATH" \
@@ -1979,7 +1976,7 @@ vllm serve "$MODEL_PATH" \
         "weight_nz_mode": 2,
         "enable_flashcomm1": true,
         "enable_reduce_sample": false
-    }' > "$LOG_PATH" 2>&1 &
+    }' > ./minimax-m3-1m-a3.log 2>&1 &
 ```
 
 #### 5.6.2 950DT Products (MXFP8)
@@ -1989,22 +1986,19 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
 === "TP8 / PP1 / DP1"
 
     ```bash
-    export MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 MXFP8 weights
-    export NIC_NAME="<NIC_NAME>"
-    export CANN_PATH=/usr/local/Ascend/cann-9.1.0
-    export LOG_PATH=./minimax-m3-1m-950dt-tp8.log
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve "$WEIGHT_PATH" \
         --host 0.0.0.0 \
         --port 31050 \
         --served-model-name minimax-m3 \
@@ -2038,28 +2032,25 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
             "multistream_overlap_shared_expert": false,
             "enable_shared_expert_dp": false,
             "enable_flashcomm1": false
-        }' > "$LOG_PATH" 2>&1 &
+        }' > ./minimax-m3-1m-950dt-tp8.log 2>&1 &
     ```
 
 === "TP4 / PP2 / DP1"
 
     ```bash
-    export MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 MXFP8 weights
-    export NIC_NAME="<NIC_NAME>"
-    export CANN_PATH=/usr/local/Ascend/cann-9.1.0
-    export LOG_PATH=./minimax-m3-1m-950dt-tp4pp2.log
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME=$NIC_NAME
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    source "${CANN_PATH}/opp/vendors/experimental_950_transformer/bin/set_env.bash"
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve "$WEIGHT_PATH" \
         --host 0.0.0.0 \
         --port 31050 \
         --served-model-name minimax-m3 \
@@ -2092,10 +2083,10 @@ Choose either of the following single-node layouts on eight NPUs. Both use FP8 K
             "multistream_overlap_shared_expert": false,
             "enable_shared_expert_dp": false,
             "enable_flashcomm1": false
-        }' > "$LOG_PATH" 2>&1 &
+        }' > ./minimax-m3-1m-950dt-tp4pp2.log 2>&1 &
     ```
 
-Wait for `Application startup complete` in the selected `LOG_PATH` before sending requests. Check the reported KV cache capacity against the configured context length. These examples demonstrate the verified long-context deployment shapes; tune concurrency and performance separately for the target workload.
+Wait for `Application startup complete` in the log file at the end of the selected command before sending requests. Check the reported KV cache capacity against the configured context length. These examples demonstrate the verified long-context deployment shapes; tune concurrency and performance separately for the target workload.
 
 ## 6 Thinking and Parser Configuration
 
