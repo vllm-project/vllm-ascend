@@ -7,13 +7,17 @@ from unittest.mock import MagicMock, Mock, call, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -754,6 +758,126 @@ def test_load_model_skips_dump_in_eager_mode():
         runner.load_model()
 
     debugger.start.assert_not_called()
+
+
+@pytest.mark.parametrize("with_draft", [False, True])
+def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with_draft):
+    runner = _make_runner(need_timing=False)
+    runner.device = torch.device("cpu")
+    runner.load_config = SimpleNamespace(load_format="auto")
+    runner.vllm_config.load_config = runner.load_config
+    runner.model_config.dtype = torch.bfloat16
+    runner.model_config.logits_processors = None
+    runner.model_config.hf_config = SimpleNamespace()
+    runner.model_config.hf_text_config = SimpleNamespace()
+    runner.vllm_config.model_config = runner.model_config
+    runner.vllm_config.cache_config = SimpleNamespace(block_size=128)
+    runner.vllm_config.compilation_config = runner.compilation_config
+    runner.vllm_config.use_v2_model_runner = True
+    runner.compilation_config.static_forward_context = {}
+    runner.compilation_config.mode = CompilationMode.NONE
+    runner.req_states = Mock()
+    runner.parallel_config = SimpleNamespace(enable_batch_sharded_sampling=False)
+    runner.eplb = Mock(
+        maybe_register_model=Mock(return_value=False), maybe_register_speculator=Mock(return_value=False)
+    )
+    runner.jit_warmup_registry = SimpleNamespace(activate=nullcontext)
+    runner.lora_config = None
+    runner.use_aux_hidden_state_outputs = False
+    runner.encoder_cache = None
+    runner.num_speculative_steps = int(with_draft)
+    runner.speculative_config = SimpleNamespace() if with_draft else None
+    runner.is_first_pp_rank = True
+    runner._draft_workspace_lane = object()
+    model = SimpleNamespace()
+    allocated_bytes = 0
+    profiling = False
+    profile_count = 0
+    layers = runner.compilation_config.static_forward_context
+    runner.get_kv_cache_spec = Mock(side_effect=AssertionError("Loading must not inspect cache allocation"))
+
+    def load_attention(name):
+        layer = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_backend = AscendMLABackend
+        impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        impl.layer_name = name
+        impl.vllm_config = runner.vllm_config
+        impl.kv_b_proj = SimpleNamespace(
+            quant_method=UnquantizedLinearMethod(), weight=torch.nn.Parameter(torch.empty(2, 2))
+        )
+        impl.kv_lora_rank = 2
+        impl.num_heads = 1
+        impl.qk_nope_head_dim = 1
+        impl.v_head_dim = 1
+        impl.enable_mlapo = False
+        impl.fa_quant_layer = False
+        impl.pcp_enabled = False
+        impl.dcp_enabled = False
+        impl.supports_prolog_v3_writer = lambda: True
+        layer.impl = impl
+        layer.indexer = None
+        layer.kv_cache_dtype = "auto"
+        layer.head_size = 3
+        layer.sliding_window = None
+        layer.non_causal_multi_token_decode = False
+
+        def build_weights():
+            nonlocal allocated_bytes
+            assert profiling, "Post-load PROLOG weights must be allocated inside the original profiler"
+            weight = torch.empty(16, dtype=torch.bfloat16)
+            allocated_bytes += weight.numel() * weight.element_size()
+            return {"weight_dq": weight}
+
+        impl._build_prolog_v3_weights = Mock(side_effect=build_weights)
+        layers[name] = layer
+        impl.process_weights_after_loading(torch.bfloat16)
+
+    def load_target(**_kwargs):
+        nonlocal allocated_bytes
+        allocated_bytes += 1024
+        load_attention("target.attn")
+        return model
+
+    runner.speculator = Mock(spec=vllm_model_runner.DraftModelSpeculator) if with_draft else None
+    if runner.speculator:
+        runner.speculator.load_model.side_effect = lambda _target: load_attention("draft.attn")
+
+    @contextmanager
+    def profile():
+        nonlocal profiling, profile_count
+        assert not profiling
+        profiling = True
+        profile_count += 1
+        before = allocated_bytes
+        memory = SimpleNamespace(consumed_memory=0)
+        yield memory
+        memory.consumed_memory = allocated_bytes - before
+        profiling = False
+
+    # Execute the real parent load_model: target and draft hooks must both be
+    # covered by its one existing profiler, without an Ascend-only second pass.
+    monkeypatch.setattr(vllm_model_runner, "DeviceMemoryProfiler", profile)
+    monkeypatch.setattr(vllm_model_runner, "get_model_loader", lambda _config: SimpleNamespace(load_model=load_target))
+    monkeypatch.setattr(
+        vllm_model_runner,
+        "init_model_state",
+        lambda *_args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
+    monkeypatch.setattr(vllm_model_runner, "use_workspace_lane", lambda _lane: nullcontext())
+    monkeypatch.setattr(vllm_model_runner, "get_offloader", NoopOffloader)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_offloader", NoopOffloader)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", lambda _config: ())
+
+    runner.load_model()
+
+    assert set(layers) == ({"target.attn", "draft.attn"} if with_draft else {"target.attn"})
+    assert profile_count == 1
+    assert runner.model_memory_usage == 1024 + 32 * len(layers)
+    runner.get_kv_cache_spec.assert_not_called()
+    for layer in layers.values():
+        layer.impl._build_prolog_v3_weights.assert_called_once_with()
 
 
 def test_pool_closes_dump_cycle_for_pooling_models():

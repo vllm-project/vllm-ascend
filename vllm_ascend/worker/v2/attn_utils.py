@@ -71,6 +71,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
+    supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -949,37 +950,7 @@ def _uses_single_raw_mla_cache(
     attn_module = attn_layers.get(layer_name)
     if attn_module is None:
         return False
-    if not isinstance(attn_module, MLAAttention):
-        return False
-    if getattr(attn_module, "indexer", None) is not None:
-        return False
-    impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
-        # PCP gathers and sharded-decode writes still use the legacy
-        # preprocessing contract. Keep their allocation compatible with it.
-        return False
-    if getattr(impl, "dcp_enabled", False):
-        buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
-        if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
-            return False
-        if not buffers_are_sufficient():
-            # DCP split attention needs stable private current-KV buffers for
-            # every admitted decode, prefill, and mixed graph.
-            return False
-    if getattr(impl, "fa_quant_layer", False):
-        return False
-    if getattr(impl, "enable_kv_nz", False):
-        # NZ decode reshapes each component with .view(). A5 token-fused
-        # NoPE/RoPE slices are separated by the other component's lanes, so
-        # keep the legacy component-dense allocation for this mode.
-        return False
-    supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
-    if supports_prolog_writer is None:
-        return False
-    # The strided writer needs MLAPrologV3, RoPE MLA, and a supported
-    # projection/quantization contract. Keep incompatible layers on the
-    # legacy writer layout instead of allocating a cache they cannot use.
-    return supports_prolog_writer()
+    return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 
 def _allocate_kv_cache(

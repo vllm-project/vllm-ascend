@@ -329,6 +329,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             or (self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz)
         ):
             self._prepare_dcp_current_kv_buffers()
+        if self.dcp_enabled:
+            # The shared writer contract checks these workspaces. Prepare the
+            # projections after them, still inside the loader memory profile.
+            self._prepare_prolog_v3_weights_after_loading()
 
     def _required_dcp_current_kv_capacity(self) -> int:
         """Upper bound on query rows in a DCP decode graph."""

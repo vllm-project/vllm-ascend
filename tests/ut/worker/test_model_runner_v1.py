@@ -1,6 +1,6 @@
 import unittest
 from collections import deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -9,7 +9,9 @@ import numpy as np
 import torch
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -36,7 +38,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -1178,6 +1180,128 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    def _check_load_model_prolog_budget(self, with_draft, pcp_enabled):
+        runner = self._build_runner()
+        runner.model_config.model = "test-model"
+        runner.model_config.multimodal_config = None
+        runner.ascend_config.mix_placement = False
+        runner.eplb_enable = False
+        runner.use_aux_hidden_state_outputs = False
+        runner.lora_config = None
+        runner.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        runner.vllm_config.use_v2_model_runner = False
+        runner.vllm_config.model_config = SimpleNamespace(
+            dtype=torch.bfloat16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        )
+        runner.vllm_config.cache_config = SimpleNamespace(block_size=128)
+        runner.vllm_config.compilation_config = runner.compilation_config
+        layers = runner.compilation_config.static_forward_context
+        model = SimpleNamespace(named_parameters=lambda: (), token_lookback_depth=0)
+        allocated = 0
+        profiling = False
+
+        def add_layer(name):
+            layer = MLAAttention.__new__(MLAAttention)
+            torch.nn.Module.__init__(layer)
+            layer.attn_backend = AscendMLABackend
+            impl = AscendMLAImpl.__new__(AscendMLAImpl)
+            impl.layer_name = name
+            impl.vllm_config = runner.vllm_config
+            impl.kv_b_proj = SimpleNamespace(
+                quant_method=UnquantizedLinearMethod(), weight=torch.nn.Parameter(torch.empty(2, 2))
+            )
+            impl.kv_lora_rank = 2
+            impl.num_heads = 1
+            impl.qk_nope_head_dim = 1
+            impl.v_head_dim = 1
+            impl.enable_mlapo = False
+            impl.fa_quant_layer = False
+            impl.pcp_enabled = pcp_enabled
+            impl.dcp_enabled = False
+            impl.supports_prolog_v3_writer = lambda: True
+            layer.impl = impl
+            layer.indexer = None
+            layer.kv_cache_dtype = "auto"
+            layer.head_size = 3
+            layer.sliding_window = None
+            layer.non_causal_multi_token_decode = False
+
+            def build():
+                nonlocal allocated
+                self.assertTrue(profiling, "Private writer weights must be allocated before profiling ends")
+                weight = torch.empty(16, dtype=torch.bfloat16)
+                allocated += weight.numel() * weight.element_size()
+                return {"weight_dq": weight}
+
+            impl._build_prolog_v3_weights = MagicMock(side_effect=build)
+            layers[name] = layer
+            impl.process_weights_after_loading(torch.bfloat16)
+
+        def load_target(**kwargs):
+            nonlocal allocated
+            allocated += 4096
+            add_layer("target.attn")
+            return model
+
+        runner.drafter = MagicMock() if with_draft else None
+        if runner.drafter:
+            runner.drafter.load_model.side_effect = lambda target: add_layer("draft.attn")
+        runner.get_kv_cache_spec = MagicMock(side_effect=AssertionError("Loading must not inspect cache allocation"))
+
+        @contextmanager
+        def memory_profiler():
+            nonlocal profiling
+            profiling = True
+            profiler = SimpleNamespace(consumed_memory=0)
+            yield profiler
+            profiler.consumed_memory = allocated
+            profiling = False
+
+        with (
+            patch.multiple(
+                "vllm_ascend.worker.model_runner_v1",
+                DeviceMemoryProfiler=memory_profiler,
+                get_model=load_target,
+                get_pp_group=lambda: SimpleNamespace(world_size=1),
+                get_tp_context=lambda drafter: nullcontext(),
+                get_offloader=lambda: NoopOffloader(),
+                supports_multimodal_pruning=lambda model: False,
+                _torch_cuda_wrapper=nullcontext,
+            ),
+            patch.multiple(
+                "vllm_ascend.attention.mla_v1",
+                get_offloader=lambda: NoopOffloader(),
+                get_ascend_config=lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+                maybe_trans_nz=lambda tensor: tensor,
+            ),
+            patch.multiple(
+                "vllm_ascend.model_executor.warmup.nz_warmup",
+                start_nz_warm_thread=MagicMock(),
+                join_nz_warm_thread=MagicMock(),
+            ),
+            patch.multiple(
+                "vllm_ascend.model_executor.warmup.early_kernel_warmup",
+                start_early_kernel_warmup=MagicMock(),
+                join_early_kernel_warmup=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.breakable_cudagraph.is_breakable_cudagraph_enabled",
+                return_value=False,
+            ),
+        ):
+            runner.load_model()
+
+        self.assertEqual(set(layers), {"target.attn", "draft.attn"} if with_draft else {"target.attn"})
+        self.assertEqual(runner.model_memory_usage, 4096 + (0 if pcp_enabled else 32 * len(layers)))
+        runner.get_kv_cache_spec.assert_not_called()
+        for layer in layers.values():
+            self.assertEqual(layer.impl._build_prolog_v3_weights.call_count, int(not pcp_enabled))
+
+    def test_load_model_budgets_prolog_weights_for_target_and_draft(self):
+        for with_draft, pcp_enabled in ((False, False), (True, False), (True, True)):
+            with self.subTest(with_draft=with_draft, pcp_enabled=pcp_enabled):
+                self._check_load_model_prolog_budget(with_draft, pcp_enabled)
 
     def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
         runner = self._build_runner()
