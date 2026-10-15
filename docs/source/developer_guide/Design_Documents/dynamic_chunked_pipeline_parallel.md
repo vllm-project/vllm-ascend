@@ -150,7 +150,6 @@ After each batch, the feature vector `[Σ C(C+H), Σ C, N]` and the actual execu
 - **Incompatible with Balance Scheduling**: Cannot enable
   `additional_config.scheduler_config.enable_balance_scheduling`
 - **Startup Overhead**: Profiling phase adds tens of seconds to initialization
-- **Memory**: No additional runtime memory overhead; profiling reuses existing dummy_run mechanism
 
 ## References
 
