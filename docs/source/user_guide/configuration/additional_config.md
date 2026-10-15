@@ -101,7 +101,6 @@ For the Python API, pass `additional_config={"rope_ub_size_kb": 192}` to `LLM`. 
 
 The `VLLM_ASCEND_ROPE_UB_SIZE_KB` environment variable is no longer supported. Replace `VLLM_ASCEND_ROPE_UB_SIZE_KB=192` with the additional configuration shown above.
 
-
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
