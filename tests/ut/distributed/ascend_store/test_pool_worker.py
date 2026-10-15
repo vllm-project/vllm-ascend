@@ -1226,14 +1226,45 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_ids=[0],
             block_hashes=["h0"],
             load_spec=load_spec,
+            can_save=True,
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+        self.assertTrue(req.can_save)
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_sync_hybrid_load_failure_is_reported_and_save_suppressed(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.m_store.get = MagicMock(return_value=[0, 1])
+        worker.grouped_block_size = [16, 16]
+        worker.token_database.metadata.append(worker.token_database.metadata[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: [2000]},
+            {0: [160], 1: [160]},
+        )
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_ids_by_group=[[7], [9]],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            kv_cache_group_ids=[0, 1],
+            can_save=True,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        self.assertFalse(req.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {9})
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
@@ -1263,7 +1294,45 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+        self.assertFalse(req.can_save)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
+        autospec=True,
+    )
+    def test_async_hybrid_load_failure_is_reported_and_save_suppressed(self, start_thread):
+        worker = self._make_worker(kv_role="kv_consumer", extra_config={"load_async": True})
+        worker.m_store.get = MagicMock(return_value=[0, 1])
+        worker.grouped_block_size = [16, 16]
+        worker.token_database.metadata.append(worker.token_database.metadata[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: [2000]},
+            {0: [160], 1: [160]},
+        )
+        start_thread.side_effect = lambda thread: thread.ready_event.set()
+        worker._start_kv_transfer_threads()
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_ids_by_group=[[7], [9]],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            kv_cache_group_ids=[0, 1],
+            can_save=True,
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+        worker.start_load_kv(meta)
+
+        recv_thread = worker.kv_recv_thread
+        recv_thread._handle_request(recv_thread.request_queue.get_nowait())
+
+        self.assertFalse(req.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {9})
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     def test_start_load_kv(self):

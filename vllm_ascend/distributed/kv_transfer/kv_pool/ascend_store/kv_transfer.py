@@ -1564,33 +1564,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_list_c,
                     ret,
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                record_load_failure_for_recompute(
+                    req_meta,
+                    missing_block_ids,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
+                )
             elif ret is None:
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                record_load_failure_for_recompute(
+                    req_meta,
+                    missing_block_ids,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
+                )
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
@@ -2509,3 +2499,27 @@ def record_failed_blocks(
             failed_blocks,
         )
     return failed_blocks
+
+
+def record_load_failure_for_recompute(
+    req_meta: ReqMeta,
+    failed_block_ids: set[int],
+    invalid_block_ids: set[int],
+    invalid_block_ids_lock: threading.Lock,
+) -> None:
+    """Report a failed load and prevent the invalid output from being saved."""
+    if not failed_block_ids:
+        return
+
+    # KV produced after an incomplete load is not trustworthy. In particular,
+    # do not publish the suffix computed from the invalid prefix.
+    req_meta.can_save = False
+    with invalid_block_ids_lock:
+        invalid_block_ids.update(failed_block_ids)
+    logger.warning(
+        "KV load failed for request %s groups=%d failed_blocks=%s; "
+        "reporting invalid blocks for recomputation and suppressing save.",
+        req_meta.req_id,
+        len(req_meta.block_ids_by_group),
+        failed_block_ids,
+    )

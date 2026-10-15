@@ -65,6 +65,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     LayerBatchBuilder,
     _circular_shift,
     record_failed_blocks,
+    record_load_failure_for_recompute,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     LayerwiseReuseLayout,
@@ -1363,31 +1364,23 @@ class KVPoolWorker:
                     block_id_list_c,
                     ret,
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+                record_load_failure_for_recompute(
+                    request,
+                    missing_block_ids,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
+                )
             elif ret is None:
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+                record_load_failure_for_recompute(
+                    request,
+                    missing_block_ids,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
+                )
             logger.debug(
                 "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                 request.req_id,
