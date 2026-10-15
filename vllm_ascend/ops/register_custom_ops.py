@@ -137,7 +137,24 @@ def _pad_and_reduce_fake(x: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tensor) -> torch.Tensor:
+def _maybe_all_reduce_tensor_model_parallel_impl(
+    final_hidden_states: torch.Tensor, prefetch_layer_name: str = ""
+) -> torch.Tensor:
+    if prefetch_layer_name:
+        from vllm_ascend.ops.weight_prefetch_qwen35 import current_controller
+
+        controller = current_controller()
+        next_input_started = controller is not None and controller.begin_next(prefetch_layer_name, final_hidden_states)
+        prepared_gdn_out = (
+            controller.prepare_next_gdn_out(prefetch_layer_name, final_hidden_states) if controller is not None else None
+        )
+        if next_input_started or prepared_gdn_out is not None:
+            result = _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states)
+            if prepared_gdn_out is not None:
+                controller.commit_next_gdn_out(prepared_gdn_out)
+            if next_input_started:
+                controller.settle_next_input()
+            return result
     moe_comm_type = _EXTRA_CTX.moe_comm_type
     if (
         moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
@@ -146,6 +163,41 @@ def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tens
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
+
+
+def _qwen35_gdn_out_prefetch_commit_impl(dependency: torch.Tensor, layer_name: str) -> torch.Tensor:
+    from vllm_ascend.ops.weight_prefetch_qwen35 import current_controller
+
+    controller = current_controller()
+    if controller is not None:
+        controller.begin_gdn_out(layer_name, dependency)
+    return dependency
+
+
+def _qwen35_gdn_out_prefetch_join_impl(consumer_input: torch.Tensor, layer_name: str) -> torch.Tensor:
+    from vllm_ascend.ops.weight_prefetch_qwen35 import current_controller
+
+    controller = current_controller()
+    if controller is not None:
+        controller.join_gdn_out(layer_name)
+    return consumer_input
+
+
+def _qwen35_gdn_out_prefetch_fake(dependency: torch.Tensor, _layer_name: str) -> torch.Tensor:
+    return dependency
+
+
+def _qwen35_next_input_prefetch_join_impl(consumer_input: torch.Tensor, layer_name: str) -> torch.Tensor:
+    from vllm_ascend.ops.weight_prefetch_qwen35 import current_controller
+
+    controller = current_controller()
+    if controller is not None:
+        controller.join_next_input(layer_name)
+    return consumer_input
+
+
+def _qwen35_next_input_prefetch_join_fake(consumer_input: torch.Tensor, _layer_name: str) -> torch.Tensor:
+    return consumer_input
 
 
 def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
@@ -244,7 +296,31 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="maybe_all_reduce_tensor_model_parallel",
     op_func=_maybe_all_reduce_tensor_model_parallel_impl,
-    fake_impl=lambda x: x,
+    fake_impl=lambda x, prefetch_layer_name="": x,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen35_gdn_out_prefetch_commit",
+    op_func=_qwen35_gdn_out_prefetch_commit_impl,
+    fake_impl=_qwen35_gdn_out_prefetch_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen35_gdn_out_prefetch_join",
+    op_func=_qwen35_gdn_out_prefetch_join_impl,
+    fake_impl=_qwen35_gdn_out_prefetch_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen35_next_input_prefetch_join",
+    op_func=_qwen35_next_input_prefetch_join_impl,
+    fake_impl=_qwen35_next_input_prefetch_join_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
