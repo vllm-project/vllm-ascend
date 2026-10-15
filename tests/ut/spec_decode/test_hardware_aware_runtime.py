@@ -22,6 +22,7 @@ from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
 def make_speculator():
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(num_speculative_tokens=5),
             additional_config={
                 "dynamic_spec_config": {
                     "method": "dspark",
@@ -96,6 +97,18 @@ def test_physical_k_scope_updates_and_restores_query_layout():
     assert speculator.num_speculative_steps == 5
     assert speculator.num_query_per_req == 5
     assert tuple(speculator.draft_token_confidence_probs.shape) == (2, 5)
+
+
+def test_noop_minimum_uses_ordinary_full_width_path():
+    speculator = make_speculator()
+    speculator.vllm_config.additional_config["dynamic_spec_config"]["physical_k"] = {
+        "min_k": 5
+    }
+    batch = SimpleNamespace(_vllm_ascend_physical_draft_k=2)
+    with physical_k_scope(speculator, batch) as active_k:
+        assert active_k == 5
+        assert speculator.num_speculative_steps == 5
+        assert not hasattr(speculator, "_vllm_ascend_physical_k_buffers_initialized")
 
 
 def test_mixed_batch_falls_back_to_fixed_width():

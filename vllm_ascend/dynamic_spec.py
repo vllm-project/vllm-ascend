@@ -53,21 +53,25 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def physical_k_runtime_enabled(vllm_config: Any) -> bool:
-    """Enable physical K through TP8; keep wider TP on the adaptive path.
+    """Enable physical K only when a narrower width can actually be used.
 
     TP8 is enabled for measurement, not assumed to outperform adaptive
     verification. Its extra collective and graph-management costs must be
-    checked against an otherwise identical adaptive benchmark.
+    checked against an otherwise identical adaptive benchmark. A minimum K
+    equal to the configured K has no physical-width choices and should use
+    the ordinary adaptive path without its controller overhead.
     """
 
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
         "dynamic_spec_config", {}
     )
-    if not isinstance(dynamic, dict) or resolve_physical_k(dynamic) is None:
+    if not isinstance(dynamic, dict) or (params := resolve_physical_k(dynamic)) is None:
         return False
     parallel_config = getattr(vllm_config, "parallel_config", None)
     tensor_parallel_size = int(getattr(parallel_config, "tensor_parallel_size", 1))
-    return tensor_parallel_size <= PHYSICAL_K_MAX_TP_SIZE
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    max_k = int(getattr(speculative_config, "num_speculative_tokens", 0))
+    return tensor_parallel_size <= PHYSICAL_K_MAX_TP_SIZE and params["min_k"] < max_k
 
 
 @dataclass

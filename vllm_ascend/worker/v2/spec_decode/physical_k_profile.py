@@ -67,16 +67,25 @@ def _is_tp_rank_zero() -> bool:
 
 
 def _sparse_profile_batches(base: list[dict[str, int]]) -> list[dict[str, int]]:
-    """Keep two timing replays per shape for non-max-K candidates."""
+    """Take three timing replays per shape for a cold-start-robust median.
+
+    Two observations let one slow first replay inflate the median by half of
+    its cost. A third replay makes the same median insensitive to one cold
+    graph/allocator outlier without changing upstream max-K profiling.
+    """
 
     counts: dict[tuple[tuple[str, int], ...], int] = defaultdict(int)
+    first_by_shape: dict[tuple[tuple[str, int], ...], dict[str, int]] = {}
     result: list[dict[str, int]] = []
     for batch in base:
         key = tuple(sorted(batch.items()))
-        if counts[key] >= 2:
+        first_by_shape.setdefault(key, batch)
+        if counts[key] >= 3:
             continue
         counts[key] += 1
         result.append(batch)
+    for key, batch in first_by_shape.items():
+        result.extend(dict(batch) for _ in range(3 - counts[key]))
     return result
 
 
@@ -105,7 +114,7 @@ def _extend_profile_batches(
         size *= 2
     template = base[0]
     for num_tokens in sorted(wanted - existing):
-        for _ in range(2):
+        for _ in range(3):
             result.append({**template, "num_tokens": num_tokens})
             is_upstream.append(False)
     return result, is_upstream
@@ -117,9 +126,8 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
         "dynamic_spec_config", {}
     )
-    if resolve_physical_k(dynamic) is not None and not physical_k_runtime_enabled(
-        vllm_config
-    ):
+    params = resolve_physical_k(dynamic)
+    if params is not None and not physical_k_runtime_enabled(vllm_config):
         tp_size = int(
             getattr(
                 getattr(vllm_config, "parallel_config", None),
@@ -127,12 +135,26 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 1,
             )
         )
-        logger.info(
-            "ASCEND_AV_PHYSICAL_K_FALLBACK tensor_parallel_size=%d "
-            "max_supported_tp=%d mode=adaptive_verification",
-            tp_size,
-            PHYSICAL_K_MAX_TP_SIZE,
-        )
+        if tp_size > PHYSICAL_K_MAX_TP_SIZE:
+            logger.info(
+                "ASCEND_AV_PHYSICAL_K_FALLBACK tensor_parallel_size=%d "
+                "max_supported_tp=%d mode=adaptive_verification",
+                tp_size,
+                PHYSICAL_K_MAX_TP_SIZE,
+            )
+        else:
+            logger.info(
+                "ASCEND_AV_PHYSICAL_K_NOOP min_k=%d configured_k=%d "
+                "mode=adaptive_verification",
+                params["min_k"],
+                int(
+                    getattr(
+                        getattr(vllm_config, "speculative_config", None),
+                        "num_speculative_tokens",
+                        0,
+                    )
+                ),
+            )
         return manager
     max_k = int(manager.num_speculative_steps)
     candidates = _candidate_k(vllm_config, max_k)
