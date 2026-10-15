@@ -25,6 +25,7 @@ data correctness is verified end-to-end.
 
 from __future__ import annotations
 
+import itertools
 import types
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    _get_streams,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -79,6 +81,7 @@ def _stub_torch_npu():
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
         current_stream=_FakeNpuStream,
+        current_device=lambda: 0,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
@@ -91,8 +94,12 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
+    # The packed streams are cached per device for the lifetime of the process, so a
+    # test has to start from an empty cache to see its own fake streams.
+    _get_streams.cache_clear()
     with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
         yield
+    _get_streams.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +333,231 @@ def test_packed_broadcast_consumer_handles_multiple_dtypes():
     assert received[1][1].dtype == torch.float32
     assert torch.equal(received[0][1].cpu(), f16)
     assert torch.equal(received[1][1].cpu(), f32)
+
+
+# ---------------------------------------------------------------------------
+# Stream contract: one stream per buffer slot, carrying its whole chunk
+# ---------------------------------------------------------------------------
+
+
+class _QueuedStream:
+    """Stream whose device work only runs when the stream is synchronized.
+
+    NPU kernels are asynchronous, so a CPU test that wants to observe stream
+    ordering has to queue the work and run it on ``synchronize()``.
+    """
+
+    def __init__(self, fake_npu, name: str, log: list | None = None) -> None:
+        self.pending: list = []
+        self._fake_npu = fake_npu
+        self._name = name
+        self._log = log
+        self._previous = None
+
+    def synchronize(self) -> None:
+        if self._log is not None:
+            self._log.append(("sync", self))
+        while self.pending:
+            self.pending.pop(0)()
+
+    def __enter__(self) -> _QueuedStream:
+        self._previous = self._fake_npu.active
+        self._fake_npu.active = self
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._fake_npu.active = self._previous
+
+    def __repr__(self) -> str:
+        return f"<npu stream {self._name}>"
+
+
+def _queueing_npu(log: list | None = None):
+    """Build a fake ``torch.npu`` whose streams queue their work.
+
+    Returns ``(fake_npu, created)``: ``created`` collects the streams the module
+    asks for through ``torch.npu.Stream()`` (its buffer slots), while
+    ``fake_npu.current_stream()`` is a separate default stream until a
+    ``with torch.npu.stream(slot)`` block says otherwise.
+    """
+    fake_npu = types.SimpleNamespace()
+    created: list[_QueuedStream] = []
+
+    def make_stream(*args, **kwargs):
+        stream = _QueuedStream(fake_npu, f"s{len(created)}", log)
+        created.append(stream)
+        return stream
+
+    fake_npu.active = _QueuedStream(fake_npu, "default", log)
+    fake_npu.Stream = make_stream
+    fake_npu.stream = lambda stream: stream
+    fake_npu.current_stream = lambda: fake_npu.active
+    fake_npu.current_device = lambda: 0
+    return fake_npu, created
+
+
+def test_packed_broadcast_streams_are_cached_across_calls():
+    """A device's packed streams are reused instead of recreated per call.
+
+    The caching allocator keys cached blocks by the stream they were allocated on,
+    so a fresh stream per call strands the packed buffers' reserved memory in a pool
+    nobody reuses (upstream vLLM caches its NCCL streams for the same reason,
+    gh-52950). It also gives a slot one stable stream, which is what its barrier
+    means anything against.
+    """
+    fake_npu, created = _queueing_npu()
+
+    with patch.object(torch, "npu", fake_npu, create=True):
+        first = _get_streams(0, 2)
+        second = _get_streams(0, 2)
+        other_device = _get_streams(1, 2)
+
+    assert first is second, "the streams of a device have to be cached"
+    assert first != other_device, "each device gets its own streams"
+    assert len(created) == 4, "two streams per device, not two per call"
+
+
+def test_packed_broadcast_producer_packs_and_broadcasts_on_the_slot_stream():
+    """Packing a chunk and its collective both run on that slot's stream.
+
+    A slot's buffer is replaced - and its memory handed back to the allocator - the
+    next time the slot comes around, right after that stream is barred. The barrier
+    therefore only covers the broadcast if the broadcast ran on the same stream.
+    """
+    log: list = []
+    fake_npu, created = _queueing_npu(log)
+    real_cat = torch.cat
+
+    def recording_cat(tensors, dim=0):
+        log.append(("pack", fake_npu.active))
+        return real_cat(tensors, dim=dim)
+
+    group = _make_group_mock()
+    group.broadcast = MagicMock(side_effect=lambda tensor, **kwargs: log.append(("broadcast", kwargs.get("stream"))))
+    chunks = [(str(index), torch.full((4,), index, dtype=torch.uint8)) for index in range(3)]
+
+    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "cat", recording_cat):
+        packed_broadcast_producer(
+            iterator=iter(chunks),
+            group=group,
+            src=0,
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=1,  # every tensor overflows -> one chunk per tensor
+            num_buffers=2,
+        )
+
+    assert len(created) == 2
+    packs = [entry for entry in log if entry[0] == "pack"]
+    broadcasts = [entry for entry in log if entry[0] == "broadcast"]
+    assert len(packs) == len(broadcasts) == len(chunks)
+    for index, (pack, broadcast) in enumerate(zip(packs, broadcasts)):
+        slot_stream = created[index % 2]
+        assert pack == ("pack", slot_stream)
+        # ``stream=None`` would resolve to a process-wide stream instead.
+        assert broadcast == ("broadcast", slot_stream)
+
+    slot0_syncs = [position for position, entry in enumerate(log) if entry == ("sync", created[0])]
+    assert slot0_syncs[1] > log.index(broadcasts[0]), "the slot's barrier has to cover its broadcast"
+    assert slot0_syncs[1] < log.index(packs[2]), "and has to run before the buffer is reused"
+    assert {entry[1] for entry in log[-2:]} == {created[0], created[1]}, "every slot is drained before returning"
+
+
+def test_packed_broadcast_producer_reuses_a_slot_buffer_only_after_its_broadcast_ran():
+    """A slot's packed buffer is only overwritten once its broadcast has run.
+
+    ``torch.cat`` hands the same block back to a slot on every chunk here - which
+    is what the caching allocator does with a freed block - and the broadcast reads
+    that block whenever the device gets to it. If the packing of a slot's next chunk
+    runs while the broadcast of its previous chunk is still queued, the workers
+    receive a window of the wrong chunk's bytes.
+    """
+    num_buffers = 2
+    chunks = [torch.arange(4, dtype=torch.uint8) + 10 * index for index in range(2 * num_buffers + 1)]
+    arena = [torch.zeros(4, dtype=torch.uint8) for _ in range(num_buffers)]
+    arena_calls = itertools.count()
+    real_cat = torch.cat
+    received: list[torch.Tensor] = []
+
+    fake_npu, _ = _queueing_npu()
+
+    def arena_cat(tensors, dim=0):
+        slot = next(arena_calls) % num_buffers
+        arena[slot].copy_(real_cat(tensors, dim=dim))
+        return arena[slot]
+
+    def queue_broadcast(tensor, **kwargs):
+        stream = kwargs.get("stream") or fake_npu.current_stream()
+
+        def read():
+            received.append(tensor.clone())
+
+        stream.pending.append(read)
+
+    group = _make_group_mock()
+    group.broadcast = MagicMock(side_effect=queue_broadcast)
+
+    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "cat", arena_cat):
+        packed_broadcast_producer(
+            iterator=iter([(str(index), chunk) for index, chunk in enumerate(chunks)]),
+            group=group,
+            src=0,
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=1,
+            num_buffers=num_buffers,
+        )
+
+    assert len(received) == len(chunks)
+    assert sorted(tuple(tensor.tolist()) for tensor in received) == sorted(tuple(chunk.tolist()) for chunk in chunks)
+
+
+def test_packed_broadcast_consumer_receives_and_loads_on_the_slot_stream():
+    """Receiving a chunk and loading it both run on that slot's stream.
+
+    The loads of a chunk are queued behind its broadcast, and the next broadcast is
+    ordered behind this one by the communicator's own launch order, so the loaders a
+    later chunk triggers for an earlier chunk's retained tensors run after those
+    tensors were loaded.
+    """
+    log: list = []
+    fake_npu, created = _queueing_npu(log)
+    payloads = iter([torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0]), torch.tensor([5.0, 6.0])])
+    group = _make_group_mock()
+    group.broadcast = MagicMock(
+        side_effect=lambda tensor, **kwargs: (
+            log.append(("broadcast", kwargs.get("stream"))),
+            tensor.copy_(next(payloads).view(torch.uint8)),
+        )
+    )
+    loaded: list[torch.Tensor] = []
+
+    def post_unpack(weights):
+        log.append(("load", fake_npu.active))
+        loaded.extend(tensor for _, tensor in weights)
+
+    with patch.object(torch, "npu", fake_npu, create=True):
+        packed_broadcast_consumer(
+            iterator=iter([(str(index), ([2], torch.float32)) for index in range(3)]),
+            group=group,
+            src=0,
+            post_unpack_func=post_unpack,
+            buffer_size_bytes=1,  # every tensor overflows -> one chunk per tensor
+            num_buffers=2,
+        )
+
+    assert [tensor.tolist() for tensor in loaded] == [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    assert len(created) == 2
+    broadcasts = [entry for entry in log if entry[0] == "broadcast"]
+    loads = [entry for entry in log if entry[0] == "load"]
+    assert len(broadcasts) == len(loads) == 3
+    for index, (broadcast, load) in enumerate(zip(broadcasts, loads)):
+        slot_stream = created[index % 2]
+        assert broadcast == ("broadcast", slot_stream)
+        assert load == ("load", slot_stream)
+
+    slot0_syncs = [position for position, entry in enumerate(log) if entry == ("sync", created[0])]
+    assert slot0_syncs[1] > log.index(broadcasts[0]), "the slot's barrier has to cover its broadcast"
+    assert slot0_syncs[1] < log.index(broadcasts[2]), "and the loads that read its buffer"
+    assert {entry[1] for entry in log[-2:]} == {created[0], created[1]}, "every slot is drained before returning"
 
 
 # ---------------------------------------------------------------------------

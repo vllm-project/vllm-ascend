@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Callable, Iterator
+from functools import cache
 from typing import Any
 
 import torch
@@ -15,6 +16,36 @@ DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
 
+@cache
+def _get_streams(device_index: int, num_buffers: int) -> tuple[torch.npu.Stream, ...]:
+    """Return this device's packed-transfer streams, one per buffer slot.
+
+    The streams are cached across calls, exactly like upstream vLLM caches its
+    NCCL streams (upstream gh-52950): the caching allocator keys its cached blocks
+    by the stream they were allocated on, so a fresh ``torch.npu.Stream`` on every
+    call would strand the packed buffers' reserved memory in a pool that nobody
+    reuses.
+
+    Caching also makes a slot's barrier a complete one, which is what both the
+    buffer lifetime and the layerwise reload's cross-chunk ordering need. Every
+    chunk that uses a slot - its packing, its broadcast and the weight loading that
+    reads its buffer - runs on that slot's stream, so ``synchronize()`` of the
+    stream covers all of the slot's previous chunk, the collective included. That
+    is what makes it safe to drop the previous packed buffer (and let its memory be
+    handed to the next chunk) when the slot comes around again. It is also what
+    orders the reload: a chunk's weight loaders are queued on its slot's stream
+    behind that chunk's broadcast, and the next broadcast is ordered behind this
+    one by the communicator's own launch order, so the loaders a *later* chunk
+    triggers for an earlier chunk's retained tensors run after those tensors were
+    loaded.
+
+    ``device_index`` only keys the cache - the streams are created on the caller's
+    current device, which is the model's device for a worker and the trainer's card
+    for a sender - so a process that moves between devices never shares streams.
+    """
+    return tuple(torch.npu.Stream() for _ in range(num_buffers))
+
+
 def packed_broadcast_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     group: Any,
@@ -24,6 +55,11 @@ def packed_broadcast_producer(
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
+
+    Packing a chunk, broadcasting it and releasing its buffer all happen on that
+    buffer slot's stream (see ``_get_streams``), and the broadcast is told to use
+    that stream explicitly, so the barrier taken when the slot comes around again
+    covers the collective that read the packed buffer as well.
 
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
@@ -38,24 +74,22 @@ def packed_broadcast_producer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(torch.npu.current_device(), num_buffers)
     buffer_idx = 0
-
-    packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
-    packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
+    # The entries of this list are the references that keep a slot's in-flight
+    # chunk alive: an entry is only replaced once that slot's barrier below has
+    # run, which is the barrier that covers the broadcast reading it.
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
 
     done = False
     while not done:
-        # Synchronize the current stream (waits for previous
-        # iteration's work on this buffer to finish)
+        # Wait for this slot's previous chunk: its packing and its broadcast both
+        # ran on this stream.
         streams[buffer_idx].synchronize()
-        # Start tasks for the new buffer in a new stream
         with torch.npu.stream(streams[buffer_idx]):
-            # Initialize the packing tensor list and sizes
-            packing_tensor_list[buffer_idx] = []
-            packing_tensor_sizes[buffer_idx] = 0
             # Pack the tensors
+            packing_tensor_list: list[torch.Tensor] = []
+            packed_size = 0
             while True:
                 try:
                     item = next(iterator)
@@ -64,29 +98,28 @@ def packed_broadcast_producer(
                     break
                 # Apply post processing and convert to linearized uint8 tensor
                 tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
-                packing_tensor_list[buffer_idx].append(tensor)
-                packing_tensor_sizes[buffer_idx] += tensor.numel()
-                if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
+                packing_tensor_list.append(tensor)
+                packed_size += tensor.numel()
+                if packed_size > target_packed_tensor_size:
                     break
-            if len(packing_tensor_list[buffer_idx]) > 0:
-                # Pack the tensors
-                packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
-
-        if len(packing_tensor_list[buffer_idx]) == 0:
-            # No more tensors — nothing left to broadcast
-            break
-
-        # torch.cat runs on the custom stream.  Synchronize before
-        # broadcasting on the default stream so the packed data is ready.
-        streams[buffer_idx].synchronize()
-        group.broadcast(packed_tensors[buffer_idx], src=src)
+            if not packing_tensor_list:
+                # No more tensors — nothing left to broadcast
+                break
+            # Pack the tensors and broadcast from the same stream. ``stream=`` is
+            # passed explicitly because ``stream=None`` resolves to
+            # ``vllm_ascend.utils.current_stream()``, a process-wide cached stream,
+            # rather than to the stream this slot's barrier waits for.
+            packed_tensors[buffer_idx] = torch.cat(packing_tensor_list, dim=0)
+            group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
 
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers
 
-    # Ensure the last broadcast on the default stream has completed
-    # before returning, so NPU tensor cleanup at exit doesn't hang.
-    torch.npu.current_stream().synchronize()
+    # Drain every slot before returning: the broadcasts are only *enqueued*, and the
+    # caller may free the source tensors or reuse these streams as soon as we
+    # return. It also keeps NPU tensor cleanup at exit from hanging.
+    for stream in streams:
+        stream.synchronize()
 
 
 def packed_broadcast_consumer(
@@ -98,6 +131,15 @@ def packed_broadcast_consumer(
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
+
+    The receive buffer of a slot is allocated, filled by the broadcast and read by
+    ``post_unpack_func`` on that slot's stream (see ``_get_streams``), and the
+    broadcast is told to use that stream explicitly. Keeping a whole chunk on the
+    slot's stream is what orders the layerwise reload across chunks: the reload
+    retains the unpacked tensors of a chunk and runs a layer's weight loaders when
+    a later chunk completes that layer, so those loaders are queued behind the
+    later chunk's broadcast, which the communicator orders behind the earlier
+    chunk's broadcast - and therefore behind the earlier chunk's loads.
 
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
@@ -128,23 +170,22 @@ def packed_broadcast_consumer(
 
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
-    default_stream = torch.npu.current_stream()
+    streams = _get_streams(torch.npu.current_device(), num_buffers)
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
-    packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
 
     done = False
     while not done:
-        # Synchronize the current stream (waits for previous
-        # iteration's load_weights on this buffer to finish)
+        # Wait for this slot's previous chunk: its broadcast, and the weight loading
+        # that read its buffer (which may have outlived the chunk), ran on this
+        # stream.
         streams[buffer_idx].synchronize()
         with torch.npu.stream(streams[buffer_idx]):
             # Collect parameter metadata for this buffer
             packing_tensor_meta_data[buffer_idx] = []
-            packing_tensor_sizes[buffer_idx] = 0
+            packed_size = 0
             while True:
                 try:
                     name, (shape, dtype) = next(iterator)
@@ -153,28 +194,22 @@ def packed_broadcast_consumer(
                     break
                 tensor_size = math.prod(shape) * dtype.itemsize
                 packing_tensor_meta_data[buffer_idx].append((name, shape, dtype, tensor_size))
-                packing_tensor_sizes[buffer_idx] += tensor_size
-                if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
+                packed_size += tensor_size
+                if packed_size > target_packed_tensor_size:
                     break
-            if len(packing_tensor_meta_data[buffer_idx]) > 0:
-                packed_tensors[buffer_idx] = torch.empty(
-                    packing_tensor_sizes[buffer_idx],
-                    dtype=torch.uint8,
-                    device="npu",
-                )
-
-        if len(packing_tensor_meta_data[buffer_idx]) == 0:
-            break
-
-        # Broadcast on the default stream.
-        group.broadcast(packed_tensors[buffer_idx], src=src)
-
-        # Synchronize the default stream so broadcast completes before
-        # load_weights (running on the custom stream) reads the data.
-        default_stream.synchronize()
-
-        # Unpack and load weights on the custom stream
-        with torch.npu.stream(streams[buffer_idx]):
+            if not packing_tensor_meta_data[buffer_idx]:
+                break
+            packed_tensors[buffer_idx] = torch.empty(
+                packed_size,
+                dtype=torch.uint8,
+                device="npu",
+            )
+            # Receive and load on the same stream, so the loads are ordered after
+            # the broadcast and this slot's next barrier is ordered after both.
+            # ``stream=`` is passed explicitly because ``stream=None`` resolves to
+            # ``vllm_ascend.utils.current_stream()``, a process-wide cached stream,
+            # rather than to the stream this slot's barrier waits for.
+            group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
             names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
             post_unpack_func(
                 unpack_tensor(
@@ -189,10 +224,11 @@ def packed_broadcast_consumer(
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers
 
-    # Wait for all in-flight load_weights (on custom streams) to finish.
-    # Otherwise NPU tensor cleanup at exit may hang.
-    for s in streams:
-        s.synchronize()
+    # Drain every slot before returning: the weight loading is only *enqueued* and
+    # the weights are applied once the device has executed it. Otherwise NPU tensor
+    # cleanup at exit may hang.
+    for stream in streams:
+        stream.synchronize()
 
 
 # ── NPU IPC packed transfer ────────────────────────────────────────────
