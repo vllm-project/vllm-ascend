@@ -169,7 +169,19 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         layer: torch.nn.Module,
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        """Run a single MXFP8 projection through grouped matmul in eager mode."""
+        """Use single-group GMM for a bias-free, 2-D MXFP8 projection.
+
+        This eager path targets QMM workspace/tiling submission overhead,
+        for example in prefill QKV and routed down/up projections. The caller
+        selects it only in eager execution; graph capture/replay, biased and
+        higher-dimensional projections continue through ``apply``.
+
+        ``x`` contains [tokens, K] activations, either unquantized or already
+        quantized with MX scales (a tuple or PreparedLinearInput). All token
+        rows form one group. Weights must have completed post-processing:
+        ND uses [K, N]; single-group NZ uses [1, K, N] with the corresponding
+        scale layout and ``_mxfp8_gmm_nz_layout`` set on the layer.
+        """
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
             if x.scale is None:
