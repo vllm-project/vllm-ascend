@@ -58,7 +58,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
-from vllm.model_executor.offloader.base import get_offloader, set_offloader
+from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.import_utils import LazyLoader
@@ -4466,6 +4466,17 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def _prepare_prolog_v3_weights(self) -> None:
+        """Include private strided-cache writer weights in the model budget."""
+        # Offloaded projections are only valid inside their onload context.
+        if not isinstance(get_offloader(), NoopOffloader):
+            return
+        for layer_name, cache_spec in self.get_kv_cache_spec().items():
+            attn_module = self.compilation_config.static_forward_context.get(layer_name)
+            if self._uses_single_raw_mla_cache(layer_name, cache_spec, attn_module):
+                assert isinstance(attn_module, MLAAttention)
+                attn_module.impl._prepare_prolog_v3_weights()
+
     def load_model(self) -> None:
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
             join_early_kernel_warmup,
@@ -4569,6 +4580,9 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+            # The cache budget is computed before graph warmup, so private
+            # PROLOG projections must be counted by the model memory profiler.
+            self._prepare_prolog_v3_weights()
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 

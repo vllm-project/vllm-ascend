@@ -8,12 +8,16 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.offloader.base import NoopOffloader
+from vllm.model_executor.offloader.prefetch import PrefetchOffloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.model_executor.offloader.prefetch import AscendPrefetchOffloader
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -699,11 +703,21 @@ def test_sample_tokens_closes_dump_cycle_on_last_rank():
     debugger.step.assert_called_once_with()
 
 
+@pytest.fixture
+def loaded_model_without_attention(monkeypatch):
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "get_offloader", NoopOffloader)
+    monkeypatch.setattr(module + "get_layers_from_vllm_config", lambda *_args: {})
+    monkeypatch.setattr(NPUModelRunner, "get_kv_cache_spec", lambda _self: {})
+    monkeypatch.setattr(module + "DeviceMemoryProfiler", lambda: nullcontext(SimpleNamespace(consumed_memory=0)))
+
+
 @pytest.mark.parametrize("load_dummy_weights", [False, True])
-def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights):
+def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights, loaded_model_without_attention):
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    runner.model_memory_usage = 1024
 
     aux_layers = (2, 4)
     with (
@@ -717,15 +731,101 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
     debugger.start.assert_called_once_with(runner.model)
 
 
-def test_load_model_skips_dump_in_eager_mode():
+def test_load_model_skips_dump_in_eager_mode(loaded_model_without_attention):
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.model_memory_usage = 1024
 
     with patch.object(GPUModelRunner, "load_model"):
         runner.load_model()
 
     debugger.start.assert_not_called()
+
+
+@pytest.mark.parametrize(("uses_strided_cache", "already_prepared"), [(False, False), (True, False), (True, True)])
+def test_load_model_accounts_for_prolog_private_weights(monkeypatch, uses_strided_cache, already_prepared):
+    runner = _make_runner(need_timing=False)
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    existing_weights = {"weight_dq": torch.empty(16, dtype=torch.bfloat16)}
+    impl._prolog_v3_weights = existing_weights if already_prepared else None
+    allocated_bytes = 0
+    events = []
+
+    def parent_load(_self, *_args, **_kwargs):
+        events.append("load")
+        runner.model_memory_usage = 1024
+
+    def build_weights():
+        nonlocal allocated_bytes
+        assert events[-1] == "profile_start"
+        weights = {"weight_dq": torch.empty(16, dtype=torch.bfloat16)}
+        allocated_bytes += weights["weight_dq"].numel() * weights["weight_dq"].element_size()
+        return weights
+
+    build = Mock(side_effect=build_weights)
+    impl._build_prolog_v3_weights = build
+    layers = {"model.layers.0": SimpleNamespace(impl=impl)}
+    cache_spec = object()
+    runner.get_kv_cache_spec = Mock(return_value={"model.layers.0": cache_spec})
+
+    @contextmanager
+    def profile():
+        assert events == ["load"]
+        events.append("profile_start")
+        memory = SimpleNamespace(consumed_memory=0)
+        before = allocated_bytes
+        yield memory
+        memory.consumed_memory = allocated_bytes - before
+        events.append("profile_end")
+
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(GPUModelRunner, "load_model", parent_load)
+    monkeypatch.setattr(module + "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(module + "get_offloader", NoopOffloader)
+    monkeypatch.setattr(module + "DeviceMemoryProfiler", profile)
+    layout_gate = Mock(return_value=uses_strided_cache)
+    monkeypatch.setattr(module + "_uses_single_raw_mla_cache", layout_gate)
+    monkeypatch.setattr(module + "get_pd_dspark_aux_layer_ids", lambda _config: ())
+
+    runner.load_model()
+
+    layout_gate.assert_called_once_with(runner.vllm_config, "model.layers.0", cache_spec)
+    expected_bytes = 32 if uses_strided_cache and not already_prepared else 0
+    assert runner.model_memory_usage == 1024 + expected_bytes
+    assert events == ["load", "profile_start", "profile_end"]
+    if uses_strided_cache:
+        prepared_weights = impl._prolog_v3_weights
+        assert impl._prepare_prolog_v3_weights() is prepared_weights
+        assert build.call_count == (0 if already_prepared else 1)
+        if already_prepared:
+            assert prepared_weights is existing_weights
+    else:
+        build.assert_not_called()
+        assert impl._prolog_v3_weights is None
+
+
+@pytest.mark.parametrize("offloader_type", [PrefetchOffloader, AscendPrefetchOffloader])
+def test_load_model_preserves_lazy_prolog_weights_with_offloading(monkeypatch, offloader_type):
+    runner = _make_runner(need_timing=False)
+    runner.model_memory_usage = 1024
+    runner.get_kv_cache_spec = Mock(side_effect=AssertionError("must not inspect offloaded weights"))
+    offloader = offloader_type.__new__(offloader_type)
+    layers = Mock(side_effect=AssertionError("must not read offloaded weights"))
+    profiler = Mock(side_effect=AssertionError("must preserve the parent memory budget"))
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(GPUModelRunner, "load_model", Mock())
+    monkeypatch.setattr(module + "get_offloader", lambda: offloader)
+    monkeypatch.setattr(module + "get_layers_from_vllm_config", layers)
+    monkeypatch.setattr(module + "DeviceMemoryProfiler", profiler)
+    monkeypatch.setattr(module + "get_pd_dspark_aux_layer_ids", lambda _config: ())
+
+    runner.load_model()
+
+    assert runner.model_memory_usage == 1024
+    runner.get_kv_cache_spec.assert_not_called()
+    layers.assert_not_called()
+    profiler.assert_not_called()
 
 
 def test_pool_closes_dump_cycle_for_pooling_models():
