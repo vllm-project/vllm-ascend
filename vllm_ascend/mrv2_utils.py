@@ -108,8 +108,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
-    if _is_enabled(_additional(vllm_config, "enable_reduce_sample")):
-        reasons.append("enable_reduce_sample")
     # V2 MTP draft pads the forward to the DP-wide request count, while eager
     # attention metadata keeps this rank's request count. DSA-CP rejects that
     # split once the hidden states outgrow the TP-aligned metadata.
@@ -148,7 +146,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
-    * enable_reduce_sample
     * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
