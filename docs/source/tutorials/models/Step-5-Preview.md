@@ -10,7 +10,7 @@ This document describes how to quickly get started with `Step-5-Preview` model i
 
     **Current status and constraints**
 
-    - `Step-5-Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - `Step-5-Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5-openeuler`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
     - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step-5-Preview`.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
@@ -53,7 +53,7 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 #### Download Docker Image
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:step5-a5
+docker pull quay.io/ascend/vllm-ascend:step5-a5-openeuler
 ```
 
 #### Create Docker Container
@@ -62,7 +62,7 @@ Use the following command to create the container.
 
 ```bash
 # Set the vLLM Ascend image name.
-export IMAGE=quay.io/ascend/vllm-ascend:step5-a5
+export IMAGE=quay.io/ascend/vllm-ascend:step5-a5-openeuler
 export CONTAINER_NAME=step5
 
 # 950DT products have 8 NPUs and use Device UB.
@@ -108,7 +108,7 @@ docker exec -it ${CONTAINER_NAME} bash
 
 !!! note
 
-    `Step-5-Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
+    `Step-5-Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5-openeuler` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
 ## 5 Online Service Deployment
 
