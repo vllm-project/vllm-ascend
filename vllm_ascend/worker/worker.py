@@ -109,7 +109,6 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -121,6 +120,17 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+# Allow tensor initialization and casting with internal formats (e.g. NZ).
+# The quantized Ascend kernels pick the NZ kernel variant based on the quant
+# scheme, so with this disabled their `npu_format_cast(..., FRACTAL_NZ)` input
+# preparation silently degrades to ND and the operator fails with a format
+# mismatch. This is a process-wide switch that both the V1 and V2 model runners
+# depend on, so it has to be set by the shared worker. Set it explicitly
+# because it used to run as a side effect of importing the V1 model runner at
+# module scope here, and V2 processes no longer import the V1 zone (see the V1
+# code-isolation RFC, PR-1).
+torch.npu.config.allow_internal_format = True
 
 
 class NPUWorker(WorkerBase):
@@ -515,6 +525,11 @@ class NPUWorker(WorkerBase):
 
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
+            # Lazy import keeps the V1 model runner out of pure-V2 processes;
+            # this selection branch is the only V1 entry point (see the
+            # V1 code-isolation RFC, PR-1).
+            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
