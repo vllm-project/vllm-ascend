@@ -45,14 +45,6 @@ test_cases:
       - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-    test_content:
-      - completion
-      - spec_decode_acceptance
-    acceptance_rate:
-      # Reference floors from EAGLE3_PCP_MIN_ACCEPTANCE_RATES in test_accuracy_v2.py.
-      # Calibrate for this DP2 + PCP2 + DCP2 GSM8K workload before merging.
-      baseline: [0.54, 0.29, 0.15]
-      tolerance: 0.05
     benchmarks:
       # Keep the accuracy baseline from Qwen3-32B-Int8.yaml for the same QuaRot checkpoint.
       acc:

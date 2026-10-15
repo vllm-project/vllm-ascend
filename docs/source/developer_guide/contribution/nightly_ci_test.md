@@ -195,7 +195,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8, prefill MC2 |
 | `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
 | `mrv2-pcp-dcp-mla` | Kimi-K2.6 W4A8, MRV2 + DP2 + TP4 + PCP2 + DCP8 |
-| `mrv2-pcp-sfa-dspark` | GLM-5.2 W4A8C8, MRV2 + DP2 + TP4 + PCP2 + EP + DSpark, accuracy and per-position acceptance |
+| `mrv2-pcp-sfa-dspark` | GLM-5.2 W4A8C8, MRV2 + DP2 + TP4 + PCP2 + EP + DSpark, accuracy only |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
 | `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
 | `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
@@ -217,7 +217,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |
 | `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |
 | `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |
-| `mrv2-pcp-dcp-gqa` | Qwen3-32B QuaRot, MRV2 + DP2 + TP2 + PCP2 + DCP2 + Eagle3, accuracy and per-position acceptance |
+| `mrv2-pcp-dcp-gqa` | Qwen3-32B QuaRot, MRV2 + DP2 + TP2 + PCP2 + DCP2 + Eagle3 |
 
 ## Examples
 
