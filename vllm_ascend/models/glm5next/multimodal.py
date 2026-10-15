@@ -791,9 +791,7 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
             video, metadata = mm_items["video"][item_idx]
             grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
             placeholder = self.info._construct_video_placeholder(video, metadata, grid_thw, video_kwargs=video_kwargs)
-            return PromptUpdateDetails.select_token_id(
-                placeholder, embed_token_id=hf_processor.image_token_id
-            )
+            return PromptUpdateDetails.select_token_id(placeholder, embed_token_id=hf_processor.image_token_id)
 
         return [
             PromptReplacement(modality=update.modality, target=update.target, replacement=get_video_replacement)
