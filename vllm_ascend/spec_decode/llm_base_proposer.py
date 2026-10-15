@@ -1967,6 +1967,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
+    def _get_draft_slot_block_size(self) -> int:
+        """Return the kernel block size used to address the draft KV cache.
+
+        Hybrid proposers whose draft cache belongs to a non-GDN group can
+        override this target-wide default with their resolved group size.
+        """
+        return self.kernel_block_size if self.has_gdn else self.block_size
+
     def attn_update_stack_num_spec_norm(
         self,
         # `draft_index` must start from `1`, no `0`
@@ -2114,10 +2122,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
             # which is not correct for computing `slot_mapping` below.
-            if self.has_gdn:
-                block_size = self.kernel_block_size
-            else:
-                block_size = self.block_size
+            block_size = self._get_draft_slot_block_size()
 
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped
