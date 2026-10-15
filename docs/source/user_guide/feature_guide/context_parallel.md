@@ -42,6 +42,9 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | 950PR&950DT Products | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
 | 950PR&950DT Products | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 
+- ✅ **Full compatibility**: Combining the feature with DCP is supported.
+- 🟠 **Partial compatibility**: Combining the feature with DCP is supported with the stated limitations.
+
 ## Usage
 
 ### Prefill Context Parallel
