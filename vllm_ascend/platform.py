@@ -286,6 +286,38 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
 
+        if backend_key == (False, False, False):
+            from vllm.config import get_current_vllm_config_or_none
+            from vllm.v1.attention.backend import AttentionType
+
+            config = get_current_vllm_config_or_none()
+            selector = attn_selector_config
+            if (
+                config is not None
+                and not config.use_v2_model_runner
+                and config.speculative_config is not None
+                and config.model_config.runner_type == "draft"
+                and config.speculative_config.method == "dflash"
+                and "DFlash2DraftModel" in (config.speculative_config.draft_model_config.architectures or [])
+                and config.speculative_config.draft_sample_method == "greedy"
+                and config.speculative_config.enforce_eager
+                and selector.attn_type == AttentionType.DECODER
+                and selector.dtype in (torch.float16, torch.bfloat16)
+                and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+                and not any(
+                    (
+                        selector.use_dcp,
+                        selector.use_mm_prefix,
+                        selector.use_rswa,
+                        selector.use_adaptive_verification,
+                        selector.use_batch_invariant,
+                        selector.use_per_head_quant_scales,
+                    )
+                )
+                and get_current_hardware_profile().supports(HardwareCapability.DEVICE_LENGTH_FLASH_ATTN)
+            ):
+                return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+
         return backend_map[backend_key]
 
     @classmethod
