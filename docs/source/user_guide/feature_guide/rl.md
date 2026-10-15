@@ -271,17 +271,6 @@ The example uses Qwen3-0.6B and two existing adapters. It starts a server with
 server on port 8000. It demonstrates HTTP adapter updates, not a training loop
 or verl's checkpoint-engine transport.
 
-#### Model coverage for RL weight updates
-
-Use the following evidence to choose what to validate for an RL deployment.
-The listed tests cover specific inference or weight-update paths; they do not
-establish a complete verl LoRA training run on every Ascend device.
-
-| Model | Available coverage | Scope for LoRA RL |
-| --- | --- | --- |
-| `Qwen/Qwen3-30B-A3B` | [LoRA inference tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py): TP=2, with and without EP, eager mode; mixed adapter/base requests on EP | Evidence for separate-adapter inference. Repeated trainer-to-rollout updates and merged export require validation in the chosen verl job. |
-| `Qwen/Qwen3.5-35B-A3B` | [Weight-update model case](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/rlhf/weight_transfer_test_utils.py), exercised by [NPU IPC](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py) and [HCCL](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py) tests | Four-layer text-only configuration with synthetic BF16 weights, TP=1, packed/unpacked full-weight updates. This covers the update path, not LoRA merging, separate adapters, or full-size verl training. |
-
 Before recording a deployment as validated, capture the model and adapter,
 verl/vLLM/vLLM-Ascend revisions, NPU type, training backend, target modules,
 TP/EP, and graph mode. Exercise repeated updates, compare outputs with a
