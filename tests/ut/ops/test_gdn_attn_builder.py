@@ -1044,9 +1044,11 @@ def test_one_token_prefill_selection_respects_recurrent_state(
     ],
 )
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+@pytest.mark.parametrize("method", ["mtp", "dspark"])
 def test_spec_width_prompt_chunk_retains_prefill_metadata(
     monkeypatch: pytest.MonkeyPatch,
     builder_cls,
+    method: str,
     dcp_size: int,
     num_spec: int,
     context_len: int,
@@ -1075,6 +1077,7 @@ def test_spec_width_prompt_chunk_retains_prefill_metadata(
         cudagraph_mode=graph_mode,
     )
     builder.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    builder.vllm_config.speculative_config.method = method
     accepted = torch.tensor([2, 1] if mixed_spec else [1], dtype=torch.int32)
     metadata = builder.build(
         0,
