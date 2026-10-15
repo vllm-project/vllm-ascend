@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -128,6 +129,7 @@ class ReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    indexer_block_ids: dict[int, tuple[list[int], list[int]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -339,6 +341,28 @@ class KVCacheSendingLayerThread(threading.Thread):
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
         local_block_ids = req_meta.local_block_ids[layer_group_idx]
+        layer_spec = layer_kv_cache_spec
+        if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+            layer_spec = layer_spec.kv_cache_specs[layer_name]
+        if (
+            isinstance(layer_spec, AscendSFAIndexerCacheSpec)
+            and layer_spec.sfa_dcp_replicated_indexer_size
+            == self.vllm_config.parallel_config.decode_context_parallel_size
+            and layer_group_idx in req_meta.indexer_block_ids
+        ):
+            local_ids, remote_ids = req_meta.indexer_block_ids[layer_group_idx]
+            # Physical scales include each side's own DCP replication factor;
+            # P/D DCP sizes (and therefore physical scales) need not be equal.
+            local_kernel_scale = local_layer_metadata.block_size_scale[0] // layer_spec.sfa_dcp_replicated_indexer_size
+            remote_kernel_scale = remote_layer_metadata.block_size_scale[0] // req_meta.remote_dcp_size
+            assert local_kernel_scale == remote_kernel_scale and local_kernel_scale > 0, (
+                "Indexer kernel block sizes must match after removing each side's DCP replication factor."
+            )
+            assert local_layer_metadata.block_len == remote_layer_metadata.block_len
+            local_block_ids = [block * local_kernel_scale + i for block in local_ids for i in range(local_kernel_scale)]
+            remote_block_ids = [
+                block * remote_kernel_scale + i for block in remote_ids for i in range(remote_kernel_scale)
+            ]
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
@@ -983,6 +1007,7 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % min(self.block_size) == 0
+            params["remote_cached_tokens"] = num_computed_tokens
             count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
 
@@ -1004,7 +1029,7 @@ class MooncakeLayerwiseConnectorScheduler:
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
-            remote_cached_tokens = request.num_computed_tokens
+            remote_cached_tokens = params.get("remote_cached_tokens", request.num_computed_tokens)
             # Get unhashed blocks to pull from remote.
             logger.debug(
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need recv queue", request.request_id
@@ -1419,6 +1444,11 @@ class MooncakeLayerwiseConnectorWorker:
                 if kv_buffer is None and "indexer" not in layer_name.lower():
                     kv_buffer = kv_cache_tuple
             single_layer_meta = LayerMetadata([], [], [], [])
+            replicated_size = (
+                layer_kv_cache_spec.sfa_dcp_replicated_indexer_size
+                if isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec)
+                else 1
+            )
             for single_kv_cache in kv_cache_tuple:
                 block_start_rank = 1
                 num_blocks = self.kv_cache_config.num_blocks
@@ -1427,21 +1457,23 @@ class MooncakeLayerwiseConnectorWorker:
                     "The external block size must be an integer multiple of the kernel block size."
                 )
                 block_size_scale = tensor_num_blocks // num_blocks
+                assert block_size_scale % replicated_size == 0
+                kernel_scale = block_size_scale // replicated_size
                 group_block_size_scale = group_block_size_scales.setdefault(
                     layer_kv_group_id,
-                    block_size_scale,
+                    kernel_scale,
                 )
-                if group_block_size_scale != block_size_scale:
+                if group_block_size_scale != kernel_scale:
                     raise NotImplementedError(
                         "Mooncake layerwise connector does not support KV cache components "
-                        "with different block size scales in one group, including DCP replicated indexer cache."
+                        "with different kernel block size scales in one group."
                     )
                 block_shape = single_kv_cache.shape[block_start_rank:]
                 single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
                 single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
                 single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
                 single_layer_meta.block_size_scale.append(block_size_scale)
-                self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
+                self.kernel_block_size_scale[layer2group_ids[layer_name]] = kernel_scale
                 if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
                     lengths.append(
@@ -1585,6 +1617,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     # {(ip, port)]: {local_block_ids: [], remote_block_ids: {}}}
     def _get_kv_split_metadata(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):
+        chunk_finish = req_meta.chunk_finish
         remote_pcp_size = req_meta.remote_pcp_size
         remote_dcp_size = req_meta.remote_dcp_size
         remote_tp_size = req_meta.remote_tp_size
@@ -1693,6 +1726,58 @@ class MooncakeLayerwiseConnectorWorker:
             self.pcp_rank,
             self.dcp_rank,
         )
+        spec = self.kv_cache_specs[group_idx]
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and any(
+            isinstance(item, AscendSFAIndexerCacheSpec) and item.sfa_dcp_replicated_indexer_size == self.dcp_size
+            for item in specs
+        ):
+            # Main KV keeps its CP mapping. For the replicated indexer, choose
+            # one of the redundant P ranks already serving each D rank.
+            remote_cp_size = remote_pcp_size * remote_dcp_size
+            cp_rank = self.pcp_rank * self.dcp_size + self.dcp_rank
+            for d_head in pd_head_mapping[p_head_group_rank]:
+                owner = min(p_head for p_head, d_heads in pd_head_mapping.items() if d_head in d_heads)
+                selected = p_head_group_rank == owner and cp_rank < remote_cp_size
+                port = remote_port + (cp_rank % remote_cp_size // remote_dcp_size) * remote_tp_size
+                port += d_head * remote_dcp_size + cp_rank % remote_dcp_size
+                endpoint = (req_meta.remote_host, port)
+                if selected:
+                    # This sender must also transfer later indexer chunks after
+                    # its last main-KV shard.
+                    req_meta.chunk_finish = chunk_finish
+                    transfer_mappings.setdefault(
+                        endpoint,
+                        {
+                            "local_block_ids": [],
+                            "remote_block_ids": [],
+                            "trans_count": d_trans_count_mapping[endpoint],
+                        },
+                    )
+                if endpoint not in transfer_mappings:
+                    continue
+                local_ids, remote_ids = [], []
+                if selected:
+                    for block_idx in range(transed_idx, to_trans_idx):
+                        local_ids.append(
+                            req_meta.local_block_ids[group_idx][block_idx // self.dcp_size] * self.dcp_size
+                            + block_idx % self.dcp_size
+                        )
+                        remote_ids.append(
+                            req_meta.remote_block_ids[group_idx][block_idx // remote_dcp_size] * remote_dcp_size
+                            + block_idx % remote_dcp_size
+                        )
+                transfer_mappings[endpoint]["indexer_block_ids"] = (local_ids, remote_ids)
+                # Count senders over the whole uncached suffix, not this chunk.
+                senders = {
+                    (i % cp_size, p_head)
+                    for i in range(req_meta.remote_cache_tokens // self.block_size[group_idx], prompt_block_size)
+                    if i % remote_cp_size == cp_rank % remote_cp_size
+                    for p_head, d_heads in pd_head_mapping.items()
+                    if d_head in d_heads
+                }
+                senders.add((cp_rank % remote_cp_size, owner))  # Full-indexer sender.
+                transfer_mappings[endpoint]["trans_count"] = len(senders)
         return transfer_mappings
 
     def _get_kv_split_metadata_for_mamba(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):
@@ -1765,6 +1850,7 @@ class MooncakeLayerwiseConnectorWorker:
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
                 self._align_remote_block_ids(req_meta)
+                indexer_block_ids = {}
                 for i, kv_cache_spec in enumerate(self.kv_cache_specs):
                     if isinstance(kv_cache_spec, MambaSpec):
                         single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
@@ -1773,6 +1859,8 @@ class MooncakeLayerwiseConnectorWorker:
                     else:
                         single_group_transfer_mappings = self._get_kv_split_metadata(req_meta, req_idx, req_id, i)
                     for (host, port), block_dict in single_group_transfer_mappings.items():
+                        if "indexer_block_ids" in block_dict:
+                            indexer_block_ids[i] = block_dict["indexer_block_ids"]
                         if (host, port) not in transfer_mappings:
                             transfer_mappings[(host, port)] = {
                                 "local_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
@@ -1790,6 +1878,7 @@ class MooncakeLayerwiseConnectorWorker:
                         ]["trans_count"]
                 assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
                 update_req_meta = copy.deepcopy(req_meta)
+                update_req_meta.indexer_block_ids = indexer_block_ids
                 for (host, port), block_dict in transfer_mappings.items():
                     update_req_meta.remote_host = host
                     update_req_meta.remote_port = port
@@ -1980,7 +2069,9 @@ class MooncakeLayerwiseConnectorWorker:
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
             for req_id, req_meta in connector_metadata.requests.items():
-                if len(req_meta.local_block_ids) <= layer_group_idx or not req_meta.local_block_ids[layer_group_idx]:
+                if not req_meta.indexer_block_ids and (
+                    len(req_meta.local_block_ids) <= layer_group_idx or not req_meta.local_block_ids[layer_group_idx]
+                ):
                     continue
                 try:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
@@ -1997,7 +2088,8 @@ class MooncakeLayerwiseConnectorWorker:
                 layer_send_task.send_request[req_id] = req_meta_update
 
             needs_reuse_gate = any(
-                len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx])
+                bool(req_meta.indexer_block_ids)
+                or (len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx]))
                 for req_meta in connector_metadata.requests.values()
             )
             if needs_reuse_gate:

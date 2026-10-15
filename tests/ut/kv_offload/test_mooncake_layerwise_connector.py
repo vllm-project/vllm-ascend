@@ -5,6 +5,7 @@ import sys
 import threading
 import types
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -45,7 +46,10 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
@@ -830,6 +834,27 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
 
+    def test_prefix_hit_is_forwarded_before_request_computed_tokens_update(self):
+        for cached_tokens in (0, 16, 32):
+            with self.subTest(cached_tokens=cached_tokens):
+                request = MockRequest(
+                    "req_prefix",
+                    prompt_token_ids=list(range(64)),
+                    kv_transfer_params={"do_remote_prefill": True},
+                )
+                self.scheduler.executor.submit = MagicMock()
+                # A repeated lookup must replace the previous hit, including with zero.
+                self.scheduler.get_num_new_matched_tokens(request, 16)
+                external_tokens, _ = self.scheduler.get_num_new_matched_tokens(request, cached_tokens)
+                self.assertEqual(request.num_computed_tokens, 0)
+                blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4, 5, 6, 7],))
+                self.scheduler.update_state_after_alloc(request, blocks, external_tokens)
+                message = self.scheduler.executor.submit.call_args.kwargs["message"]
+                self.assertEqual(message["remote_cached_tokens"], cached_tokens)
+                self.assertEqual(message["remote_block_ids"], ([4, 5, 6, 7],))
+                self.assertEqual(external_tokens, 64 - cached_tokens)
+                self.assertEqual(request.num_computed_tokens, 0)
+
     def test_get_num_new_matched_tokens_hybrid_excludes_last_token(self):
         self.scheduler.need_truncate = True
         request = MockRequest("req1", prompt_token_ids=list(range(17)), kv_transfer_params={"do_remote_prefill": True})
@@ -1497,7 +1522,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertEqual(worker.index_to_name[1], [main_1])
         self.assertEqual(worker.total_layers, 2)
 
-    def test_register_kv_caches_rejects_dcp_replicated_indexer_scale(self):
+    def test_register_kv_caches_rejects_unexplained_component_scale(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
         group = MagicMock()
@@ -1522,7 +1547,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer"
             ) as register_buffer,
-            self.assertRaisesRegex(NotImplementedError, "DCP replicated indexer cache"),
+            self.assertRaisesRegex(NotImplementedError, "different kernel block size scales"),
         ):
             worker.register_kv_caches(
                 {
@@ -1532,6 +1557,43 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             )
 
         register_buffer.assert_not_called()
+
+    def test_register_kv_caches_accepts_dcp_replicated_indexer(self):
+        main_name = "model.layers.0.self_attn.attn"
+        indexer_name = "model.layers.0.self_attn.indexer.k_cache"
+        specs = {
+            main_name: AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16),
+            indexer_name: AscendSFAIndexerCacheSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                sfa_dcp_replicated_indexer_size=4,
+            ),
+        }
+        group = SimpleNamespace(
+            layer_names=list(specs),
+            kv_cache_spec=UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs=specs,
+            ),
+        )
+        config = SimpleNamespace(kv_cache_groups=[group], kv_cache_tensors=[], num_blocks=10)
+        self.vllm_config.parallel_config.decode_context_parallel_size = 4
+        self.vllm_config.parallel_config.tensor_parallel_size = 4
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, config, self.engine_id)
+        caches = {}
+        # Register the indexer first to catch order-dependent group scale selection.
+        for name, blocks, ptr in [(indexer_name, 80, 0x20000), (main_name, 20, 0x10000)]:
+            cache = MagicMock()
+            cache.shape = (blocks, 8, 1, 16)
+            cache.data_ptr.return_value = ptr
+            cache.element_size.return_value = 2
+            caches[name] = (cache,)
+        worker.register_kv_caches(caches)
+        self.assertEqual(worker.kernel_block_size_scale, [2])
+        self.assertEqual(worker.layer_metadata[indexer_name].block_size_scale, [8])
+        self.assertEqual(worker.index_to_name[0], [main_name, indexer_name])
 
     def test_register_kv_caches_rejects_components_in_different_groups(self):
         main_name = "model.layers.0.self_attn.attn"
@@ -1601,3 +1663,214 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
 
         worker.create_kv_buffer.assert_called_once_with(main_cache)
+
+
+class TestLayerwiseReplicatedIndexerMapping(unittest.TestCase):
+    @staticmethod
+    def make_worker(pcp, dcp, rank):
+        worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        worker.pcp_size, worker.dcp_size = pcp, dcp
+        worker.pcp_rank, worker.dcp_rank = divmod(rank, dcp)
+        worker.tp_rank = worker.dcp_rank
+        worker.tp_size = dcp
+        worker.total_num_kv_heads = 1
+        worker.pd_head_ratio = 1
+        worker.use_mla = True
+        worker.num_kv_cache_groups = 1
+        worker.block_size = [16]
+        worker.kv_cache_specs = [
+            AscendSFAIndexerCacheSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                sfa_dcp_replicated_indexer_size=dcp,
+            )
+        ]
+        return worker
+
+    @staticmethod
+    def make_request(remote_dcp, prompt=113, cached=0, computed=None, transferred=0, final=True):
+        return ReqMeta(
+            local_block_ids=[[10, 13, 19, 23, 29, 31, 37, 41]],
+            token_ids=None,
+            remote_block_ids=[[50, 53, 59, 61, 67, 71, 73, 79]],
+            remote_block_size=[16],
+            remote_engine_id="decode",
+            remote_host="host",
+            remote_port=8000,
+            remote_te_rpc_port=None,
+            remote_layer_metadata=None,
+            metaserver=None,
+            remote_tp_size=remote_dcp,
+            remote_pcp_size=1,
+            remote_dcp_size=remote_dcp,
+            chunk_finish=final,
+            prompt_len=prompt,
+            remote_cache_tokens=cached,
+            local_computed_tokens=prompt if computed is None else computed,
+            local_transed_tokens=transferred,
+        )
+
+    def test_one_redundant_rank_sends_full_indexer_to_each_destination(self):
+        for pcp, p_dcp, d_dcp in [(1, 4, 4), (1, 4, 2), (1, 4, 1), (4, 1, 4)]:
+            with self.subTest(pcp=pcp, p_dcp=p_dcp, d_dcp=d_dcp):
+                senders = {port: [] for port in range(8000, 8000 + d_dcp)}
+                for rank in range(pcp * p_dcp):
+                    worker = self.make_worker(pcp, p_dcp, rank)
+                    req = self.make_request(d_dcp, cached=32)
+                    mappings = worker._get_kv_split_metadata(req, 0, "req", 0)
+                    self.assertLessEqual(len(mappings), 1)
+                    for (_, port), item in mappings.items():
+                        local_ids, remote_ids = item["indexer_block_ids"]
+                        if not local_ids:
+                            continue
+                        senders[port].append(rank)
+                        self.assertEqual(
+                            local_ids, [req.local_block_ids[0][i // p_dcp] * p_dcp + i % p_dcp for i in range(2, 8)]
+                        )
+                        self.assertEqual(
+                            remote_ids, [req.remote_block_ids[0][i // d_dcp] * d_dcp + i % d_dcp for i in range(2, 8)]
+                        )
+                self.assertTrue(all(len(ranks) == 1 for ranks in senders.values()))
+
+    def test_short_prompt_sends_indexer_to_ranks_without_main_kv(self):
+        for computed, transferred, final, block_idx in [(16, 0, False, 0), (17, 16, True, 1)]:
+            for rank in range(8):
+                with self.subTest(rank=rank, final=final):
+                    worker = self.make_worker(1, 8, rank)
+                    req = self.make_request(4, prompt=17, computed=computed, transferred=transferred, final=final)
+                    mappings = worker._get_kv_split_metadata(req, 0, "req", 0)
+                    if rank >= 4:
+                        self.assertEqual(mappings, {})
+                        continue
+                    self.assertEqual(set(mappings), {("host", 8000 + rank)})
+                    mapping = mappings[("host", 8000 + rank)]
+                    self.assertEqual(mapping["indexer_block_ids"], ([80 + block_idx], [200 + block_idx]))
+                    self.assertEqual(mapping["trans_count"], 1)
+                    self.assertEqual(req.chunk_finish, final)
+                    if rank >= 2:
+                        self.assertEqual(mapping["local_block_ids"], [])
+                        self.assertEqual(mapping["remote_block_ids"], [])
+
+    def test_non_replicated_indexer_uses_existing_dcp_mapping(self):
+        worker = self.make_worker(1, 4, 0)
+        worker.kv_cache_specs[0] = replace(worker.kv_cache_specs[0], sfa_dcp_replicated_indexer_size=1)
+        req = self.make_request(2)
+        mappings = worker._get_kv_split_metadata(req, 0, "req", 0)
+        self.assertEqual(
+            mappings,
+            {
+                ("host", 8000): {
+                    "local_block_ids": [10, 13],
+                    "remote_block_ids": [50, 59],
+                    "trans_count": 2,
+                }
+            },
+        )
+
+    def test_prefix_hit_completion_counts_main_and_indexer_senders(self):
+        for prompt, cached, expected in [(192, 128, 1), (128, 64, 2)]:
+            with self.subTest(prompt=prompt, cached=cached):
+                actual_senders = {port: set() for port in range(8000, 8004)}
+                for rank in range(8):
+                    worker = self.make_worker(1, 8, rank)
+                    req = self.make_request(4, prompt=prompt, cached=cached)
+                    for (_, port), mapping in worker._get_kv_split_metadata(req, 0, "req", 0).items():
+                        actual_senders[port].add(rank)
+                        self.assertEqual(mapping["trans_count"], expected)
+                self.assertTrue(all(len(ranks) == expected for ranks in actual_senders.values()))
+
+    def test_prefix_hit_completion_count_is_stable_across_chunks(self):
+        for computed, transferred, final in [(160, 128, False), (192, 160, True)]:
+            for rank in range(4):
+                worker = self.make_worker(1, 8, rank)
+                req = self.make_request(
+                    4, prompt=192, cached=128, computed=computed, transferred=transferred, final=final
+                )
+                mapping = worker._get_kv_split_metadata(req, 0, "req", 0)[("host", 8000 + rank)]
+                self.assertEqual(mapping["trans_count"], 1)
+                self.assertEqual(req.chunk_finish, final)
+
+    def test_selected_sender_keeps_last_indexer_chunk(self):
+        worker = self.make_worker(1, 4, 0)
+        req = self.make_request(2, prompt=81, computed=80, final=False)
+        first = worker._get_kv_split_metadata(req, 0, "req", 0)[("host", 8000)]
+        self.assertFalse(req.chunk_finish)
+        self.assertEqual(first["indexer_block_ids"][1], [100, 101, 106, 107, 118])
+        req = self.make_request(2, prompt=81, transferred=80)
+        final = worker._get_kv_split_metadata(req, 0, "req", 0)[("host", 8000)]
+        self.assertEqual(final["local_block_ids"], [])
+        self.assertEqual(final["indexer_block_ids"], ([53], [119]))
+        self.assertEqual(final["trans_count"], first["trans_count"])
+
+    def test_start_load_preserves_string_request_key(self):
+        worker = self.make_worker(1, 4, 0)
+        worker.total_layers = 1
+        worker.kernel_block_size_scale = [1]
+        worker.enable_kv_quant = worker.enable_c8_quant = False
+        worker.vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True,
+                is_kv_consumer=False,
+            )
+        )
+        metadata = MooncakeLayerwiseConnectorMetadata()
+        metadata.requests["req"] = self.make_request(2)
+        worker.start_load_kv(metadata)
+        self.assertEqual(list(metadata.requests), ["req"])
+        self.assertEqual(len(metadata.requests["req"].indexer_block_ids[0][0]), 8)
+
+    def test_indexer_addresses_use_each_sides_dcp_size(self):
+        for local_dcp, remote_dcp in [(4, 2), (2, 4), (4, 1), (1, 4), (4, 4)]:
+            for kernel_scale in [1, 2]:
+                with self.subTest(local_dcp=local_dcp, remote_dcp=remote_dcp, kernel_scale=kernel_scale):
+                    sender = KVCacheSendingLayerThread.__new__(KVCacheSendingLayerThread)
+                    sender.kv_cache_specs = self.make_worker(1, local_dcp, 0).kv_cache_specs
+                    sender.pd_head_ratio = 1
+                    sender.vllm_config = SimpleNamespace(
+                        parallel_config=SimpleNamespace(
+                            decode_context_parallel_size=local_dcp,
+                        )
+                    )
+                    sender.layer_metadata = {
+                        "index_cache": LayerMetadata(
+                            [0, 0],
+                            [1000, 2000],
+                            [32, 4],
+                            [local_dcp * kernel_scale] * 2,
+                        )
+                    }
+                    req = self.make_request(remote_dcp)
+                    # Same sequence positions, different scheduler block IDs and DCP widths.
+                    local_ids = [req.local_block_ids[0][i // local_dcp] * local_dcp + i % local_dcp for i in [0, 4]]
+                    remote_ids = [
+                        req.remote_block_ids[0][i // remote_dcp] * remote_dcp + i % remote_dcp for i in [0, 4]
+                    ]
+                    req.indexer_block_ids = {0: (local_ids, remote_ids)}
+                    req.remote_layer_metadata = {
+                        "index_cache": LayerMetadata(
+                            [0, 0],
+                            [10000, 20000],
+                            [32, 4],
+                            [remote_dcp * kernel_scale] * 2,
+                        )
+                    }
+                    src, dst, lengths = sender.get_transfer_meta(SendTask(), "req", req, "index_cache", 0)
+                    self.assertEqual(
+                        src,
+                        [
+                            base + block * kernel_scale * size
+                            for base, size in [(1000, 32), (2000, 4)]
+                            for block in local_ids
+                        ],
+                    )
+                    self.assertEqual(
+                        dst,
+                        [
+                            base + block * kernel_scale * size
+                            for base, size in [(10000, 32), (20000, 4)]
+                            for block in remote_ids
+                        ],
+                    )
+                    self.assertEqual(lengths, [32 * kernel_scale] * 2 + [4 * kernel_scale] * 2)
