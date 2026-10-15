@@ -514,9 +514,11 @@ class KVPoolScheduler:
             # a sequential prefix scan (stop at first miss), so blocks whose
             # (group, hash) state is cached are resolved without any RPC.
             hit_cache = self._lw_block_hit_cache
-            if self.dspark_prefix_keys is not None:
-                # A paired prefix may be saved or evicted between requests.
-                # Recheck target and all draft replicas on every lookup.
+            if self.layerwise_offload or self.dspark_prefix_keys is not None:
+                # Reused buffers do not retain every layer's local prefix KV.
+                # A stale miss would skip its restore; a stale hit may refer
+                # to evicted KV. Recheck host readability on every lookup.
+                # DSpark likewise requires fresh target and draft coverage.
                 hit_cache = {}
             now = time.monotonic()
             if len(hit_cache) > self._lw_hit_cache_max:
