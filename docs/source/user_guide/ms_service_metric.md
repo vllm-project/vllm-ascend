@@ -57,7 +57,7 @@ vLLM Ascend-owned metric configurations are stored as YAML files in `vllm_ascend
 Example:
 
 ```yaml
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:model_runner_execute_model:duration

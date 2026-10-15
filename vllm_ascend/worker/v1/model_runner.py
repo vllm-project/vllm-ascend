@@ -241,13 +241,13 @@ from vllm_ascend.worker.device_metadata import (
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
-    AscendKVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     disable_compilation,
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
     row_major_strides,
 )
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip

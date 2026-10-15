@@ -528,7 +528,7 @@ class NPUWorker(WorkerBase):
             # Lazy import keeps the V1 model runner out of pure-V2 processes;
             # this selection branch is the only V1 entry point (see the
             # V1 code-isolation RFC, PR-1).
-            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+            from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 

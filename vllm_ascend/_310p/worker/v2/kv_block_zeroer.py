@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.utils import AttentionGroup
+    from vllm.v1.worker.utils import AttentionGroup
 
 
 class AscendKVBlockZeroer310V2(AscendKVBlockZeroer310):

@@ -169,7 +169,7 @@ Reviewers must verify:
 
 **NPU Model Runner Files:**
 
-- `vllm_ascend/worker/model_runner_v1.py` - vLLM v1 model runner
+- `vllm_ascend/worker/v1/model_runner.py` - vLLM v1 model runner (isolated V1 zone, removal-tracked)
 - `vllm_ascend/worker/v2/model_runner.py` - vLLM v2 model runner
 - `vllm_ascend/_310p/model_runner_310p.py` - Ascend 310P model runner
 
