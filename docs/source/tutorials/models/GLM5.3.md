@@ -395,29 +395,11 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --async-scheduling
     ```
 
-**A2 parameter clarification:** The four-node A2 commands above use global
-DP4, one local DP rank per node, and TP8. Their starting DP ranks are
-0, 1, 2, and 3. On the API node, omit `--data-parallel-start-rank` so rank
-0 is inferred automatically. Explicitly setting this flag on the API
-node triggers external/hybrid DP load-balancing inference in v0.30.0rc1,
-which rejects remote headless engines. Nodes 1-3 keep `--headless` and
-set their starting ranks to 1, 2, and 3, respectively.
-
-Use `scheduler_config.enable_balance_scheduling` and
-`ascend_compilation_config.fuse_muls_add` inside `--additional-config`.
-The former replaces the deprecated top-level scheduler setting; the
-latter is the configuration level required by v0.30.0rc1.
-
-The DP8/local-DP4 values and node 1 offset of 4 in the
-network parameter descriptions below apply to the A3 example. The A2
-commands use `multistream_overlap_shared_expert` and do not enable fused
-MC2; the fused-MC2 notice below applies to A3.
-
 Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. max-model-len and max-num-seqs need to be set according to the actual usage scenario.
 
-**Multi-node network and data parallel configuration:**
+**A3 network and data parallel configuration:**
 
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
@@ -425,7 +407,32 @@ Only the key parameters specific to this model/scenario are described below. max
 - `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
-- `--headless`: Indicates a non-master node (used on node 1-3). Do not use on node 0.
+- `--headless`: Used on node 1. Node 0 hosts the API server.
+
+**A2 four-node network and data parallel configuration:**
+
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and
+  `HCCL_SOCKET_IFNAME`: Set each node's local IP and matching network
+  interface for multi-node communication.
+- `--data-parallel-size 4`: Four global DP ranks, one per A2 node.
+- `--data-parallel-size-local 1`: One local DP rank per node, using TP8.
+- Node 0 hosts the API and omits `--data-parallel-start-rank`, so rank 0
+  is inferred automatically. Nodes 1-3 use `--headless` and explicitly
+  set `--data-parallel-start-rank` to 1, 2, and 3, respectively.
+- `--data-parallel-address`: Node 0's IP, shared by all four nodes.
+  `--data-parallel-rpc-port 12980` must also match on every node.
+
+On v0.30.0rc1, explicitly setting `--data-parallel-start-rank 0` on the
+API node triggers external/hybrid DP load-balancing inference. The remote
+headless engines are then rejected with
+`Remote engine must not use --headless in external or hybrid dp lb mode`.
+Keep the API node's rank implicit so all four EngineCores join the same
+DP group.
+
+Use `scheduler_config.enable_balance_scheduling` and
+`ascend_compilation_config.fuse_muls_add` inside `--additional-config`.
+The former replaces the deprecated top-level scheduler setting; the
+latter is the configuration level required by v0.30.0rc1.
 
 **A2-specific environment variables:**
 
@@ -438,8 +445,9 @@ Only the key parameters specific to this model/scenario are described below. max
 
 - `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
 
-**Notice:**
+**A3-specific fused MC2 notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
+The A2 four-node commands in this section do not enable fused MC2.
 
 #### 5.1.2 Prefill-Decode Disaggregation
 
@@ -957,7 +965,8 @@ Key parameters:
 ##### 5.1.2.5 A2 Series: 8-Node Deployment
 
 This reference deploys GLM-5.3 W8A8C8 on eight Atlas 800I A2 (64GB × 8)
-nodes with the image from Section 4.1. Both roles enable expert
+nodes. The rc1 reference uses `quay.io/ascend/vllm-ascend:v0.30.0rc1`
+with the A2 container command from Section 4.1. Both roles enable expert
 parallelism to distribute the MoE expert weights across their DP × TP ranks.
 
 | Role | Nodes | Global DP | TP | PP | Placement | Devices per role |
@@ -1044,6 +1053,11 @@ P0's IP in every copy and `NIC_NAME` to the current node's interface.
 The command-line arguments select the node rank, API port, local IP,
 and visible devices.
 
+For v0.30.0rc1, apply the single-local-DP-rank compatibility fix in
+[Section 5.1.2.5.6](#51256-v0300rc1-compatibility-and-troubleshooting)
+to the active vLLM-Ascend installation on every Prefill node before
+starting the group.
+
 ```shell
 #!/usr/bin/env bash
 set -eo pipefail
@@ -1062,7 +1076,7 @@ case "$NODE_RANK" in
   *) echo "node_rank must be 0-3" >&2; exit 1;;
 esac
 
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 # Cross-node TP16 uses the NPU RoCE interfaces for device communication.
@@ -1093,6 +1107,7 @@ exec vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
   --port "$PORT" \
   --data-parallel-size 2 \
+  --data-parallel-size-local 1 \
   --tensor-parallel-size 16 \
   --distributed-executor-backend mp \
   --nnodes 4 \
@@ -1157,7 +1172,7 @@ LOCAL_IP="<CURRENT_DECODE_NODE_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export VLLM_HOST_IP="$LOCAL_IP"
@@ -1269,8 +1284,17 @@ bash start_p_engine.sh 3 8077 "<PREFILL_NODE3_IP>" 0,1,2,3,4,5,6,7
 
 Wait for P0:8077 and all sixteen Decode APIs on ports 10010-10013 to
 answer `GET /v1/models`. Confirm in the logs that P1-P3 have joined;
-headless nodes do not expose HTTP APIs. Start the proxy on P0 or a host
-that can reach all endpoints:
+headless nodes do not expose HTTP APIs. When HTTP proxy variables are
+set, use `curl --noproxy '*'` for business-IP checks to avoid proxy
+interception and HTTP 403 responses. For example, check P0 as follows,
+then check each Decode endpoint in the same way:
+
+```shell
+curl --noproxy '*' "http://<PREFILL_NODE0_IP>:8077/v1/models"
+```
+
+Start the load-balancing proxy on P0 or a host that can reach all
+endpoints. Clear inherited proxy settings before starting it:
 
 ```shell
 P0_IP="<PREFILL_NODE0_IP>"
@@ -1278,6 +1302,8 @@ D0_IP="<DECODE_NODE0_IP>"
 D1_IP="<DECODE_NODE1_IP>"
 D2_IP="<DECODE_NODE2_IP>"
 D3_IP="<DECODE_NODE3_IP>"
+
+unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
 python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
   --host 0.0.0.0 --port 8000 --workers 8 \
@@ -1290,12 +1316,81 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
     10010 10011 10012 10013 10010 10011 10012 10013
 ```
 
-Send requests to `http://<PROXY_IP>:8000` with model name `glm5`.
+Check the proxy and send requests with model name `glm5`, explicitly
+bypassing any client-side HTTP proxy:
+
+```shell
+curl --noproxy '*' "http://<PROXY_IP>:8000/v1/models"
+curl --noproxy '*' "http://<PROXY_IP>:8000/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm5",
+    "messages": [{"role": "user", "content": "What is 12 times 7?"}],
+    "max_tokens": 128,
+    "temperature": 0
+  }'
+```
+
 Both roles use a 135,000-token maximum length, memory utilization 0.92,
 and three MTP tokens. Prefill uses eager mode, an 8192-token batch budget,
 64 sequences, DSA CP, FlashComm1, and fused MC2. Decode uses a 256-token
 batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
 fused MC2, and recomputation scheduling.
+
+###### 5.1.2.5.6 v0.30.0rc1 Compatibility and Troubleshooting
+
+If Prefill fails during Mooncake KV cache registration with
+`ValueError: Mooncake worker requires a local DP rank`, first verify that
+`--data-parallel-size-local 1` is present in `start_p_engine.sh`.
+P0/P1 form global DP rank 0 and P2/P3 form global DP rank 1; each node
+has one local DP rank. Even with that option, v0.30.0rc1 multi-node TP
+headless workers may receive `data_parallel_rank_local=None`.
+
+For the rc1 image, apply the following change to
+`vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py`
+in the vLLM-Ascend installation used by **every Prefill node** before
+launching the scripts. It infers local rank 0 only when
+`data_parallel_size_local == 1`; multiple-local-rank configurations
+still require an explicit local rank.
+
+```diff
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
+@@ -93,9 +93,14 @@
+         self.pp_rank = get_pp_group().rank_in_group
+         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+-        if self.dp_rank is None:
+-            raise ValueError("Mooncake worker requires a local DP rank")
+         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
++        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
++        if self.dp_rank is None:
++            if self.dp_size != 1:
++                raise ValueError("Mooncake worker requires a local DP rank")
++            self.dp_rank = 0
++            logger.warning(
++                "Inferring Mooncake local DP rank 0 for a single local DP rank"
++            )
+         pcp_group = get_pcp_group()
+         self.pcp_rank = pcp_group.rank_in_group
+         self.pcp_size = pcp_group.world_size
+```
+
+The same rc1 compatibility fix is required by the pooled Prefill PP
+headless workers in Section 5.1.3.5. Confirm that the active Python
+package contains the change on every Prefill node, then start all
+members of the Prefill group before waiting for it to become ready.
+
+The supplied A2 deployment validation record dated 2026-10-15 reports
+the following results with the explicit local-DP setting and rc1 fix:
+
+| Check | Recorded result |
+| --- | --- |
+| Smoke request | HTTP 200; answer `84` |
+| GSM8K requests / successful / failed | 200 / 200 / 0 |
+| Elapsed time for the 200-request run | 105.324 seconds |
+
+The request counts report successful completion, not an accuracy score.
 
 #### 5.1.3 MemCache KV Cache Pool Deployment
 
@@ -1871,6 +1966,24 @@ on every node, including the hardware/CANN prerequisites and installation
 of `memfabric-hybrid` and `memcache-hybrid`. Install `fastokens` on all
 four Prefill nodes. All eight nodes must reach the same MetaService.
 
+On every Prefill and Decode **host**, configure hugepages before
+starting MemCache services:
+
+```shell
+# Run on every Prefill and Decode host before starting MemCache services.
+sudo sysctl -w vm.nr_hugepages=200000
+sysctl -n vm.nr_hugepages
+```
+
+The check must print:
+
+```text
+200000
+```
+
+This is a host prerequisite for the `device_rdma` configuration with
+`40GB` DRAM per LocalService; check all eight hosts before proceeding.
+
 Prepare `mmc-meta.conf` for the MetaService on `<MEMCACHE_META_IP>`:
 
 ```ini
@@ -1947,7 +2060,7 @@ case "$NODE_RANK" in
   *) echo "node_rank must be 0 or 1" >&2; exit 1;;
 esac
 
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export VLLM_SERVER_DEV_MODE=1
@@ -2040,6 +2153,12 @@ The Prefill script keeps `--no-async-scheduling` together with the V1
 runner and `profiling_chunk_config.enabled=true`. Enabling async
 scheduling with this combination is rejected by the runtime.
 
+On v0.30.0rc1, PP headless workers may fail with
+`Mooncake worker requires a local DP rank`. Each pooled Prefill instance
+has DP size 1, so apply the single-local-DP-rank compatibility fix in
+[Section 5.1.2.5.6](#51256-v0300rc1-compatibility-and-troubleshooting)
+to all Prefill nodes before starting the two instances.
+
 ###### 5.1.3.5.3 Decode Engine Script (Pooled)
 
 Save this script as `start_d_engine_pool.sh` on D0-D3. Configure the
@@ -2064,7 +2183,7 @@ LOCAL_IP="<CURRENT_DECODE_NODE_IP>"
 : "${PYTHON_LIB_DIR:?export PYTHON_LIB_DIR}"
 : "${MMC_LOCAL_CONFIG_PATH:?export MMC_LOCAL_CONFIG_PATH}"
 
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export VLLM_SERVER_DEV_MODE=1
@@ -2200,10 +2319,23 @@ DP rank; it is not a TCP listener on port zero.
     python launch_online_dp.py --script ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 8000
     ```
 
-4. Wait for the APIs on P0:8000, P2:8000, and all sixteen Decode APIs on
-   ports 8000-8003 to answer `GET /v1/models`. Confirm from the logs that
-   P1 and P3 joined their PP instances; they do not expose HTTP APIs.
-   Start the proxy on P0 or another reachable host:
+4. Confirm that the Decode worker logs report completion of the MemCache
+   DP initialization barrier before treating the group as ready:
+
+    ```text
+    All DP MemCache initializations completed
+    ```
+
+    The Prefill instances have DP size 1 and do not enter this DP
+    barrier; check their logs for successful MemCache initialization and
+    verify that P1 and P3 joined their PP instances. They do not expose
+    HTTP APIs. On every node, confirm that the active `mmc-local.conf`
+    uses `device_rdma` and `dram.size = 40GB`.
+
+    Wait for the APIs on P0:8000, P2:8000, and all sixteen Decode APIs on
+    ports 8000-8003 to answer `GET /v1/models`. Use `curl --noproxy '*'`
+    for these checks when HTTP proxies are configured. Start the proxy
+    on P0 or another reachable host:
 
     ```shell
     P0_IP="<PREFILL_NODE0_IP>"
@@ -2212,6 +2344,8 @@ DP rank; it is not a TCP listener on port zero.
     D1_IP="<DECODE_NODE1_IP>"
     D2_IP="<DECODE_NODE2_IP>"
     D3_IP="<DECODE_NODE3_IP>"
+
+    unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
       --host 0.0.0.0 --port 1999 --workers 8 \
@@ -2230,7 +2364,8 @@ Send requests to the proxy with model name `glm5`, keeping the combined
 input and output within the 128,000-token Prefill limit:
 
 ```shell
-curl "http://<PROXY_IP>:1999/v1/chat/completions" \
+curl --noproxy '*' "http://<PROXY_IP>:1999/v1/models"
+curl --noproxy '*' "http://<PROXY_IP>:1999/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "glm5",
@@ -2247,6 +2382,31 @@ saves, lookups, loads, and hit metrics. Confirm a shared-pool load when
 the prefix is absent from the selected engine's local cache; a successful
 response or a local prefix-cache hit alone does not demonstrate pooling.
 All nodes use the same `PYTHONHASHSEED=0` and MemCache configuration.
+
+Also inspect the vLLM external prefix-cache statistics. After warmup,
+the external hit rate should be greater than zero:
+
+```text
+External prefix cache hit rate: > 0%
+```
+
+Correlate this external-cache metric with the MemCache backend's
+successful lookups and loads to confirm reuse through the shared
+pool rather than only the engine's local HBM prefix cache.
+
+The supplied A2 deployment validation record dated 2026-10-15 reports
+the following results for this pooled topology after configuring
+hugepages and applying the rc1 compatibility fix:
+
+| Check | Recorded result |
+| --- | --- |
+| Smoke request | HTTP 200; answer `42` |
+| GSM8K requests / successful / failed | 200 / 200 / 0 |
+| Elapsed time for the 200-request run | 75.666 seconds |
+| Decode external prefix cache hit rate | 100.0% |
+
+The observed log line was `External prefix cache hit rate: 100.0%`.
+The request counts report successful completion, not an accuracy score.
 
 The A2 pooled Prefill budget is 16,384 batched tokens and 64 sequences,
 with eager execution, one MTP token, DSA CP, FlashComm1, and synchronous
