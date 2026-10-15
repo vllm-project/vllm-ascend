@@ -1,6 +1,6 @@
 import unittest
 from collections import deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -10,6 +10,8 @@ import torch
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.offloader.base import NoopOffloader
+from vllm.model_executor.offloader.prefetch import PrefetchOffloader
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -1216,6 +1218,103 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    def _check_load_model_prolog_budget(self, with_draft, pcp_enabled):
+        runner = self._build_runner()
+        runner.model_config.model = "test-model"
+        runner.model_config.multimodal_config = None
+        runner.ascend_config.mix_placement = False
+        runner.eplb_enable = False
+        runner.use_aux_hidden_state_outputs = False
+        runner.lora_config = None
+        runner.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        layers = runner.compilation_config.static_forward_context
+        model = SimpleNamespace(named_parameters=lambda: (), token_lookback_depth=0)
+        allocated = 0
+        profiling = False
+        spec = AscendMLAAttentionSpec(block_size=128, num_heads=4, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+
+        def add_layer(name):
+            layer = MLAAttention.__new__(MLAAttention)
+            torch.nn.Module.__init__(layer)
+            layer.impl = SimpleNamespace(pcp_enabled=pcp_enabled, supports_prolog_v3_writer=lambda: True)
+
+            def prepare():
+                nonlocal allocated
+                self.assertTrue(profiling, "Private writer weights must be allocated before profiling ends")
+                allocated += 1024
+
+            layer.impl._prepare_prolog_v3_weights = MagicMock(side_effect=prepare)
+            layers[name] = layer
+
+        def load_target(**kwargs):
+            nonlocal allocated
+            allocated += 4096
+            add_layer("target.attn")
+            return model
+
+        runner.drafter = MagicMock() if with_draft else None
+        if runner.drafter:
+            runner.drafter.load_model.side_effect = lambda target: add_layer("draft.attn")
+        runner.get_kv_cache_spec = lambda: dict.fromkeys(layers, spec)
+
+        @contextmanager
+        def memory_profiler():
+            nonlocal profiling
+            profiling = True
+            profiler = SimpleNamespace(consumed_memory=0)
+            yield profiler
+            profiler.consumed_memory = allocated
+            profiling = False
+
+        with (
+            patch.multiple(
+                "vllm_ascend.worker.model_runner_v1",
+                DeviceMemoryProfiler=memory_profiler,
+                get_model=load_target,
+                get_pp_group=lambda: SimpleNamespace(world_size=1),
+                get_tp_context=lambda drafter: nullcontext(),
+                get_offloader=lambda: NoopOffloader(),
+                supports_multimodal_pruning=lambda model: False,
+                supports_component_major_mla_pd=lambda config: True,
+                _torch_cuda_wrapper=nullcontext,
+            ),
+            patch.multiple(
+                "vllm_ascend.model_executor.warmup.nz_warmup",
+                start_nz_warm_thread=MagicMock(),
+                join_nz_warm_thread=MagicMock(),
+            ),
+            patch.multiple(
+                "vllm_ascend.model_executor.warmup.early_kernel_warmup",
+                start_early_kernel_warmup=MagicMock(),
+                join_early_kernel_warmup=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.breakable_cudagraph.is_breakable_cudagraph_enabled",
+                return_value=False,
+            ),
+        ):
+            runner.load_model()
+
+        self.assertEqual(set(layers), {"target.attn", "draft.attn"} if with_draft else {"target.attn"})
+        self.assertEqual(runner.model_memory_usage, 4096 + (0 if pcp_enabled else 1024 * len(layers)))
+        for layer in layers.values():
+            self.assertEqual(layer.impl._prepare_prolog_v3_weights.call_count, int(not pcp_enabled))
+
+    def test_load_model_budgets_prolog_weights_for_target_and_draft(self):
+        for with_draft, pcp_enabled in ((False, False), (True, False), (True, True)):
+            with self.subTest(with_draft=with_draft, pcp_enabled=pcp_enabled):
+                self._check_load_model_prolog_budget(with_draft, pcp_enabled)
+
+    def test_prolog_weight_budget_preserves_offloaded_weight_onload(self):
+        runner = self._build_runner()
+        runner.get_kv_cache_spec = MagicMock(side_effect=AssertionError("Offloaded weights are not ready"))
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.get_offloader",
+            return_value=PrefetchOffloader.__new__(PrefetchOffloader),
+        ):
+            runner._prepare_prolog_v3_weights()
+        runner.get_kv_cache_spec.assert_not_called()
 
     def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
         runner = self._build_runner()
