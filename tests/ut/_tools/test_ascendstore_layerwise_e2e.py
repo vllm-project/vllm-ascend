@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from statistics import median
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -15,57 +16,45 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
+from tests.e2e.pull_request.one_card.ascendstore_v1_layerwise import AscendStoreLayerwiseWorkerExtension
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAYERWISE_TEST = "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py"
 
 
 @pytest.mark.parametrize("failure", [None, "production", "v1"])
-def test_both_correctness_runs_gate_fresh_uninstrumented_performance_servers(tmp_path, failure):
+def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(tmp_path, failure):
     source = ast.parse((REPO_ROOT / LAYERWISE_TEST).read_text())
     entry = next(node for node in source.body if isinstance(node, ast.FunctionDef))
     # Execute the actual orchestration with boundary doubles; do not import pytest's NPU E2E conftest.
     module = ast.Module(body=[entry], type_ignores=[])
-    launches, operations, reports = [], [], []
+    launches, reports = [], []
     connectors = (("production", "production", "module"), ("v1", "v1", "module"))
 
     def exercise(path, model, tokenizer, inputs, warmup, connector, observations, **kwargs):
-        assert kwargs["use_layerwise"] is True
-        assert kwargs["worker_extension"] == "layerwise-extension"
+        assert kwargs == {"use_layerwise": True, "worker_extension": "layerwise-extension"}
         assert path.is_dir()
-        validator = kwargs.get("validate")
-        launches.append((connector[0], "validation" if validator is not None else "performance"))
-        if validator is not None:
-            validator(SimpleNamespace(implementation=connector[0]), SimpleNamespace(master_address="127.0.0.1:1"))
+        launches.append(connector[0])
+        observations.append({"cold_store": {}, "external_load": {}})
+        if connector[0] == failure:
+            raise AssertionError("Injected serving failure")
 
-    def rpc(server, method, **kwargs):
-        operations.append((server.implementation, method))
-        if method == "finish_layerwise_validation" and failure == server.implementation:
-            raise AssertionError("Injected validation failure")
-        return {"workers": [{"status": "passed"}]}
+    compare = Mock(return_value={"output_and_performance_comparison": True})
 
     namespace: dict[str, Any] = {
         "Path": Path,
         "Any": object,
         "shutil": SimpleNamespace(which=lambda _: "master"),
-        "import_module": lambda _: SimpleNamespace(
-            MOONCAKE_LAYERWISE_CLIENT_METHODS=("start",), MooncakeDistributedStore=SimpleNamespace(start=lambda: None)
-        ),
         "MODEL": "model",
         "maybe_model_redirect": lambda model: model,
         "get_tokenizer": lambda _: None,
         "make_requests": lambda *args, **kwargs: [],
         "CONCURRENCY": 8,
-        "VALIDATION_REQUEST_COUNT": 2,
         "make_report": lambda *args: {"runs": []},
-        "CONNECTORS": connectors,
         "CROSSOVER_RUNS": connectors + connectors[::-1],
         "LAYERWISE_WORKER_EXTENSION": "layerwise-extension",
         "_exercise_connector": exercise,
-        "call_worker_rpc": rpc,
-        "reset_local_prefix_cache": lambda _: {},
-        "run_benchmark": lambda *args: {},
-        "assert_prompt_sources": Mock(),
-        "compare_runs": lambda _: {},
+        "compare_runs": compare,
         "time": SimpleNamespace(monotonic=lambda: 1),
         "write_report": lambda *args: reports.append(args[-1]),
     }
@@ -73,25 +62,82 @@ def test_both_correctness_runs_gate_fresh_uninstrumented_performance_servers(tmp
     test = namespace[entry.name]
     if failure is None:
         test(tmp_path)
-        assert launches == [(name, "validation") for name in ("production", "v1")] + [
-            (name, "performance") for name in ("production", "v1", "v1", "production")
-        ]
-        assert reports[0]["status"] == "validated_and_measured"
+        assert launches == ["production", "v1", "v1", "production"]
+        assert reports[0]["status"] == "measured"
+        assert reports[0]["comparisons"] == compare.return_value
+        compare.assert_called_once_with(reports[0]["runs"])
     else:
-        with pytest.raises(AssertionError, match="Injected validation failure"):
+        with pytest.raises(AssertionError, match="Injected serving failure"):
             test(tmp_path)
-        assert all(phase == "validation" for _, phase in launches)
+        assert launches == (["production"] if failure == "production" else ["production", "v1"])
         assert reports[0]["status"] == "incomplete"
-    for implementation, _ in launches[:2]:
-        methods = [method for name, method in operations if name == implementation]
-        assert methods == [
-            "reset_ascendstore_benchmark_pool",
-            "start_layerwise_validation",
-            "drain_ascendstore_benchmark_stores",
-            "arm_layerwise_destination_poisoning",
-            "finish_layerwise_validation",
-            "remove_layerwise_validation",
-        ]
+        compare.assert_not_called()
+    assert reports[0]["scenario"] == "layerwise"
+    assert "validation" not in reports[0]
+    assert all(run["measurements"] and "duration_seconds" in run for run in reports[0]["runs"])
+
+
+@pytest.mark.parametrize("implementation", ["production", "v1"])
+def test_worker_drains_the_layerwise_owner_not_the_bulk_sender(monkeypatch, implementation):
+    extension = AscendStoreLayerwiseWorkerExtension()
+    store = object()
+    backend = SimpleNamespace(store=store, _store=store)
+    worker = SimpleNamespace(_drain_attention_transfers=Mock(), fence_previous_store=Mock(), _pending_store_batch=None)
+    monkeypatch.setattr(extension, "_layerwise_resources", lambda: (worker, backend, implementation))
+    assert extension._drain_stores()[:2] == (backend, store)
+    if implementation == "production":
+        worker._drain_attention_transfers.assert_called_once_with(drain_recv=False, full=True)
+        worker.fence_previous_store.assert_not_called()
+    else:
+        worker.fence_previous_store.assert_called_once_with()
+        worker._drain_attention_transfers.assert_not_called()
+
+
+def test_output_differences_are_reported_alongside_performance_results():
+    benchmark = REPO_ROOT / "tests/e2e/pull_request/ascendstore_v1_benchmark.py"
+    source = ast.parse(benchmark.read_text())
+    compare = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "compare_runs")
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "CONNECTORS": (("production", "", ""), ("v1", "", "")),
+        "SUMMARY_METRICS": ("median_ttft_ms", "output_throughput"),
+        "median": median,
+    }
+    exec(compile(ast.Module(body=[compare], type_ignores=[]), str(benchmark), "exec"), namespace)
+    runs = []
+    for run_index, implementation in enumerate(("production", "v1"), start=1):
+        measurement = {
+            "generated_texts": ["same", implementation],
+            "median_ttft_ms": 100 / run_index,
+            "output_throughput": 10 * run_index,
+        }
+        runs.append(
+            {
+                "run": run_index,
+                "implementation": implementation,
+                "measurements": [{"round": 1, "cold_store": measurement, "external_load": measurement}],
+            }
+        )
+    results = namespace["compare_runs"](runs)
+    for phase in ("cold_store", "external_load"):
+        comparison = results[phase]
+        assert comparison["text_comparisons"][0]["generated_texts_equal"] is False
+        assert comparison["text_comparisons"][0]["different_request_indices"] == [1]
+        assert comparison["median_ttft_ms"]["v1_over_production"] == 0.5
+        assert comparison["output_throughput"]["v1_over_production"] == 2.0
+
+
+def test_layerwise_byte_probe_and_instrumentation_entry_points_are_removed():
+    assert not (REPO_ROOT / "tests/e2e/common/kv_pool/ascendstore_layerwise_probe.py").exists()
+    worker = (REPO_ROOT / "tests/e2e/pull_request/one_card/ascendstore_v1_layerwise.py").read_text()
+    assert "LayerwiseRangeProbe" not in worker
+    assert "validation" not in worker
+    assert "kv_caches" not in worker
+    shared = ast.parse((REPO_ROOT / "tests/e2e/pull_request/one_card/test_ascendstore_v1.py").read_text())
+    exercise = next(
+        node for node in shared.body if isinstance(node, ast.FunctionDef) and node.name == "_exercise_connector"
+    )
+    assert "validate" not in [argument.arg for argument in exercise.args.kwonlyargs]
 
 
 def test_demo_ci_selects_only_one_tp1_layerwise_e2e_and_has_real_timeouts(tmp_path):

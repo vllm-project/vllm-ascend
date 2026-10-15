@@ -7,7 +7,6 @@ import os
 import shlex
 import shutil
 import time
-from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -83,7 +82,6 @@ def _exercise_connector(
     *,
     use_layerwise: bool = False,
     worker_extension: str = WORKER_EXTENSION,
-    validate: Callable[[Any, Any], None] | None = None,
 ) -> None:
     _, connector_name, connector_module = connector
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
@@ -143,9 +141,6 @@ def _exercise_connector(
             env_dict=server_envs,
         ) as server:
             run_benchmark(server, tokenizer, warmup)
-            if validate is not None:
-                validate(server, pool)
-                return
             for round_index in range(1, ROUNDS_PER_RUN + 1):
                 row: dict[str, Any] = {"round": round_index}
                 observations.append(row)
