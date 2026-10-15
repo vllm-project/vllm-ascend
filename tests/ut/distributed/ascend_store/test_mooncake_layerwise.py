@@ -161,12 +161,58 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
         store.batch_commit.assert_called_once_with(["key"])
         self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0)])
 
+    def test_failed_layer_range_never_publishes_incomplete_decode_block(self):
+        for failed_operation in ("copy", "commit"):
+            with self.subTest(failed_operation=failed_operation):
+                store = MagicMock()
+                store.batch_copy_put.return_value = [-1] if failed_operation == "copy" else [30]
+                store.batch_commit.return_value = [-1] if failed_operation == "commit" else [0]
+                store.batch_revoke.return_value = [0]
+                tracker = LayerwiseSessionTracker()
+                tracker.register_put_keys("decode", [("key", 0)])
+                database = make_token_database()
+                builder = LayerBatchBuilder(database, page_size_bytes=60, num_layers=2)
+                started = {"key"}
+                thread = KVCacheStoreLayerSendingThread(
+                    m_store=store,
+                    token_database=database,
+                    block_size=16,
+                    tp_rank=0,
+                    tp_size=1,
+                    dcp_size=1,
+                    page_size_bytes=60,
+                    ready_event=threading.Event(),
+                    num_layers=2,
+                    layer_save_finished_events=[threading.Event(), threading.Event()],
+                    sync_save_events=[MagicMock(), MagicMock()],
+                    put_started_keys=started,
+                    session_tracker=tracker,
+                )
+                request = ReqMeta("decode", block_ids=[2], block_hashes=[])
+                request.save_block_keys = ["key"]
+                for layer_id in range(2):
+                    task = LayerTransferTask(
+                        layer_id=layer_id,
+                        layer_idx_in_group=layer_id,
+                        block_ranges=[LayerBlockRange(request, 0, 1)],
+                        use_key_major_ranges=True,
+                    )
+                    thread._handle_range_request(builder.build(task))
+                store.batch_revoke.assert_called_once_with(["key"])
+                if failed_operation == "copy":
+                    store.batch_commit.assert_not_called()
+                self.assertEqual(tracker.prepare_load_entries("decode", []), [])
+                self.assertFalse(started)
+
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
     def _make_worker() -> KVPoolWorker:
         worker = KVPoolWorker.__new__(KVPoolWorker)
         worker.kv_role = "kv_producer"
+        worker._layerwise_decode_retry_offsets = {}
+        worker._step_layerwise_decode_failures = {}
+        worker._current_layerwise_decode_saves = []
         worker.consumer_is_to_put = False
         worker.dcp_size = 1
         worker.tp_rank = 0
@@ -201,6 +247,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker._put_started_keys_lock = threading.Lock()
         worker._layerwise_session_tracker = LayerwiseSessionTracker()
         worker.m_store = MagicMock()
+        worker.m_store.exists.side_effect = lambda keys: [0] * len(keys)
         return worker
 
     def test_put_start_uses_full_current_layout_size_and_skips_hits(self):
@@ -222,6 +269,59 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
         self.assertEqual(request.save_block_keys, ["model@6831@0"])
+
+    def test_decode_backfill_skips_committed_prompt_and_preserves_block_slots(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        worker.m_store.exists.side_effect = lambda keys: [int(key == "model@6830@0") for key in keys]
+        worker.m_store.batch_put_start.return_value = [0, 0]
+        request = ReqMeta(
+            "decode",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            target_token_len=49,
+            block_ids=[5, 6, 7, 8],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            can_save=True,
+        )
+        worker._prepare_layerwise_put_session(request)
+        worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0", "model@6832@0"], [60, 60])
+        self.assertEqual(request.save_block_keys, [None, "model@6831@0", "model@6832@0"])
+        self.assertIsNone(request.save_last_block_key)
+        self.assertEqual(request.save_key_block_offset, 0)
+
+    def test_decode_saving_does_not_reload_previously_committed_prefix(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        worker._layerwise_session_tracker.register_put_keys("decode", [("prefix", 0)])
+        worker._layerwise_session_tracker.commit_put_keys(["prefix"])
+        request = ReqMeta("decode", block_ids=[5, 6], block_hashes=[b"h0", b"h1"], can_save=True)
+        self.assertEqual(worker._prepare_layerwise_get_session(request), [])
+        self.assertEqual(request.load_block_keys, [])
+
+    def test_decode_save_owner_preserves_mla_replica_and_recurrent_state_rules(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        worker.put_step = 2
+        worker.tp_rank = 1
+        self.assertFalse(worker._is_layerwise_save_owner())
+        worker.group_uses_align_state = [True]
+        self.assertTrue(worker._is_layerwise_save_owner())
+        worker.save_decode_cache = False
+        self.assertFalse(worker._is_layerwise_save_owner())
+
+    def test_decode_prefill_does_not_open_put_session(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        request = ReqMeta("prefill", block_ids=[1], block_hashes=[b"h0"], can_save=False)
+        worker._prepare_layerwise_put_session(request)
+        worker.m_store.batch_put_start.assert_not_called()
+        worker.m_store.exists.assert_not_called()
 
     def test_full_remote_hit_loads_last_block_even_when_vllm_keeps_one_token(self):
         worker = self._make_worker()

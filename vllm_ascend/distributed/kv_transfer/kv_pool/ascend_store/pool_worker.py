@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
+from copy import copy
 from typing import Any, cast
 
 import numpy as np
@@ -227,6 +228,9 @@ class KVPoolWorker:
         self._retired_store_req_ids: set[str] = set()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
+        self._layerwise_decode_retry_offsets: dict[str, int] = {}
+        self._step_layerwise_decode_failures: dict[str, int] = {}
+        self._current_layerwise_decode_saves: list[ReqMeta] = []
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
@@ -749,7 +753,7 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-            can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
+            can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put, getattr(self, "save_decode_cache", False))
             if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
@@ -770,6 +774,7 @@ class KVPoolWorker:
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
+                    track_failed_saves=self.use_block_key_layerwise and self.save_decode_cache,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -2167,7 +2172,7 @@ class KVPoolWorker:
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
         # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and (
+        return is_kv_save_role(self.kv_role, self.consumer_is_to_put, getattr(self, "save_decode_cache", False)) and (
             self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
         )
 
@@ -2204,8 +2209,9 @@ class KVPoolWorker:
         sharing a prefix and concurrent prefill ranks writing the same keys.
 
         Returns the subset of ``keys`` that is safe to start a session for.
-        Failing open (treat as missing) is intentional: an unreadable pool costs
-        hits, while a bogus skip would cost the blocks themselves.
+        Decode saving propagates lookup failures so preparation can defer the
+        keys safely and retry them at the next boundary. Legacy prefill saving
+        retains its fallback of treating lookup failures as misses.
         """
         if not keys:
             return []
@@ -2226,8 +2232,14 @@ class KVPoolWorker:
                         "Block-key pool existence check returned unexpected number of states: "
                         f"expected={len(key_batch)}, actual={len(states)}"
                     )
+                if getattr(self, "save_decode_cache", False) and any(int(state) not in (0, 1) for state in states):
+                    raise RuntimeError("Block-key pool existence check returned states other than 0 or 1")
                 missing.extend(key for key, state in zip(key_batch, states, strict=True) if int(state) != 1)
             except Exception as exc:
+                if getattr(self, "save_decode_cache", False):
+                    # Unknown existence is unsafe for ranged PUT: opening an
+                    # existing object can invalidate its committed contents.
+                    raise
                 logger.error(
                     "Block-key pool existence check failed keys=%d error=%s; treating all as missing",
                     len(key_batch),
@@ -2347,16 +2359,37 @@ class KVPoolWorker:
             previously_started = set(requested_keys) & self._put_started_keys
             new_keys = [key for key in requested_keys if key not in self._put_started_keys]
 
+        # The first decode save backfills the prompt prefix. Some of these
+        # full blocks can already be committed by the producer. Never reopen
+        # them for a ranged PUT; keep their slots empty so every layer skips
+        # them. The request-private partial snapshot remains writable.
+        full_keys = [key for key in new_keys if key != request.save_last_block_key]
+        try:
+            missing_full_keys = set(self._filter_pool_existing_keys(full_keys))
+        except Exception as exc:
+            logger.warning("Layerwise decode existence check failed; retrying later: %s", exc)
+            for key, slot, block_index in key_slots:
+                if slot is not None and key in full_keys:
+                    self._record_layerwise_decode_failure(request.req_id, block_index * self.block_size)
+            missing_full_keys = set()
+        new_keys = [key for key in new_keys if key in missing_full_keys or key == request.save_last_block_key]
         started = set(previously_started)
         if new_keys:
             try:
                 results = self._start_layerwise_put_keys(new_keys, self._layerwise_object_size_bytes())
             except Exception as exc:
+                for key, slot, block_index in key_slots:
+                    if slot is not None and key in new_keys:
+                        self._record_layerwise_decode_failure(request.req_id, block_index * self.block_size)
                 logger.error("Layerwise batch_put_start failed keys=%s error=%s", new_keys, exc)
                 with self._put_started_keys_lock:
                     self._put_started_keys.update(new_keys)
                 self._queue_layerwise_revoke_keys(new_keys)
             else:
+                rejected = {key for key, result in zip(new_keys, results, strict=True) if result != 0}
+                for key, slot, block_index in key_slots:
+                    if slot is not None and key in rejected:
+                        self._record_layerwise_decode_failure(request.req_id, block_index * self.block_size)
                 newly_started = {key for key, result in zip(new_keys, results, strict=True) if result == 0}
                 with self._put_started_keys_lock:
                     self._put_started_keys.update(newly_started)
@@ -2381,6 +2414,16 @@ class KVPoolWorker:
         request.load_keys = []
         current_entries: list[tuple[str, int]] = []
         load_spec = request.load_spec
+        # Decode saving uses resident KV, unlike chunked-prefill restoration.
+        # Previously committed PUTs must not turn a save-only decode step into
+        # redundant GETs of the prefix on every completed-block boundary.
+        if (
+            self.kv_role == "kv_consumer"
+            and getattr(self, "save_decode_cache", False)
+            and not self.layerwise_offload
+            and (load_spec is None or not load_spec.can_load)
+        ):
+            return []
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
             if not self.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
@@ -2657,8 +2700,59 @@ class KVPoolWorker:
             num_local = self.num_layers
         self._wait_for_final_layer_save(num_local, self.kv_send_thread)
 
+    def _record_layerwise_decode_failure(self, req_id: str, token_offset: int) -> None:
+        if not self.use_block_key_layerwise or not getattr(self, "save_decode_cache", False):
+            return
+        failures = self._step_layerwise_decode_failures
+        failures[req_id] = min(failures.get(req_id, token_offset), token_offset)
+
+    def _finish_layerwise_decode_saves(self, send_thread: KVTransferThread) -> None:
+        if not self.use_block_key_layerwise or not self.save_decode_cache:
+            return
+        assert isinstance(send_thread, KVCacheStoreLayerSendingThread)
+        failed_keys = send_thread.take_failed_save_keys()
+        # Only failure paths rescan hashes; normal steps keep the original
+        # incremental metadata range and introduce no extra backend RPCs.
+        if failed_keys:
+            for request in self._current_layerwise_decode_saves:
+                for group_id in self.cacheable_group_ids:
+                    if not self._is_layerwise_save_owner(group_id):
+                        continue
+                    block_size = self.grouped_block_size[group_id]
+                    hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
+                    start = request.save_start_token // block_size
+                    end = min(request.save_end_token // block_size, len(hashes))
+                    for index in range(start, end):
+                        key = self._make_layerwise_full_key(group_id, block_hash_to_str(hashes[index]))
+                        if key in failed_keys:
+                            self._record_layerwise_decode_failure(request.req_id, index * block_size)
+        for request in self._current_layerwise_decode_saves:
+            offset = self._step_layerwise_decode_failures.get(request.req_id)
+            if offset is None:
+                self._layerwise_decode_retry_offsets.pop(request.req_id, None)
+            else:
+                self._layerwise_decode_retry_offsets[request.req_id] = offset
+        self._current_layerwise_decode_saves = []
+        self._step_layerwise_decode_failures.clear()
+
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         self._masked_runs_cache.clear()
+        if self.use_block_key_layerwise and self.save_decode_cache:
+            self._step_layerwise_decode_failures.clear()
+            self._current_layerwise_decode_saves = []
+            prepared_requests = []
+            for request in requests:
+                if request.can_save:
+                    # Do not mutate scheduler-owned metadata. A failed full
+                    # block is rechecked at the next scheduled save boundary.
+                    request = copy(request)
+                    request.save_start_token = min(
+                        request.save_start_token,
+                        self._layerwise_decode_retry_offsets.get(request.req_id, request.save_start_token),
+                    )
+                    self._current_layerwise_decode_saves.append(request)
+                prepared_requests.append(request)
+            requests = prepared_requests
         # Keep this method safe for direct callers as well as metadata binding.
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
@@ -2706,7 +2800,7 @@ class KVPoolWorker:
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put, getattr(self, "save_decode_cache", False)):
             return
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
@@ -2868,7 +2962,9 @@ class KVPoolWorker:
             self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
         ):
             self._finish_current_layerwise_load_sessions()
-        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
+        if hasattr(self, "kv_role") and not is_kv_save_role(
+            self.kv_role, getattr(self, "consumer_is_to_put", False), getattr(self, "save_decode_cache", False)
+        ):
             self.current_layer += 1
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -2903,7 +2999,9 @@ class KVPoolWorker:
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE:
+            # Decode source blocks may be freed or recycled after this forward;
+            # keep their final PUT fence within the current step.
+            if _LW_DEFER_LAST_SAVE and not self.save_decode_cache:
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
                 # start of the NEXT step's start_load_kv, absorbing the send
@@ -2944,6 +3042,7 @@ class KVPoolWorker:
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()
+        self._finish_layerwise_decode_saves(send_thread)
         reuse_source_layers = set(self.prefetch_layer_map.values())
         for layer_id in range(num_local):
             if layer_id in reuse_source_layers:
@@ -3398,6 +3497,9 @@ class KVPoolWorker:
         return True
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        if self.use_block_key_layerwise and self.save_decode_cache:
+            for req_id in finished_req_ids | meta.preempted_req_ids:
+                self._layerwise_decode_retry_offsets.pop(req_id, None)
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
         if self.kv_send_thread is not None:

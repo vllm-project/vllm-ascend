@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import ctypes
 import queue
 import threading
 import unittest
@@ -33,7 +34,10 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, Mamb
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreKeyLayerSendingThread,
+    KVCacheStoreLayerSendingThread,
     KVCacheStoreSendingThread,
+    KVTransferThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -3106,6 +3110,271 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
             [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
             [(1, 2, None), (3, 4, None)],
         )
+
+
+class TestLayerwiseDecodeSave(unittest.TestCase):
+    def test_decode_consumer_selects_range_sender_and_advances_once_per_layer(self):
+        for enabled in (False, True):
+            with self.subTest(save_decode_cache=enabled):
+                worker = make_worker(
+                    self,
+                    kv_role="kv_consumer",
+                    use_layerwise=True,
+                    num_hidden_layers=2,
+                    extra_config={"save_decode_cache": enabled},
+                )
+                worker.page_size_bytes = 32
+                worker.group_block_len = {0: [16, 16]}
+                worker.group_num_layers = {0: 2}
+                worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [16, 16]}, group_num_layers={0: 2})
+                with patch.object(KVTransferThread, "start", lambda thread: thread.ready_event.set()):
+                    worker._start_kv_transfer_threads()
+                if enabled:
+                    self.assertIsInstance(worker.kv_send_thread, KVCacheStoreLayerSendingThread)
+                    self.assertNotIsInstance(worker.kv_send_thread, KVCacheStoreKeyLayerSendingThread)
+                else:
+                    self.assertIsNone(worker.kv_send_thread)
+                worker.kv_recv_thread = MagicMock()
+                worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
+                for layer_id in range(worker.num_layers):
+                    worker.wait_for_layer_load()
+                    self.assertEqual(worker.current_layer, layer_id if enabled else layer_id + 1)
+                    if enabled:
+                        worker.save_kv_layer(AscendConnectorMetadata(set(), set()))
+                        self.assertEqual(worker.current_layer, layer_id + 1)
+
+    def test_decode_save_does_not_defer_source_buffer_fence(self):
+        worker = make_worker(
+            self,
+            kv_role="kv_consumer",
+            use_layerwise=True,
+            num_hidden_layers=2,
+            extra_config={"save_decode_cache": True},
+        )
+        worker.kv_send_thread = MagicMock()
+        worker.current_layer = worker.num_layers - 1
+        worker.sync_save_events = [MagicMock() for _ in range(worker.num_layers)]
+        worker.layer_save_finished_events = [threading.Event() for _ in range(worker.num_layers)]
+        worker._wait_for_final_layer_save = MagicMock()
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._LW_DEFER_LAST_SAVE", True):
+            worker.save_kv_layer(AscendConnectorMetadata(set(), set()))
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        self.assertFalse(getattr(worker, "_pending_last_save_drain", False))
+
+    def test_decode_range_put_and_load_preserve_every_kv_byte(self):
+        self._check_decode_range_roundtrip()
+
+    def test_decode_failed_saves_retry_after_scheduler_offset_advances(self):
+        for operation in ("exists", "exists-status", "exists-shape", "start", "copy", "commit"):
+            with self.subTest(operation=operation):
+                self._check_decode_range_roundtrip(operation)
+
+    def test_decode_retry_offsets_are_removed_on_finish_and_preemption(self):
+        worker = make_worker(
+            self,
+            kv_role="kv_consumer",
+            use_layerwise=True,
+            num_hidden_layers=2,
+            extra_config={"save_decode_cache": True},
+        )
+        worker._layerwise_decode_retry_offsets = {"finished": 0, "preempted": 16, "live": 32}
+        metadata = AscendConnectorMetadata({"preempted"}, set())
+        worker.get_finished({"finished"}, metadata)
+        self.assertEqual(worker._layerwise_decode_retry_offsets, {"live": 32})
+
+    def _check_decode_range_roundtrip(self, failed_operation=None):
+        worker = make_worker(
+            self,
+            kv_role="kv_consumer",
+            use_layerwise=True,
+            num_hidden_layers=2,
+            extra_config={"save_decode_cache": True},
+        )
+        # Four separate K/V buffers, two layers, six physical blocks. The
+        # shuffled block table detects confusion between logical and physical
+        # block indices; distinct per-entry bytes detect incorrect layer offsets.
+        buffers = [(ctypes.c_ubyte * 48)(*[entry * 48 + i for i in range(48)]) for entry in range(4)]
+        worker.group_block_len = {0: [8] * 4}
+        worker.group_num_layers = {0: 2}
+        worker.page_size_bytes = 32
+        worker.token_database.set_group_buffers(
+            {0: [ctypes.addressof(buf) for buf in buffers]},
+            {0: [8] * 4},
+            group_num_layers={0: 2},
+            group_layer_cache_entry_offsets={0: [0, 2, 4]},
+        )
+        committed, pending, written = {}, {}, []
+        names = [worker._make_mooncake_layerwise_key(f"683{i}") for i in range(3)]
+        source_ids = [4, 1, 5]
+        expected = [b"".join(bytes(buf[index * 8 : (index + 1) * 8]) for buf in buffers) for index in source_ids]
+        committed[names[0]] = expected[0]
+        worker.m_store.requires_exists_before_put = True
+        fault_pending = failed_operation is not None
+
+        def exists(keys):
+            nonlocal fault_pending
+            if failed_operation is not None and failed_operation.startswith("exists") and fault_pending:
+                fault_pending = False
+                if failed_operation == "exists-status":
+                    return [-1] * len(keys)
+                if failed_operation == "exists-shape":
+                    return []
+                raise RuntimeError("temporary exists failure")
+            return [int(key in committed) for key in keys]
+
+        worker.m_store.exists.side_effect = exists
+
+        def start(keys, sizes):
+            nonlocal fault_pending
+            results = []
+            for key, size in zip(keys, sizes, strict=True):
+                self.assertNotIn(key, committed)
+                if key == names[1] and failed_operation == "start" and fault_pending:
+                    fault_pending = False
+                    results.append(-1)
+                else:
+                    pending[key] = bytearray(size)
+                    results.append(0)
+            return results
+
+        def put(keys, addrs, sizes, offsets):
+            nonlocal fault_pending
+            results = []
+            for key, row, lengths, positions in zip(keys, addrs, sizes, offsets, strict=True):
+                written.append(key)
+                if key == names[1] and failed_operation == "copy" and fault_pending:
+                    fault_pending = False
+                    results.append(-1)
+                    continue
+                for addr, size, offset in zip(row, lengths, positions, strict=True):
+                    pending[key][offset : offset + size] = ctypes.string_at(addr, size)
+                results.append(sum(lengths))
+            return results
+
+        def commit(keys):
+            nonlocal fault_pending
+            results = []
+            for key in keys:
+                if key == names[1] and failed_operation == "commit" and fault_pending:
+                    fault_pending = False
+                    results.append(-1)
+                else:
+                    committed[key] = bytes(pending.pop(key))
+                    results.append(0)
+            return results
+
+        def revoke(keys):
+            for key in keys:
+                self.assertNotIn(key, committed)
+                pending.pop(key, None)
+            return [0] * len(keys)
+
+        def get(keys, addrs, sizes, offsets):
+            for key, row, lengths, positions in zip(keys, addrs, sizes, offsets, strict=True):
+                for addr, size, offset in zip(row, lengths, positions, strict=True):
+                    ctypes.memmove(addr, committed[key][offset : offset + size], size)
+            return [sum(row) for row in sizes]
+
+        worker.m_store.batch_put_start.side_effect = start
+        worker.m_store.batch_copy_put.side_effect = put
+        worker.m_store.batch_commit.side_effect = commit
+        worker.m_store.batch_revoke.side_effect = revoke
+        worker.m_store.batch_get_start.side_effect = lambda keys: [0] * len(keys)
+        worker.m_store.batch_copy_get.side_effect = get
+        worker.m_store.batch_get_end.return_value = 0
+        with patch.object(KVTransferThread, "start", lambda thread: thread.ready_event.set()):
+            worker._start_kv_transfer_threads()
+
+        def send(tasks):
+            worker.kv_send_thread.request_queue.put(tasks)
+            worker.kv_send_thread._handle_request(tasks)
+
+        def recv(task):
+            # The CPU fixture executes transfers inline, so open the prefetch
+            # gate that the attention kernel normally records asynchronously.
+            if task.attention_start_gate is not None:
+                task.attention_start_gate.record()
+            worker.kv_recv_thread.request_queue.put(task)
+            worker.kv_recv_thread._handle_request(task)
+
+        worker.kv_send_thread.add_request = send
+        worker.kv_recv_thread.add_request = recv
+        request = ReqMeta(
+            "decode",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            target_token_len=49,
+            block_ids=source_ids,
+            block_hashes=[b"h0", b"h1", b"h2"],
+            can_save=True,
+            is_last_chunk=True,
+        )
+        metadata = AscendConnectorMetadata(set(), set())
+        metadata.add_request(request)
+        worker.prepare_layerwise_step(metadata)
+        for layer_id in range(2):
+            worker.wait_for_layer_load()
+            worker.save_kv_layer(metadata)
+            if layer_id == 0:
+                self.assertEqual(set(committed), {names[0]})
+        if failed_operation is not None:
+            self.assertNotIn(names[1], committed)
+            self.assertFalse(pending)
+            self.assertEqual(
+                worker._layerwise_decode_retry_offsets["decode"], 0 if failed_operation.startswith("exists") else 16
+            )
+            if failed_operation.startswith("exists"):
+                worker.m_store.batch_put_start.assert_not_called()
+            names.append(worker._make_mooncake_layerwise_key("6833"))
+            source_ids.append(2)
+            expected.append(b"".join(bytes(buf[16:24]) for buf in buffers))
+            request = ReqMeta(
+                "decode",
+                token_len_chunk=64,
+                save_start_token=48,
+                save_end_token=64,
+                target_token_len=64,
+                block_ids=source_ids,
+                block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+                can_save=True,
+                is_last_chunk=True,
+            )
+            metadata = AscendConnectorMetadata(set(), set())
+            metadata.add_request(request)
+            worker.prepare_layerwise_step(metadata)
+            for _ in range(2):
+                worker.wait_for_layer_load()
+                worker.save_kv_layer(metadata)
+            self.assertEqual(request.save_start_token, 48, "Worker must not mutate scheduler metadata")
+            self.assertFalse(worker._layerwise_decode_retry_offsets)
+        else:
+            self.assertEqual(written, [names[1], names[2], names[1], names[2]])
+        self.assertEqual([committed[name] for name in names], expected)
+        self.assertNotIn(names[0], written, "Committed prompt blocks must never be overwritten")
+        self.assertFalse(pending)
+
+        # A fresh reader restores the same logical blocks to different slots.
+        target_ids = [0, 2, 3, 4][: len(expected)]
+        for buf in buffers:
+            ctypes.memset(ctypes.addressof(buf), 0, 48)
+        load = ReqMeta(
+            "reader",
+            token_len_chunk=len(expected) * 16,
+            block_ids=target_ids,
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"][: len(expected)],
+            can_save=False,
+            load_spec=LoadSpec(0, len(expected) * 16, True),
+            is_last_chunk=True,
+        )
+        load_metadata = AscendConnectorMetadata(set(), set())
+        load_metadata.add_request(load)
+        worker.prepare_layerwise_step(load_metadata)
+        for _ in range(2):
+            worker.wait_for_layer_load()
+            worker.save_kv_layer(load_metadata)
+        restored = [b"".join(bytes(buf[index * 8 : (index + 1) * 8]) for buf in buffers) for index in target_ids]
+        self.assertEqual(restored, expected)
 
 
 if __name__ == "__main__":

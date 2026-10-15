@@ -359,7 +359,15 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                 if request.load_spec is not None and request.load_spec.can_load
                 else []
             )
-            entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
+            # Resident decode KV needs no historical GETs on save-only steps.
+            # Keep explicit remote loads and physical layer reuse unchanged.
+            if not (
+                worker.kv_role == "kv_consumer"
+                and getattr(worker, "save_decode_cache", False)
+                and not worker.layerwise_offload
+                and (request.load_spec is None or not request.load_spec.can_load)
+            ):
+                entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
             entries = [
                 (name, index)
                 for name, index in entries
@@ -399,7 +407,14 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             # The non-layerwise path filters through
             # Backend.requires_exists_before_put; the hybrid path must too.
             if new:
-                missing = worker._filter_pool_existing_keys(new)
+                try:
+                    missing = worker._filter_pool_existing_keys(new)
+                except Exception as exc:
+                    logger.warning("Mooncake decode existence check failed; retrying later: %s", exc)
+                    for name, index in key_indices:
+                        if name in new:
+                            worker._record_layerwise_decode_failure(request.req_id, index * block_size)
+                    missing = []
                 if len(missing) != len(new):
                     logger.debug(
                         "Mooncake hybrid: req=%s group=%d skipping %d/%d blocks already pooled",
@@ -418,6 +433,9 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                 started_now = {name for name, code in zip(new, codes, strict=True) if code == 0}
                 rejected = [name for name, code in zip(new, codes, strict=True) if code != 0]
                 if rejected:
+                    for name, index in key_indices:
+                        if name in rejected:
+                            worker._record_layerwise_decode_failure(request.req_id, index * block_size)
                     # Non-zero means the session was never opened, so this rank
                     # owns nothing to revoke — and revoking a key another rank
                     # committed would discard its object. Report instead of
