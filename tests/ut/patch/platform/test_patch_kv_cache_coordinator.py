@@ -38,6 +38,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -45,6 +46,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
+    MooncakeConnector,
+    MooncakeConnectorScheduler,
+)
 from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -100,7 +105,12 @@ def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
-    return KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=None,
+    )
 
 
 def _make_coordinator(
@@ -365,6 +375,104 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+@pytest.mark.parametrize("prompt_length", [1, 2, 16, 17, 18, 145, 146, 147, 1537, 1538])
+@pytest.mark.parametrize("producer", [False, True])
+@pytest.mark.parametrize("per_group", [False, True])
+def test_admission_lookup_preserves_upstream_recompute_bound(prompt_length, producer, per_group):
+    """Admission truncation and prompt-minus-one already reserve P recompute.
+
+    Managers report the offered bound, isolating the admission/lookup contract
+    from checkpoint availability. In particular, a 146-token P prompt admits
+    145 tokens and may probe the 144-token state; an extra PMU cap loses it.
+    """
+
+    class RequestDouble:
+        def __init__(self):
+            self.request_id = "admission-bound"
+            self.prompt_token_ids = list(range(prompt_length))
+            self._all_token_ids = list(self.prompt_token_ids)
+            self.num_prompt_tokens = prompt_length
+            self.max_tokens = 8
+            self.kv_transfer_params = {"do_remote_decode": producer}
+            self.block_hashes = []
+
+        @property
+        def num_tokens(self):
+            return len(self._all_token_ids)
+
+    request = RequestDouble()
+    connector_scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    connector_scheduler._boundary_requests = {}
+    connector_scheduler.need_truncate = True
+    connector = MooncakeConnector.__new__(MooncakeConnector)
+    connector.connector_scheduler = connector_scheduler
+    connector.on_new_request(request)
+    # Admission must be idempotent, including the one-token edge case.
+    connector.on_new_request(request)
+    admitted_length = prompt_length - int(producer and prompt_length > 1)
+    assert request.num_tokens == request.num_prompt_tokens == admitted_length
+    assert len(request.prompt_token_ids) == admitted_length
+
+    coordinator = _make_lookup_coordinator(producer=producer)
+    coordinator.hash_block_size = 16
+    coordinator.scheduler_block_size = 16
+    coordinator.enable_partial_hash_hits = True
+    # Do not mask the real lookup with the old drop-test pass-through stub.
+    coordinator.__dict__.pop("_producer_hit_cap", None)
+    coordinator.is_kv_producer = producer
+    coordinator.has_state_groups = True
+    coordinator.full_attention_group_id = 0
+    _RecordingFA.calls.clear()
+    _RecordingMamba.calls.clear()
+
+    manager = KVCacheManager.__new__(KVCacheManager)
+    manager.coordinator = coordinator
+    manager.kv_cache_config = SimpleNamespace(has_mamba_layers=True)
+    manager.enable_kv_cache_events = False
+    manager.prefix_cache_lookup_enabled = lambda request: True
+    manager.create_kv_cache_blocks = lambda blocks: blocks
+    if per_group:
+        manager.get_computed_blocks_for_connector(request)
+    else:
+        manager.get_computed_blocks(request)
+
+    expected_bound = admitted_length - 1
+    assert _RecordingFA.calls[0]["max_length"] == expected_bound
+    assert _RecordingMamba.calls[0]["max_length"] == expected_bound
+    assert admitted_length - expected_bound == 1
+
+
+@pytest.mark.parametrize("role", ["producer", "consumer", "both", "standalone"])
+@pytest.mark.parametrize("has_state_groups", [False, True])
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("per_group", [False, True])
+@pytest.mark.parametrize("max_length", [0, 1, 15, 16, 17, 144, 1536])
+def test_lookup_does_not_recap_caller_bound(role, has_state_groups, use_eagle, per_group, max_length):
+    coordinator = _make_lookup_coordinator(producer=role == "producer", standalone=role == "standalone")
+    coordinator.hash_block_size = 16
+    coordinator.scheduler_block_size = 16
+    coordinator.enable_partial_hash_hits = has_state_groups
+    coordinator.is_kv_producer = role == "producer"
+    coordinator.has_state_groups = has_state_groups
+    coordinator.__dict__.pop("_producer_hit_cap", None)
+    coordinator.attention_groups[0] = SpecGroup(FA_SPEC, [0], _RecordingFA, use_eagle)
+    if not has_state_groups:
+        coordinator.attention_groups = coordinator.attention_groups[:1]
+        coordinator.kv_cache_config.kv_cache_groups = [object()]
+    _RecordingFA.calls.clear()
+    _RecordingMamba.calls.clear()
+
+    if per_group:
+        coordinator.find_longest_cache_hit_per_group([], max_length)
+    else:
+        coordinator.find_longest_cache_hit([], max_length)
+
+    assert _RecordingFA.calls[0]["max_length"] == max_length
+    assert _RecordingFA.calls[0]["drop_eagle_block"] == (use_eagle and role in {"consumer", "both"})
+    if has_state_groups:
+        assert _RecordingMamba.calls[0]["max_length"] == max_length
 
 
 if __name__ == "__main__":
