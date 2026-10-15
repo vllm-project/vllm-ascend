@@ -4,7 +4,7 @@
 
 KVPP (KV pipeline parallelism) distributes historical KV caches that would otherwise be replicated across TP ranks by layer for non-hybrid MLA/SFA models. This reduces persistent cache storage per rank, allowing the same HBM capacity to accommodate more context tokens or concurrent requests.
 
-When a layer executes, the rank responsible for its cache broadcasts the complete cache to the other ranks in the group. Model computation retains its TP/EP/PP configuration. With PP enabled, each stage assigns caches and broadcasts within its own cache-replica group. The group spans TP ranks, or PCP × TP ranks when PCP is enabled on Model Runner V2, and never crosses DP replicas or PP stages.
+When a forward pass needs historical KV, the rank responsible for each layer's cache broadcasts the complete cache to the other ranks in the group before that layer executes. Model computation retains its TP/EP/PP configuration. With PP enabled, each stage assigns caches and broadcasts within its own cache-replica group. The group spans TP ranks, or PCP × TP ranks when PCP is enabled on Model Runner V2, and never crosses DP replicas or PP stages.
 
 The pipeline parallelism in KVPP refers to KV cache storage and communication, while model computation keeps the parallel configuration described above. For the underlying layer-wise KV storage concept, see **LayerSplit** in Z.ai's [Scaling Pain of Coding Agent Serving: Lessons from Debugging GLM-5 at Scale](https://z.ai/blog/scaling-pain).
 
@@ -89,7 +89,7 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle3, with a fixed number of speculative tokens (K). Dynamic K has not been validated. Draft caches remain independently allocated and are excluded from KVPP layer partitioning.
+KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle3, with a fixed number of speculative tokens (K). Dynamic K has not been validated. When present, draft caches retain their original per-rank allocation and are excluded from KVPP layer partitioning.
 
 ## Configuration Parameters
 
@@ -97,7 +97,7 @@ KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle
 | --- | --- | --- |
 | `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
 
-KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
+Each KVPP broadcast transfers a full layer cache. No broadcast granularity or separate KVPP parallel size needs to be configured.
 
 ## KV Transfer Configuration
 
@@ -105,7 +105,7 @@ KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP 
 
 KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**).
 
-Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. Draft caches remain replicated and are transferred alongside the persistent target caches.
+Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. Any draft caches retain their original per-rank allocation and are transferred alongside the persistent target caches.
 
 ```bash
 # Prefill node: include {"enable_kvpp": true} in --additional-config.
@@ -142,7 +142,8 @@ The pooling backend still requires its own SDK and service configuration.
         "kv_connector_extra_config": {
           "backend": "memcache",
           "lookup_rpc_port": "0",
-          "use_layerwise": false
+          "use_layerwise": false,
+          "load_async": true
         }
       }
     ]
