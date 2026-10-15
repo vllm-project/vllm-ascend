@@ -2953,13 +2953,14 @@ def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
     assert second.routed_experts.mega_moe_activation_kwargs is second_kwargs
 
 
-def test_runner_sets_precast_fp32_weight(monkeypatch):
-    """Init sets precast so load materializes weight_fp32."""
+def test_runner_preserves_gate_weight_dtype(monkeypatch):
+    """The runner must not force the gate to materialize an FP32 weight."""
     gate = SimpleNamespace(weight=torch.randn(8, 4, dtype=torch.float16))
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
-    assert gate.precast_fp32_weight is True
+    assert not hasattr(gate, "precast_fp32_weight")
+    assert gate.weight.dtype == torch.float16
     assert not hasattr(gate, "weight_fp32")
 
 
@@ -2977,7 +2978,7 @@ def test_runner_skips_precast_without_internal_router(monkeypatch):
 
 
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
-    """Hot path only reads gate.weight_fp32; judgment lives in __init__."""
+    """The hot path uses an existing gate.weight_fp32 when provided."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
