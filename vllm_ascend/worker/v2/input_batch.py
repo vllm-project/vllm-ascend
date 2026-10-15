@@ -69,6 +69,26 @@ class AscendInputBuffers(InputBuffers):
         # MRV2 dummy path otherwise describes every dummy batch as decode-only.
         self.profile_cpp: bool = False
 
+        # Non-speculative batches always have one logit per request. Consumers
+        # only read these buffers, so concurrent steps can share their views.
+        self._cu_num_logits_np = np.arange(max_num_reqs + 1, dtype=np.int32)
+        self._cu_num_logits = torch.arange(max_num_reqs + 1, dtype=torch.int32, device=device)
+        self._expanded_local_pos = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        self._non_draft_num_reqs = None
+        self._non_draft_inputs = None
+        self.idx_mapping_key = None
+        self.idx_mapping_gpu = None
+
+    def get_non_draft_inputs(self, num_reqs: int):
+        if num_reqs != self._non_draft_num_reqs:
+            self._non_draft_inputs = (
+                self._cu_num_logits_np[: num_reqs + 1],
+                self._cu_num_logits[: num_reqs + 1],
+                self._expanded_local_pos[:num_reqs],
+            )
+            self._non_draft_num_reqs = num_reqs
+        return self._non_draft_inputs
+
 
 @dataclass
 class AscendInputBatch(InputBatch):

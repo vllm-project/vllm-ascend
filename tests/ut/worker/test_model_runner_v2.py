@@ -18,6 +18,7 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 
 
 def _make_runner(need_timing: bool = True):
@@ -1616,3 +1617,69 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
     for i, req_id in enumerate(batch.req_ids):
         index = runner.req_states.req_id_to_index[req_id]
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+def test_finish_requests_preserves_seeded_rng_before_slots_are_released():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.sampler = Mock(spec=AscendSampler)
+    output = SimpleNamespace(finished_req_ids={"done"}, preempted_req_ids={"paused"})
+    calls = Mock()
+    calls.attach_mock(runner.sampler.finish_requests, "preserve_rng")
+    with patch.object(GPUModelRunner, "finish_requests") as upstream:
+        calls.attach_mock(upstream, "release_slots")
+        runner.finish_requests(output)
+    assert calls.mock_calls == [
+        call.preserve_rng({"done"}, {"paused"}),
+        call.release_slots(output),
+    ]
+
+
+def test_finish_requests_without_sampling():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.sampler = None
+    output = SimpleNamespace(finished_req_ids={"done"}, preempted_req_ids=set())
+    with patch.object(GPUModelRunner, "finish_requests") as upstream:
+        runner.finish_requests(output)
+    upstream.assert_called_once_with(output)
+
+
+def test_non_draft_inputs_remain_valid_when_batch_size_changes():
+    buffers = AscendInputBuffers(4, 16, torch.device("cpu"))
+    previous = buffers.get_non_draft_inputs(4)
+    for num_reqs in (1, 3, 4):
+        cumulative_np, cumulative, local_pos = buffers.get_non_draft_inputs(num_reqs)
+        np.testing.assert_array_equal(cumulative_np, np.arange(num_reqs + 1, dtype=np.int32))
+        torch.testing.assert_close(cumulative, torch.arange(num_reqs + 1, dtype=torch.int32))
+        torch.testing.assert_close(local_pos, torch.zeros(num_reqs, dtype=torch.int32))
+    np.testing.assert_array_equal(previous[0], np.arange(5, dtype=np.int32))
+    torch.testing.assert_close(previous[1], torch.arange(5, dtype=torch.int32))
+    torch.testing.assert_close(previous[2], torch.zeros(4, dtype=torch.int32))
+
+
+def test_idx_mapping_reuse_preserves_inflight_batch_after_reordering():
+    runner, _, _, _ = _prepare_inputs_runner()
+    indices = np.array([0, 1], dtype=np.int32)
+    with patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy) as copy:
+        previous = runner._get_idx_mapping(indices)
+        assert runner._get_idx_mapping(indices) is previous
+        assert copy.call_count == 1
+        indices[:] = [1, 0]
+        reordered = runner._get_idx_mapping(indices)
+        assert copy.call_count == 2
+        torch.testing.assert_close(reordered, torch.tensor([1, 0], dtype=torch.int32))
+        torch.testing.assert_close(previous, torch.tensor([0, 1], dtype=torch.int32))
+        indices.resize(1, refcheck=False)
+        reduced = runner._get_idx_mapping(indices)
+        torch.testing.assert_close(reduced, torch.tensor([1], dtype=torch.int32))
+        torch.testing.assert_close(reordered, torch.tensor([1, 0], dtype=torch.int32))
+
+
+def test_cpu_lengths_follow_request_order_and_rejection_correction():
+    runner, output, _, _ = _prepare_inputs_runner(speculator=True)
+    output.scheduled_cached_reqs.req_ids = ["r0", "r1"]
+    runner._update_seq_lens_cpu(output, ["r1", "r0"])
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_np[:2], [6, 5])
+    runner.num_computed_tokens_cpu[:2] = torch.tensor([10, 7], dtype=torch.int32)
+    output.num_scheduled_tokens = {"r0": 1, "r1": 3}
+    runner._update_seq_lens_cpu(output, ["r0", "r1"])
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_np[:2], [11, 10])

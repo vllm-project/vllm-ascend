@@ -1074,3 +1074,24 @@ class TestDCPGraphParams(TestBase):
         mock_end.assert_called_once_with(self.update_stream)
         event.record.assert_called_once_with(self.update_stream)
         assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]
+
+
+def test_graph_update_bind_keeps_each_runtime_snapshot_independent():
+    operation, provider, handle, event = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    captured_query = torch.zeros(1)
+    task = GraphUpdateTask(operation, {"query": captured_query, "length": [1]}, provider, 3, handle, event)
+    first = task.bind({"length": [2]})
+    second = task.bind({"length": [3]})
+    task.kwargs["captured_only"] = True
+    assert task.kwargs["length"] == [1]
+    assert first.kwargs["length"] == [2]
+    assert second.kwargs["length"] == [3]
+    assert "captured_only" not in first.kwargs
+    assert "captured_only" not in second.kwargs
+    for bound in (first, second):
+        assert bound.operation is operation
+        assert bound.provider is provider
+        assert bound.provider_index == 3
+        assert bound.handle is handle
+        assert bound.event is event
+        assert bound.kwargs["query"] is captured_query

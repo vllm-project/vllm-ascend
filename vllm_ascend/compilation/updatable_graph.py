@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import torch
@@ -67,7 +67,16 @@ class GraphUpdateTask:
 
     def bind(self, params: Params) -> "GraphUpdateTask":
         runtime_kwargs = {**self.kwargs, **params}
-        return replace(self, kwargs=runtime_kwargs)
+        # Avoid dataclass field introspection for every layer on every step.
+        # Each binding still owns its kwargs snapshot for asynchronous updates.
+        return GraphUpdateTask(
+            self.operation,
+            runtime_kwargs,
+            self.provider,
+            self.provider_index,
+            self.handle,
+            self.event,
+        )
 
     def apply(self, update_stream) -> None:
         torch.npu.graph_task_update_begin(update_stream, self.handle)
