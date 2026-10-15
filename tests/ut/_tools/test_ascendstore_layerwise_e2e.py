@@ -120,3 +120,22 @@ def test_demo_ci_selects_only_one_tp1_layerwise_e2e_and_has_real_timeouts(tmp_pa
     )
     assert "test_ascendstore_v1_layerwise.py" in test_step["timeout-minutes"]
     assert "&& 90 || inputs.timeout-minutes" in test_step["timeout-minutes"]
+
+
+def test_ci_installs_new_layerwise_sdk_and_runs_npu_tests_without_cpu_preflight():
+    source = (REPO_ROOT / ".github/workflows/_selected_tests.yaml").read_text()
+    workflow = yaml.safe_load(source)
+    steps = workflow["jobs"]["selected-tests"]["steps"]
+    install = next(step for step in steps if step.get("name") == "Install Mooncake wheel")
+    build = next(step for step in steps if step.get("name") == "Install vllm-project/vllm-ascend with device")
+    run = next(step for step in steps if step.get("name") == "Run selected tests with device")
+    assert install["env"]["MOONCAKE_WHEEL"] == (
+        "${{ contains(matrix.group.tests, '" + LAYERWISE_TEST + "') && "
+        "'mooncake-transfer-engine-npu==0.3.13.post1' || 'mooncake-transfer-engine-npu==0.3.11.post1' }}"
+    )
+    assert '"$MOONCAKE_WHEEL"' in install["run"]
+    assert steps.index(install) + 1 == steps.index(build) < steps.index(run)
+    assert "MC_FORCE_TCP" not in source
+    assert "check_mooncake_layerwise" not in source
+    assert not (REPO_ROOT / ".github/workflows/scripts/check_mooncake_layerwise.py").exists()
+    subprocess.run(["bash", "-n", "-c", install["run"]], check=True, capture_output=True)

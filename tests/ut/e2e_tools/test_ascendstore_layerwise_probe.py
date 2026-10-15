@@ -20,7 +20,7 @@ class RangeBackend:
         self.objects = {}
         self.published = set()
         self.no_op_load = False
-        self.load_code = 0
+        self.load_code: int | None = None
         self.end_code = None if implementation == "v1" else 0
         self.premature_publication = False
         for name, method in zip(
@@ -49,7 +49,7 @@ class RangeBackend:
         for key, pointers, lengths, starts in zip(keys, addresses, sizes, offsets, strict=True):
             for pointer, size, offset in zip(pointers, lengths, starts, strict=True):
                 self.objects[key][offset : offset + size].copy_(self.view(pointer, size))
-        return [0] * len(keys)
+        return [sum(lengths) for lengths in sizes]
 
     def commit(self, keys):
         self.published.update(keys)
@@ -66,7 +66,7 @@ class RangeBackend:
             for key, pointers, lengths, starts in zip(keys, addresses, sizes, offsets, strict=True):
                 for pointer, size, offset in zip(pointers, lengths, starts, strict=True):
                     self.view(pointer, size).copy_(self.objects[key][offset : offset + size])
-        return [self.load_code] * len(keys)
+        return [sum(lengths) if self.load_code is None else self.load_code for lengths in sizes]
 
     def finish_load(self, keys):
         return self.end_code
@@ -114,7 +114,7 @@ def chain(request):
 def publish(chain):
     chain.call(0, ["key"], [64])
     for layer in range(2):
-        chain.call(1, *chain.ranges(layer))
+        assert chain.call(1, *chain.ranges(layer)) == [32]
     chain.call(2, ["key"])
     chain.probe.arm_destination_poisoning()
     chain.call(4, ["key"])
@@ -123,7 +123,7 @@ def publish(chain):
 def test_complete_ranges_and_last_layer_session_end_before_wait_returns(chain):
     publish(chain)
     for layer in range(2):
-        chain.call(5, *chain.ranges(layer, destination=True))
+        assert chain.call(5, *chain.ranges(layer, destination=True)) == [32]
         if layer == 1:
             chain.probe.original_wait = lambda *args: chain.call(6, ["key"])
         chain.connector.wait_for_layer_load(f"layer{layer}")
@@ -166,7 +166,7 @@ def test_premature_visibility_fails(chain):
 
 
 @pytest.mark.parametrize("fault", ["noop", "corruption"])
-def test_success_code_cannot_hide_incorrect_native_load(chain, fault):
+def test_success_byte_count_cannot_hide_incorrect_native_load(chain, fault):
     publish(chain)
     chain.backend.no_op_load = fault == "noop"
     if fault == "corruption":
@@ -187,10 +187,27 @@ def test_early_wait_and_early_session_end_fail(chain):
 def test_native_failure_and_unclosed_session_fail(chain):
     publish(chain)
     chain.backend.load_code = -1
-    with pytest.raises(AssertionError, match="KeyRange operation failed"):
+    with pytest.raises(AssertionError, match="KeyRange copy byte counts mismatch"):
         chain.call(5, *chain.ranges(0, destination=True))
     with pytest.raises(AssertionError, match="sessions leaked"):
         chain.probe.verify_complete()
+
+
+@pytest.mark.parametrize("operation", ["store", "load"])
+@pytest.mark.parametrize("results", [[-1], [0], [31], [33], [], [32, 32]])
+def test_copy_rejects_errors_short_or_excess_bytes_and_misaligned_results(chain, operation, results):
+    if operation == "store":
+        chain.call(0, ["key"], [64])
+        chain.probe.original_copy_store = Mock(return_value=results)
+        method = 1
+    else:
+        publish(chain)
+        chain.probe.original_copy_load = Mock(return_value=results)
+        method = 5
+    with pytest.raises(AssertionError, match="KeyRange copy byte counts mismatch"):
+        chain.call(method, *chain.ranges(0, destination=operation == "load"))
+    if operation == "load":
+        assert not chain.probe.loaded["key"]
 
 
 def test_session_end_failure_is_not_ignored(chain):
