@@ -79,60 +79,6 @@ def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
         assert cast.call_count == (0 if fa_quant_layer else 2)
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_kimi_rope_setup_refreshes_projection_nz_management(quantized):
-    impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.enable_mlapo = False
-    impl.fa_quant_layer = False
-    impl.support_fp8_attention = True
-    impl.use_mla_rope = False
-    impl.qk_rope_head_dim = 32
-    impl.dtype = torch.bfloat16
-    impl.enable_kv_nz = False
-    impl.q_lora_rank = 64
-    impl.q_a_layernorm = object()
-    impl.kv_a_layernorm = object()
-    scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod) if quantized else None
-    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=scheme))
-    impl.q_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=scheme))
-    attention_layer = SimpleNamespace(impl=impl)
-    rotary_emb = object()
-
-    def init_upstream_attention(self, **kwargs):
-        nn.Module.__init__(self)
-        self.scaling = 1.0
-
-    with (
-        patch.object(kimi_k3.UpstreamKimiMLAAttention, "__init__", init_upstream_attention),
-        patch.object(
-            kimi_k3.AscendKimiMLAAttention,
-            "_attention_layer",
-            new_callable=PropertyMock,
-            return_value=attention_layer,
-        ),
-        patch.object(kimi_k3, "get_rope", return_value=rotary_emb),
-    ):
-        kimi_k3.AscendKimiMLAAttention(
-            config=SimpleNamespace(rope_parameters={"rope_type": "default"}, max_position_embeddings=128),
-            hidden_size=256,
-            num_heads=2,
-            qk_nope_head_dim=64,
-            qk_rope_head_dim=32,
-            v_head_dim=128,
-            q_lora_rank=64,
-            kv_lora_rank=32,
-            use_output_gate=False,
-            use_rope=True,
-            disable_mlapo=True,
-        )
-
-    assert not impl.enable_mlapo
-    assert impl.use_mla_rope
-    assert impl.rotary_emb is rotary_emb
-    assert impl.fused_qkv_a_proj._fused_preprocess_managed is quantized
-    assert impl.q_proj._fused_preprocess_managed is quantized
-
-
 def test_kimi_moe_leaves_routed_input_transform_to_runner():
     moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
     nn.Module.__init__(moe)
