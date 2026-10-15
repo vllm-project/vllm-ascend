@@ -746,7 +746,7 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
         }'
     ```
 
-    Set the short sequence max-num-batched-tokens to 2048.
+    For short-input workloads, tune `--max-num-batched-tokens` using [Section 9.2](#92-tuning-guidelines).
     Once the preparation is done, start the server with the following command on each node:
 
     1. Prefill node
@@ -2429,6 +2429,15 @@ The recommended configurations are the same as those specified in Chapter 5, "On
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Workload-Specific Tuning
+
+Use the following adjustments as starting points for the target workload. Recheck memory usage, latency, and throughput after each change.
+
+| Scenario | Parameter | Example Adjustment | Tuning Goal |
+| --- | --- | --- | --- |
+| Device-memory-bound workloads where KV cache capacity limits concurrency | `HCCL_BUFFSIZE` | Reduce from `2048` to `1024` (MB). | Reduce HCCL communication-buffer memory usage to make more device memory available for KV cache and allow higher concurrency. |
+| Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
 
