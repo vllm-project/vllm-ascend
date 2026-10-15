@@ -58,6 +58,22 @@ def results_to_json(latency, throughput, serving):
     )
 
 
+def classify_result_file(test_file: Path) -> str | None:
+    """Classify a benchmark result file into latency/throughput/serving.
+
+    Only the file name is inspected. Matching against the full path would
+    misclassify every file when the results folder itself contains a keyword
+    such as ``serving``.
+    """
+    if "serving" in test_file.name:
+        return "serving"
+    if "latency" in test_file.name:
+        return "latency"
+    if "throughput" in test_file.name:
+        return "throughput"
+    return None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process the results of the benchmark tests.")
     parser.add_argument(
@@ -91,7 +107,9 @@ if __name__ == "__main__":
         with open(test_file) as f:
             raw_result = json.loads(f.read())
 
-        if "serving" in str(test_file):
+        result_type = classify_result_file(test_file)
+
+        if result_type == "serving":
             # this result is generated via `benchmark_serving.py`
 
             # update the test name of this result
@@ -101,7 +119,7 @@ if __name__ == "__main__":
             serving_results.append(raw_result)
             continue
 
-        elif "latency" in f.name:
+        elif result_type == "latency":
             # this result is generated via `benchmark_latency.py`
 
             # update the test name of this result
@@ -117,7 +135,7 @@ if __name__ == "__main__":
             latency_results.append(raw_result)
             continue
 
-        elif "throughput" in f.name:
+        elif result_type == "throughput":
             # this result is generated via `benchmark_throughput.py`
 
             # update the test name of this result
