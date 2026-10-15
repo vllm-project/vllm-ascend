@@ -248,6 +248,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -262,6 +263,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
+        self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -301,6 +303,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+        self.synchronize_device()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -1263,6 +1266,9 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        torch.npu.synchronize()
 
     def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
         """Return serializable encoder graph state for diagnostics.

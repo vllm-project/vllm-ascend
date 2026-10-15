@@ -91,6 +91,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
 
     model = SimpleNamespace(
         hc_mult=4,
+        decoder_replay_layers=None,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),

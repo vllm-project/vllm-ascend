@@ -220,7 +220,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
 #    Why:
-#       GLM-5.3 always generates reasoning, but the supported vLLM v0.30.0
+#       GLM-5.3 always generates reasoning, but the supported vLLM v0.31.0
 #       and verified main pin do not include PR #56994. Passing thinking=False
 #       or enable_thinking=False disables extraction and leaks reasoning into
 #       content, including for streamed responses.

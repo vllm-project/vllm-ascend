@@ -36,6 +36,8 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
+    update_draft_graph_params_workspaces,
+    update_draft_graph_prefill_params_workspaces,
     update_graph_params_workspaces,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
@@ -327,6 +329,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             or (self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz)
         ):
             self._prepare_dcp_current_kv_buffers()
+        if self.dcp_enabled:
+            # The shared writer contract checks these workspaces. Prepare the
+            # projections after them, still inside the loader memory profile.
+            self._prepare_prolog_v3_weights_after_loading()
 
     def _required_dcp_current_kv_capacity(self) -> int:
         """Upper bound on query rows in a DCP decode graph."""
@@ -900,7 +906,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     k_nope,
                     **common_kwargs,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                # Keep target, draft decode, and draft prefill workspaces in their own registries.
+                if _EXTRA_CTX.is_draft_model:
+                    if _EXTRA_CTX.is_draft_model_prefill:
+                        update_draft_graph_prefill_params_workspaces(num_tokens, workspace)
+                    else:
+                        update_draft_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BSND":
                 num_decodes = attn_metadata.num_decodes
