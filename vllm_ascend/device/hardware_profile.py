@@ -103,9 +103,6 @@ class HardwareCapability(Enum):
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
-    # Fuse non-MX INT8/INT4 grouped matmul, dequantization, SiTU, and per-token
-    # quantization through the ACLNN GmmDequantSituQuant operator.
-    GMM_DEQUANT_SITU_QUANT = auto()
     # Register the FX graph rewrite that fuses a supported matmul/reduce-scatter pattern.
     GRAPH_MM_REDUCE_SCATTER_FUSION = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
@@ -287,7 +284,6 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
