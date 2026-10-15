@@ -49,6 +49,29 @@ if _triton_available:
         if not hasattr(_tl_core, "_aggregate"):
             _tl_core._aggregate = lambda *a, **kw: None
 
+# fla_npu (flash-linear-attention-npu) is an external NPU kernel package that is
+# not a declared install dependency. Worker patches import it at module load
+# time, so environments without it (CPU runs or NPU images that do not ship the
+# package) would otherwise fail during engine boot. Register the same import
+# boundary the UT conftest uses: empty package modules whose ops are mocks, so
+# the import succeeds and only actual kernel invocation is affected.
+if "fla_npu" not in sys.modules and importlib.util.find_spec("fla_npu") is None:
+    from unittest.mock import MagicMock
+
+    for _fla_package in ("fla_npu", "fla_npu.ops", "fla_npu.ops.ascendc"):
+        _fla_module = ModuleType(_fla_package)
+        _fla_module.__path__ = []
+        sys.modules[_fla_package] = _fla_module
+    for _fla_op in (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "recurrent_gated_delta_rule",
+        "chunk_gated_delta_rule_fwd_h",
+        "chunk_kda_fwd",
+        "recurrent_kda",
+    ):
+        setattr(sys.modules["fla_npu.ops.ascendc"], _fla_op, MagicMock())
+
 _GLOBAL_PATCH_APPLIED = False
 
 

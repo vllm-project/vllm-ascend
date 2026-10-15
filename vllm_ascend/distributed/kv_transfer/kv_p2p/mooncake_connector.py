@@ -1624,6 +1624,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
+        # vLLM main's `KVConnectorBase_V1.get_loaded_kv_cache_group_ids` default
+        # reads `_kv_cache_config`; this connector does not call `super().__init__`.
+        self._kv_cache_config = kv_cache_config
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
@@ -1633,6 +1636,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # This P/D connector restores the request's own blocks across all
+        # transfer groups; used by the scheduler to skip zeroing those blocks.
+        kv_cache_config = self._kv_cache_config
+        return () if kv_cache_config is None else tuple(kv_cache_config.transfer_group_ids)
 
     ############################################################
     # Scheduler Side Methods

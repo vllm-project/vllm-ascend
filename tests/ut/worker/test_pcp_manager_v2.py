@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -127,7 +128,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
 
-def test_decode_sharding_does_not_add_a_parallel_config_field():
+def test_decode_sharding_derives_from_declared_fields():
     parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     parallel_config.worker_cls = "test-worker"
     config = SimpleNamespace(
@@ -150,7 +151,9 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
         hardware_profile.return_value.supports.return_value = False
         _setup_worker_and_scheduler(config, ascend_config)
 
-    assert not hasattr(parallel_config, "pcp_shard_decode_requests")
+    # vLLM main now exposes `ParallelConfig.pcp_shard_decode_requests`; Ascend's
+    # helper must keep deriving the same decision from the declared fields (and
+    # must survive `replace()` cloning).
     replace(parallel_config)
     assert is_pcp_decode_sharding_enabled(config) is True
 

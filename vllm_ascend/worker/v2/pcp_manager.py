@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -85,18 +86,37 @@ class AscendPCPManager(PCPManager):
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        shard_decode_requests: bool = False,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        # vLLM main's PCPManager takes `shard_decode_requests` (required, passed
+        # by `maybe_build_pcp_manager`); the v0.31.0 release does not have it.
+        # Ascend owns the decode-sharding partition path, so this only keeps the
+        # constructor contract satisfied on both trees.
+        if vllm_version_is("0.31.0"):
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                shard_decode_requests=shard_decode_requests,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
         if block_tables is not None:

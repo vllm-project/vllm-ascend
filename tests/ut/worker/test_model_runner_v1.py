@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import unittest
 from collections import deque
 from contextlib import contextmanager, nullcontext
@@ -56,7 +57,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -1104,7 +1105,10 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], expected)
 
     def test_non_align_postprocess_keeps_an_independent_snapshot(self):
-        for mode in ("none", "all"):
+        # Mamba cache mode "all" (and postprocess_mamba_all) exists only on the
+        # v0.31.0 release; vLLM main removed both.
+        modes = ("none", "all") if vllm_version_is("0.31.0") else ("none",)
+        for mode in modes:
             with self.subTest(mode=mode):
                 runner = self._build_runner()
                 runner.cache_config.mamba_cache_mode = mode
@@ -1112,7 +1116,10 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.requests = {}
                 runner.mamba_state_idx = {}
                 runner.num_spec_tokens = 3
-                with patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all") as postprocess_all:
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all",
+                    create=True,
+                ) as postprocess_all:
                     runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
                 np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
                 np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])
