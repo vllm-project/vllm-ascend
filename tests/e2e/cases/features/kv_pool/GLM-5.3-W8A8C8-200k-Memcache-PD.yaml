@@ -311,9 +311,9 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}]}}'
-        #      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": true}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": true}}]}}'
 
+        #      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}]}}'
 
 benchmarks:
   perf_warmup_HBM:
