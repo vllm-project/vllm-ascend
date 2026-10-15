@@ -113,8 +113,6 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
     rebuild_args = (None, None, None, None, None, None, 999, None)
     fake_reduce = MagicMock(return_value=("rebuild_func_sentinel", rebuild_args))
 
-    captured = {}
-
     with patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce):
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
             NPUIPCTrainerWeightTransferEngine,
@@ -125,14 +123,11 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
         engine.is_sender = True
         engine.npu_uuid = "node-0"
         engine.gpu_uuid = engine.npu_uuid
-        engine._do_send = lambda **kw: captured.update(kw)
-        engine._all_gather_and_merge_handles = lambda x: x
-        engine._post_send_sync = MagicMock()
-
         source = iter([("model.weight", torch.zeros(3))])
-        engine._send_unpacked(source)
+        with patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles):
+            engine._send_unpacked(source)
 
-        stored = captured["ipc_handles"][0]["node-0"]
+        stored = engine.client.update_weights.call_args.args[0]["ipc_handles"][0]["node-0"]
 
         # Only the args tuple is stored, not a (func, args) pair.
         assert stored == rebuild_args
@@ -292,7 +287,6 @@ def test_unpacked_lifecycle_keeps_contiguous_copies_alive_until_sync(is_sender):
     engine.packed = False
     engine.gpu_uuid = "node-0"
     engine.source = [("w", torch.arange(6).reshape(2, 3).t())]
-    engine._all_gather_and_merge_handles = lambda handles: handles
     refs = []
     events = []
 
@@ -313,8 +307,11 @@ def test_unpacked_lifecycle_keeps_contiguous_copies_alive_until_sync(is_sender):
     engine.client.start_weight_update.side_effect = lambda: events.append("start")
     engine.client.update_weights.side_effect = lambda payload: events.append("update")
     engine.client.finish_weight_update.side_effect = finish
-    engine._post_send_sync = sync
-    with patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", new=reduce):
+    with (
+        patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
+        patch.object(engine, "_post_send_sync", side_effect=sync),
+        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", new=reduce),
+    ):
         engine.send_weights()
     assert refs[0]() is None
     assert events == (["start", "reduce", "update", "finish", "sync"] if is_sender else ["reduce", "sync"])
@@ -335,9 +332,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.npu_uuid = "node-0"
     engine.packed_buffer_size_bytes = 16
     engine.source = []
-    events = []
-    engine._all_gather_and_merge_handles = lambda handles: handles
-    engine._post_send_sync = lambda: events.append("sync")
+    events: list[str] = []
 
     def chunks(**kwargs):
         assert kwargs["npu_uuid"] == "node-0"
@@ -350,7 +345,11 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
             events.append("reuse")
 
     engine.client.update_weights.side_effect = lambda payload: events.append("update")
-    with patch(f"{_MODULE}.packed_npu_ipc_producer", side_effect=chunks):
+    with (
+        patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
+        patch.object(engine, "_post_send_sync", side_effect=lambda: events.append("sync")),
+        patch(f"{_MODULE}.packed_npu_ipc_producer", side_effect=chunks),
+    ):
         engine.send_weights()
     expected_chunk = ["update", "sync", "reuse"] if is_sender else ["sync", "reuse"]
     assert events == expected_chunk * 2 + ["sync"]
@@ -457,9 +456,9 @@ def test_trainer_worker_roundtrip_two_updates(packed):
     source = [("a", torch.arange(4, dtype=torch.float32).reshape(2, 2).t()), ("b", torch.ones(4, dtype=torch.float32))]
     accelerator = types.SimpleNamespace(current_device_index=lambda: 0, synchronize=MagicMock())
     npu = types.SimpleNamespace(synchronize=MagicMock(), current_stream=lambda: MagicMock())
-    exports = {}
+    exports: dict[int, torch.Tensor] = {}
     rebuilds = []
-    loads = []
+    loads: list[tuple[str, torch.Tensor]] = []
     original_empty = torch.empty
 
     def empty(*args, **kwargs):

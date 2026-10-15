@@ -275,6 +275,8 @@ def packed_npu_ipc_producer(
 class NPUPackedBufferImporter(PackedBufferImporter):
     """Cache one NPU mapping across chunks; inherit upstream cache cleanup."""
 
+    _entry: tuple[tuple, torch.Tensor] | None
+
     def rebuild(self, list_args: list) -> torch.Tensor:
         from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
 

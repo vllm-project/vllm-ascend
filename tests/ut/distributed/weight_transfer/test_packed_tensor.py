@@ -26,6 +26,7 @@ data correctness is verified end-to-end.
 from __future__ import annotations
 
 import types
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -905,7 +906,7 @@ def test_packed_npu_ipc_roundtrip_shapes(shape):
 
     importer = NPUPackedBufferImporter()
     fake_mod = types.ModuleType("torch_npu.multiprocessing.reductions")
-    fake_mod.rebuild_npu_tensor = lambda *args: buffers[0]
+    fake_mod.rebuild_npu_tensor = lambda *args: buffers[0]  # type: ignore[attr-defined]
     with (
         patch(f"{_MODULE}.reduce_tensor", new=reduce),
         patch.dict("sys.modules", {"torch_npu.multiprocessing.reductions": fake_mod}),
@@ -940,7 +941,7 @@ def test_packed_importer_reuses_mapping_but_not_weight_storage():
         import sys
 
         rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             ipc_handle={"node-0": args},
             physical_npu_id="node-0",
             names=["w"],
