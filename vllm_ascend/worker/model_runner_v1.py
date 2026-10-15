@@ -223,6 +223,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -4023,6 +4024,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
+        randomize_inputs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -4347,7 +4349,11 @@ class NPUModelRunner(GPUModelRunner):
             active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
             self.kvpp.prepare_forward(False)
 
-            with set_ascend_forward_context(
+            with (
+                self.maybe_randomize_inputs(input_ids, inputs_embeds, randomize_inputs=True)
+                if randomize_inputs
+                else nullcontext()
+            ), set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
@@ -4422,7 +4428,7 @@ class NPUModelRunner(GPUModelRunner):
         output = self.model.compute_logits(hidden_states)
         return output
 
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         self.eplb_warmup()
         if self.sparse_kv_offload_enabled:
             allocate_kv_offload_topk_profile_buffers(
@@ -4437,8 +4443,13 @@ class NPUModelRunner(GPUModelRunner):
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
             with disable_compilation(self.get_model()):
-                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
-        super().profile_run()
+                self._dummy_run(
+                    mc2_tokens_capacity, with_prefill=True, is_profile=True, randomize_inputs=randomize_inputs
+                )
+        if vllm_version_is("0.31.0"):
+            super().profile_run(randomize_inputs=randomize_inputs)
+        else:
+            super().profile_run()
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:

@@ -57,7 +57,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -1805,8 +1804,6 @@ def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
     connector up. Without this guard a V1 run enables the scheduler-side
     connector and crashes with "auxiliary output worker output is missing".
     """
-    if vllm_version_is("0.30.0"):
-        return
     if getattr(vllm_config, "aux_output_config", None) is None:
         return
     if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:

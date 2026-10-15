@@ -770,6 +770,7 @@ class KVPoolWorker:
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
+                    raise_on_transfer_failure=self.layerwise_offload,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -818,6 +819,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
