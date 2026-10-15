@@ -186,8 +186,8 @@ def generate(url):
 
 @pytest.mark.parametrize(
     "tp_size,pp_size,dp_size",
-    [(4, 1, 1), (4, 1, 2), (1, 2, 1), (2, 2, 1)],
-    ids=["tp4-ep4", "tp4-dp2-ep8", "tp1-pp2-ep1", "tp2-pp2-ep2"],
+    [(4, 1, 1), (2, 1, 2), (1, 2, 1), (2, 2, 1)],
+    ids=["tp4-ep4", "tp2-dp2-ep4", "tp1-pp2-ep1", "tp2-pp2-ep2"],
 )
 def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, pp_size, dp_size):
     """Compare every worker parameter and generated token with dense loading."""
