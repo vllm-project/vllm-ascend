@@ -203,7 +203,14 @@ def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
     wrapped = object()
     wrap_factory = Mock(return_value=wrapped)
     monkeypatch.setattr(patch_deepseek_v2.pp_transport, "make_empty_intermediate_tensors", wrap_factory)
-    patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
+    patch_deepseek_v2._patched_deepseek_v2_model_init(
+        model,
+        vllm_config=SimpleNamespace(
+            use_v2_model_runner=v2,
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        ),
+    )
     assert model._use_upstream_aux_relay is (v2 and not legacy)
     expected_data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.TOPK_INDICES,)
     if not model._use_upstream_aux_relay:
@@ -316,6 +323,105 @@ def test_pp_forward_propagates_aliased_topk_indices(monkeypatch):
     )
     assert len(transported) == 1
     torch.testing.assert_close(transported[0], received_topk_indices)
+
+
+@pytest.mark.parametrize(
+    "model_type,v2,pp,sp,expected",
+    [
+        ("glm_moe_dsa", False, 2, True, True),
+        ("glm_moe_dsa", False, 4, True, True),
+        ("glm_moe_dsa", False, 1, True, False),
+        ("glm_moe_dsa", False, 2, False, False),
+        ("glm_moe_dsa", True, 2, True, False),
+        ("deepseek_v3", False, 2, True, False),
+    ],
+)
+def test_glm_pp_sp_selection(model_type, v2, pp, sp, expected):
+    moe = patch_deepseek_v2.DeepseekV2MoE.__new__(patch_deepseek_v2.DeepseekV2MoE)
+    torch.nn.Module.__init__(moe)
+
+    def make_layer(mlp):
+        attention = patch_deepseek_v2.DeepseekV2MLAAttention.__new__(patch_deepseek_v2.DeepseekV2MLAAttention)
+        torch.nn.Module.__init__(attention)
+        attention.o_proj = torch.nn.Identity()
+        attention.o_proj.reduce_results = True
+        return SimpleNamespace(mlp=mlp, self_attn=attention, use_sequence_parallel_moe=False)
+
+    inactive, dense, active = make_layer(moe), make_layer(torch.nn.Identity()), make_layer(moe)
+    model = SimpleNamespace(layers=[inactive, dense, active], start_layer=1, end_layer=3)
+    config = SimpleNamespace(
+        use_v2_model_runner=v2,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp, use_sequence_parallel_moe=sp),
+    )
+    patch_deepseek_v2._enable_glm_pp_sequence_parallel(model, config)
+    assert active.use_sequence_parallel_moe is expected
+    assert active.self_attn.o_proj.reduce_results is (not expected)
+    for layer in (inactive, dense):
+        assert not layer.use_sequence_parallel_moe
+        assert layer.self_attn.o_proj.reduce_results
+
+
+@pytest.mark.parametrize("first,last", [(True, False), (False, False), (False, True)])
+@pytest.mark.parametrize("dense_after_sp", [False, True])
+@pytest.mark.parametrize("num_tokens", [3, 4])
+def test_sp_pp_restores_hidden_and_residual(monkeypatch, first, last, dense_after_sp, num_tokens):
+    # Model two distinct TP shards, including an odd token count. The PP
+    # receiver and dense layers must never see the padded/local layout.
+    full_hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    full_residual = full_hidden + 20
+    positions = torch.arange(num_tokens)
+    monkeypatch.setattr(
+        patch_deepseek_v2, "get_pp_group", lambda: SimpleNamespace(is_first_rank=first, is_last_rank=last)
+    )
+    gather = Mock(return_value=torch.cat([full_hidden, full_residual], dim=-1))
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", gather)
+
+    class SPLayer:
+        use_sequence_parallel_moe = True
+
+        def __call__(self, positions, hidden, residual, scaling):
+            assert hidden.shape == (num_tokens, 2)
+            if not first:
+                torch.testing.assert_close(residual, full_residual[:num_tokens])
+            return full_hidden[:2], full_residual[:2]
+
+    class DenseLayer:
+        use_sequence_parallel_moe = False
+
+        def __call__(self, positions, hidden, residual, scaling):
+            torch.testing.assert_close(hidden, full_hidden[:num_tokens])
+            torch.testing.assert_close(residual, full_residual[:num_tokens])
+            assert residual.is_contiguous()
+            return hidden, residual
+
+    layers = [SPLayer(), DenseLayer()] if dense_after_sp else [SPLayer()]
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        hidden_size=2,
+        layers=layers,
+        start_layer=0,
+        end_layer=len(layers),
+        aux_hidden_state_layers=(),
+        _use_upstream_aux_relay=False,
+        send_pp_topk_indices=False,
+        embed_input_ids=lambda ids: full_hidden[:num_tokens],
+        norm=lambda hidden, residual: (hidden + residual, None),
+    )
+    incoming = (
+        None
+        if first
+        else IntermediateTensors({"hidden_states": full_hidden[:num_tokens], "residual": full_residual[:num_tokens]})
+    )
+    output = _patched_forward(model, positions if first else None, positions, incoming)
+    gather.assert_called_once()
+    torch.testing.assert_close(gather.call_args.args[0], torch.cat([full_hidden[:2], full_residual[:2]], dim=-1))
+    if last:
+        torch.testing.assert_close(output, (full_hidden + full_residual)[:num_tokens])
+    else:
+        torch.testing.assert_close(output["hidden_states"], full_hidden[:num_tokens])
+        torch.testing.assert_close(output["residual"], full_residual[:num_tokens])
+        assert output["residual"].is_contiguous()
 
 
 def _empty_tensor_factory(batch_size, dtype, device):

@@ -27,6 +27,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
     DeepseekV2Model,
+    DeepseekV2MoE,
     Indexer,
     _get_llama_4_scaling,
     yarn_get_mscale,
@@ -303,6 +304,7 @@ def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
+    _enable_glm_pp_sequence_parallel(self, kwargs["vllm_config"])
     # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_transport.use_legacy_spec_pp()
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
@@ -319,6 +321,26 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
 
 
 DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
+
+
+def _enable_glm_pp_sequence_parallel(self, vllm_config: VllmConfig) -> None:
+    # Upstream disables decoder-level SP with PP because its transport expects
+    # replicated activations. Our forward restores that layout at each PP cut.
+    if vllm_config.use_v2_model_runner:
+        return
+    parallel_config = vllm_config.parallel_config
+    if (
+        vllm_config.model_config.hf_text_config.model_type != "glm_moe_dsa"
+        or parallel_config.pipeline_parallel_size <= 1
+        or not parallel_config.use_sequence_parallel_moe
+    ):
+        return
+    for layer in islice(self.layers, self.start_layer, self.end_layer):
+        if isinstance(layer.mlp, DeepseekV2MoE) and isinstance(layer.self_attn, DeepseekV2MLAAttention):
+            layer.use_sequence_parallel_moe = True
+            # The decoder now owns the reduction via reduce-scatter. This is
+            # the same projection object held by the Ascend MLA backend.
+            layer.self_attn.o_proj.reduce_results = False
 
 
 # Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
@@ -404,9 +426,25 @@ def _patched_forward(
         islice(self.layers, self.start_layer, self.end_layer),
         start=self.start_layer,
     ):
+        # A dense layer following an SP MoE layer expects replicated inputs.
+        if hidden_states.shape[0] != positions.shape[0] and not layer.use_sequence_parallel_moe:
+            combined_states = torch.cat([hidden_states, residual], dim=-1)
+            combined_states = tensor_model_parallel_all_gather(combined_states, 0)[: positions.shape[0]]
+            hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
+            residual = residual.contiguous()
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
         # A boundary state belongs to the stage producing it, including end_layer.
         _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
+
+    # Like the DSV4 SP+PP path, keep PP transport in the full-token layout.
+    # Gather residual together with hidden_states and trim TP padding. This
+    # also restores the final norm/logits layout on the last stage.
+    if hidden_states.shape[0] != positions.shape[0]:
+        combined_states = torch.cat([hidden_states, residual], dim=-1)
+        combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+        combined_states = combined_states[: positions.shape[0]]
+        hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
+        residual = residual.contiguous()
 
     if not pp_group.is_last_rank:
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
@@ -431,14 +469,6 @@ def _patched_forward(
                 [self.topk_indices_buffer[:num_tokens]],
             )
         return pp_output
-
-    if hidden_states.shape[0] != positions.shape[0]:
-        combined_states = torch.cat([hidden_states, residual], dim=-1)
-        combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-        combined_states = combined_states[: positions.shape[0]]
-        hidden_size = self.hidden_size
-        hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-        residual = residual.contiguous()
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if len(aux_hidden_states) > 0:

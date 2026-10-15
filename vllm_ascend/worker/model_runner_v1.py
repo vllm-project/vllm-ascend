@@ -41,7 +41,6 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -3277,7 +3276,14 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    # Keep PP intermediate tensors local to the sequence-parallel shard.
+    def _pp_intermediate_token_count(self, num_tokens: int) -> int:
+        # GLM's decoder uses SP within a stage, but patch_deepseek_v2 restores
+        # hidden_states and residual to full tokens at every PP boundary.
+        if self.model_config.hf_text_config.model_type == "glm_moe_dsa" or not enable_sp():
+            return num_tokens
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        return (num_tokens + tp - 1) // tp
+
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,
@@ -3285,12 +3291,11 @@ class NPUModelRunner(GPUModelRunner):
         sync_self: bool,
     ) -> IntermediateTensors:
         assert self.intermediate_tensors is not None
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        copy_len = self._pp_intermediate_token_count(num_tokens)
 
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                 if k not in self.intermediate_tensors.tensors:
                     base_tensor = self.intermediate_tensors["hidden_states"]
                     self.intermediate_tensors[k] = v.new_empty(
@@ -3302,9 +3307,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return IntermediateTensors(
             {
-                k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
-                else v[:num_tokens]
+                k: v[:copy_len]
                 for k, v in self.intermediate_tensors.items()
             }
         )
@@ -4210,18 +4213,10 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
-                # When PP and sequence parallelism are enabled, during dummy_run the estimated space should divide
-                # num_tokens by
-                # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
-                # to incorrect memory estimation and potentially causing OOM.
-                intermediate_tokens = num_tokens_padded
-                if enable_sp():
-                    tp_size = get_tensor_model_parallel_world_size()
-                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                # Match the real PP receive layout during profiling/capture.
+                intermediate_tokens = self._pp_intermediate_token_count(num_tokens_padded)
                 if self.intermediate_tensors is None:
-                    max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
-                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                    max_actual_tokens = self._pp_intermediate_token_count(self.max_num_tokens)
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )

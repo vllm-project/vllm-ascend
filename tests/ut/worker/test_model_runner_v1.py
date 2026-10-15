@@ -11,6 +11,7 @@ from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -57,6 +58,34 @@ from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+
+
+class TestPPIntermediateLayout(unittest.TestCase):
+    def test_receive_and_dummy_layout_match_model_transport(self):
+        for model_type in ("glm_moe_dsa", "deepseek_v3"):
+            for sp in (False, True):
+                for num_tokens in (3, 4):
+                    with self.subTest(model_type=model_type, sp=sp, num_tokens=num_tokens):
+                        runner = NPUModelRunner.__new__(NPUModelRunner)
+                        runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type))
+                        runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
+                        runner.intermediate_tensors = IntermediateTensors(
+                            {key: torch.zeros(4, 2) for key in ("hidden_states", "residual")}
+                        )
+                        expected_len = num_tokens if model_type == "glm_moe_dsa" or not sp else (num_tokens + 1) // 2
+                        incoming = IntermediateTensors(
+                            {
+                                key: torch.arange(expected_len * 2).reshape(expected_len, 2).float() + offset
+                                for key, offset in (("hidden_states", 0), ("residual", 100))
+                            }
+                        )
+                        with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=sp):
+                            self.assertEqual(runner._pp_intermediate_token_count(num_tokens), expected_len)
+                            output = runner.sync_and_gather_intermediate_tensors(num_tokens, incoming, True)
+                            dummy = runner.sync_and_gather_intermediate_tensors(num_tokens, None, False)
+                        for key in ("hidden_states", "residual"):
+                            torch.testing.assert_close(output[key], incoming[key])
+                            torch.testing.assert_close(dummy[key], incoming[key])
 
 
 class DenseAttentionBackend(AscendAttentionBackend):
