@@ -4,7 +4,6 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -211,40 +210,48 @@ def test_sparse_moe_block_init_delegates_when_pruning_disabled(monkeypatch):
     assert not hasattr(block, "pruned_expert_ids")
 
 
-def test_get_expert_mapping_remaps_original_experts_to_pruned_slots():
-    model = SimpleNamespace(
-        expert_pruning_map={1: (7, 3)},
-        named_parameters=lambda: [],
+def test_remap_expert_weight_name_maps_retained_experts_to_compact_ids():
+    expert_pruning_map = {1: (7, 3)}
+
+    assert (
+        pruning._remap_expert_weight_name(
+            "model.layers.1.mlp.experts.7.gate_proj.weight",
+            expert_pruning_map,
+        )
+        == "model.layers.1.mlp.experts.0.gate_proj.weight"
+    )
+    assert (
+        pruning._remap_expert_weight_name(
+            "model.layers.1.mlp.experts.3.down_proj.weight_scale",
+            expert_pruning_map,
+        )
+        == "model.layers.1.mlp.experts.1.down_proj.weight_scale"
     )
 
-    mapping = pruning._patched_get_expert_mapping(model)
 
-    assert mapping == [
-        ("layers.1.mlp.experts.w13_weight", "layers.1.mlp.experts.7.gate_proj.weight", 0, "w1"),
-        ("layers.1.mlp.experts.w2_weight", "layers.1.mlp.experts.7.down_proj.weight", 0, "w2"),
-        ("layers.1.mlp.experts.w13_weight", "layers.1.mlp.experts.7.up_proj.weight", 0, "w3"),
-        ("layers.1.mlp.experts.w13_weight_scale", "layers.1.mlp.experts.7.gate_proj.weight_scale", 0, "w1"),
-        ("layers.1.mlp.experts.w2_weight_scale", "layers.1.mlp.experts.7.down_proj.weight_scale", 0, "w2"),
-        ("layers.1.mlp.experts.w13_weight_scale", "layers.1.mlp.experts.7.up_proj.weight_scale", 0, "w3"),
-        ("layers.1.mlp.experts.w13_weight", "layers.1.mlp.experts.3.gate_proj.weight", 1, "w1"),
-        ("layers.1.mlp.experts.w2_weight", "layers.1.mlp.experts.3.down_proj.weight", 1, "w2"),
-        ("layers.1.mlp.experts.w13_weight", "layers.1.mlp.experts.3.up_proj.weight", 1, "w3"),
-        ("layers.1.mlp.experts.w13_weight_scale", "layers.1.mlp.experts.3.gate_proj.weight_scale", 1, "w1"),
-        ("layers.1.mlp.experts.w2_weight_scale", "layers.1.mlp.experts.3.down_proj.weight_scale", 1, "w2"),
-        ("layers.1.mlp.experts.w13_weight_scale", "layers.1.mlp.experts.3.up_proj.weight_scale", 1, "w3"),
-    ]
-    assert not any("weight_offset" in weight_name for _, weight_name, _, _ in mapping)
+def test_remap_expert_weight_name_skips_pruned_experts_and_offsets():
+    expert_pruning_map = {1: (7, 3)}
 
-
-def test_get_expert_mapping_delegates_without_pruning(monkeypatch):
-    model = MagicMock(expert_pruning_map=None)
-    original_get_expert_mapping = MagicMock(return_value=["original"])
-    monkeypatch.setattr(
-        pruning.qm.Qwen3MoeModel,
-        "_ascend_original_get_expert_mapping",
-        original_get_expert_mapping,
-        raising=False,
+    assert (
+        pruning._remap_expert_weight_name(
+            "model.layers.1.mlp.experts.5.up_proj.weight",
+            expert_pruning_map,
+        )
+        is None
+    )
+    assert (
+        pruning._remap_expert_weight_name(
+            "model.layers.1.mlp.experts.7.gate_proj.weight_offset",
+            expert_pruning_map,
+        )
+        is None
     )
 
-    assert pruning._patched_get_expert_mapping(model) == ["original"]
-    original_get_expert_mapping.assert_called_once_with(model)
+
+def test_remap_expert_weight_name_leaves_other_weights_unchanged():
+    gate_name = "model.layers.1.mlp.gate.weight"
+    fused_expert_name = "model.layers.1.mlp.experts.gate_up_proj.weight"
+
+    assert pruning._remap_expert_weight_name(gate_name, {1: (7, 3)}) == gate_name
+    assert pruning._remap_expert_weight_name(fused_expert_name, {1: (7, 3)}) == fused_expert_name
+    assert pruning._remap_expert_weight_name(gate_name, None) == gate_name
