@@ -106,11 +106,14 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     before = raw.clone()
     slots = torch.tensor([0, 128, -1, -1])
     tokens = slots.numel()
+    attention_output = torch.ones(heads, tokens, 512)
+    # Injected unused-row values check this consumer, not the NPU output contract.
+    attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
         slots=slots,
         current=object() if split else None,
         query=torch.empty(tokens, heads, 576),
-        adapter=SimpleNamespace(attention=Mock(return_value=(torch.ones(heads, tokens, 512), None))),
+        adapter=SimpleNamespace(attention=Mock(return_value=(attention_output, None))),
         block_table=object(),
         cache_lens=object(),
         cu=object(),
@@ -209,7 +212,13 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         # separately by test_flashmla_dcp.py. Here check the handoff to them.
         impl._forward_external_flashmla = Mock(return_value=torch.ones(tokens, heads * 128))
     else:
-        impl._v_up_proj = lambda latent: latent[..., :128].transpose(0, 1).reshape(tokens, heads * 128)
+
+        def project(latent):
+            torch.testing.assert_close(latent[:, :-1], torch.ones_like(latent[:, :-1]))
+            torch.testing.assert_close(latent[:, -1], torch.zeros_like(latent[:, -1]))
+            return latent[..., :128].transpose(0, 1).reshape(tokens, heads * 128)
+
+        impl._v_up_proj = project
         external = load(MLA, "_forward_external_flashmla", scope, "AscendMLAImpl")
         impl._forward_external_flashmla = Mock(wraps=MethodType(external, impl))
     impl._forward_decode = Mock(side_effect=AssertionError("external decode must not call FIA"))
