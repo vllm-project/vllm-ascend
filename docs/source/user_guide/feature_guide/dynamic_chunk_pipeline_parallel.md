@@ -25,9 +25,9 @@ Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking st
 
 CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. CPP is recommended for PD (Prefill/Decode) disaggregation scenarios. Supported features are as follows:
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Flashcomm1 |
-| ------- | ----- | ----- | ------ | ------ | ------ |
-| **CPP** | ✅    | ✅     | ✅      | ✅       | ✅       |
+|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Flashcomm1 | SRF |
+| ------- | ----- | ----- | ------ | ------ | ------ | ------ |
+| **CPP** | ✅    | ✅     | ✅      | ✅       | ✅       | ✅  |
 
 ## How to Enable
 
@@ -51,6 +51,7 @@ Note:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     vllm serve Qwen/Qwen3-30B-A3B \
         --host 0.0.0.0 \
