@@ -42,13 +42,6 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | 950PR&950DT Products | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
 | 950PR&950DT Products | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 
-On 950PR&950DT Products, DCP cannot be combined with SFA C8 (`enable_sparse_sfa_c8=true`).
-
-- ✅ **Full compatibility**: Combining the feature with DCP is supported.
-- 🟠 **Partial compatibility**: Combining the feature with DCP is supported with the stated limitations.
-- ❌ **No compatibility**: Combining the feature with DCP is not supported.
-- **Not applicable**: The feature does not apply to this attention backend.
-
 DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend.
 
 ## Usage
