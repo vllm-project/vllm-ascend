@@ -64,7 +64,7 @@ KVPP trades communication for persistent cache capacity. Each rank still needs t
 
 ## 4. Usage
 
-Enable KVPP through the model launch arguments. The KVPP group size follows TP × PCP (PCP requires Model Runner V2):
+Enable KVPP through the model launch arguments. The KVPP group size follows the TP size:
 
 ```bash
 vllm serve <model-path> \
@@ -73,4 +73,4 @@ vllm serve <model-path> \
   --additional-config '{"enable_kvpp": true}'
 ```
 
-`enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own PCP × TP group. Eager execution and PIECEWISE graph mode are supported; see the [KVPP feature guide](../../user_guide/feature_guide/kvpp.md) for connector and speculative-decoding constraints.
+`enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own TP group.

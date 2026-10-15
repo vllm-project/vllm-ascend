@@ -42,14 +42,11 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| MTP and DSpark | ✅ Supported | Draft caches are allocated independently and excluded from KVPP layer partitioning. |
-| Dynamic speculative decoding | Model-dependent | KVPP validation does not restrict the speculative method or token count, including DSpark adaptive verification and dynamic lengths. The model, proposer, and runner must support the configuration; draft layers cannot share target KV caches. |
+| Speculative decoding | ✅ Supported | All speculative decoding modes are supported. Draft caches are allocated independently and excluded from KVPP layer partitioning. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
-| PCP + P/D disaggregation + KVPP | ✅ Supported | Use Model Runner V2 and `MooncakeConnectorV2`; enable PCP and KVPP only on the prefill producer. The connector does not allow PP > 1 together with PCP > 1. |
-| PCP + KV pooling + KVPP | ✅ Supported | Requires Model Runner V2 and the Memcache whole-block pooling configuration below; owner shards span PCP × TP. |
 | MultiConnector | ✅ Supported | Combine `MooncakeConnectorV2` and `AscendStoreConnector`; each child connector must satisfy its type and role restrictions. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
@@ -95,7 +92,7 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-MTP and DSpark can be combined with KVPP. Draft caches remain independently allocated and are excluded from KVPP layer partitioning. KVPP does not impose a fixed speculative length; follow the model, proposer, and runner requirements for speculative decoding. Draft layers that share target KV caches are rejected. In particular, a speculative mode requiring FULL graphs (such as DSpark adaptive verification) cannot be combined with KVPP while KVPP supports only eager/PIECEWISE execution.
+KVPP supports all speculative decoding modes, including MTP, DSpark, and Eagle3, with fixed or dynamic speculative lengths. Draft caches remain independently allocated and are excluded from KVPP layer partitioning.
 
 ## Configuration Parameters
 
@@ -110,9 +107,9 @@ KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP 
 
 ### PD Disaggregation
 
-KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**). The connector code has been merged but has not yet been released.
+KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**).
 
-Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. MTP caches remain replicated and are transferred alongside the persistent target caches.
+Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. Draft caches remain replicated and are transferred alongside the persistent target caches.
 
 ```bash
 # Prefill node: include {"enable_kvpp": true} in --additional-config.

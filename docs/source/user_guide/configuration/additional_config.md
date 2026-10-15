@@ -380,11 +380,8 @@ KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
 DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
 TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
 
-PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP requires non-hybrid MLA/SFA and
-eager or `PIECEWISE` execution; DCP is not supported. KV transfer supports
-`MooncakeConnectorV2`, `AscendStoreConnector`, and their `MultiConnector`
-combination, subject to the roles and pooling settings in the
-[KVPP guide](../feature_guide/kvpp.md). PCP gathers
+PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
+non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
 prefill KV before cache writes; layer broadcasts restore prior-forward cache
 contents before attention. The broadcast decision uses the global scheduled
 batch, not PCP-local segment offsets.
