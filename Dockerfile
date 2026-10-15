@@ -61,6 +61,8 @@ ARG DAILY_DEPS_MODE="full"
 # flash-linear-attention-npu
 ARG FLA_VERSION="26.9.1+deva4a7958"
 ARG FLA_RELEASE_TAG="v26.9.1-beta2"
+# flash-attn-npu
+ARG FLASH_ATTN_VERSION="0.4.2.post1"
 
 WORKDIR /workspace
 
@@ -106,6 +108,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    python3 -m pip install flash-attn-npu==${FLASH_ATTN_VERSION} --no-build-isolation && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
