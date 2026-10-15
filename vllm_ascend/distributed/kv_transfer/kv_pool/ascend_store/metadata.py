@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import compress
 from typing import Any, cast
 
 import numpy as np
@@ -545,6 +546,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -558,13 +560,17 @@ class ChunkedTokenDatabase:
             return
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
+        first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
+        chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
+        if chunk_mask is not None:
+            # Unlike transfer-range masks, a short lookup/store mask excludes
+            # chunks beyond its end. compress stops at the shorter iterator.
+            chunk_ids = compress(chunk_ids, chunk_mask[first_chunk:num_logical_blocks])
         candidate_index = 0
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in chunk_ids:
             start_idx = chunk_id * logical_block_size
             end_idx = min(start_idx + logical_block_size, token_len)
-            if start_idx < mask_num:
-                continue
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -624,6 +630,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -633,6 +640,7 @@ class ChunkedTokenDatabase:
             mask_num,
             kv_cache_group_id,
             chunk_filter=chunk_filter,
+            chunk_mask=chunk_mask,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
@@ -647,6 +655,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -660,6 +669,7 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             shard_rank=shard_rank,
             shard_size=shard_size,
+            chunk_mask=chunk_mask,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
