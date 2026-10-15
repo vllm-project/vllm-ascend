@@ -45,5 +45,5 @@
 The accuracy test uses the real inference shape `[6, 1, 2048]` (dcp_size=6, topk=2048) plus a broader grid of `dcp_size {2, 4, 6} x interleave_size {1, 2, 4} x topk {1, 8, 48, 256, 2048}` over every DCP rank, against an independent fp32 torch reference. As a pure integer index remap, the unified precision tolerance is bit-exact (`rtol=0, atol=0`). ATK verification on A3 additionally reports 180/180 accuracy pass and an e2e npu/cpu ratio of 2.50x for the real `[6, 1, 2048]` shape (device kernel time 19.9us; micro shapes are launch-bound).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sparse_index_remap_triton.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_sparse_index_remap_triton.py
 ```

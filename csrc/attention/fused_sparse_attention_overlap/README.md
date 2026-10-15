@@ -225,4 +225,4 @@ output = torch.ops._C_ascend.npu_fused_sparse_attention_overlap(
 ```
 
 完整的Tensor构造、首次Miss及后续All-Hit精度校验请参考
-[test_fused_sparse_attention_overlap.py](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py)。
+[test_fused_sparse_attention_overlap.py](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_fused_sparse_attention_overlap.py)。

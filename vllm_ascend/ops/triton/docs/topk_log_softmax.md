@@ -61,5 +61,5 @@ Accuracy tests live under `tests/e2e/nightly/single_node/ops/singlecard_ops/trit
 The reference is `torch.nn.functional.log_softmax` in fp32 followed by `torch.gather`. As a reduction-type operator over the vocabulary, the tolerance is `atol=1e-4, rtol=1e-5` for fp32 input and `atol=1e-3, rtol=1e-4` for fp16 input.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_token_logprobs.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_compute_token_logprobs.py
 ```

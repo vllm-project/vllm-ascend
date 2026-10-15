@@ -171,10 +171,10 @@ Python接口内部通过`EXEC_NPU_CMD`调用`aclnnFusedQuantLightningIndexerMana
 
 ## 测试说明
 
-算子正确性测试位于`tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_quant_lightning_indexer_manage.py`，需要在已编译安装当前代码的Ascend NPU环境执行：
+算子正确性测试位于`tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_fused_quant_lightning_indexer_manage.py`，需要在已编译安装当前代码的Ascend NPU环境执行：
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_quant_lightning_indexer_manage.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_fused_quant_lightning_indexer_manage.py
 ```
 
 测试覆盖以下场景：

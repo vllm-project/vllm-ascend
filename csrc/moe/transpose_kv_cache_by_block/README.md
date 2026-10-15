@@ -172,7 +172,7 @@ ACLNN 接口和 tiling 数据结构，更新后应同时重新编译二者。
 在仓库根目录执行回归测试：
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_transpose_kv_cache_by_block.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_transpose_kv_cache_by_block.py
 ```
 
 测试覆盖 FP16/BF16、连续/交错/带间隙布局、K/V 独立 stride、混合层布局、

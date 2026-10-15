@@ -199,5 +199,5 @@ _apply_grammar_bitmask_kernel[grid](
 
 ```bash
 pytest -sv --noconftest \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_grammar_bitmask_triton.py
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_apply_grammar_bitmask_triton.py
 ```

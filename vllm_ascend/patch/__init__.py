@@ -1415,7 +1415,7 @@
 #       override triton ops in vLLM with ascend implementation
 #       re-write apply_penalties kernel with minimum change to support large input shape.
 #    Test:
-#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
+#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\a2a3\test_penality.py
 #    Related PR (if no, explain why):
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
@@ -1490,7 +1490,7 @@
 #       vector transpose, multiply, and reduction instructions.
 #    Test:
 #       Regression coverage is in
-#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
+#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_sampling_mask.py`.
 #    Related PR (if no, explain why):
 #       No. This is a Triton-Ascend compiler compatibility workaround.
 #    Future Plan:

@@ -44,5 +44,5 @@
 The test guards the 1:1 wrapper against an fp32 CPU golden across fp16/bf16/fp32 and shapes exercising the small, medium, and large-`M` heuristic regimes (`(m, k, n) = (7, 63, 129)`, `(257, 257, 131)`, `(1025, 65, 257)`), with unified tolerances (`rtol=2e-3, atol=2e-2` for fp16; `2e-2, 5e-2` for bf16; `1e-4, 1e-4` for fp32). The sibling `test_linear_batch_invariant_nd_precision` covers the convenience wrapper on 2D/3D/4D activations.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py -k linear_persistent
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_batch_invariant_ops.py -k linear_persistent
 ```

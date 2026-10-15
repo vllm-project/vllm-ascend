@@ -13,7 +13,7 @@
 # limitations under the License.
 """CPU golden reference for ``npu_copy_and_expand_eagle_inputs``.
 
-Adapted from ``tests/e2e/nightly/single_node/ops/singlecard_ops/test_copy_and_expand_eagle_inputs.py``.
+Adapted from ``tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_copy_and_expand_eagle_inputs.py``.
 """
 
 from __future__ import annotations

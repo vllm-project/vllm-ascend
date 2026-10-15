@@ -74,8 +74,8 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton_sis
 > [!NOTE]
 > Single-operator accuracy test cases are placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
 
-`test_rotary_embedding_triton_kernel_siso` in `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py` compares the kernel against a PyTorch-native reference over `head_size` of `64` and `128` (the SFA lightweight head dimension), `rotary_dim` of `32` and `64` (partial rotary, matching `qk_rope_head_dim`), `num_heads = 64`, `num_tokens` of `1, 4, 8, 16, 1024` (decode through prefill), both `is_neox_style` values, and bf16/fp16. Accuracy comparison uses the unified tolerance for this element-wise fp32-accumulating operator: `atol=rtol=1e-3`.
+`test_rotary_embedding_triton_kernel_siso` in `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_rope.py` compares the kernel against a PyTorch-native reference over `head_size` of `64` and `128` (the SFA lightweight head dimension), `rotary_dim` of `32` and `64` (partial rotary, matching `qk_rope_head_dim`), `num_heads = 64`, `num_tokens` of `1, 4, 8, 16, 1024` (decode through prefill), both `is_neox_style` values, and bf16/fp16. Accuracy comparison uses the unified tolerance for this element-wise fp32-accumulating operator: `atol=rtol=1e-3`.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py -k "siso"
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_rope.py -k "siso"
 ```

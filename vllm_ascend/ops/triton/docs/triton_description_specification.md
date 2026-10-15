@@ -37,12 +37,12 @@
 > [!NOTE]
 > **Test Case Instructions**
 >
-> - Single-operator accuracy test cases should be placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
+> - Single-operator accuracy tests belong under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/` or `triton/a5/`, according to their CI architecture group.
 > - For inference scenarios, use the actual shapes and other parameters adopted by the model as single-operator test cases, rather than arbitrarily constructed ones.
 > - Accuracy comparison results should use a unified precision tolerance based on the operator type and data type; example cases will be provided later.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_fused_qkvzba_split_reshape_cat.py
 ```
 
 ## Example
@@ -50,6 +50,6 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qk
 A worked example of this template is committed alongside it in the same branch:
 
 - **Operator doc**: `vllm_ascend/ops/triton/docs/fused_qkvzba_split_reshape.md`
-- **Accuracy test**: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py`
+- **Accuracy test**: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_fused_qkvzba_split_reshape_cat.py`
 
 The example doc is filled section by section following this template; the example test uses the actual shapes adopted by the model in inference (Qwen3-GDN-10B, `gqa_interleaved_layout=True`) and applies the unified precision tolerance based on the operator type and data type (bit-exact for this pure data-movement operator).

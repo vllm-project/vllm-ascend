@@ -66,5 +66,5 @@
 The single-operator tests use the long-vocabulary inference shape `vocab_size=151936`, which is not divisible by either the 8192 coarse block or the 1024 fine block and therefore covers hierarchy-tail masking. Batch/token counts include `1`, `16`, and `64`, matching the operator's long-vocabulary performance validation range. Greedy and cache results are checked bit-exact. Random sampling cannot be validated by exact token equality against Gumbel-Max because the RNG consumption pattern is intentionally different; the tests instead cover deterministic replay, mixed greedy/random rows, exact single-support sampling across hierarchy boundaries, temperature-scaling equivalence, cache semantics, and an equal-mass finite-support distribution sanity check.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_categorical_sample.py
 ```

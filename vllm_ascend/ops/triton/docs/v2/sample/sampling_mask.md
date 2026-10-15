@@ -140,5 +140,5 @@ the later four-field main interface, it additionally validates the zero-width
 compact buffer and exact bitmask fallback.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_sampling_mask.py
 ```

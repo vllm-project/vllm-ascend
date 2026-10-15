@@ -117,19 +117,12 @@ runner_mapping:
     default: [ops-a2-1, ops-a3-1]
   tests/e2e/nightly/single_node/ops/singlecard_ops/(ascendc|triton)/a5/:
     default: ops-a5-1
-  # Keep these tests in their existing directory. More specific file routes
-  # win over the recursive default, including the legacy *_310.py names.
+  # Preserve the two existing 310P files without creating backend/310p dirs.
   tests/e2e/nightly/single_node/ops/singlecard_ops/(test_causal_conv1d_310|test_recurrent_gated_delta_rule_310)\.py$:
     default: ops-310p-1
-  tests/e2e/nightly/single_node/ops/singlecard_ops/(test_attn_res_fwd|test_gmm_dequant_situ_quant_msd)\.py$:
+  # These local kernels/host helpers require the A3 build or offload path.
+  tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_(attn_res_fwd|gmm_dequant_situ_quant_msd|copy_sfa_offload_metadata|lim_mtp_index_reuse|sparse_kv_offload)\.py$:
     default: ops-a3-1
-  tests/e2e/nightly/single_node/ops/singlecard_ops/(test_add_rms_norm_bias_a5|test_cann_qli_binding|test_gmm_situ_small_experts|test_qfa_c8_paged_layout|test_sparse_flash_attention_dcp_lse)\.py$:
-    default: ops-a5-1
-  # Mixed files retain common A2 cases and A5-specific cases in one file.
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_scatter_nd_update_sk\.py$:
-    default: [ops-a2-1, ops-a5-1]
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_(rope|dcp_a2a)\.py$:
-    default: [ops-a2-1, ops-a5-1]
   tests/e2e/nightly/single_node/ops/singlecard_ops/:
     default: ops-a2-1
   tests/e2e/pull_request/one_card:

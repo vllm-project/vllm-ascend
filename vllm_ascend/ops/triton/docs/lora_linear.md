@@ -75,5 +75,5 @@ It tests every supported per-slice rank in `{8, 16, 32, 64}` at token counts `{1
 The arithmetic accuracy criterion is relative L2 error below 0.5% against a PyTorch FP32 reference. Tokens masked as base-only must remain bit-exact (`rtol=0`, `atol=0`) relative to their original y values.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lora_linear.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_lora_linear.py
 ```

@@ -45,7 +45,7 @@ from the repository root:
 
 ```bash
 python -m pip install -v --no-build-isolation -e .
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_gmm_dequant_situ_quant_msd.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_gmm_dequant_situ_quant_msd.py
 ```
 
 The regression suite covers ND/native NZ expert slices, one and multiple experts,

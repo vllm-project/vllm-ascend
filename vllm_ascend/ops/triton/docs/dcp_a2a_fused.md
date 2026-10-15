@@ -92,7 +92,7 @@ a real two-rank HCCL group and invokes the registered custom operator end to
 end for both scatter dimensions.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```
 

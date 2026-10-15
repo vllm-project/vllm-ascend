@@ -260,7 +260,7 @@ Covered behavior:
 Run on an Ascend environment with Triton enabled:
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_resample.py
 ```
 
 Performance is validated separately with `msprof op`; the numerical UT does not use Python wall time as an operator-performance metric.

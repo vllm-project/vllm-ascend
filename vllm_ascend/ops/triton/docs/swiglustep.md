@@ -45,5 +45,5 @@
 The test compares `swiglustep_forward_triton` with an independent PyTorch baseline across fp16/bf16, 2D and 3D shapes (`M = 1/128/4000`, `N = 1280/2048`), and `limit = 1.0/7.0`, with unified elementwise tolerances (`rtol = atol = 5e-3` for fp16, `2e-2` for bf16). It additionally covers clamp-extreme inputs against exact golden values, NaN/Inf propagation, and non-contiguous input.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglustep.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_swiglustep.py
 ```

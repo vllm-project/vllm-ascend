@@ -68,5 +68,5 @@ This replaces the previous hardcoded `row_block_size = 16`, so small hidden dims
 The test guards the 1:1 wrapper against an fp32 CPU golden (`x · rsqrt(mean(x²) + eps) · w`) across fp16/bf16/fp32, a non-power-of-two hidden size (1025) and a multi-program/multi-block shape (2×65×4096), `eps = 1e-6 / 1e-5`, with unified tolerances (`rtol=2e-3, atol=2e-2` for fp16; `2e-2, 5e-2` for bf16; `1e-4, 1e-4` for fp32).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py -k rms_norm_kernel
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_batch_invariant_ops.py -k rms_norm_kernel
 ```

@@ -42,6 +42,6 @@
 The single-card nightly test compares packed output bit-exactly with the expected rank permutation and checks decoded LSE against FP32 input. It covers both scatter axes, non-contiguous inputs, BF16/FP16/FP32 payloads, A5 dispatch boundaries, and a partial eight-row tile. The multi-card A3 test exercises the payload through HCCL All-to-All. The output-data comparison uses `atol=0, rtol=0`; decoded LSE uses the tolerances in the test.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```

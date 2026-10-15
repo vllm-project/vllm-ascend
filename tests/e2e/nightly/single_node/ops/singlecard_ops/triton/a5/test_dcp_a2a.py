@@ -70,8 +70,6 @@ def _check_a5_batching_case(
     run_combine: bool,
 ) -> None:
     """Compare one A5 shape with scalar kernels and check its dispatch."""
-    if not dcp_a2a.is_950():
-        pytest.skip("The batched DCP kernels are enabled only on A5")
     dcp_a2a.init_device_properties_triton()
     vector_cores = dcp_a2a.get_vectorcore_num()
     torch.manual_seed(2026 + num_tokens + dcp_size)
@@ -180,8 +178,6 @@ def test_a5_generalized_batching_matches_scalar_path(
 )
 @torch.inference_mode()
 def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
-    if not dcp_a2a.is_950():
-        pytest.skip("The batched DCP kernels are enabled only on A5")
     dcp_a2a.init_device_properties_triton()
     vector_cores = dcp_a2a.get_vectorcore_num()
     if case.startswith("pack-"):

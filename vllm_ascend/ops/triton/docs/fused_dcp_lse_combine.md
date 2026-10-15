@@ -44,6 +44,6 @@
 The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE, A5 dispatch boundaries, and a partial eight-row tile. The combine comparison uses the per-dtype tolerances declared in the test (BF16 up to `atol=2e-2, rtol=2e-2`). The multi-card A3 test runs the registered operator with a real HCCL exchange.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```

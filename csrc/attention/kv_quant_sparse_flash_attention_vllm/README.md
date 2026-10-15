@@ -256,11 +256,11 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 在仓库根目录、已编译并安装自定义算子的A2/A3环境中运行：
 
 ```bash
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_kv_quant_sparse_flash_attention_vllm.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_kv_quant_sparse_flash_attention_vllm_rope0.py
 ```
 
-原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py)
+原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/ascendc/a2a3/test_kv_quant_sparse_flash_attention_vllm_rope0.py)
 共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
 LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，

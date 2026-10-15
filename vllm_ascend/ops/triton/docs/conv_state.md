@@ -53,5 +53,8 @@ The existing `test_conv_state_copy_masks_invalid_slots_and_preserves_shared_page
 This is pure data movement: the correctness criterion is exact copied values and exact zero padding (`rtol=0`, `atol=0` for an independent reference). The existing test uses `torch.testing.assert_close` with its default tolerances. Historical A3 validation and its hardware scope are recorded in PR #17010; this document does not claim a new device run.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_glm5next_conv_state.py
+# A2/A3
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_copy_conv_state.py
+# A5
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a5/test_copy_conv_state.py
 ```

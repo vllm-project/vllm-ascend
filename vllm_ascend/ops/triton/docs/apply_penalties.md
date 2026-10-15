@@ -53,5 +53,5 @@
 The accuracy test compares this operator against `vllm.v1.sample.ops.penalties.apply_all_penalties` element by element. It sweeps `num_seqs` in `{1, 8, 32, 128}` and `vocab_size` in `{5120, 151936}` (the latter being the Qwen3 vocabulary used in inference), over prompt/output length combinations that cover the empty, single-token, typical and all-padding cases, for both fp16 and bf16. The precision tolerance follows the data type: `rtol = atol = 1e-3` for fp16 and `1e-2` for bf16.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_penalties_triton.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_apply_penalties_triton.py
 ```

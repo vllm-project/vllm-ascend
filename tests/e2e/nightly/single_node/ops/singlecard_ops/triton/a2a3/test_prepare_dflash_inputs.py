@@ -377,6 +377,7 @@ def _build_inputs(case, device):
 
 
 def _build_reference(data, case):
+    """Build query/context slots and sampling metadata with a per-request CPU reference."""
     sample_from_anchor = case.get("sample_from_anchor", False)
     sample_off = 0 if sample_from_anchor else 1
     expected_steps = case["num_query_per_req"] - sample_off

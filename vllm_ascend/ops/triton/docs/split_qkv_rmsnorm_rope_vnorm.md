@@ -70,11 +70,11 @@
 
 ## Test Cases
 
-- Single-operator accuracy test: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_rope_vnorm.py`, parameterized over real `gemma-4-31B-it` per-rank shapes: sliding layers (`head_dim=256`, 32 Q / 16 KV heads) and full attention layers (`head_dim=512`, 32 Q / 4 KV heads), each divided by the tensor parallel size. Both the no-bias and the with-bias paths are covered. `rope_dim == head_dim` throughout, because `Gemma4RotaryEmbedding` passes `rotary_dim = head_size` to the base class and therefore builds a full-width cos/sin cache even on proportional-RoPE layers.
+- Single-operator accuracy test: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_split_qkv_rmsnorm_rope_vnorm.py`, parameterized over real `gemma-4-31B-it` per-rank shapes: sliding layers (`head_dim=256`, 32 Q / 16 KV heads) and full attention layers (`head_dim=512`, 32 Q / 4 KV heads), each divided by the tensor parallel size. Both the no-bias and the with-bias paths are covered. `rope_dim == head_dim` throughout, because `Gemma4RotaryEmbedding` passes `rotary_dim = head_size` to the base class and therefore builds a full-width cos/sin cache even on proportional-RoPE layers.
 - Fusion-pass test: `tests/e2e/pull_request/one_card/compile/test_graphex_qkvnorm_rope_fusion.py`, which compiles the pre-attention chain for both Gemma4 shapes and asserts the graph holds `qkv_rmsnorm_rope_vnorm` and no leftover `npu_rms_norm` or `npu_rotary_embedding`. The variant built from the real `RMSNorm` and `get_rope` modules also checks that each attention type gets its Ascend rotary embedding, and that the fused outputs match the same modules run eagerly.
 - Pass registration unit test: `tests/ut/compilation/test_qknorm_rope_fusion_pass.py`, which checks that the two Gemma4 shapes produce distinct pattern keys (a shared key would silently drop the second registration), that the pass registers one pattern per distinct attention shape, that a shape overflowing the unified buffer is skipped, and that hardware without the kernel (Ascend 950) skips this pattern while keeping the q/k-only ones.
 - Precision tolerance follows the operator-type/data-type convention: bf16 normalization plus rotation uses `atol=5e-2, rtol=5e-3` against a float32 reference, matching `test_split_qkv_rmsnorm_rope.py`. The fused vs unfused comparison in the fusion-pass test compares two bf16 results that round at different points, so it allows a few bf16 ulps (`atol=1e-1, rtol=2e-2`).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_rope_vnorm.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_split_qkv_rmsnorm_rope_vnorm.py
 ```

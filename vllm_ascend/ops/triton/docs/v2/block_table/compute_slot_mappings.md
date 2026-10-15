@@ -106,5 +106,5 @@ CP=4. It covers empty requests, cross-block and cross-tile ranges, multiple
 kernel block sizes, padding, and the `out` interface:
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_slot_mapping.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/a2a3/test_compute_slot_mapping.py
 ```

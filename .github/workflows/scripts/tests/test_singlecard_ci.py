@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selection and process isolation regressions; no accelerator imports."""
 
+import ast
 import json
 import os
 import subprocess
@@ -48,13 +49,17 @@ def test_complete_singlecard_inventory(tmp_path):
     assert {path for path, _ in actual} == files
     assert all(group["num_npus"] == 1 for group in groups)
     assert {chip for _, chip in actual} == {"a2", "a3", "a5", "310p"}
-    assert (f"{OPS}/test_attn_res_fwd.py", "a3") in actual
-    assert (f"{OPS}/test_gmm_dequant_situ_quant_msd.py", "a3") in actual
+    assert (f"{OPS}/ascendc/a2a3/test_attn_res_fwd.py", "a3") in actual
+    assert (f"{OPS}/ascendc/a2a3/test_attn_res_fwd.py", "a2") not in actual
+    assert (f"{OPS}/ascendc/a2a3/test_gmm_dequant_situ_quant_msd.py", "a3") in actual
+    for name in ("copy_sfa_offload_metadata", "lim_mtp_index_reuse", "sparse_kv_offload"):
+        target = f"{OPS}/ascendc/a2a3/test_{name}.py"
+        assert (target, "a3") in actual
+        assert (target, "a2") not in actual
     assert (f"{OPS}/test_causal_conv1d_310.py", "310p") in actual
     assert (f"{OPS}/test_recurrent_gated_delta_rule_310.py", "310p") in actual
-    assert (f"{OPS}/test_qfa_c8_paged_layout.py", "a5") in actual
-    assert (f"{OPS}/test_cann_qli_binding.py", "a2") not in actual
-    assert {(f"{OPS}/triton/test_rope.py", chip) for chip in ("a2", "a5")} <= actual
+    assert (f"{OPS}/ascendc/a5/test_qfa_c8_paged_layout.py", "a5") in actual
+    assert {(f"{OPS}/triton/{arch}/test_rope.py", chip) for arch, chip in (("a2a3", "a2"), ("a5", "a5"))} <= actual
     for name in ("kda_gate_cumsum_vllm", "kda_layout_swap12", "dequant_situ_quant"):
         assert {(f"{OPS}/ascendc/a2a3/test_{name}.py", chip) for chip in ("a2", "a3")} <= actual
     assert (f"{OPS}/ascendc/a5/test_situ_mx_quant.py", "a5") in actual
@@ -63,12 +68,52 @@ def test_complete_singlecard_inventory(tmp_path):
     assert (f"{OPS}/triton/a5/test_copy_conv_state.py", "a5") in actual
 
 
+def test_all_operator_tests_have_backend_and_architecture():
+    legacy = {"test_causal_conv1d_310.py", "test_recurrent_gated_delta_rule_310.py"}
+    root = ROOT / OPS
+    for source in root.rglob("test_*.py"):
+        relative = source.relative_to(root)
+        if relative.as_posix() in legacy:
+            continue
+        assert len(relative.parts) == 3, relative
+        assert relative.parts[0] in {"ascendc", "triton"}, relative
+        assert relative.parts[1] in {"a2a3", "a5"}, relative
+    assert not list(root.rglob(".gitkeep"))
+
+
+def test_a5_cases_are_separated_from_a2a3():
+    def names(relative):
+        tree = ast.parse((ROOT / OPS / relative).read_text())
+        return {node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")}
+
+    fp8 = "test_rotary_embedding_triton_kernel_fp8"
+    assert fp8 not in names("triton/a2a3/test_rope.py")
+    assert fp8 in names("triton/a5/test_rope.py")
+    assert not any(name.startswith("test_a5_") for name in names("triton/a2a3/test_dcp_a2a.py"))
+    assert any(name.startswith("test_a5_") for name in names("triton/a5/test_dcp_a2a.py"))
+    assert "test_a5_cache_destination_layout" not in names("ascendc/a2a3/test_scatter_nd_update_sk.py")
+    assert "test_a5_cache_destination_layout" in names("ascendc/a5/test_scatter_nd_update_sk.py")
+
+
+def test_external_operator_only_files_are_removed():
+    removed = {
+        "test_cann_qli_binding.py",
+        "test_gating_top_k_softmax.py",
+        "test_pa_kv_cache_ops.py",
+        "test_chunk_kda_aclnn.py",
+        "test_kimi_k3_chunk_kda_tail_npu.py",
+        "test_kimi_kda_ascendc_npu.py",
+        "test_kimi_kda_recurrent_ascendc_npu.py",
+    }
+    assert not {source.name for source in (ROOT / OPS).rglob("test_*.py")} & removed
+
+
 def test_new_file_is_discovered_recursively(tmp_path):
-    source = tmp_path / OPS / "triton/new_subdir/test_new_kernel.py"
+    source = tmp_path / OPS / "triton/a2a3/new_subdir/test_new_kernel.py"
     source.parent.mkdir(parents=True)
     source.write_text("def test_new_kernel(): pass\n")
     groups = select(tmp_path, "--curated", "singlecard-ops", cwd=tmp_path)
-    assert assignments(groups) == {(source.relative_to(tmp_path).as_posix(), "a2")}
+    assert assignments(groups) == {(source.relative_to(tmp_path).as_posix(), chip) for chip in ("a2", "a3")}
 
 
 @pytest.mark.parametrize(
@@ -98,9 +143,9 @@ def test_all_tests_contains_singlecard_and_existing_pr_tests(tmp_path):
 
 
 def test_nodeid_scope_and_override_deduplication(tmp_path):
-    target = f"{OPS}/triton/test_rope.py::test_rotary_embedding_triton_kernel_fp8"
+    target = f"{OPS}/triton/a2a3/test_rope.py::test_rotary_embedding_triton_kernel"
     groups = select(tmp_path, "--explicit-e2e-tests", target)
-    assert assignments(groups) == {(target, "a2"), (target, "a5")}
+    assert assignments(groups) == {(target, "a2"), (target, "a3")}
     groups = select(tmp_path, "--explicit-e2e-tests", target, "--runner-label-override", "linux-aarch64-a5-4")
     assert assignments(groups) == {(target, "a5")}
     assert sum(len(group["tests"].split()) for group in groups) == 1
@@ -175,7 +220,7 @@ def test_unknown_partition_in_list_is_rejected(monkeypatch):
 def test_skipped_target_is_removed_from_all_devices(tmp_path, suffix):
     config_path = SCRIPT.with_name("test_config.yaml")
     config = yaml.safe_load(config_path.read_text())
-    target = f"{OPS}/triton/test_rope.py{suffix}"
+    target = f"{OPS}/triton/a5/test_rope.py{suffix}"
     config["skip_tests"].append(target)
     custom_config = tmp_path / "test_config.yaml"
     custom_config.write_text(yaml.safe_dump(config))
