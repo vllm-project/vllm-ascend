@@ -44,7 +44,7 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
 
-#### Layerwise Pull Connector (Mooncake Backend)
+#### Layerwise Push Connector
 
 1. The request is sent to the Proxy's `_handle_completions` endpoint.
 2. The Proxy calls `select_decoder` to choose a D node and forwards the request, configuring `kv_transfer_params` with `do_remote_prefill=True` and setting the `metaserver` endpoint.

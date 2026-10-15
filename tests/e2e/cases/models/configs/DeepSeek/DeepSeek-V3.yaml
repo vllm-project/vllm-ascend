@@ -42,15 +42,7 @@ deployment:
         '{"kv_connector": "LayerwisePushConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
+        "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
             }
         }'
   -
@@ -78,15 +70,7 @@ deployment:
         '{"kv_connector": "LayerwisePushConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
+        "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync"
             }
         }'
 

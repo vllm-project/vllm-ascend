@@ -4,13 +4,11 @@
 
 `LayerwisePushConnector` 仅保留 P 主动写入的控制流程，不提供 pull 模式。
 
-当前支持注册的 HBM 目标。MemFabric 默认使用异步 WRITE；Mooncake 仅支持同步
-WRITE，需要显式配置 `push_write_mode: "sync"`。
-Sparse decode offload 暂不支持，两个后端均在缓存注册前明确拒绝。
-
-原因是当前 MemFabric TRANS WRITE 会查找远端已注册的地址映射，而 offload CPU GVA
-没有注册到该通道。Pull 使用本地 GVA 的能力不能直接推导为 Push 可写远端 GVA。
-实验版没有添加额外 HBM 中转或 D2H 拷贝。
+普通 HBM 目标支持 MemFabric 和 Mooncake。MemFabric 默认使用异步 WRITE；
+Mooncake 仅支持同步 WRITE，需要显式配置 `push_write_mode: "sync"`。
+Sparse decode offload 仅支持 MemFabric：D 侧将共享 CPU KV 池的 GVA 和 block 区段
+注册到本 rank 的传输引擎，P 侧即可直接写入。Mooncake 无法使用该内存池，仍在
+缓存注册前明确拒绝。Sparse decode offload 继续要求 Decode PP=1。
 
 ## 配置
 
@@ -86,6 +84,8 @@ socket 操作。
 并新增真实 ZeroMQ 控制通道测试：慢 D 不阻塞另一个 D、同 D 保序、目标延迟发布、
 源 slot 完成门、WRITE 失败、以及 PP/chunk/层复用组合。
 
-这些测试使用模拟 WRITE 和 NPU 事件；尚未运行本分支的硬件端到端和性能对比。
-先对注册 HBM 目标比较成功率、吞吐、TTFT/TPOT、P CPU 占用和层复用等待，
-固定后端版本、协议、请求数据和并行配置。Sparse offload 不纳入当前 Push 对比。
+这些测试使用模拟 WRITE 和 NPU 事件。实机验证已完成：A3 Mini 跨机 P TP8 → D TP4
+的普通/sparse、同步/异步组合均通过；61 层全模型 P TP16/PP1 → D TP8/PP2 的普通
+HBM sync/async，以及 P TP16/PP1 → D TP8/PP1 + experts prefetch 的 sparse sync
+均通过。首请求、短序列串行/并发和 17175-token chunked prefill 均返回 HTTP 200，
+P/D 未出现 `Traceback`、`WRITE_FAILED`、`EngineDead` 或 `TransformAddr`。

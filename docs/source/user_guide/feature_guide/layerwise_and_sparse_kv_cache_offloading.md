@@ -1,9 +1,9 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
-> **Compatibility notice:** The current `LayerwisePushConnector` supports HBM
-> destinations only and rejects Sparse Decode Offload. The combined deployment
-> described below documents the former pull connector and is not a runnable
-> configuration in this branch.
+> **Compatibility notice:** `LayerwisePushConnector` supports ordinary HBM
+> destinations with MemFabric or Mooncake, and Sparse Decode Offload with
+> MemFabric. Sparse Decode Offload requires Decode PP=1; Mooncake cannot use
+> the MemFabric offload memory pool.
 
 This guide explains how to configure:
 
@@ -192,7 +192,7 @@ TP and divisible by it.
 
 Add the following options to the Prefill launch command. `MultiConnector` lets
 `AscendStoreConnector` offload layer buffers to Memcache while
-`LayerwisePullConnector` exposes the same buffers to Decode:
+`LayerwisePushConnector` writes KV from the same buffers to Decode-owned destinations:
 
 ```bash
 --enforce-eager \
@@ -202,7 +202,7 @@ Add the following options to the Prefill launch command. `MultiConnector` lets
     "kv_connector_extra_config": {
         "connectors": [
             {
-                "kv_connector": "LayerwisePullConnector",
+                "kv_connector": "LayerwisePushConnector",
                 "kv_role": "kv_producer",
                 "kv_connector_extra_config": {
                     "transfer_backend": "memfabric"
@@ -231,11 +231,12 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 | `layerwise_num_shared_buffers` | Number of reusable NPU buffers. Start with two to four and tune for memory and transfer bandwidth. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
 
-The `SfaRemoteD2HConnector` entry accepts the following options:
+The `LayerwisePushConnector` entry accepts the following options:
 
 | Parameter | Description |
 | :--- | :--- |
 | `transfer_backend` | Transfer backend. `memfabric` is the only supported value. |
+| `push_write_mode` | MemFabric supports `async` (default) and `sync`. Use `sync` when a deterministic cold-link baseline is preferred. |
 | `memfabric_transfer_protocol` | MemFabric data-path protocol: `sdma` (default) and `device_rdma` for A3 series, `device_urma` for 950PR&950DT Products. Must be set to the same value on Prefill and Decode. Invalid values abort startup. |
 
 The following log confirms that buffer reuse is enabled:
@@ -256,7 +257,7 @@ Requirements:
 MemFabric configuration-store ownership stays on Prefill, using the official
 transfer-engine initialization. No additional store-role or preconnection
 configuration is needed. Deploy the same connector protocol version on both
-sides, and validate actual remote KV reads rather than relying on `/health`.
+sides, and validate end-to-end KV writes and inference responses rather than relying on `/health`.
 
 For the validated GLM-5.2 Prefill PP2 deployment on 16 NPUs, use DP1 × PP2 ×
 TP8, not DP2 × PP2 × TP8. Set `VLLM_PP_LAYER_PARTITION=38,40`: each stage
@@ -275,7 +276,7 @@ Add the following options to the Decode launch command:
     }
 }' \
 --kv-transfer-config '{
-    "kv_connector": "LayerwisePullConnector",
+    "kv_connector": "LayerwisePushConnector",
     "kv_role": "kv_consumer",
     "kv_port": 20050,
     "kv_connector_extra_config": {
@@ -286,7 +287,7 @@ Add the following options to the Decode launch command:
 ```
 
 On Decode, reserve
-`decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
+`decode_data_parallel_size * decode_pipeline_parallel_size * decode_tensor_parallel_size` consecutive ports
 starting from `kv_port`.
 
 On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"` to
@@ -377,7 +378,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/GLM-5.2-w4a8 \
         }
     }' \
     --kv-transfer-config '{
-        "kv_connector": "SfaRemoteD2HConnector",
+        "kv_connector": "LayerwisePushConnector",
         "kv_role": "kv_consumer",
         "kv_port": 20050,
         "kv_connector_extra_config": {
