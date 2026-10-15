@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from functools import reduce
+from math import gcd
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
-from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
+from vllm.v1.core.kv_cache_utils import BlockHash, is_kv_cache_spec_uniform
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    SlidingWindowManager,
+    register_all_kvcache_specs,
+)
 from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
-    AscendCompressorStateSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -297,63 +303,133 @@ def test_a_layer_that_may_replay_warns_about_nothing():
     warning.assert_not_called()
 
 
-def _compressor_state_spec() -> AscendCompressorStateSpec:
-    return AscendCompressorStateSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=2048,
-        dtype=torch.float32,
-        sliding_window=8,
-    )
+# --- DeepSeek-V4 compressor state specs (#16270) -------------------------------
 
 
-def test_compressor_state_spec_opts_out_of_prefix_caching():
-    spec = _compressor_state_spec()
-    assert not is_prefix_cacheable(spec)
+def _compressor_state_spec(compress_ratio: int, config_block_size: int) -> AscendSlidingWindowMLASpec:
+    """Build a state spec through the production ``get_kv_cache_spec``.
 
-    # Geometry is unchanged: the state slot stays the storage unit, and the
-    # uniform wrapper propagates the opt-out to the coordinator's predicate.
-    assert spec.storage_block_size == 2
-    uniform = UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs={"state_c4": spec})
-    assert not is_prefix_cacheable(uniform)
+    The upstream cache constructor registers itself in the static forward
+    context and the spec consults the DSV4 geometry table, so both are
+    pinned here; the denomination under test is the production path.
+    """
+    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateCache
 
-    # Group merging must not fall back to the cacheable base spec.
-    merged = AscendCompressorStateSpec.merge([spec, spec])
-    assert type(merged) is AscendCompressorStateSpec
-    assert not is_prefix_cacheable(merged)
+    coff = 1 + (compress_ratio == 4)
+    block_sizes = {
+        32: [[32, 32, 2, 8], [4160, 32768]],
+        64: [[64, 64, 4, 16], [8320, 65536]],
+        128: [[128, 128, 8, 32], [16640, 131072]],
+    }
+    state_c4_slots, state_c128_slots = block_sizes[config_block_size][0][2:]
+    with (
+        patch("vllm.models.deepseek_v4.compressor.get_current_vllm_config") as current_config,
+        patch("vllm_ascend.models.layer.attention.layer.dsv4_block_sizes", return_value=block_sizes),
+    ):
+        current_config.return_value = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+        cache = AscendCompressorStateCache(
+            state_dim=2 * coff * 512,
+            dtype=torch.float32,
+            compress_ratio=compress_ratio,
+            prefix="model.layers.0.self_attn.state_cache",
+            block_size=state_c4_slots if compress_ratio == 4 else state_c128_slots,
+        )
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=config_block_size))
+        return cache.get_kv_cache_spec(vllm_config)
 
 
-def test_compressor_state_spec_routes_to_dedicated_manager():
+@pytest.mark.parametrize("config_block_size", [32, 64, 128])
+def test_compressor_state_spec_declares_token_denominated_blocks(config_block_size):
+    for ratio in (4, 128):
+        spec = _compressor_state_spec(ratio, config_block_size)
+        slots = (config_block_size // 16) if ratio == 4 else (config_block_size // 4)
+        # One slot holds one compression interval; the manager reads tokens.
+        assert spec.block_size == slots * ratio
+        # Kernel addressing is unchanged: the slot count survives as the
+        # storage view of the same physical block.
+        assert spec.storage_block_size == slots
+        # The gather window, overlap included, is the sliding window.
+        assert spec.sliding_window == (1 + (ratio == 4)) * ratio
+        # Stock sliding-window semantics, not opted out of prefix caching.
+        assert is_prefix_cacheable(spec)
+
     register_ascend_kv_cache_specs()
-
-    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-
-    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateManager
-
-    # State groups get the dedicated manager; plain SWA-MLA content caches
-    # keep the stock one.
-    assert KVCacheSpecRegistry.get_manager_class(_compressor_state_spec()) is AscendCompressorStateManager
-    assert KVCacheSpecRegistry.get_manager_class(_swa_spec()) is SlidingWindowManager
+    routing_spec = _compressor_state_spec(4, config_block_size)
+    assert KVCacheSpecRegistry.get_manager_class(routing_spec) is SlidingWindowManager
 
 
-def test_compressor_state_manager_skips_hash_bookkeeping():
-    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateManager
+@pytest.mark.parametrize(("config_block_size", "expected"), [(32, 8), (64, 16), (128, 32)])
+def test_dsv4_state_specs_do_not_collapse_engine_block_size(config_block_size, expected):
+    """The engine cache block size is the min over the participating groups
+    and the hash granularity their gcd, both computed in tokens. The DSV4
+    content groups are ``config_block_size * compress_ratio`` (built from
+    the same geometry table), so before the fix only the slot-denominated
+    state declarations could drag both down to 2 (#16270)."""
+    content_groups = (
+        config_block_size * 4,  # MLA-C4
+        config_block_size * 128,  # MLA-C128
+        config_block_size,  # SWA
+    )
+    state_groups = (
+        _compressor_state_spec(4, config_block_size).block_size,
+        _compressor_state_spec(128, config_block_size).block_size,
+    )
+    participating = content_groups + state_groups
 
-    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=32)
-    manager = AscendCompressorStateManager(
-        kv_cache_spec=_compressor_state_spec(),
+    assert min(participating) == expected
+    assert reduce(gcd, participating) == expected
+    # The stock write path hashes every group; no block size may break the
+    # divisibility the hash granularity is derived from.
+    assert all(block_size % expected == 0 for block_size in participating)
+
+
+def _seed_cached_block_hash(pool: BlockPool, block_hash: BlockHash, block) -> None:
+    """Insert on either hash-key spelling the pinned vLLM may use."""
+    scoped = getattr(kv_cache_utils, "make_block_hash_with_group_id", None)
+    key = scoped(block_hash, 0) if scoped is not None else block_hash
+    table = pool.cached_block_hash_to_block
+    if hasattr(table, "insert"):
+        table.insert(key, block)
+    else:
+        table[key] = block
+
+
+def test_compressor_state_tail_blocks_shared_on_hit():
+    """The resume invariant behind keeping the state cache prefix-cacheable:
+    after a prefix hit the group must hand back the previous request's
+    window-tail blocks, because the compressor's first boundary after the
+    resume reads the overlap state rows they hold. The stock sliding-window
+    lookup provides that, and reports the full matched length rather than
+    the window, so the hybrid min-over-groups keeps the long hit."""
+    spec = _compressor_state_spec(4, 32)
+    pool = BlockPool(num_gpu_blocks=100, enable_caching=True, hash_block_size=spec.block_size)
+    manager = SlidingWindowManager(
+        kv_cache_spec=spec,
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=0,
         scheduler_block_size=4096,
     )
-    # Caching is disabled before the base constructor runs, whatever the
-    # caller asked for.
-    assert manager.enable_caching is False
+    num_blocks = 8
+    writer_blocks = pool.blocks[10 : 10 + num_blocks]
+    block_hashes = [BlockHash(str(i).encode()) for i in range(num_blocks)]
+    for block_hash, block in zip(block_hashes, writer_blocks):
+        _seed_cached_block_hash(pool, block_hash, block)
 
-    request = SimpleNamespace(request_id="r1", num_prompt_tokens=8, block_hashes=[0] * 4)
-    # The no-op write path is load-bearing: state block_size=2 does not divide
-    # the MLA-derived hash_block_size=32, which upstream cache_full_blocks
-    # asserts against (the stock manager would raise here).
-    manager.cache_blocks(request, 8)
-    assert manager.get_num_common_prefix_blocks("r1") == 0
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=num_blocks * spec.block_size,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=spec.block_size,
+    )
+
+    # The matched length is the whole prefix, not the window.
+    assert hit_length == num_blocks * spec.block_size
+    # Only the window tail carries real blocks, and they are the blocks the
+    # previous request wrote -- its state rows are what the compressor
+    # reads back after resuming from this hit.
+    real_blocks = [block for block in computed_blocks[0] if block != pool.null_block]
+    assert real_blocks == [writer_blocks[-1]]

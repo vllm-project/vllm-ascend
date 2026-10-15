@@ -24,7 +24,6 @@
 # limitations under the License.
 #
 import typing
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -36,13 +35,9 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
-from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.request import Request
 
-from vllm_ascend.core.kv_cache_interface import AscendCompressorStateSpec
+from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
@@ -66,14 +61,25 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
-        return AscendCompressorStateSpec(
-            block_size=self.block_size,
+        # ``block_size`` is consumed as a token count throughout the cache
+        # manager, while ``self.block_size`` counts state slots: one slot
+        # holds one compression interval, i.e. ``compress_ratio`` tokens.
+        # Reporting the slot count directly dragged the engine-wide cache
+        # block size and hash granularity down to 2 tokens (#16270). The
+        # prefix-cache semantics stay the stock sliding-window ones: the
+        # compressor's first boundary after a prefix hit reads the overlap
+        # state rows in the window-tail blocks the lookup shares. Kernel
+        # addressing is unchanged either way, through the derived
+        # ``storage_block_size = block_size // compress_ratio``.
+        return AscendSlidingWindowMLASpec(
+            block_size=self.block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            compress_ratio=self.compress_ratio,
         )
 
     def forward(self): ...
@@ -89,74 +95,6 @@ class AscendCompressorStateCache(CompressorStateCache):
 
             return AscendDSAC128StateBackend
         raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {self.compress_ratio}")
-
-
-class AscendCompressorStateManager(SlidingWindowManager):
-    """Allocate compressor-state blocks without prefix-cache bookkeeping.
-
-    The state cache is request-private scratch: a prefix hit never resumes
-    from a cached state snapshot (the compressor recomputes the state while
-    rewriting the overlapped window), so the group must not publish block
-    hashes. Skipping the hash write is also what keeps the write path
-    alive: the state ``block_size`` (2/8) need not divide the MLA-derived
-    hash block size, which upstream ``cache_full_blocks`` asserts against.
-    """
-
-    def __init__(
-        self,
-        kv_cache_spec: KVCacheSpec,
-        block_pool: BlockPool,
-        enable_caching: bool,
-        kv_cache_group_id: int,
-        scheduler_block_size: int,
-        **kwargs: typing.Any,
-    ) -> None:
-        # The global pool can cache other groups; this manager never does.
-        # Disable it before entering the base constructor, independently of
-        # coordinator-side filtering and the caller's global caching setting.
-        super().__init__(
-            kv_cache_spec=kv_cache_spec,
-            block_pool=block_pool,
-            enable_caching=False,
-            kv_cache_group_id=kv_cache_group_id,
-            scheduler_block_size=scheduler_block_size,
-            **kwargs,
-        )
-
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-        **kwargs: typing.Any,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Defensive: the coordinator already excludes non-prefix-cacheable
-        # groups from the hybrid lookup; if reached directly, report no hit.
-        return tuple([] for _ in kv_cache_group_ids), 0
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundary: int | None = None,
-        replay_boundaries: Sequence[int] | None = None,
-        **kwargs: typing.Any,
-    ) -> None:
-        # Upstream uses either replay boundary spelling; neither path
-        # publishes this request-private scratch to the shared block cache.
-        return
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
 
 
 @dataclass(frozen=True)
