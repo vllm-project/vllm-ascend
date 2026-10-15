@@ -295,6 +295,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
+            if layer._mxfp8_gmm_nz_layout:
+                # A5 only supports NZ-to-NZ copies into an internal-format buffer.
+                transposed_weight = maybe_trans_nz(transposed_weight, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_weight_buf.copy_(transposed_weight)
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 

@@ -127,8 +127,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertEqual(layer.weight_scale.data_ptr(), scale_ptr)
             torch.testing.assert_close(layer.weight.squeeze(0).float(), original_weight.T.float(), rtol=0, atol=0)
             torch.testing.assert_close(layer.weight_scale.squeeze(0), original_scale.reshape(128, 4, 2).transpose(0, 1))
-        # One initial NZ cast; reloads only convert the checkpoint view to ND.
-        self.assertEqual([call.args[1] for call in mock_cast.call_args_list], [29, 2, 2])
+        # Reload converts the checkpoint view to ND, then casts the new source
+        # back to NZ before copying into the persistent buffer.
+        self.assertEqual([call.args[1] for call in mock_cast.call_args_list], [29, 2, 29, 2, 29])
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
