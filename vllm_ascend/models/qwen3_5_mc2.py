@@ -136,12 +136,23 @@ class _AscendMC2Mixin:
         if tp.world_size <= 1:
             return
 
-        # When fla_npu is active, only fuse row-parallel linears in
-        # full-attention layers; GDN layers keep the stock path so fla's
-        # long kernels are not followed by a pipeline-draining sync.
-        from vllm_ascend.ascend_config import get_ascend_config
+        # When the FLA NPU GDN prefill backend is active, only fuse
+        # row-parallel linears in full-attention layers; GDN layers keep the
+        # stock path so fla's long kernels are not followed by a
+        # pipeline-draining sync. Mirror gdn.py's runtime gate exactly (op
+        # importable + hardware capability + non-PCP): AscendConfig has no
+        # gdn_prefill_backend field (it is a stripped upstream-injected
+        # key), so reading it raised AttributeError at model init.
+        from vllm.distributed import get_pcp_group
 
-        skip_gdn_layers = get_ascend_config().gdn_prefill_backend == "fla_npu"
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+        from vllm_ascend.ops.gdn import _get_fla_gdn_prefill_op
+
+        skip_gdn_layers = (
+            _get_fla_gdn_prefill_op() is not None
+            and get_pcp_group().world_size == 1
+            and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
+        )
         gdn_layer_indices = set()
         if skip_gdn_layers:
             text_config = vllm_config.model_config.hf_text_config
@@ -161,24 +172,28 @@ class _AscendMC2Mixin:
             if not isinstance(module, RowParallelLinear) or not module.reduce_results:
                 continue
             if skip_gdn_layers and gdn_layer_indices:
-                # name looks like "model.layers.N.self_attn.o_proj" — extract N
+                # name looks like "model.layers.N.self_attn.o_proj" — extract N.
+                # Unparseable names keep the fused path: the skip is a perf
+                # heuristic for GDN layers, not a correctness requirement.
                 parts = name.split(".")
                 try:
                     layer_idx = int(parts[2])
                 except (IndexError, ValueError):
-                    continue
-                if layer_idx in gdn_layer_indices:
+                    layer_idx = None
+                if layer_idx is not None and layer_idx in gdn_layer_indices:
                     continue
             module.forward = types.MethodType(_fused_forward_factory(module.forward), module)
             installed += 1
-        if skip_gdn_layers and gdn_layer_indices:
-            total = sum(1 for _, m in self.named_modules() if isinstance(m, RowParallelLinear) and m.reduce_results)
+        total = sum(1 for _, m in self.named_modules() if isinstance(m, RowParallelLinear) and m.reduce_results)
+        if gdn_layer_indices:
             logger.info(
-                "MC2: installed on %d/%d row-parallel linears (skipped %d GDN layers for fla_npu backend)",
+                "MC2: installed on %d/%d row-parallel linears (skipped %d GDN layers for the fla_npu backend)",
                 installed,
                 total,
                 len(gdn_layer_indices),
             )
+        else:
+            logger.info("MC2: installed on %d/%d row-parallel linears", installed, total)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
