@@ -4,15 +4,15 @@
 
 **Step 5 Preview** is a next-generation flagship Mixture-of-Experts (MoE) model developed by StepFun. The model has **600B** total parameters, with **27B** active per token, and supports a 1M-token context window and vision input.
 
-This document describes how to quickly get started with Step 5 model inference deployment on Ascend NPU using vLLM-Ascend, based on W8A8 quantized weights.
+This document describes how to quickly get started with `Step 5 Preview` model inference deployment on Ascend NPU using vLLM-Ascend, based on W8A8 quantized weights.
 
 !!! warning
 
     **Current status and constraints**
 
-    - Step 5 Preview is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - Only **Ascend 950 (A5)** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for Step 5 Preview.
-    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for Step 5 Preview. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
+    - `Step 5 Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - Only **Ascend 950 (A5)** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step 5 Preview`.
+    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step 5 Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
 ## 2 Supported Features
 
@@ -26,7 +26,7 @@ The features below are the ones enabled by the verified deployment commands in [
 | --- | --- | --- |
 | Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
 | Expert Parallel (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 96k. | `--data-parallel-size 4` |
+| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
 | Automatic Prefix Caching | Reuses the KV cache for shared prompt prefixes. | `--enable-prefix-caching` |
 | Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
 | Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
@@ -39,10 +39,9 @@ The features below are the ones enabled by the verified deployment commands in [
 
 | Model | Weight |
 | --- | --- |
-| Step-5-Preview | [Hugging Face](https://huggingface.co/StepFun/Step-5-Preview) |
-| Step-5-Preview-w8a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
+| Step-5-Preview-w8a8-mxfp8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
-This document uses the quantized [Step-5-Preview-w8a8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk.
+This document uses the quantized [Step-5-Preview-w8a8-mxfp8](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) weights, which are about 600 GB. Download the weights to the local disk. We choose mxfp8 quantization format to get better performance on Ascend 950.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -50,9 +49,9 @@ This document uses the quantized [Step-5-Preview-w8a8](https://www.modelscope.cn
 
 | Hardware | Ascend HDK | CANN version | torch_npu version | vLLM | vLLM-Ascend version |
 | --- | --- | --- | --- | --- | --- |
-| Ascend 950 (A) | 25.5.0 (recommended) | CANN 9.2.0 | 2.10.0.post2 | Based on v0.27.0 | Based on v0.27.0 |
+| Ascend 950 (A) | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | Based on v0.27.0 | Based on v0.27.0 |
 
-Step 5 Preview currently supports **only the Ascend 950 (A5)** hardware; other Ascend hardware (e.g., Atlas 800I A3) is not supported.
+`Step 5 Preview` currently supports **only the Ascend 950 (A5)** hardware; other Ascend hardware (e.g., Atlas 800I A3) is not supported.
 
 Before getting started, confirm that the firmware/driver is installed correctly. The recommended HDK version is 25.5.0. Run the following command to confirm; the version shown in the output header is the HDK version.
 
@@ -87,39 +86,39 @@ The output should contain the downloaded `quay.io/ascend/vllm-ascend:step5-a5`.
 Use the following command to create the container.
 
 ```bash
-    # Set the vLLM Ascend image name.
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-    export NAME=step5
+# Set the vLLM Ascend image name.
+export IMAGE=quay.io/ascend/vllm-ascend:step5-a5
+export CONTAINER_NAME=step5
 
-    # 950DT products have 8 NPUs and use Device UB.
-    docker run --rm \
-    --name $NAME \
-    --net=host \
-    --privileged=true \
-    --shm-size=60g \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hixlep:/etc/hixlep \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -v /var/log/npu/:/usr/slog \
-    -v /lib64:/lib64 \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+# 950DT products have 8 NPUs and use Device UB.
+docker run --rm \
+--name $CONTAINER_NAME \
+--net=host \
+--privileged=true \
+--shm-size=60g \
+--device /dev/davinci_manager \
+--device /dev/hisi_hdc \
+--device /dev/ummu \
+--device /dev/uburma \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+-v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+-v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /etc/hixlep:/etc/hixlep \
+-v /etc/hccn.conf:/etc/hccn.conf \
+-v /var/log/npu/:/usr/slog \
+-v /lib64:/lib64 \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
 ```
 
 The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
@@ -134,13 +133,13 @@ docker exec -it ${CONTAINER_NAME} bash
 
 !!! note
 
-    Step 5 Preview is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
+    `Step 5 Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
 ## 5 Online Service Deployment
 
 ### 5.1 Multi-Node Co-Located Deployment
 
-DP=4 cross-machine deployment with TP=4 per dp rank extends the context to 96k. Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+DP=4 multi-node deployment with TP=4 per dp rank extends the context to 1M. Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
 
 Run the following command on node 0:
 
@@ -155,8 +154,6 @@ export HCCL_SOCKET_IFNAME="$IFNAME"
 export GLOO_SOCKET_IFNAME="$IFNAME"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
-export HCCL_EXEC_TIMEOUT=240
-export HCCL_CONNECT_TIMEOUT=240
 export TRITON_ALL_BLOCKS_PARALLEL=1
 export PYTHONUNBUFFERED=1
 export VLLM_USE_FASTOKENS=1
@@ -180,7 +177,7 @@ vllm serve ${WEIGHT_PATH} \
     --api-server-count=1 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --safetensors-load-strategy 'prefetch' \
-    --additional-config '{"enable_shared_expert_dp": true, "step5_prefill_mnd_slot_allocator":"runner", "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
     --speculative-config '{"num_speculative_tokens": 3,"method": "mtp"}'
 ```
 
@@ -197,8 +194,6 @@ export HCCL_SOCKET_IFNAME="$IFNAME"
 export GLOO_SOCKET_IFNAME="$IFNAME"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
-export HCCL_EXEC_TIMEOUT=240
-export HCCL_CONNECT_TIMEOUT=240
 export TRITON_ALL_BLOCKS_PARALLEL=1
 export PYTHONUNBUFFERED=1
 export VLLM_USE_FASTOKENS=1
@@ -223,11 +218,11 @@ vllm serve ${WEIGHT_PATH} \
     --distributed_executor_backend "mp" \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --safetensors-load-strategy 'prefetch' \
-    --additional-config '{"enable_shared_expert_dp": true, "step5_prefill_mnd_slot_allocator":"runner", "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
     --speculative-config '{"num_speculative_tokens": 3,"method": "mtp"}'
 ```
 
-> Note: `--data-parallel-address` is set to the local IP (i.e., the coordinator) on Node 1, and to the head node IP on Node 2; `--data-parallel-start-rank` is only set on the headless node.
+> Note: `--data-parallel-address` is set to the local IP (i.e., the coordinator) on Node 0, and to the head node IP on Node 1; `--data-parallel-start-rank` is only set on the headless node.
 
 Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. The following logs indicate that the service has been started successfully:
 
@@ -242,7 +237,7 @@ INFO:     Application startup complete.
 Send an inference request to test the inference service, refer to the following command:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -sS -X POST http://127.0.0.1:10086/v1/chat/completions -H 'Content-Type: application/json' -d '{
     "model":"step",
     "messages":[{
         "role":"user",
@@ -273,8 +268,8 @@ The following table shows the results of `Step 5 Preview`.
 
 | dataset | model | hardware | deployment | metric | mode | vllm-api-general-chat |
 | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA Diamond | Step-5-Preview-w8a8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 92.6 |
-| MMMU-Pro | Step-5-Preview-w8a8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 76.24 |
+| GPQA Diamond | Step-5-Preview-w8a8-mxfp8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 93.8 |
+| MMMU-Pro | Step-5-Preview-w8a8-mxfp8 | A5 | Multi-Node Co-Located Deployment | accuracy | gen | 76.24 |
 
 ## 8 Performance Evaluation
 
