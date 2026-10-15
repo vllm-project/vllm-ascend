@@ -1,30 +1,49 @@
-name: CPU dependency compatibility probe
+name: Dependency compatibility probe
 
 on:
   pull_request:
     paths:
       - '.github/workflows/manual_dependency_compatibility.yaml'
+      - 'tools/dependency_compatibility.py'
+      - 'tests/ut/test_dependency_compatibility.py'
       - 'tests/dependency_compatibility/**'
   workflow_dispatch:
     inputs:
-      numpy_version:
-        description: 'Exact NumPy candidate version (not a production constraint)'
+      source:
+        description: 'Authoritative dependency source (pyproject selects build-system.requires)'
+        type: choice
+        options:
+          - requirements.txt
+          - requirements-dev.txt
+          - requirements-lint.txt
+          - pyproject.toml
+        default: requirements.txt
+      packages_json:
+        description: 'JSON array of direct package names; [] selects the entire source'
         type: string
-        default: '1.26.4'
-        required: true
-      pyarrow_version:
-        description: 'Exact PyArrow candidate version (not a production constraint)'
+        default: '["packaging"]'
+      candidates_json:
+        description: 'JSON array of candidate requirements; replaces selected direct declarations or adds packages'
         type: string
-        default: '16.1.0'
-        required: true
+        default: '["packaging>=24.2,<27"]'
+      python_version:
+        description: 'Python version for both clean environments'
+        type: choice
+        options: ['3.10', '3.11', '3.12']
+        default: '3.12'
+      smoke:
+        description: 'Optional candidate smoke test; required packages must be part of the candidate graph'
+        type: choice
+        options: [none, numpy-pyarrow]
+        default: none
 
 permissions:
   contents: read
 
 jobs:
-  cpu-compatibility:
+  dependency-compatibility:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -32,77 +51,67 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-      - name: Create a clean probe environment
-        id: environment
-        run: |
-          python -m venv .compatibility-venv
-          .compatibility-venv/bin/python -m pip install packaging
-          mkdir -p compatibility-results
-      - name: Select repository Triton pin and validate candidate versions
-        id: candidates
+          python-version: ${{ inputs.python_version || '3.12' }}
+      - name: Prepare baseline and candidate declarations
+        id: prepare
         env:
-          NUMPY_VERSION: ${{ inputs.numpy_version || '1.26.4' }}
-          PYARROW_VERSION: ${{ inputs.pyarrow_version || '16.1.0' }}
+          DEPENDENCY_SOURCE: ${{ inputs.source || 'requirements.txt' }}
+          PACKAGES_JSON: ${{ inputs.packages_json || '["packaging"]' }}
+          CANDIDATES_JSON: ${{ inputs.candidates_json || '["packaging>=24.2,<27"]' }}
         run: |
-          .compatibility-venv/bin/python - <<'PY'
-          import os
-          from pathlib import Path
-          from packaging.requirements import Requirement
-          from packaging.utils import canonicalize_name
-          from packaging.version import Version
-
-          requirements = []
-          for line in Path("requirements.txt").read_text().splitlines():
-              line = line.strip()
-              if line and not line.startswith(("#", "-")):
-                  requirement = Requirement(line)
-                  if canonicalize_name(requirement.name) == "triton-ascend":
-                      requirements.append(requirement)
-          if len(requirements) != 1:
-              raise SystemExit("Expected one direct triton-ascend requirement in requirements.txt")
-          requirement = requirements[0]
-          specifiers = list(requirement.specifier)
-          if (requirement.url or requirement.marker or requirement.extras
-                  or len(specifiers) != 1 or specifiers[0].operator != "=="):
-              raise SystemExit("Expected an exact, unconditional triton-ascend version pin")
-          Version(specifiers[0].version)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"triton_requirement={requirement}\n")
-              output.write(f"numpy_version={Version(os.environ['NUMPY_VERSION'])}\n")
-              output.write(f"pyarrow_version={Version(os.environ['PYARROW_VERSION'])}\n")
-          PY
-      - name: Resolve, install and test the candidate environment
+          python -m venv .compatibility-tools
+          .compatibility-tools/bin/python -m pip install packaging 'tomli; python_version < "3.11"'
+          .compatibility-tools/bin/python -m unittest tests.ut.test_dependency_compatibility -v
+          .compatibility-tools/bin/python -m tools.dependency_compatibility prepare \
+            --source "$DEPENDENCY_SOURCE" --packages-json "$PACKAGES_JSON" \
+            --candidates-json "$CANDIDATES_JSON"
+      - name: Resolve and install both profiles without dependency bypass
         env:
-          TRITON_REQUIREMENT: ${{ steps.candidates.outputs.triton_requirement }}
-          NUMPY_VERSION: ${{ steps.candidates.outputs.numpy_version }}
-          PYARROW_VERSION: ${{ steps.candidates.outputs.pyarrow_version }}
-          PIP_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu
+          SMOKE: ${{ inputs.smoke || 'none' }}
         run: |
-          .compatibility-venv/bin/python -m pip install --dry-run --only-binary=:all: \
-            --report compatibility-results/resolution.json \
-            "$TRITON_REQUIREMENT" "numpy==$NUMPY_VERSION" "pyarrow==$PYARROW_VERSION" \
-            2>&1 | tee compatibility-results/resolution.log
-          .compatibility-venv/bin/python -m pip install --only-binary=:all: \
-            --report compatibility-results/installation.json \
-            "$TRITON_REQUIREMENT" "numpy==$NUMPY_VERSION" "pyarrow==$PYARROW_VERSION" \
-            2>&1 | tee compatibility-results/installation.log
-          .compatibility-venv/bin/python -m pip check \
-            2>&1 | tee compatibility-results/pip-check.log
-          .compatibility-venv/bin/python -m unittest \
-            tests.dependency_compatibility.numpy_pyarrow_smoke -v \
-            2>&1 | tee compatibility-results/smoke-tests.log
-      - name: Record installed metadata and probe context
-        if: always() && steps.environment.outcome == 'success'
+          run_profile() {
+            local profile="$1"
+            local directory="compatibility-results/$profile"
+            local python=".compatibility-$profile/bin/python"
+            mkdir -p "$directory" || return 1
+            python -m venv ".compatibility-$profile" || return 1
+            "$python" -m pip install --dry-run --only-binary=:all: \
+              --report "$directory/resolution.json" -r "compatibility-results/$profile.txt" \
+              2>&1 | tee "$directory/resolution.log" || return 1
+            "$python" -m pip install --only-binary=:all: \
+              --report "$directory/installation.json" -r "compatibility-results/$profile.txt" \
+              2>&1 | tee "$directory/installation.log" || return 1
+            "$python" -m pip check 2>&1 | tee "$directory/pip-check.log" || return 1
+            if [ "$profile" = candidate ] && [ "$SMOKE" = numpy-pyarrow ]; then
+              "$python" -m unittest tests.dependency_compatibility.numpy_pyarrow_smoke -v \
+                2>&1 | tee "$directory/smoke-tests.log" || return 1
+            fi
+            "$python" -m pip inspect > "$directory/installed.json" || return 1
+            touch "$directory/success"
+          }
+          status=0
+          for profile in baseline candidate; do
+            if ! run_profile "$profile"; then
+              status=1
+              if [ -x ".compatibility-$profile/bin/python" ]; then
+                ".compatibility-$profile/bin/python" -m pip inspect \
+                  > "compatibility-results/$profile/installed.json" || status=1
+              fi
+            fi
+          done
+          exit "$status"
+      - name: Compare graphs and record probe context
+        if: always() && steps.prepare.outcome == 'success'
         run: |
-          .compatibility-venv/bin/python -m pip inspect > compatibility-results/installed.json
           git rev-parse HEAD > compatibility-results/revision.txt
-          .compatibility-venv/bin/python --version > compatibility-results/python.txt
+          python --version > compatibility-results/python.txt
           uname -a > compatibility-results/platform.txt
+          .compatibility-tools/bin/python -m tools.dependency_compatibility compare
       - name: Upload probe evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: cpu-dependency-compatibility
+          name: dependency-compatibility
           path: compatibility-results/
           if-no-files-found: ignore

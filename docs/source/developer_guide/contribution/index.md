@@ -1,7 +1,7 @@
 # Contributing
 
 For dependency upgrade experiments, see
-[qualifying NumPy and PyArrow candidates](dependency_compatibility.md).
+[qualifying third-party dependency candidates](dependency_compatibility.md).
 
 ## Building and Testing
 
