@@ -84,7 +84,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         return params_dict
 
     def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        prefix_padding, suffix_padding = vars(layer).get("mxfp4_tp_padding", (0, 0))
+        prefix_padding, suffix_padding = getattr(layer, "mxfp4_tp_padding", (0, 0))
         if prefix_padding or suffix_padding:
             x = F.pad(x, (prefix_padding, suffix_padding))
         return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
@@ -150,8 +150,10 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             quantized_x, dynamic_scale = self._quantize_input(layer, x)
             output_dtype = x.dtype
 
-        if any(vars(layer).get("mxfp4_tp_padding", (0, 0))):
-            if quantized_x.shape[-1] != layer.weight.shape[0] * 2:
+        prefix_padding, suffix_padding = getattr(layer, "mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            expected_k = layer.input_size_per_partition + prefix_padding + suffix_padding
+            if quantized_x.shape[-1] != expected_k:
                 raise ValueError("MXFP4 prequantized input must include the layer's TP group padding.")
 
         # The MXFP4 Weight-NZ kernel requires a matrix-shaped bias.

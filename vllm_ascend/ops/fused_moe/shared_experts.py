@@ -715,7 +715,7 @@ class AscendSharedExperts:
         # with MXFP8 activations).
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
             if any(
-                any(vars(linear).get("mxfp4_tp_padding", (0, 0)))
+                any(getattr(linear, "mxfp4_tp_padding", (0, 0)))
                 for linear in (self.layer.gate_up_proj, self.layer.down_proj)
             ):
                 # Fused activation quantizes before the linear can align its
