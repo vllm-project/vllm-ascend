@@ -1004,6 +1004,16 @@ class KVPoolWorker:
 
         layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
+            if getattr(self, "use_kvpp", False):
+                # The address tables below are built from the layers this rank
+                # registered, so the group-local index carried by the transfer
+                # tasks has to be owner-relative as well. The model-level index
+                # built from the full layer list walks past the registered
+                # entries and build_addrs() indexes the offsets array out of
+                # bounds.
+                self.physical_layer_to_group_layers.setdefault(phys, []).append(
+                    (group_id, len(layer_cache_entry_offsets) - 1)
+                )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 for cache in self._as_cache_tuple(cache_or_caches):
@@ -1120,6 +1130,9 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
+            # Drop the model-level map and rebuild it from the owner-filtered
+            # table in _infer_cache_group_metadata.
+            self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {
                 name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
@@ -2176,10 +2189,18 @@ class KVPoolWorker:
         if self.use_block_key_layerwise:
             # The map and buffer builders both use stage-local physical layer
             # indices. A group's dense layer index is a third, distinct axis.
-            if self.num_kv_cache_groups == 1:
+            # Under KVPP the transfer tasks are indexed against the
+            # owner-filtered address tables, so only the owner-relative map
+            # built by _infer_cache_group_metadata is valid here: falling back
+            # to local_layer would index past those tables.
+            if self.num_kv_cache_groups == 1 and not getattr(self, "use_kvpp", False):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
+                if getattr(self, "use_kvpp", False):
+                    # This rank is not the owner of the layer: it neither saves
+                    # nor loads it here.
+                    return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
