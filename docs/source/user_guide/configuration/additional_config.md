@@ -85,8 +85,22 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
+| `rope_ub_size_kb` | int | `0` | Unified Buffer (UB) capacity in KiB used to size ordinary Q/K Triton RoPE head tiles. Must be non-negative. `0` auto-detects device capacity, falling back to 192 KiB; a positive value overrides detection. |
 
 The details of each configuration option are as follows:
+
+<span id="rope_ub_size_kb"></span>**rope_ub_size_kb**
+
+Set this startup option when UB auto-detection is unavailable or when debugging RoPE UB overflow. It changes the capacity used by the tile-size estimator, not the physical device memory. SISO and FP8 RoPE use separate tile-sizing strategies.
+
+```bash
+vllm serve <model> --additional-config '{"rope_ub_size_kb": 192}'
+```
+
+For the Python API, pass `additional_config={"rope_ub_size_kb": 192}` to `LLM`. Omit the key or set it to `0` to retain automatic detection and the 192 KiB fallback.
+
+The `VLLM_ASCEND_ROPE_UB_SIZE_KB` environment variable is no longer supported. Replace `VLLM_ASCEND_ROPE_UB_SIZE_KB=192` with the additional configuration shown above.
+
 
 <span id="runtime_guard"></span>**runtime_guard**
 

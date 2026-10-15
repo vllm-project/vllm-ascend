@@ -23,7 +23,7 @@ import os
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -420,6 +420,7 @@ class AscendConfig:
         {
             "refresh": false,
             "enable_cpu_binding": true,
+            "rope_ub_size_kb": 0,
             "multistream_dsv4_dsa_overlap": true,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
@@ -562,6 +563,8 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # 0: detect UB capacity; positive values override RoPE tile sizing in KiB.
+    rope_ub_size_kb: int = Field(default=0, ge=0)
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.

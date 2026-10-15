@@ -496,7 +496,7 @@ class NPUWorker(WorkerBase):
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
-        init_device_properties_triton()
+        init_device_properties_triton(rope_ub_size_kb=get_ascend_config().rope_ub_size_kb)
 
         return device
 
