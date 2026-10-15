@@ -14,13 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # mypy: ignore-errors
-"""Ascend Qwen3.5: fused matmul+allreduce for row-parallel linears under TP.
+"""Ascend Qwen3.5: fused matmul+allreduce + NPU image preprocessing.
 
-Uses torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) to compute both
-in one kernel: activation crosses the HCCL link once, comm overlaps the
-matmul tail. Ineligible calls delegate to the stock forward captured at
-install time; during ACL graph capture the op falls back to stock
-matmul+allreduce (EE1016).
+Composes both Ascend optimizations for Qwen3.5 in a single class so the two
+architecture overrides do not fight over the ModelRegistry mapping:
+
+- MC2: torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) fuses the
+  matmul and the all-reduce of row-parallel linears under TP into one kernel:
+  the activation crosses the HCCL link once and comm overlaps the matmul
+  tail. Ineligible calls delegate to the stock forward captured at install
+  time; during ACL graph capture the op falls back to stock matmul+allreduce
+  (EE1016).
+- VL preprocessing (from qwen3_5_vl): the front-end emits flat raw uint8 and
+  resize/patchify/rescale+normalize run on the NPU worker; falls back to the
+  stock CPU pipeline for unsupported settings, non-uint8 pixels or
+  mm_device_do_normalize=false.
 """
 
 import os
@@ -41,15 +49,17 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
-    Qwen3_5MoeProcessingInfo,
-    Qwen3_5ProcessingInfo,
 )
-from vllm.model_executor.models.qwen3_vl import (
-    Qwen3VLDummyInputsBuilder,
-    Qwen3VLMultiModalProcessor,
-)
+from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.torch_utils import direct_register_custom_op
+
+from vllm_ascend.models.qwen3_5_vl import (
+    AscendQwen3_5MoeProcessingInfo,
+    AscendQwen3_5ProcessingInfo,
+    AscendQwen3_5VLProcessor,
+    _AscendVLPreprocessMixin,
+)
 
 _ascend_tp_group = None
 _ascend_hcomm = None
@@ -197,18 +207,20 @@ class _AscendMC2Mixin:
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen3VLMultiModalProcessor,
-    info=Qwen3_5ProcessingInfo,
+    AscendQwen3_5VLProcessor,
+    info=AscendQwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class AscendQwen3_5ForConditionalGeneration(_AscendMC2Mixin, Qwen3_5ForConditionalGeneration):
+class AscendQwen3_5ForConditionalGeneration(_AscendMC2Mixin, _AscendVLPreprocessMixin, Qwen3_5ForConditionalGeneration):
     pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen3VLMultiModalProcessor,
-    info=Qwen3_5MoeProcessingInfo,
+    AscendQwen3_5VLProcessor,
+    info=AscendQwen3_5MoeProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class AscendQwen3_5MoeForConditionalGeneration(_AscendMC2Mixin, Qwen3_5MoeForConditionalGeneration):
+class AscendQwen3_5MoeForConditionalGeneration(
+    _AscendMC2Mixin, _AscendVLPreprocessMixin, Qwen3_5MoeForConditionalGeneration
+):
     pass
