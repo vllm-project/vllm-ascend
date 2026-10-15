@@ -158,19 +158,20 @@ msgstr "由于性能分析仅覆盖到 `max_num_batched_tokens` 的序列（通�
 msgid "**Extended Model (two variables):**"
 msgstr "**扩展模型（两个变量）：**"
 
-msgid "$$f(C, H) = a \\cdot C(C+H) + b \\cdot (C+H) + c$$"
-msgstr "$$f(C, H) = a \\cdot C(C+H) + b \\cdot (C+H) + c$$"
+msgid "$$f(C, H) = a \\cdot C(C+H) + b \\cdot C + c$$"
+msgstr "$$f(C, H) = a \\cdot C(C+H) + b \\cdot C + c$$"
 
 msgid "Where $C$ is chunk size and $H$ is prefix history length."
 msgstr "其中 $C$ 是块大小，$H$ 是前缀历史长度。"
 
 msgid ""
-"After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual "
-"execution time are recorded. Once enough data points accumulate (5-30), "
-"model parameters are updated using least squares."
+"After each batch, the feature vector `[Σ C(C+H), Σ C, N]` and the actual "
+"execution time are recorded. From 5 through `max_fit_chunk` data points (30 "
+"by default), the model parameters are refitted using non-negative least "
+"squares."
 msgstr ""
-"在每个批次之后，记录特征向量 `[Σ(C+H)·C, Σ(C+H), N]` 和实际执行时间。一旦累积了足够的数据点（5-30 "
-"个），就使用最小二乘法更新模型参数。"
+"在每个批次之后，记录特征向量 `[Σ C(C+H), Σ C, N]` 和实际执行时间。从 5 个数据点开始，直至达到 "
+"`max_fit_chunk`（默认值为 30），使用非负最小二乘法反复拟合模型参数。"
 
 msgid "## Architecture"
 msgstr "## 架构"

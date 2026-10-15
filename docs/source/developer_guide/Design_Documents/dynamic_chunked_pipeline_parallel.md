@@ -88,11 +88,11 @@ Since profiling only covers sequences up to `max_num_batched_tokens` (typically 
 
 **Extended Model (two variables):**
 
-$$f(C, H) = a \cdot C(C+H) + b \cdot (C+H) + c$$
+$$f(C, H) = a \cdot C(C+H) + b \cdot C + c$$
 
 Where $C$ is chunk size and $H$ is prefix history length.
 
-After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual execution time are recorded. Once enough data points accumulate (5-30), model parameters are updated using least squares.
+After each batch, the feature vector `[Σ C(C+H), Σ C, N]` and the actual execution time are recorded. From 5 through `max_fit_chunk` data points (30 by default), the model parameters are refitted using non-negative least squares.
 
 ## Architecture
 
