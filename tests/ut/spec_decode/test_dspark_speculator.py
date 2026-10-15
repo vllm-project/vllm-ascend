@@ -360,7 +360,8 @@ def test_local_argmax_sampling_matches_full_vocab_markov_reference(monkeypatch):
                     org_vocab_end_index=shard_size,
                 ),
             )
-            self.previous_tokens = []
+
+            self.previous_tokens: list[torch.Tensor] = []
             self.seen_hidden_states = None
 
         def compute_local_draft_logits(self, hidden_states):
