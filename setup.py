@@ -397,12 +397,14 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def run(self):
-        if envs.COMPILE_CUSTOM_KERNELS:
-            # First, ensure ACLNN custom-ops is built and installed.
+        if not envs.COMPILE_CUSTOM_KERNELS:
+            return super().run()
+        cache = load_module_from_path("csrc_build_cache", os.path.join(ROOT_DIR, "csrc", "scripts", "build_cache.py"))
+        cache_root = envs.VLLM_ASCEND_BUILD_CACHE_DIR or os.path.join(ROOT_DIR, "csrc", "build_cache")
+        # Keep every version available until all native builds and installs pass.
+        with cache.build_session(cache_root, envs.VLLM_ASCEND_BUILD_CACHE_MAX_OPERATOR_VERSIONS):
             self.run_command("build_aclnn")
-
-        # Then, run the standard build_ext command to compile the extensions
-        super().run()
+            super().run()
 
 
 class custom_install(install):
