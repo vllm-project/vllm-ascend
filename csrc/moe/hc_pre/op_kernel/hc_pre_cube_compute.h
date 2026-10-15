@@ -318,6 +318,7 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeL0Pairs(
         LoadBToL0B(firstKOffset % mmParams.xWsKSize, K_L0_SIZE, l1bLoopIdx_, mmParams);
         AscendC::SetHF32Mode(1);
         MmadAB(firstKOffset, K_L0_SIZE, firstIsLast, mmParams);
+        AscendC::SetHF32Mode(0);
         SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
         l0bLoopIdx_++;
         SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
