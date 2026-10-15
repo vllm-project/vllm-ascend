@@ -876,6 +876,18 @@
 #    Future Plan:
 #       Re-add only if a supported pin rejects PCP+DP.
 #
+#   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
+#    Why:
+#       vLLM 0.31 rejects V1 PP with async scheduling for a GPU runner
+#       limitation. Ascend has separate PP communication and scheduler patches.
+#    How:
+#       Add this feature to the existing Ascend V1 allowlist, preserving
+#       unrelated upstream restrictions.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/45014 describes the GPU issue.
+#    Future Plan:
+#       Remove with the V1 runner compatibility patch when Ascend uses V2 only.
+#
 # * Worker Patch:
 # ========#
 # Entries are listed in alphabetical order by file name.
