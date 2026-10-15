@@ -51,8 +51,8 @@ import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Reuse the platform patch for VllmConfig.use_v2_model_runner so EngineCore
 # and worker processes share the same selection: honor
-# VLLM_USE_V2_MODEL_RUNNER when set; otherwise default to MRV2 on Ascend 310P
-# (MRV1 is no longer maintained there) and MRV1 on other Ascend platforms.
+# VLLM_USE_V2_MODEL_RUNNER when set; otherwise defaults_model_runner_v2()
+# (310P / no STANDARD_WORKER_PATCHES → MRV2; standard platforms → MRV1).
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

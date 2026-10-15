@@ -99,31 +99,31 @@ def _patch_select_moe_comm_method_deps(
     )
 
 
-def test_use_v2_additional_kwargs_follows_env_and_310p_default(monkeypatch):
-    """_EXTRA_CTX must not consult get_current_vllm_config (MagicMock is truthy)."""
+def test_use_v2_additional_kwargs_follows_env_and_hal_default(monkeypatch):
+    """_EXTRA_CTX follows env / defaults_model_runner_v2, not get_current_vllm_config."""
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(
-        "vllm_ascend.device.device_config.is_310p",
+        "vllm_ascend.device.hardware_profile.defaults_model_runner_v2",
         lambda: True,
     )
     assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is True
 
     monkeypatch.setattr(
-        "vllm_ascend.device.device_config.is_310p",
+        "vllm_ascend.device.hardware_profile.defaults_model_runner_v2",
         lambda: False,
     )
     assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is False
 
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
     monkeypatch.setattr(
-        "vllm_ascend.device.device_config.is_310p",
+        "vllm_ascend.device.hardware_profile.defaults_model_runner_v2",
         lambda: True,
     )
     assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is False
 
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
     monkeypatch.setattr(
-        "vllm_ascend.device.device_config.is_310p",
+        "vllm_ascend.device.hardware_profile.defaults_model_runner_v2",
         lambda: False,
     )
     assert afc._ExtraForwardContextProxy._use_v2_additional_kwargs() is True
@@ -133,7 +133,7 @@ def test_use_v2_additional_kwargs_ignores_truthy_mock_current_config(monkeypatch
     """Regression: bool(MagicMock().use_v2_model_runner) is True."""
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(
-        "vllm_ascend.device.device_config.is_310p",
+        "vllm_ascend.device.hardware_profile.defaults_model_runner_v2",
         lambda: False,
     )
     monkeypatch.setattr(

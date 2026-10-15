@@ -60,8 +60,8 @@ def test_embed_models_correctness(model: str):
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
-def test_qwen3_vl_embedding_mrv2_pooling():
-    """Verify Qwen3-VL-Embedding pooling execution with Model Runner V2 on 310P."""
+def test_qwen3_vl_embedding_pooling():
+    """Verify Qwen3-VL-Embedding pooling execution on 310P (default MRV2)."""
     queries = [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other.",

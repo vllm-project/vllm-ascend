@@ -1,8 +1,11 @@
 import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.device.device_config import is_310p
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    defaults_model_runner_v2,
+    get_current_hardware_profile,
+)
 
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
 
@@ -24,16 +27,16 @@ def _patched_use_v2_model_runner(self) -> bool:
     are deferred to the NPU runner itself.
 
     When the env var is unset:
-    - Ascend 310P defaults to Model Runner V2 (MRV1 is no longer maintained
-      on 310P).
-    - Other Ascend platforms keep Model Runner V1 until they opt in with
+    - Compatibility stacks without STANDARD_WORKER_PATCHES (Ascend 310P)
+      default to Model Runner V2 (MRV1 is no longer maintained there).
+    - Standard Ascend platforms keep Model Runner V1 until they opt in with
       VLLM_USE_V2_MODEL_RUNNER=1.
     Explicit 0 / 1 overrides always win.
     """
     use_v2 = envs.VLLM_USE_V2_MODEL_RUNNER
     if use_v2 is not None:
         return use_v2
-    return is_310p()
+    return defaults_model_runner_v2()
 
 
 VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
