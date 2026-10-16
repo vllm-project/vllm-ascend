@@ -89,8 +89,8 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
 
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:/root/aicpu_kernels/0/aicpu_kernels_device/sand_box:$LD_LIBRARY_PATH' >> /root/.bashrc

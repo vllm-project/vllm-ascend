@@ -162,6 +162,7 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
 
     monkeypatch.setattr(AscendModelState, "prepare_attn", fake_prepare_attn)
     state = object.__new__(deepseek_v41.EngramModelState)
+    state.decoder_replay = None
     state._replay_groups = (128, torch.empty(0, dtype=torch.int32))
     state._replay_start_np = np.zeros(4, dtype=np.int32)
     state._replay_start = Buffer(8)
