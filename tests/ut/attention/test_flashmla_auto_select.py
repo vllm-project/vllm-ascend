@@ -1,11 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from collections import namedtuple
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
 import vllm_ascend.ops  # noqa: F401  # Register ops before importing attention/device modules.
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention import utils as flashmla
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, split_flashmla_requests
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
 
@@ -105,3 +111,60 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert AscendMLAImpl._can_use_flashmla(impl)
     config.parallel_config.decode_context_parallel_size = 4
     assert not AscendMLAImpl._can_use_flashmla(impl)
+
+
+@pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])
+def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling):
+    BatchReqState = namedtuple(
+        "BatchReqState",
+        [
+            "req_ids",
+            "num_scheduled_tokens",
+            "idx_mapping_np",
+            "prefill_len_np",
+            "num_computed_prefill_tokens_np",
+            "is_prefilling_np",
+            "has_prefill",
+            "num_tokens",
+        ],
+    )
+    state = BatchReqState(
+        ["a", "b", "c"],
+        np.array([1, 1, 1]),
+        np.array([10, 20, 30]),
+        np.array([100, 200, 300]),
+        np.array([11, 22, 33]),
+        np.array(prefilling),
+        any(prefilling),
+        3,
+    )
+    result, uniform = prepare_flashmla_batch_req_state(state, 1)
+    order = [1, 0, 2] if state.has_prefill else [0, 1, 2]
+    assert result.req_ids == [state.req_ids[index] for index in order]
+    for field in state._fields:
+        expected = getattr(state, field)
+        actual = getattr(result, field)
+        if isinstance(expected, np.ndarray):
+            np.testing.assert_array_equal(actual, expected[order])
+        elif field != "req_ids":
+            assert actual == expected
+    assert uniform == (None if state.has_prefill else 1)
+    common = SimpleNamespace(
+        is_prefilling=torch.from_numpy(result.is_prefilling_np),
+        query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
+        num_reqs=4,
+        num_actual_tokens=3,
+    )
+    # A one-token prompt stays FIA prefill; trailing empty graph rows are ignored.
+    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if state.has_prefill else (3, 0, 3, 0))
+
+
+def test_request_split_rejects_decode_after_real_prefill():
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([True, False]),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+    )
+    with pytest.raises(RuntimeError, match="decode requests before prefill"):
+        split_flashmla_requests(common)

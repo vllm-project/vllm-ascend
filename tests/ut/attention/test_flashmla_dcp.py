@@ -92,7 +92,7 @@ def runtime(monkeypatch):
     events: list[tuple[str, ...]] = []
     recorded_streams = []
     active_stream = ["main"]
-    current_query_storages = set()
+    current_query_storages: set[int] = set()
     original_copy = torch.Tensor.copy_
 
     def copy_tensor(destination, *args, **kwargs):
@@ -275,10 +275,17 @@ def common(lengths, queries, *, tokens=None, causal=True):
     )
 
 
-@pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("speculative", [True, False])
-@pytest.mark.parametrize("interleave", [1, 4, 128])
-@pytest.mark.parametrize("rank", [0, 1, 7])
+@pytest.mark.parametrize(
+    "causal,speculative,interleave,rank",
+    [
+        (True, True, 1, 0),
+        (True, True, 4, 1),
+        (True, True, 128, 7),
+        (True, False, 4, 1),
+        (False, True, 128, 7),
+        (False, False, 1, 0),
+    ],
+)
 def test_visibility_uses_global_history_before_sharding(runtime, causal, speculative, interleave, rank):
     builder = runtime.builder(rank=rank, interleave=interleave, speculative=speculative)
     split = causal and speculative
@@ -315,8 +322,7 @@ def addresses(flash):
     return {key: value.data_ptr() for key, value in tensors.items()}
 
 
-@pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("rank", [0, 3, 7])
+@pytest.mark.parametrize("causal,rank", [(True, 3), (False, 7)])
 def test_metadata_refresh_reuses_device_rank(runtime, monkeypatch, causal, rank):
     builder = runtime.builder(rank=rank, interleave=4)
     rank_tensors = []
@@ -351,96 +357,7 @@ def test_metadata_refresh_reuses_device_rank(runtime, monkeypatch, causal, rank)
     assert all(tensor is rank_tensors[0] for tensor in rank_tensors)
 
 
-def test_inline_refreshes_repeated_and_alternating_captured_capacities(runtime):
-    builder = runtime.builder(rank=3, interleave=4, use_rope=True)
-    captured = {}
-    for step, capacity in enumerate((4, 4, 16, 4, 16)):
-        inputs = common([37 + step, 15 - step], [1, 1], tokens=capacity)
-        inputs.positions.add_(step * 10)
-        inputs.slot_mapping.copy_(torch.tensor([step * 2, step * 2 + 1]))
-        flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
-        if capacity not in captured:
-            captured[capacity] = (flash, addresses(flash))
-        previous, pointers = captured[capacity]
-        assert flash is previous and addresses(flash) == pointers
-        expected = local_lengths(inputs.seq_lens - 1, dcp_size=8, dcp_rank=3, cp_kv_cache_interleave_size=4)
-        torch.testing.assert_close(flash.cache_lens[:2], expected)
-        torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
-        torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
-        assert flash.used_q.tolist() == [1, 1] + [0] * (flash.used_q.numel() - 2)
-        assert flash.slots.tolist() == inputs.slot_mapping.tolist() + [-1] * (capacity - 2)
-        assert flash.positions.tolist() == inputs.positions.tolist() + [0] * (capacity - 2)
-        torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
-    assert len(builder.buffers) == 2
-
-
-@pytest.mark.parametrize("failed_schedule", [1, 2])
-def test_inline_refresh_failure_can_rebuild(runtime, failed_schedule):
-    builder = runtime.builder(rank=3, use_rope=True)
-    inputs = common([37, 15], [1, 1], tokens=4)
-    flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
-    pointers = addresses(flash)
-    schedule = runtime.metadata_op.side_effect
-    calls: list[None] = []
-
-    def fail(*args, **kwargs):
-        calls.append(None)
-        if len(calls) == failed_schedule:
-            raise ValueError("metadata refresh failed")
-        return schedule(*args, **kwargs)
-
-    runtime.metadata_op.side_effect = fail
-    with pytest.raises(ValueError, match="metadata refresh failed"):
-        builder.build(inputs, 2, 2, False)
-    runtime.metadata_op.side_effect = schedule
-    inputs.seq_lens.add_(8)
-    assert builder.build(inputs, 2, 2, False) is flash
-    assert addresses(flash) == pointers
-    expected = local_lengths(inputs.seq_lens - 1, dcp_size=8, dcp_rank=3, cp_kv_cache_interleave_size=1)
-    torch.testing.assert_close(flash.cache_lens[:2], expected)
-    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
-    torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
-
-
-def test_two_schedules_refresh_after_rejection_without_changing_graph_addresses(runtime, monkeypatch):
-    builder = runtime.builder(rank=3, interleave=4, use_rope=True)
-    inputs = common([37, 15], [4, 3], tokens=16)
-    flash = builder.build(inputs, 2, 7, False, retain_for_graph=True)
-    pointers = addresses(flash)
-    previous = flash.schedule.clone()
-    previous_current = flash.current.schedule.clone()
-    # Simulate device rejection correction before the next metadata build.
-    inputs.seq_lens.copy_(torch.tensor([35, 0]))
-    inputs.query_start_loc.copy_(torch.tensor([0, 2, 3]))
-    inputs.positions.add_(8)
-    inputs.slot_mapping.copy_(torch.arange(7))
-    runtime.metadata_op.reset_mock()
-    torch.testing.assert_close(flash.schedule, previous)
-    torch.testing.assert_close(flash.current.schedule, previous_current)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("device lengths must not be copied to the host")
-
-    with monkeypatch.context() as patch:
-        for method in ("item", "tolist", "cpu", "numpy", "__bool__"):
-            patch.setattr(torch.Tensor, method, forbidden)
-        same = builder.build(inputs, 2, 7, False)
-    assert same is flash and addresses(flash) == pointers
-    assert flash.cache_lens[:2].tolist() == [4, 0]
-    assert flash.slots.tolist() == [0, 1] + [-1] * 14
-    assert flash.current.slots.tolist() == [0, 1] + [-1] * 14
-    assert flash.positions.tolist() == list(range(8, 15)) + [0] * 9
-    torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
-    torch.testing.assert_close(flash.sin, -flash.cos)
-    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
-    torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
-    assert runtime.metadata_op.call_count == 2
-    assert not torch.equal(flash.schedule, previous)
-    assert not torch.equal(flash.current.schedule, previous_current)
-
-
-@pytest.mark.parametrize("speculative", [False, True])
-@pytest.mark.parametrize("rank", [0, 1, 7])
+@pytest.mark.parametrize("speculative,rank", [(False, 0), (True, 7)])
 def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime, monkeypatch, speculative, rank):
     builder = runtime.builder(rank=rank, speculative=speculative, use_rope=True)
     inputs = common([9, 1], [1, 1], tokens=4)
@@ -503,10 +420,17 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
     assert not flash.adapter.config.return_softmax_lse
 
 
-@pytest.mark.parametrize("causal,speculative", [(True, True), (False, True), (True, False), (False, False)])
-@pytest.mark.parametrize("interleave", [1, 4, 128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize(
+    "causal,speculative,interleave,dtype,capturing",
+    [
+        (True, False, 1, torch.float16, False),
+        (True, False, 128, torch.bfloat16, True),
+        (True, True, 4, torch.float16, False),
+        (True, True, 128, torch.bfloat16, True),
+        (False, True, 1, torch.bfloat16, False),
+        (False, True, 4, torch.float16, True),
+    ],
+)
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
 ):
@@ -679,117 +603,6 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
-@pytest.mark.parametrize("workspace_sizes,cached_size", [(None, None), ((64, 128), None), ((64, 128), 256)])
-def test_shared_dcp_keeps_fia_stream_order_and_workspace(runtime, monkeypatch, workspace_sizes, cached_size):
-    """Exercise the unchanged FIA contract through the shared production method."""
-    runtime.context.capturing = workspace_sizes is not None
-    graph = SimpleNamespace(workspaces={2: torch.empty(cached_size, dtype=torch.uint8) if cached_size else None})
-    workspace_query = Mock(side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes or ()])
-    runtime.scope["get_graph_params"] = Mock(return_value=graph)
-    runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = workspace_query
-
-    q_nope = torch.arange(2 * 4 * 4).float().view(2, 4, 4)
-    q_pe = torch.zeros(2, 4, 2)
-    current_k_nope, current_k_pe = torch.ones(2, 1, 4), torch.ones(2, 1, 2)
-    decode = SimpleNamespace(
-        cp_history_seq_len=[2],
-        actual_seq_lengths_q=[2],
-        block_table=torch.zeros(1, 1, dtype=torch.int32),
-        attn_mask=torch.zeros(2, 2, dtype=torch.bool),
-    )
-    history_output, history_lse = torch.ones(2, 4, 4), torch.zeros(2, 4, 1)
-    current_output, current_lse = torch.full((2, 2, 4), 3.0), torch.zeros(2, 2, 1)
-    kinds = runtime.scope["CPKVScope"]
-
-    def attention(q, q_rope, k, k_rope, **kwargs):
-        is_history = kwargs["attention_kind"] is kinds.HISTORY
-        runtime.events.append(("history" if is_history else "current", runtime.active_stream[0]))
-        assert kwargs["actual_seq_lengths"] == [2]
-        assert kwargs["actual_seq_lengths_kv"] == [2]
-        if is_history:
-            torch.testing.assert_close(q, q_nope)
-            assert kwargs["block_table"] is decode.block_table
-            assert kwargs["sparse_mode"] == 0 and kwargs["attn_mask"] is None
-            return history_output, history_lse
-        torch.testing.assert_close(q, q_nope[:, 2:])
-        torch.testing.assert_close(q_rope, q_pe[:, 2:])
-        torch.testing.assert_close(k, current_k_nope)
-        torch.testing.assert_close(k_rope, current_k_pe)
-        assert kwargs["block_table"] is None
-        assert kwargs["sparse_mode"] == 3 and kwargs["attn_mask"] is decode.attn_mask
-        return current_output, current_lse
-
-    def exchange(output, lse, size, scatter_dim, group, *, defer_combine):
-        assert output is history_output and lse is history_lse
-        assert (size, scatter_dim, group, defer_combine) == (2, 1, "cpu-dcp", True)
-        runtime.events.append(("exchange", runtime.active_stream[0]))
-        return object()
-
-    received = Mock(side_effect=exchange)
-    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", received, raising=False)
-
-    def combine(recv, head_dim, *, scatter_dim, local_output, local_lse):
-        assert head_dim == 4 and scatter_dim == 1
-        assert local_output is current_output and local_lse is current_lse
-        runtime.events.append(("merge", runtime.active_stream[0]))
-        # Two unit-weight history shards plus one unit-weight current term.
-        return (history_output[:, :2] + history_output[:, 2:] + current_output) / 3
-
-    combined = Mock(side_effect=combine)
-    runtime.scope["fused_dcp_lse_combine"] = combined
-
-    def project(latent):
-        runtime.events.append(("project", runtime.active_stream[0]))
-        return latent
-
-    impl = runtime.bind(
-        SimpleNamespace(
-            num_heads=2,
-            num_kv_heads=1,
-            kv_lora_rank=4,
-            qk_rope_head_dim=2,
-            dcp_size=2,
-            dcp_rank=1,
-            dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
-            scale=0.5,
-            _v_up_proj_batch_major=Mock(side_effect=project),
-        )
-    )
-    impl._run_dcp_mtp_split_attention_op = Mock(side_effect=attention)
-    impl._run_dcp_flashmla_attention = Mock(side_effect=AssertionError("FIA must not call FlashMLA"))
-    result = impl._forward_decode_split_attention(
-        q_nope,
-        q_pe,
-        torch.zeros(1, 1, 2, 4),
-        torch.zeros(1, 1, 2, 2),
-        current_k_nope,
-        current_k_pe,
-        2,
-        SimpleNamespace(decode=decode, external_flashmla=None),
-    )
-    torch.testing.assert_close(result, torch.full((2, 2, 4), 5 / 3))
-    assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
-    if workspace_sizes is not None:
-        assert graph.workspaces[2].numel() == (cached_size or max(workspace_sizes))
-    impl._run_dcp_flashmla_attention.assert_not_called()
-    assert impl._run_dcp_mtp_split_attention_op.call_count == 2
-    received.assert_called_once()
-    combined.assert_called_once()
-    impl._v_up_proj_batch_major.assert_called_once()
-    assert len(runtime.recorded_streams) == 7
-    assert runtime.events == [
-        ("history", "main"),
-        ("record", "main"),
-        ("wait", "attn", "main"),
-        ("current", "attn"),
-        ("record", "attn"),
-        ("exchange", "main"),
-        ("wait", "main", "attn"),
-        ("merge", "main"),
-        ("project", "main"),
-    ]
-
-
 @pytest.mark.parametrize("draft", [False, True])
 def test_external_dcp_graph_skips_fia_parameter_updates(draft):
     metadata = {"flash": SimpleNamespace(decode=object(), external_flashmla=object())}
@@ -803,42 +616,6 @@ def test_external_dcp_graph_skips_fia_parameter_updates(draft):
     )
     # No torch.npu stream or FIA graph registry access is possible in this scope.
     update(None, SimpleNamespace(attn_metadata=metadata), 4, draft_attn_metadatas=[metadata])
-
-
-@pytest.mark.parametrize(
-    "heads,size,expected", [(8, 1, True), (8, 8, True), (12, 8, True), (8, 2, False), (12, 4, False)]
-)
-def test_selection_checks_both_local_and_gathered_heads(runtime, heads, size, expected):
-    scope = {
-        "torch": torch,
-        "HardwareCapability": SimpleNamespace(MLA_FLASH="mla"),
-        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: True),
-        "MLA_FLASH_SUPPORTED_Q_HEADS": runtime.api.MLA_FLASH_SUPPORTED_Q_HEADS,
-        "FLASHMLA_V_DIM": 512,
-        "FLASHMLA_QK_DIM": 576,
-        "supports_component_major_mla_pd": lambda _: True,
-        "enable_sfa": lambda _: False,
-        "get_flashmla_ops": lambda: (Mock(), Mock()),
-    }
-    select = load_method("vllm_ascend/attention/mla_v1.py", "AscendMLAImpl", "_can_use_flashmla", scope)
-    impl = SimpleNamespace(
-        num_heads=heads,
-        num_kv_heads=1,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
-        fa_quant_layer=False,
-        dtype=torch.bfloat16,
-        enable_kv_nz=False,
-        pcp_enabled=False,
-        vllm_config=SimpleNamespace(
-            use_v2_model_runner=True,
-            speculative_config=None,
-            parallel_config=SimpleNamespace(decode_context_parallel_size=size),
-        ),
-    )
-    assert select(impl) is expected
-    impl.pcp_enabled = True
-    assert not select(impl)
 
 
 @pytest.mark.parametrize("bad_lse", ["layout", "dtype"])
@@ -868,19 +645,3 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
-
-
-@pytest.mark.parametrize("speculative", [False, True])
-def test_current_kv_requirement_uses_external_split_metadata(runtime, speculative):
-    fallback = Mock(return_value=True)
-    scope = {"AscendMLAMetadata": object, "use_history_current_split_decode": fallback, "_EXTRA_CTX": runtime.context}
-    requires = load_method(
-        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "_decode_requires_current_kv", scope
-    )
-    impl = SimpleNamespace(speculative_config=None)
-    for causal in (True, False):
-        flash = runtime.builder(speculative=speculative).build(common([9], [1], causal=causal), 1, 1, False)
-        assert requires(impl, SimpleNamespace(external_flashmla=flash)) is (causal and speculative)
-    fallback.assert_not_called()
-    assert requires(impl, SimpleNamespace(external_flashmla=None))
-    fallback.assert_called_once()

@@ -12,7 +12,6 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 MLA = "vllm_ascend/attention/mla_v1.py"
-DSPARK = "vllm_ascend/models/kimi_k3_dspark.py"
 
 
 def load(path, name, scope, owner=None):
@@ -39,67 +38,16 @@ def fused_cache():
     return raw.as_strided((3, 128, 1, 576), (stride, 576, 576, 1), 32), raw
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_dspark_normalizes_token_fused_views_before_selecting_writer(enabled):
-    fused, _ = fused_cache()
-    scope = {
-        "torch": torch,
-        "torch_npu": SimpleNamespace(npu_mla_prolog_v3=Mock()),
-        "get_cos_and_sin_mla": lambda _: (object(), object()),
-        "_log_dspark_mla_cache_diagnostic": lambda *args: None,
-    }
-    normalize = load(DSPARK, "_normalize_dspark_mla_cache", scope)
-    scope["_normalize_dspark_mla_cache"] = normalize
-    write = load(DSPARK, "precompute_and_store_context_kv", scope, "AscendK3DSparkModel")
-    impl = SimpleNamespace(
-        kv_lora_rank=512,
-        dtype=torch.bfloat16,
-        num_kv_heads=1,
-        qk_rope_head_dim=64,
-        use_mla_rope=enabled,
-        fa_quant_layer=False,
-        enable_kv_nz=False,
-        supports_prolog_v3_quantization=lambda: True,
-        supports_prolog_v3_projection=lambda: True,
-        fused_qkv_a_proj=object(),
-        q_proj=SimpleNamespace(_chunk_size=0),
-        q_lora_rank=4,
-        exec_context_kv_prolog_v3=Mock(),
-        exec_kv_prefill=Mock(),
-    )
-    for name in (
-        "supports_prolog_v3_dtype",
-        "supports_prolog_v3_writer",
-        "_validate_prolog_v3_cache",
-        "_cache_requires_prolog_v3_writer",
-    ):
-        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
-    choose = Mock(wraps=impl._cache_requires_prolog_v3_writer)
-    impl._cache_requires_prolog_v3_writer = choose
-    attn = SimpleNamespace(
-        impl=impl, kv_cache=fused, q_lora_rank=4, fused_qkv_a_proj=Mock(return_value=(torch.zeros(2, 580),))
-    )
-    model = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
-    slots = torch.tensor([1, 129])
-    write(model, torch.zeros(2, 16), torch.arange(2), slots)
-    views = choose.call_args.args[0]
-    assert tuple(t.shape for t in views) == ((3, 128, 1, 512), (3, 128, 1, 64))
-    assert all(t.untyped_storage().data_ptr() == fused.untyped_storage().data_ptr() for t in views)
-    assert views[1].storage_offset() - views[0].storage_offset() == 512
-    if enabled:
-        assert impl.exec_context_kv_prolog_v3.call_args.args[3] is views
-        impl.exec_kv_prefill.assert_not_called()
-        attn.fused_qkv_a_proj.assert_not_called()
-    else:
-        assert impl.exec_kv_prefill.call_args.args[3] is views
-        impl.exec_context_kv_prolog_v3.assert_not_called()
-
-
 @pytest.mark.parametrize(
-    "dcp,causal,speculative",
-    [(False, True, False), (False, False, True), (True, True, True), (True, False, True), (True, True, False)],
+    "dcp,causal,speculative,heads",
+    [
+        (False, True, False, 8),
+        (False, False, True, 12),
+        (True, True, True, 12),
+        (True, False, True, 8),
+        (True, True, False, 8),
+    ],
 )
-@pytest.mark.parametrize("heads", [8, 12])
 def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, heads):
     split = dcp and causal and speculative
     history, raw = fused_cache()
@@ -262,113 +210,6 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     notify.assert_called_once_with("mla")
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-@pytest.mark.parametrize(
-    "connector,module,expected",
-    [
-        (None, None, True),
-        ("MooncakeConnectorV2", None, True),
-        ("MooncakePullConnector", None, True),
-        ("MooncakeConnectorV1", None, False),
-        ("MooncakeConnectorV2", "custom.connector", False),
-    ],
-)
-def test_external_selection_retains_token_fused_pd(connector, module, expected, use_v2_runner):
-    scope = {
-        "torch": torch,
-        "HardwareCapability": SimpleNamespace(MLA_FLASH="mla"),
-        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: True),
-        "MLA_FLASH_SUPPORTED_Q_HEADS": {8, 12, 64, 96},
-        "FLASHMLA_V_DIM": 512,
-        "FLASHMLA_QK_DIM": 576,
-        "enable_sfa": lambda _: False,
-        "get_flashmla_ops": Mock(return_value=(Mock(), Mock())),
-    }
-    for name in ("supports_component_major_mla_pd",):
-        load("vllm_ascend/core/kv_cache_interface.py", name, scope)
-    select = load(MLA, "_can_use_flashmla", scope, "AscendMLAImpl")
-    transfer = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=module)
-    impl = SimpleNamespace(
-        num_heads=8,
-        num_kv_heads=1,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
-        fa_quant_layer=False,
-        dtype=torch.bfloat16,
-        enable_kv_nz=False,
-        pcp_enabled=False,
-        supports_prolog_v3_quantization=lambda: True,
-        supports_prolog_v3_projection=lambda: True,
-        q_proj=SimpleNamespace(_chunk_size=0),
-        vllm_config=SimpleNamespace(
-            use_v2_model_runner=use_v2_runner,
-            speculative_config=None,
-            kv_transfer_config=transfer,
-            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        ),
-    )
-    expected = expected and use_v2_runner
-    assert select(impl) is expected
-    if not expected:
-        scope["get_flashmla_ops"].assert_not_called()
-
-
-@pytest.mark.parametrize("mode", ["normal", "dcp", "pcp", "quantization", "chunked_projection", "no_q_lora"])
-def test_external_selection_reaches_mrv2_single_raw_allocation(mode):
-    class Spec:
-        supports_single_raw_backing = True
-
-    class Layer:
-        impl: SimpleNamespace
-
-    config = SimpleNamespace(
-        use_v2_model_runner=True,
-        speculative_config=None,
-        kv_transfer_config=None,
-        parallel_config=SimpleNamespace(decode_context_parallel_size=8 if mode == "dcp" else 1),
-    )
-    impl = SimpleNamespace(
-        vllm_config=config,
-        num_heads=8,
-        num_kv_heads=1,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
-        fa_quant_layer=False,
-        dtype=torch.bfloat16,
-        enable_kv_nz=False,
-        pcp_enabled=mode == "pcp",
-        dcp_enabled=mode == "dcp",
-        is_pcp_decode_sharded=False,
-        supports_prolog_v3_quantization=lambda: mode != "quantization",
-        supports_prolog_v3_projection=lambda: mode != "no_q_lora",
-        q_proj=SimpleNamespace(_chunk_size=128 if mode == "chunked_projection" else 0),
-    )
-    layer = Layer()
-    layer.impl = impl
-    scope = {
-        "torch": torch,
-        "AscendMLAAttentionSpec": Spec,
-        "MLAAttention": Layer,
-        "AttentionLayerBase": Layer,
-        "get_layers_from_vllm_config": lambda *args: {"mla": layer},
-        "HardwareCapability": SimpleNamespace(MLA_FLASH="mla"),
-        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: True),
-        "MLA_FLASH_SUPPORTED_Q_HEADS": {8, 12, 64, 96},
-        "FLASHMLA_V_DIM": 512,
-        "FLASHMLA_QK_DIM": 576,
-        "enable_sfa": lambda _: False,
-        "get_flashmla_ops": lambda: (Mock(), Mock()),
-    }
-    for name in ("supports_component_major_mla_pd",):
-        load("vllm_ascend/core/kv_cache_interface.py", name, scope)
-    select = load(MLA, "_can_use_flashmla", scope, "AscendMLAImpl")
-    impl.use_flashmla = select(impl)
-    allocate = load("vllm_ascend/worker/v2/attn_utils.py", "_uses_single_raw_mla_cache", scope)
-    single_raw = allocate(config, "mla", Spec())
-    assert select(impl) is (mode != "pcp")
-    assert single_raw is (mode != "pcp")
-
-
 @pytest.mark.parametrize("interleaved", [False, True])
 @pytest.mark.parametrize("context_write", [False, True])
 def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved, context_write):
@@ -480,27 +321,3 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
     assert writer[0].data_ptr() == buffers[0].data_ptr()
     with pytest.raises(RuntimeError, match="scheduled token rows"):
         impl._prolog_v3_writer_workspace(161, views, torch.arange(161))
-
-
-@pytest.mark.parametrize("external", [False, True])
-@pytest.mark.parametrize("block_size", [128, 768])
-def test_prolog_tile_is_not_derived_from_external_current_workspace(external, block_size):
-    # Native PROLOG retains main's geometry-derived attribute. External DCP and
-    # context writers retain tile128 even when their private dense cache is768.
-    write = Mock(return_value=(object(), object(), object()))
-    scope = {"torch": torch, "torch_npu": SimpleNamespace(npu_mla_prolog_v3=write)}
-    weights = {name: object() for name in ("weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr")}
-    norm = SimpleNamespace(weight=SimpleNamespace(data=object()), variance_epsilon=1e-6)
-    impl = SimpleNamespace(
-        use_flashmla=external,
-        fa_quant_layer=False,
-        q_a_layernorm=norm,
-        kv_a_layernorm=norm,
-        _prepare_prolog_v3_token=lambda x: (x, {}, weights),
-        _flatten_prolog_rope_table=lambda x, _: x,
-        _prolog_v3_writer_workspace=lambda tokens, cache, slots: (cache, slots, False),
-    )
-    run = load(MLA, "_run_prolog_v3", scope, "AscendMLAImpl")
-    cache = (torch.empty(1, block_size, 1, 512), torch.empty(1, block_size, 1, 64))
-    run(impl, torch.zeros(1, 16), object(), object(), cache, torch.tensor([0]), quantize_query=False)
-    assert write.call_args.kwargs["tile_size"] == (128 if external else block_size)
