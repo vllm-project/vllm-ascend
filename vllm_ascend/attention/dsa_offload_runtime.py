@@ -282,6 +282,11 @@ class DsaOffloadRuntime:
         group = self.groups[group_id]
         metadata = self.group_metadata[group_id]
         batch_size = selection_topk_indices.shape[0]
+        if batch_size > metadata.pool_ids.shape[0]:
+            raise ValueError(
+                f"Batch size {batch_size} exceeds the capacity of DSA group "
+                f"metadata ({metadata.pool_ids.shape[0]})"
+            )
         plan, install_records, actual_seq = dsa_plan(
             selection_topk_indices,
             full_kv_actual_seq,

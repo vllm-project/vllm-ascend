@@ -2160,6 +2160,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         raw_seq: int,
         topk: int,
     ) -> torch.Tensor:
+        if topk_indices is None:
+            raise ValueError("topk_indices cannot be None")
         topk_indices = topk_indices.to(dtype=torch.int32)
         if topk_indices.shape[-1] != topk:
             raise ValueError(

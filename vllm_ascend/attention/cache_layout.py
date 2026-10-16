@@ -167,6 +167,8 @@ def build_mla_layer_cache_descriptor(
     ``indexer_scale``; A5 C8 merges the Main cache into one tensor.
     """
 
+    if kv_cache_spec is None:
+        raise ValueError("kv_cache_spec cannot be None")
     sparse_dims = kv_cache_spec.sparse_head_dim
     if sparse_dims is None or len(sparse_dims) != 3:
         raise ValueError("SFA offload requires a three-part sparse_head_dim")
