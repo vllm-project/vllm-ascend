@@ -1104,6 +1104,118 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
 
+#### 5.2.4 D2RH Deployment on 950PR and 950DT
+
+D2RH stages KV cache in the Decode node's host memory before loading it into
+HBM. See the [D2RH workflow](../../developer_guide/Design_Documents/disaggregated_prefill.md#mooncake-d2rh-connector)
+for the transfer sequence and cache-hit behavior.
+
+This example uses two nodes, with **DP4/TP1/PP1 and EP on each node**, four visible
+devices per node, and UBoE enabled. It adapts the DSpark deployment above to
+`MooncakeD2RHConnectorV1`; it is not a drop-in A2/A3 configuration.
+
+Before starting:
+
+- Prepare compatible vLLM, vLLM Ascend, CANN, and Mooncake environments on both
+  nodes, with UBoE connectivity and the D2RH connector available. Use the same
+  software versions and checkpoint on P and D.
+- Prepare the `DeepSeek-V4-Flash-0731-w4a4c8` weights described in
+  [Model Weight](#31-model-weight). The scripts use DSpark with five speculative
+  tokens on both sides; check that the checkpoint supports this setting.
+- Use a vLLM Ascend source checkout containing the scripts below. Source the
+  container's Ascend environment before launching them.
+- Check available host RAM and container memory limits on D. D2RH allocates
+  pinned staging memory per worker based on its KV-cache layout; budget for all
+  four local ranks, in addition to model loading and process memory. The default
+  HBM utilization of 0.85 is a starting point, not a host-memory capacity guarantee.
+
+**1. Start P and D in separate terminals on their respective nodes.**
+
+Run these commands from the vLLM Ascend repository root. Replace the example IPs,
+interface names, and model paths with your deployment values.
+
+On P, use [run_prefill.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/deepseek_v4_flash_d2rh/run_prefill.sh):
+
+```bash
+export LOCAL_IP=192.0.2.10
+export NIC_NAME=eth0
+export MODEL_PATH=/path/to/DeepSeek-V4-Flash-0731-w4a4c8
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+bash examples/disaggregated_prefill_v1/deepseek_v4_flash_d2rh/run_prefill.sh
+```
+
+On D, use [run_decode.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/deepseek_v4_flash_d2rh/run_decode.sh):
+
+```bash
+export LOCAL_IP=192.0.2.20
+export NIC_NAME=eth0
+export MODEL_PATH=/path/to/DeepSeek-V4-Flash-0731-w4a4c8
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+bash examples/disaggregated_prefill_v1/deepseek_v4_flash_d2rh/run_decode.sh
+```
+
+The scripts enable prefix caching on both sides, keep the hybrid KV cache
+manager enabled, and set
+`ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'`.
+They use FP8 indexer cache on 950PR/950DT, not the INT8 indexer setting from the
+A2/A3 examples; see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
+P uses eager execution and D uses `FULL_DECODE_ONLY` graphs.
+
+The context limit is 133120 tokens, enough for 128K input plus 1K output, including
+any prompt-template tokens within that limit. Logs go to `d2rh_prefill.log` and
+`d2rh_decode.log`; set `LOG_FILE` to change the path. Set
+`GPU_MEMORY_UTILIZATION` before launching to override 0.85. Reducing it reduces
+available KV capacity and can reduce D's staging allocation; recheck both host
+memory and maximum request capacity after changing it.
+
+HTTP ports are 8100 (P) and 8200 (D); DP RPC ports are 12321 and 12322, and
+`kv_port` bases are 36010 and 36020. D2RH control-port bases default to 38100 and
+38200, with rank offsets. Reserve these ranges and the transport's communication
+ports. For multiple instances on one host, use non-overlapping ranges and set
+`d2rh_zmq_port` and `d2rh_scheduler_ready_port` in
+`kv_connector_extra_config` when needed.
+
+**2. Check both services, then start the proxy.**
+
+On a host that can reach both nodes, from the repository root:
+
+```bash
+unset http_proxy https_proxy ftp_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY
+export P_IP=192.0.2.10
+export D_IP=192.0.2.20
+curl --fail "http://${P_IP}:8100/health"
+curl --fail "http://${D_IP}:8200/health"
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 --port 8000 \
+    --prefiller-hosts "$P_IP" --prefiller-ports 8100 \
+    --decoder-hosts "$D_IP" --decoder-ports 8200
+```
+
+The proxy points at each node's single API endpoint; the server distributes
+requests across its local DP ranks. Do not also run `launch_online_dp.py` for
+this example. Keep these unauthenticated example endpoints on a trusted network.
+
+**3. Verify an end-to-end request through the proxy.**
+
+In another terminal on the proxy host:
+
+```bash
+curl --noproxy '*' --fail http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "dsv4",
+        "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+        "max_tokens": 1024,
+        "temperature": 0
+    }'
+```
+
+Expect HTTP 200 and a response containing `choices`. Check D's log for
+`D2RH_HOST_CACHE` to confirm the staging path; its hit count refers to host
+memory, not D HBM. A short curl request checks connectivity, not long-context
+accuracy or throughput. Use the accuracy and performance evaluation sections
+below for those checks.
+
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
