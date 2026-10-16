@@ -82,20 +82,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, scale_groups, dtype=torch.uint8)
         return params_dict
 
-    def get_pergroup_param_for_layer(
-        self,
-        layer: torch.nn.Module,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        layer_type: str | None = None,
-    ) -> dict[str, Any]:
-        # A TP shard starting inside a checkpoint group may need one extra scale.
-        if isinstance(layer, RowParallelLinear):
-            prefix_padding, _ = get_mxfp_tp_padding(input_size, self.group_size, layer.tp_rank)
-            input_size += prefix_padding
-        return self.get_pergroup_param(input_size, output_size, params_dtype, layer_type=layer_type)
-
     def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_padding, suffix_padding = getattr(layer, "mxfp4_tp_padding", (0, 0))
         if prefix_padding or suffix_padding:
