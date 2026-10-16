@@ -36,7 +36,7 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
-    # Worker L1 KV read/write legality. 0 (default) disables all hooks, 1 enables
+    # Worker V1/V2 KV read/write legality. 0 (default) disables all hooks, 1 enables
     # address/valid-prefix checks and violation logs. Dense PA/MLA only; unadapted
     # features fail initialization. No KV content dumps or checksums. Not sensitive.
     "VLLM_ASCEND_KV_GUARD": lambda: bool(int(os.getenv("VLLM_ASCEND_KV_GUARD", "0"))),

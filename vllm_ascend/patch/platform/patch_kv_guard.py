@@ -19,8 +19,6 @@ def install_scheduler_guard(scheduler_cls):
     @functools.wraps(original_init)
     def initialize(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        if getattr(getattr(self, "vllm_config", None), "use_v2_model_runner", False):
-            raise ValueError("KV L1 guard supports Model Runner V1; set VLLM_USE_V2_MODEL_RUNNER=0")
         pool = self.kv_cache_manager.block_pool
         counters = [0] * len(pool.blocks)
         pool_id = uuid.uuid4().hex

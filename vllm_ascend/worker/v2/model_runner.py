@@ -71,6 +71,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.debug.kv_guard_v2 import install_guard
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -278,6 +279,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+        self._kv_guard_v2 = install_guard(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -516,6 +518,9 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        guard = getattr(self, "_kv_guard_v2", None)
+        if guard is not None:
+            guard.configure()
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -133,7 +134,7 @@ class GuardRuntime:
             )
         )
         sizes = {}
-        tables = getattr(getattr(runner.input_batch, "block_table", None), "block_tables", ())
+        tables = getattr(getattr(getattr(runner, "input_batch", None), "block_table", None), "block_tables", ())
         for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
             spec = group.kv_cache_spec
             sizes[group_id] = spec.block_size
@@ -363,7 +364,9 @@ class GuardRuntime:
                     keys.update(write_keys)
                     offset = 0
                 else:
-                    if self._phase == "warmup":
+                    if self._phase in ("dummy", "warmup"):
+                        # Dummy outputs are discarded. Their writes can corrupt
+                        # live KV, but reading reserved scratch is expected.
                         continue
                     lengths = values(access.lengths)
                     if access.starts is not None:
@@ -435,32 +438,46 @@ class GuardRuntime:
                         if valid > block.valid_end:
                             block.valid_end = valid
 
-    def wrap_forward(self, runner: Any, forward: Any, get_context: Any):
-        @functools.wraps(forward)
-        def observed(num_tokens, *args, **kwargs):
-            self._check_failure()
-            phase = kwargs.pop("_kv_guard_phase", "forward")
-            context = get_context()
-            context._kv_guard = self
-            self._full_graph = "FULL" in str(context.cudagraph_runtime_mode)
-            self._phase = phase
-            self._accesses = []
-            try:
-                self.collect_metadata(getattr(context, "attn_metadata", None))
-            except Exception as exc:
-                self._metadata = {}
-                self._missing_groups = set(self.layer_groups.values())
-                self.gap(f"metadata_collection_failed:{type(exc).__name__}")
-            try:
-                output = forward(num_tokens, *args, **kwargs)
+    def observe_metadata(self, metadata: Any) -> None:
+        try:
+            self.collect_metadata(metadata)
+        except Exception as exc:
+            self._metadata = {}
+            self._missing_groups = set(self.layer_groups.values())
+            self.gap(f"metadata_collection_failed:{type(exc).__name__}")
+
+    @contextmanager
+    def forward_scope(
+        self, runner: Any, *, phase: str, metadata: Any = None, full_graph: bool = False, required: bool = True
+    ):
+        """Audit one completed forward; never advance validity on exceptions."""
+        self._check_failure()
+        self._phase, self._full_graph = phase, full_graph
+        self._accesses = []
+        self.observe_metadata(metadata)
+        try:
+            yield
+            if required or self._metadata or self._accesses:
                 try:
                     self._audit(runner)
                 except Exception as exc:
                     self.gap(f"access_audit_failed:{type(exc).__name__}")
-                self._check_failure()
-                return output
-            finally:
-                self._phase = None
+            self._check_failure()
+        finally:
+            self._phase = None
+
+    def wrap_forward(self, runner: Any, forward: Any, get_context: Any):
+        @functools.wraps(forward)
+        def observed(num_tokens, *args, **kwargs):
+            context = get_context()
+            context._kv_guard = self
+            with self.forward_scope(
+                runner,
+                phase=kwargs.pop("_kv_guard_phase", "forward"),
+                metadata=getattr(context, "attn_metadata", None),
+                full_graph="FULL" in str(context.cudagraph_runtime_mode),
+            ):
+                return forward(num_tokens, *args, **kwargs)
 
         return observed
 

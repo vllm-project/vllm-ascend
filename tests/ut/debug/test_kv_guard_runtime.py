@@ -169,7 +169,8 @@ def test_unadapted_kernel_block_coordinates_are_rejected(runtime, kernel_size, a
             runtime.configure(runner)
 
 
-def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime):
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime, use_v2):
     patch = load("guard_scheduler_subject", "vllm_ascend/patch/platform/patch_kv_guard.py")
 
     class Pool:
@@ -181,6 +182,7 @@ def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime):
 
     class Scheduler:
         def __init__(self):
+            self.vllm_config = NS(use_v2_model_runner=use_v2)
             self.pool = Pool()
             self.mapping = {"r": [[1]]}
             self.kv_cache_manager = NS(
@@ -307,18 +309,6 @@ def test_equivalent_cloned_slots_across_layers_remain_one_logical_write(runtime)
 
     runtime.wrap_forward(runner, model, lambda: context)(1)
     assert not any(e["event"] == "guard.violation" for e in runtime.events)
-
-
-def test_v2_runner_does_not_silently_skip_the_guard(runtime):
-    patch = load("guard_v2_gate_subject", "vllm_ascend/patch/platform/patch_kv_guard.py")
-
-    class Scheduler:
-        def __init__(self):
-            self.vllm_config = NS(use_v2_model_runner=True)
-
-    patch.install_scheduler_guard(Scheduler)
-    with pytest.raises(ValueError, match="Model Runner V1"):
-        Scheduler()
 
 
 def metadata(slots, table=None, lengths=None):
