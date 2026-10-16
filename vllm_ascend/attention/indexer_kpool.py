@@ -4,10 +4,13 @@
 
 from dataclasses import dataclass
 from importlib import import_module
+from pathlib import Path
+from tempfile import gettempdir
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+from filelock import FileLock
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -613,7 +616,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
     def _init_cann_ops(self) -> None:
         try:
-            import_module("cann_ops_transformer")
+            # The package JIT-compiles operators at import time; concurrent
+            # workers can remove one another's torch extension build locks.
+            with FileLock(str(Path(gettempdir()) / "vllm-ascend-cann-ops-transformer.lock")):
+                import_module("cann_ops_transformer")
             adapters = import_module("vllm_ascend.ops.cann_keypool")
             fused = import_module("vllm_ascend.ops.triton.glm5_next_cann_keypool")
             self._gather_retained_hidden = adapters.gather_retained_hidden

@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -363,6 +366,33 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
     with pytest.raises(RuntimeError, match="CANN ops-transformer operator package and Triton cache/index adapters"):
         Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
     assert missing in [call.args[0] for call in loader.call_args_list]
+
+
+def test_cann_backend_serializes_concurrent_operator_imports(monkeypatch, tmp_path):
+    barrier = Barrier(2)
+    importing = Lock()
+    monkeypatch.setattr(backend_module, "gettempdir", lambda: str(tmp_path), raising=False)
+    monkeypatch.setattr(torch.ops, "cann_ops_transformer", MagicMock())
+
+    def load(name):
+        if name == "cann_ops_transformer":
+            assert importing.acquire(blocking=False), "Concurrent CANN imports share JIT build locks"
+            try:
+                time.sleep(0.1)
+            finally:
+                importing.release()
+        return MagicMock()
+
+    monkeypatch.setattr(backend_module, "import_module", load)
+
+    def initialize():
+        barrier.wait(timeout=10)
+        Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(initialize) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
