@@ -7,7 +7,6 @@ from typing import Any
 
 import torch
 import vllm.envs as envs_vllm
-from pydantic import TypeAdapter
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -31,9 +30,6 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
-
-
-_FUSED_MC2_MODE_ADAPTER = TypeAdapter(int)
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -93,7 +89,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # Draft config initialization can reset the process-global support flag.
     # Use the current model request for both communicator init and forward.
     requested = (getattr(vllm_config, "additional_config", None) or {}).get("enable_fused_mc2", 0)
-    if _FUSED_MC2_MODE_ADAPTER.validate_python(requested) != 2:
+    if requested != 2:
         return False
     return (
         importlib.util.find_spec("cann_ops_transformer") is not None
