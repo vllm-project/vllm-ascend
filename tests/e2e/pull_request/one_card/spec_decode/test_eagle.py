@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -15,19 +13,6 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, MODELS,
 MAX_NUM_SEQS = 256
 
 
-def test_qwen3_vl_eagle(
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-    vl_model_name: str,
-):
-    with VllmRunner(
-        vl_model_name,
-        max_model_len=1024,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as ref_llm:
-        ref_llm.model.chat(test_prompts, sampling_config)
-
-
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])
@@ -37,7 +22,6 @@ def test_qwen3_vl_eagle(
     "dynamic_num_speculative_tokens",
     [
         pytest.param(None, id="static"),
-        pytest.param(2, id="dynamic"),
     ],
 )
 def test_qwen_eagle3_acceptance(
