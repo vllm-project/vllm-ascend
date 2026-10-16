@@ -621,6 +621,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             cache_dir = _get_build_directory("cann_ops_transformer", verbose=False)
             with FileLock(str(Path(cache_dir) / "import.lock")):
                 import_module("cann_ops_transformer")
+                # These operators otherwise JIT-compile on their first NPU call.
+                for op_name in ("key_pool", "pool_key_indexer"):
+                    module = import_module(f"cann_ops_transformer.ops.attention.{op_name}.{op_name}")
+                    getattr(module, f"{op_name}_op_builder").load()
             adapters = import_module("vllm_ascend.ops.cann_keypool")
             fused = import_module("vllm_ascend.ops.triton.glm5_next_cann_keypool")
             self._gather_retained_hidden = adapters.gather_retained_hidden
