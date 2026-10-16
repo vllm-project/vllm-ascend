@@ -254,19 +254,23 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
 
 
-def test_model_cache_layers_publish_source_compatible_specs():
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_model_cache_layers_publish_source_compatible_specs(dtype):
     current_config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     cache_config = SimpleNamespace(block_size=256)
-    with patch(
-        "vllm_ascend.models.glm5next.kv_cache.get_current_vllm_config",
-        return_value=current_config,
+    with (
+        patch("vllm_ascend.models.glm5next.kv_cache.get_current_hardware_profile"),
+        patch(
+            "vllm_ascend.models.glm5next.kv_cache.get_current_vllm_config",
+            return_value=current_config,
+        ),
     ):
         indexer = Glm5NextIndexerCache(
             head_dim=128,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             cache_role="indexer",
             cache_config=cache_config,
             prefix="model.layers.0.indexer.k_cache",
@@ -288,6 +292,11 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
+    assert indexer_spec.dtype == dtype
+    assert indexer_spec.scale_dim == (1 if dtype == torch.float8_e4m3fn else 0)
+    if dtype == torch.float8_e4m3fn:
+        assert indexer_spec.scale_dtype == torch.float32
+        assert indexer_spec.real_page_size_bytes == 16 * (128 + 4)
     assert state_spec.block_size == state_spec.sliding_window == 16
     assert state_spec.head_size == 128
     assert state_spec.dtype == torch.float32
@@ -299,6 +308,22 @@ def test_model_cache_layers_publish_source_compatible_specs():
         indexer.prefix,
         state.prefix,
     }
+
+
+def test_fp8_indexer_cache_rejects_unsupported_hardware():
+    profile = SimpleNamespace(supports=lambda _capability: False)
+    with (
+        patch("vllm_ascend.models.glm5next.kv_cache.get_current_hardware_profile", return_value=profile),
+        pytest.raises(NotImplementedError, match="Ascend A5"),
+    ):
+        Glm5NextIndexerCache(
+            head_dim=128,
+            dtype=torch.float8_e4m3fn,
+            cache_role="indexer",
+            cache_config=SimpleNamespace(block_size=128),
+            prefix="indexer.k_cache",
+            compress_ratio=4,
+        )
 
 
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():

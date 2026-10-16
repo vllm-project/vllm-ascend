@@ -237,3 +237,125 @@ def test_business_shape_index_packing_in_place():
     expected[:3, 2048] = torch.tensor([65536, -1, 65540], dtype=torch.int32, device="npu")
     torch.testing.assert_close(indices, expected, rtol=0, atol=0)
     assert result.data_ptr() == indices.data_ptr()
+
+
+@torch.inference_mode()
+def test_fp8_pool_writes_preserve_shared_key_scale_pages_under_replay():
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+    from vllm_ascend.ops.cann_keypool import quantize_keypool_query
+
+    if not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_FP8):
+        pytest.skip("Requires A5 FP8 cache writes")
+    dim, rows, page_bytes = 128, 32, 4224
+    raw = torch.full((2 * page_bytes,), 23, dtype=torch.uint8, device="npu")
+    cache = raw.view(torch.float8_e4m3fn).as_strided((2, rows, 1, dim), (page_bytes, dim, dim, 1))
+    scale = raw.view(torch.float32).as_strided((2, rows, 1), (page_bytes // 4, 1, 1), rows * dim // 4)
+    pooled = torch.arange(4 * dim, dtype=torch.float32, device="npu").view(4, dim).to(torch.bfloat16)
+    pooled[0].zero_()
+    query, descales = quantize_keypool_query(pooled[:, None])
+    assert query.dtype == torch.float8_e4m3fn and (descales > 0).all()
+    torch.testing.assert_close(query.float() * descales[..., None], pooled[:, None].float(), rtol=0.065, atol=1e-5)
+    metadata = SimpleNamespace(pooled_slot_mapping=torch.tensor([0, 33, -1, 64], device="npu"))
+    inputs = SimpleNamespace(
+        write_indices=torch.empty((0, 4), dtype=torch.int64, device="npu"),
+        state_indices=torch.empty((0, 4), dtype=torch.int64, device="npu"),
+        page_rows=4,
+    )
+    tail = torch.empty((1, 4, 2 * dim), device="npu")
+
+    def run():
+        adapters.write_keypool_caches(
+            tail, cache, None, None, pooled, metadata, SimpleNamespace(cann_inputs=inputs), tail, scale_cache=scale
+        )
+
+    for _ in range(3):
+        run()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        run()
+    for advance in (0, 1):
+        raw.fill_(23)
+        pooled.add_(advance)
+        graph.replay()
+        expected = torch.full_like(raw.cpu(), 23)
+        source = pooled.float().cpu()
+        for source_row, slot in ((0, 0), (1, 33)):
+            maximum = source[source_row].abs().max()
+            descale = maximum / 448 if maximum > 0 else torch.tensor(1.0)
+            key_bytes = (source[source_row] / descale).to(torch.float8_e4m3fn).view(torch.uint8)
+            page, row = divmod(slot, rows)
+            start = page * page_bytes + row * dim
+            expected[start : start + dim] = key_bytes
+            offset = page * page_bytes + rows * dim + row * 4
+            expected[offset : offset + 4] = descale.reshape(1).view(torch.uint8)
+        torch.testing.assert_close(raw.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@torch.inference_mode()
+def test_cann_selection_replays_empty_short_and_live_requests(dtype):
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_FP8):
+        pytest.skip("Requires A5 CANN PoolKeyIndexer")
+    pytest.importorskip("cann_ops_transformer")
+    tokens, heads, dim, topk = 4, 32, 128, 2048
+    query = torch.ones((tokens, heads, dim), dtype=torch.bfloat16, device="npu")
+    query[0].zero_()
+    weights = torch.ones((tokens, heads), dtype=torch.bfloat16, device="npu")
+    cache = torch.ones((2, 32, 1, dim), device="npu").to(dtype)
+    table = torch.tensor([[0], [1]], dtype=torch.int32, device="npu")
+    metadata = SimpleNamespace(
+        cum_query_lens=torch.zeros(2, dtype=torch.int64, device="npu"),
+        seq_lens=torch.zeros(2, dtype=torch.int64, device="npu"),
+        pool_tail=torch.zeros(2, dtype=torch.int64, device="npu"),
+        positions=torch.zeros(tokens, dtype=torch.int64, device="npu"),
+    )
+    key_scales = torch.ones((2, 32, 1), device="npu") if dtype == torch.float8_e4m3fn else None
+
+    def run():
+        from vllm_ascend.ops.cann_keypool import quantize_keypool_query
+
+        inputs = adapters.prepare_pool_key_indexer_inputs(query, weights, metadata, table)
+        values, kwargs = inputs.query, {}
+        if key_scales is not None:
+            values, scales = quantize_keypool_query(values)
+            kwargs = dict(q_descale=scales, k_descale=key_scales, quant_mode=0)
+        indices, _ = torch.ops.cann_ops_transformer.pool_key_indexer(
+            values,
+            cache,
+            inputs.weights,
+            inputs.pool_tail,
+            actual_seq_q=inputs.cum_query_lens,
+            actual_seq_k=inputs.seq_lens,
+            block_table=inputs.block_table,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            topk=topk,
+            pool_size=4,
+            mask_mode=3,
+            **kwargs,
+        )
+        return adapters.pack_keypool_indices(indices[1:], metadata, topk, 4)
+
+    for _ in range(3):
+        run()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = run()
+    cases = (
+        ([0, 0], [0, 0], [0, 0], [0, 0, 0, 0]),
+        ([2, 4], [0, 0], [2, 2], [0, 1, 0, 1]),
+        ([1, 4], [2, 1], [0, 0], [7, 1, 2, 3]),
+        ([0, 0], [0, 0], [0, 0], [0, 0, 0, 0]),
+    )
+    for ends, lengths, tails, positions in cases:
+        for field, values in zip(
+            ("cum_query_lens", "seq_lens", "pool_tail", "positions"), (ends, lengths, tails, positions)
+        ):
+            getattr(metadata, field).copy_(torch.tensor(values, device="npu"))
+        graph.replay()
+        actual = result.cpu()
+        for row, position in enumerate(positions):
+            valid = actual[row, 0][actual[row, 0] >= 0].sort().values.tolist()
+            assert valid == (list(range(position + 1)) if row < ends[-1] else [])

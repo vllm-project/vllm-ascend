@@ -56,7 +56,7 @@ def view_compressed_indexer_cache(
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     attn_backend: AttentionBackend,
     kernel_block_size: int,
-) -> tuple[torch.Tensor]:
+) -> tuple[torch.Tensor, ...]:
     if isinstance(raw_cache, tuple):
         if len(raw_cache) != 1:
             raise ValueError(f"Compressed indexer cache for {layer_name} must be a single tensor.")
@@ -77,6 +77,33 @@ def view_compressed_indexer_cache(
     )
     strides = _row_major_strides(shape)
     typed_slot = raw_single.view(kv_cache_spec.dtype)
+    if kv_cache_spec.scale_dim:
+        # Each kernel block holds a contiguous K region followed by scales.
+        # Interleave these regions when one scheduler page contains multiple
+        # kernel blocks, so both tensors have a uniform physical block stride.
+        page_bytes = kv_cache_spec.page_size_bytes // num_blocks_per_kv_block
+        key_bytes = strides[0] * get_dtype_size(kv_cache_spec.dtype)
+        scale_shape = (*shape[:-1], kv_cache_spec.scale_dim)
+        scale_strides = _row_major_strides(scale_shape)
+        scale_bytes = scale_strides[0] * get_dtype_size(kv_cache_spec.scale_dtype)
+        if (
+            kv_cache_spec.page_size_bytes % num_blocks_per_kv_block
+            or page_bytes < key_bytes + scale_bytes
+            or page_bytes % get_dtype_size(kv_cache_spec.scale_dtype)
+        ):
+            raise ValueError(f"Compressed indexer key and scale for {layer_name} do not fit aligned kernel pages.")
+        strides[0] = page_bytes // get_dtype_size(kv_cache_spec.dtype)
+        scale_strides[0] = page_bytes // get_dtype_size(kv_cache_spec.scale_dtype)
+        scale_slot = raw_single.view(kv_cache_spec.scale_dtype)
+        return (
+            torch.as_strided(typed_slot, size=shape, stride=tuple(strides)),
+            torch.as_strided(
+                scale_slot,
+                size=scale_shape,
+                stride=tuple(scale_strides),
+                storage_offset=scale_slot.storage_offset() + key_bytes // get_dtype_size(kv_cache_spec.scale_dtype),
+            ),
+        )
     if strides[0] * shape[0] != typed_slot.numel():
         raise ValueError(
             f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "

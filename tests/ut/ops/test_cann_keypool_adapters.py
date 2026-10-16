@@ -151,3 +151,24 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
     assert scalars[:7] == [3, dim, 80, 3, 7, 3, 32]
     assert 48 * dim in scalars
     assert dim + 64 in scalars
+
+
+def test_safe_indexer_inputs_reserve_an_independent_leading_request(monkeypatch):
+    launch = MagicMock()
+    monkeypatch.setattr(adapters, "_prepare_indexer_inputs_kernel", launch)
+    query = torch.empty(4, 2, 128, dtype=torch.float8_e4m3fn)
+    weights = torch.empty(4, 2, dtype=torch.bfloat16)
+    table = torch.empty(2, 3, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        cum_query_lens=torch.empty(2, dtype=torch.int64),
+        seq_lens=torch.empty(2, dtype=torch.int64),
+        pool_tail=torch.empty(2, dtype=torch.int64),
+    )
+    inputs = adapters.prepare_pool_key_indexer_inputs(query, weights, metadata, table)
+    assert inputs.query.shape == (5, 2, 128)
+    assert inputs.weights.shape == (5, 2)
+    assert inputs.query.dtype == torch.float8_e4m3fn
+    assert inputs.block_table.shape == (3, 3)
+    assert inputs.cum_query_lens.shape == inputs.seq_lens.shape == inputs.pool_tail.shape == (3,)
+    assert inputs.query.data_ptr() != query.data_ptr()
+    assert launch.__getitem__.return_value.call_count == 1

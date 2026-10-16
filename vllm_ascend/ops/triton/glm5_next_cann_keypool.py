@@ -1,16 +1,119 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
+"""Fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
 
 from types import SimpleNamespace
 
 from vllm.triton_utils import tl, triton
+
+FP8_E4M3_MAX = tl.constexpr(448.0) if tl.constexpr is not None else 448.0
+
+
+@triton.jit(do_not_specialize=["tokens", "requests"])
+def _prepare_indexer_inputs_kernel(
+    query,
+    weights,
+    ends,
+    lengths,
+    tails,
+    table,
+    out_query,
+    out_weights,
+    out_ends,
+    out_lengths,
+    out_tails,
+    out_table,
+    tokens,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    requests,
+    COLUMNS: tl.constexpr,
+    QUERY_ROW: tl.constexpr,
+    QUERY_HEAD: tl.constexpr,
+    WEIGHT_ROW: tl.constexpr,
+    WEIGHT_HEAD: tl.constexpr,
+    TABLE_ROW: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row = offset // (HEADS * DIM)
+    head = offset // DIM % HEADS
+    value = tl.load(
+        query + (row - 1) * QUERY_ROW + head * QUERY_HEAD + offset % DIM,
+        (row > 0) & (row <= tokens),
+        other=0,
+    )
+    tl.store(out_query + offset, value, row <= tokens)
+    weight_row = offset // HEADS
+    weight = tl.load(
+        weights + (weight_row - 1) * WEIGHT_ROW + offset % HEADS * WEIGHT_HEAD,
+        (weight_row > 0) & (weight_row <= tokens),
+        other=0,
+    )
+    tl.store(out_weights + offset, weight, weight_row <= tokens)
+    valid = (offset > 0) & (offset <= requests)
+    end = tl.load(ends + offset - 1, valid, other=0) + 1
+    length = tl.load(lengths + offset - 1, valid, other=1)
+    tail = tl.load(tails + offset - 1, valid, other=0)
+    tl.store(out_ends + offset, end, offset <= requests)
+    tl.store(out_lengths + offset, length, offset <= requests)
+    tl.store(out_tails + offset, tail, offset <= requests)
+    table_row = offset // COLUMNS
+    page = tl.load(
+        table + (table_row - 1) * TABLE_ROW + offset % COLUMNS,
+        (table_row > 0) & (table_row <= requests),
+        other=0,
+    )
+    tl.store(out_table + offset, page, table_row <= requests)
+
+
+def prepare_pool_key_indexer_inputs(query, weights, metadata, block_table):
+    # A leading one-query/one-pool request keeps CANN out of its unsafe TND
+    # no-work cleanup, including when graph replay changes an empty shard.
+    tokens, heads, dim = query.shape
+    requests, columns = block_table.shape
+    inputs = SimpleNamespace(
+        query=query.new_empty((tokens + 1, heads, dim)),
+        weights=weights.new_empty((tokens + 1, heads)),
+        cum_query_lens=metadata.cum_query_lens.new_empty(requests + 1),
+        seq_lens=metadata.seq_lens.new_empty(requests + 1),
+        pool_tail=metadata.pool_tail.new_empty(requests + 1),
+        block_table=block_table.new_empty((requests + 1, columns)),
+    )
+    size = max(inputs.query.numel(), inputs.block_table.numel(), requests + 1)
+    _prepare_indexer_inputs_kernel[(triton.cdiv(size, 1024),)](
+        query,
+        weights,
+        metadata.cum_query_lens,
+        metadata.seq_lens,
+        metadata.pool_tail,
+        block_table,
+        inputs.query,
+        inputs.weights,
+        inputs.cum_query_lens,
+        inputs.seq_lens,
+        inputs.pool_tail,
+        inputs.block_table,
+        tokens,
+        heads,
+        dim,
+        requests,
+        columns,
+        query.stride(0),
+        query.stride(1),
+        weights.stride(0),
+        weights.stride(1),
+        block_table.stride(0),
+        1024,
+    )
+    return inputs
 
 
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
 def _write_keypool_caches_kernel(
     tail,
     cache,
+    scale_cache,
     key,
     gate,
     pooled,
@@ -26,10 +129,12 @@ def _write_keypool_caches_kernel(
     cache_blocks,
     BLOCK_SIZE: tl.constexpr,
     CACHE_STRIDE: tl.constexpr,
+    SCALE_STRIDE: tl.constexpr,
     POOLED_STRIDE: tl.constexpr,
     INPUT_STRIDE,
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
+    QUANTIZED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -53,11 +158,17 @@ def _write_keypool_caches_kernel(
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
+        if QUANTIZED:
+            pool_value = pool_value.to(tl.float32)
+            maximum = tl.max(tl.abs(pool_value), 0)
+            scale = tl.where(maximum > 0, maximum / FP8_E4M3_MAX, 1.0)
+            pool_value = pool_value / scale
+            tl.store(scale_cache + slot // BLOCK_SIZE * SCALE_STRIDE + slot % BLOCK_SIZE, scale, valid)
         address = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * HEAD_DIM + cols
         tl.store(address, pool_value, valid & (cols < HEAD_DIM))
 
 
-def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state):
+def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state, scale_cache=None):
     inputs = tail_metadata.cann_inputs
     writes = inputs.write_indices
     tail_rows = writes.numel()
@@ -66,6 +177,7 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
     _write_keypool_caches_kernel[(tail_rows + pooled_rows,)](
         tail,
         cache,
+        scale_cache,
         key,
         gate,
         pooled,
@@ -81,10 +193,12 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         cache.shape[0],
         cache.shape[1],
         cache.stride(0),
+        scale_cache.stride(0) if scale_cache is not None else 0,
         pooled.stride(0),
         writes.stride(0),
         writes.shape[1],
         key is not None,
+        scale_cache is not None,
         triton.next_power_of_2(2 * cache.shape[-1]),
     )
 

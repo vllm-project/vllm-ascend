@@ -2,12 +2,14 @@
 
 ## Description
 
-- **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
+- **Function**: Four Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
 - **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
+- **FP8 extension**: When `scale_cache` is supplied, each pool stores E4M3 keys with `scale=max(abs(pooled))/448` (or 1 for a zero vector), and stores one FP32 descale per pool.
 - **Algorithm flow**:
     1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. DSA-CP also builds rank-local cumulative query ends, visible pool counts and tail lengths in the same launch. Completed pools retain their compact output row even when their cache slot is evicted.
     2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
-    3. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
+    3. `prepare_pool_key_indexer_inputs` prepends an independent one-query/one-pool request, shifts cumulative query ends by one and copies query/weight inputs before optional query quantization in one launch. Its discarded output keeps CANN out of the unsafe TND no-work cleanup during empty or tail-only graph replay. Real cache contents and per-request lengths are preserved.
+    4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
 
 ## Parameters
@@ -53,8 +55,9 @@
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `tail` | Input/output | Request-owned raw key/gate ring, `[Ntail,C,2D]` | FP32 | ND; padded page stride supported |
-| `cache` | Input/output | Completed pooled keys, `[Ncache,B,1,D]` | BF16 | ND; padded block stride supported |
+| `cache` | Input/output | Completed pooled keys, `[Ncache,B,1,D]` | BF16 or E4M3 | ND; padded block stride supported |
 | `key`, `gate` | Input | MTP retained projections, each `[R*W,D]`; both `None` for non-MTP | FP32 or `None` | Contiguous ND |
+| `scale_cache` | Optional output | FP8 per-pool descales, `[Ncache,B,1]`; default `None` for BF16 | FP32 or `None` | ND; padded block stride supported |
 | `pooled` | Input | CANN completed-pool vectors, `[Q,D]` | BF16 | ND; row stride supported |
 | `metadata` | Input | `pooled_slot_mapping[Q]`, the destination of each compact pooled row | int64 | Contiguous ND |
 | `tail_metadata` | Input | `cann_inputs` from `build_tail_inputs` | Object | N/A |
@@ -74,7 +77,7 @@
 
 ## Constraints
 
-- Inference only. `P>1`, `D>0`, `L%P==0`, `0<=A<=source<=T`, and input storage must cover every actual token. This adapter documents the BF16 cache path.
+- Inference only. `P>1`, `D>0`, `L%P==0`, `0<=A<=source<=T`, and input storage must cover every actual token. FP8 cache writes require matching FP32 scale storage and supported A5 hardware; native FP8 precision/performance verification is pending. A3 verification covers BF16 only.
 - Queries are contiguous within each request and packed in request order. Normalize a negative query boundary to `A`, clamp boundaries to `A`, then require nondecreasing boundaries beginning at 0 and ending at `A`. Raw sequence lengths must cover the request's query length; actual positions are nonnegative and consistent with those lengths.
 - DSA-CP partitions the packed global query into contiguous rank intervals. Each local request sees only the prefix through its last local query; requests without local queries have zero visible length. KeyPool/cache writes still use global request metadata, while selection and packing use local query metadata.
 - Tail blocks are request-local. Use `C=P` for non-MTP and `C=P+num_speculative_tokens` for speculative decoding; `0<retained_width<=C` when MTP is enabled. `page_rows>=C` and `page_rows*2D==tail.stride(0)` preserve shared page padding.
@@ -89,7 +92,7 @@
 ## Origin and Differences
 
 - **Origin**: Developed for the CANN GLM-5.3-Flash pooled-indexer integration, with the same logical slot and tail contract as the existing GLM KPool path.
-- **Differences**: Replaces separate boundary conversions, compact-slot construction, tail/cache scatter and output padding operations with three kernel types. The metadata kernel runs in two modes per metadata build; this is not a claim of only three launches per model step. Key pooling and TopK scoring remain CANN operations. FP32 tail and BF16 completed keys are preserved.
+- **Differences**: Replaces separate boundary conversions, compact-slot construction, tail/cache scatter and output padding operations with fused adapters. The metadata kernel runs in two modes per metadata build. A leading independent request avoids CANN's unsafe TND no-work cleanup. Key pooling and TopK scoring remain CANN operations. Tail state remains FP32; completed keys can be BF16 or FP8 with FP32 descales.
 
 ## Example
 

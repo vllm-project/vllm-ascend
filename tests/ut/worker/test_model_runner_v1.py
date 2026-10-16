@@ -2133,7 +2133,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             block_size=8,
             num_kv_heads=1,
             head_size=4,
-            dtype=torch.bfloat16,
+            dtype=torch.float8_e4m3fn,
+            scale_dim=1,
+            scale_dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
@@ -2174,6 +2176,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             mamba_spec.page_size_bytes,
         )
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
+        self.assertIs(specs["model.layers.1.indexer.k_cache"], indexer_spec)
         self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

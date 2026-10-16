@@ -98,10 +98,11 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16 vectors without quantization scales.
+        # KeyPool projects in BF16; completed pools optionally store FP8 keys
+        # with a per-pool FP32 descale for CANN PoolKeyIndexer.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype=torch.bfloat16,
+            dtype=(torch.float8_e4m3fn if vllm_config.attention_config.indexer_kv_dtype == "fp8" else torch.bfloat16),
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
