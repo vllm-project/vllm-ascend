@@ -23,7 +23,7 @@ class TestReusePublicationFence(unittest.TestCase):
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
                     worker.tp_size = tp_size
-                    calls = []
+                    calls: list[str] = []
                     worker._drain_deferred_last_save = lambda calls=calls: calls.append("drain")
                     worker.process_layer_data = lambda requests, calls=calls: calls.append("prepare")
                     group = SimpleNamespace(barrier=lambda calls=calls: calls.append("barrier"))
