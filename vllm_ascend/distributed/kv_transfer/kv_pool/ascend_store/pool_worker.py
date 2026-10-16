@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -1230,6 +1231,11 @@ class KVPoolWorker:
         """Prepare per-step hook state when the runner binds metadata."""
         assert self.use_layerwise
         self._drain_deferred_last_save()
+        # The final-layer fence drains this rank only. Readers of replicated
+        # KV must also wait for the writer before querying the previous step.
+        # Use configuration, never local requests/tasks, to gate the collective.
+        if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
+            get_tp_group().barrier()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
