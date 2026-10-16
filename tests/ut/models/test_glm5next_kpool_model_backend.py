@@ -382,11 +382,13 @@ def test_cann_initialization_timeout_preserves_existing_lock(monkeypatch, tmp_pa
     assert marker.exists()
 
 
-def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch, tmp_path):
+@pytest.mark.parametrize("is_moe", [False, True])
+def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch, tmp_path, is_moe):
     # Model shared filesystems whose flock does not exclude another node.
     monkeypatch.setattr(fcntl, "flock", lambda *args: None)
     context = get_context("fork")
     barrier = context.Barrier(2)
+    ready = context.Value("i", 0)
     building = context.Lock()
     loaded = set()
     monkeypatch.setattr(backend_module, "_get_build_directory", lambda *args, **kwargs: str(tmp_path), raising=False)
@@ -416,10 +418,19 @@ def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch,
         SimpleNamespace(key_pool=lambda: build("key_pool"), pool_key_indexer=lambda: build("pool_key_indexer")),
     )
 
+    def synchronize():
+        assert {"import", "key_pool", "pool_key_indexer"} <= loaded
+        with ready.get_lock():
+            ready.value += 1
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(backend_module, "get_ep_group", lambda: SimpleNamespace(barrier=synchronize))
+
     def initialize():
         barrier.wait(timeout=10)
         backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
-        backend._init_cann_ops()
+        backend._init_cann_ops(is_moe=is_moe)
+        assert ready.value == (2 if is_moe else 0)
         barrier.wait(timeout=10)
         backend._key_pool()
         backend._pool_key_indexer()
