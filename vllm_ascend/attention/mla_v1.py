@@ -38,10 +38,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
+    FlashMLADecode,
+    FlashMLAMetadataBuilder,
     get_flashmla_ops,
     split_flashmla_requests,
 )
-from vllm_ascend.attention.flashmla_metadata import FlashMLADecode, FlashMLAMetadataBuilder
 from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -365,14 +366,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
             )
 
-    def take_device_metadata_tasks(self):
-        return self.flashmla_state.take_tasks() if self.flashmla_state is not None else ()
-
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
         state = self.flashmla_state
         assert state is not None
-        state.tasks = ()
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = split_flashmla_requests(
             common
         )
@@ -2332,10 +2329,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             **branch,
         )
         if scatter_history:
-            # PROLOG accepts a strided page axis, but the component's trailing
-            # axes must be dense. FlashMLA token-fused slices have token stride
-            # 576, so write bounded scratch rows then scatter into the original
-            # cache. The workspace never escapes this call as current KV.
+            # Keep this integration's dense writer workspace until token-fused
+            # component view strides are verified with the deployed PROLOG version.
+            # Scatter with the original slots into rank-owned history; this
+            # workspace is not the complete current KV.
             DeviceOperator.reshape_and_cache(
                 key=writer_cache[0].flatten(0, 1)[:num_tokens],
                 value=writer_cache[1].flatten(0, 1)[:num_tokens],
@@ -2951,6 +2948,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
+        # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
+        # TND(576) query. The backend retains this buffer for captured capacities
+        # so replay reuses its address.
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
@@ -2964,8 +2964,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )
-        # Zero unused query rows even if the package leaves their output undefined.
-        latent.masked_fill_(~flash.token_live[None, :, None], 0)
         return self._v_up_proj(latent)
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):

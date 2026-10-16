@@ -41,12 +41,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 )
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
-from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
-    flashmla_metadata_scope,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
@@ -72,7 +70,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
-        self.flashmla_executor: DeviceMetadataExecutor | None = None
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -214,10 +211,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 device=self.device,
             )
 
-    def capture(self) -> None:
-        with flashmla_metadata_scope(self.attn_groups, self.flashmla_executor):
-            super().capture()
-
     def set_attn(
         self,
         model_state: Any,
@@ -235,12 +228,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 target_input_buffers,
                 target_attn_groups,
             )
-            if any(
-                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
-                for groups in self.attn_groups
-                for group in groups
-            ):
-                self.flashmla_executor = DeviceMetadataExecutor()
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
             attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -461,15 +448,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
                 input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
             )
-        # Initial memory profiling invokes the drafter before set_attn creates
-        # its draft builders. Keep real runs bound to those builders.
-        attn_groups = getattr(self, "attn_groups", None)
-        if self.flashmla_executor is not None and attn_groups is None:
-            if not (dummy_run and is_profile and skip_attn_for_dummy_run):
-                raise RuntimeError("DSpark attention groups are unavailable outside initial memory profiling")
-            attn_groups = ()
         with (
-            flashmla_metadata_scope(attn_groups, self.flashmla_executor),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
