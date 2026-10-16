@@ -26,17 +26,15 @@ class KVPPRuntime:
         vllm_config: Any,
         kv_cache_config: Any,
         static_forward_context: dict[str, Any],
-        kv_caches: dict[str, Any] | None = None,
     ) -> KVPPRuntime:
         config = KVPPConfig.from_vllm_config(vllm_config)
         if config.size <= 1:
             return cls()
-        if kv_caches is None:
-            kv_caches = {
-                name: static_forward_context[name].kv_cache
-                for group in kv_cache_config.kv_cache_groups
-                for name in group.layer_names
-            }
+        kv_caches = {
+            name: static_forward_context[name].kv_cache
+            for group in kv_cache_config.kv_cache_groups
+            for name in group.layer_names
+        }
         group = get_kvpp_group()
         plan = create_kvpp_cache_allocation_plan(
             vllm_config, get_kvpp_cache_specs(kv_cache_config), group.rank_in_group

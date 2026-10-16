@@ -135,8 +135,8 @@ msgstr "| 领域 | 范围 |"
 
 msgid ""
 "| Models and execution | Non-hybrid MLA/SFA models in eager mode; Model "
-"Runner V1 and V2 |"
-msgstr "| 模型与执行 | eager 模式下的非混合 MLA/SFA 模型；Model Runner V1 和 V2 |"
+"Runner V2 |"
+msgstr "| 模型与执行 | eager 模式下的非混合 MLA/SFA 模型；Model Runner V2 |"
 
 msgid ""
 "| Supported combinations | TP, EP, PP, chunked prefill, prefix caching, "
