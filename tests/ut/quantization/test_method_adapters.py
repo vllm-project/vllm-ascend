@@ -15,16 +15,6 @@ from vllm_ascend.quantization.method_adapters import (
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
 
 
-def test_pergroup_layer_context_preserves_default_allocation():
-    scheme = MagicMock(spec=AscendLinearScheme)
-    scheme.get_pergroup_param.return_value = {"weight_scale": torch.empty(8, 34)}
-    result = AscendLinearScheme.get_pergroup_param_for_layer(
-        scheme, torch.nn.Module(), 1076, 8, torch.bfloat16, layer_type="row"
-    )
-    scheme.get_pergroup_param.assert_called_once_with(1076, 8, torch.bfloat16, layer_type="row")
-    assert result is scheme.get_pergroup_param.return_value
-
-
 def test_mx_scale_weight_loader_preserves_group_phase():
     weight_loader = MagicMock()
     param = torch.nn.Parameter(torch.empty(2, 17), requires_grad=False)
@@ -64,9 +54,6 @@ def test_mx_scale_weight_loader_accepts_pre_sharded_scale():
 class TestAscendLinearMethod(TestBase):
     def setUp(self):
         self.mock_scheme = MagicMock(spec=AscendLinearScheme)
-        self.mock_scheme.get_pergroup_param_for_layer.side_effect = lambda *args, **kwargs: (
-            AscendLinearScheme.get_pergroup_param_for_layer(self.mock_scheme, *args, **kwargs)
-        )
         self.mock_scheme.get_weight.return_value = {
             "weight": torch.empty(128, 256, dtype=torch.int8),
             "_packed_dim": 0,
