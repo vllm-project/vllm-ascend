@@ -23,47 +23,13 @@ model families:
 
 Other sparse-attention models have not been validated.
 
-## 1. Install Dependencies
+## 1. Preparation
 
-The installation steps are grouped by hardware. A3 and 950PR&950DT Products are supported.
-On 950PR&950DT Products nodes, set the MemFabric transfer protocol to `device_urma` as described
-in sections 2 and 3.
-
-### Prefill Build Dependencies
+### Prefill Nodes
 
 === "A3 series"
 
-    Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this
-    order.
-
-    #### MemFabric Hybrid
-
-    Install MemFabric Hybrid release 1.2 on every Prefill node. This release
-    requires NPU driver `25.5.1` or later.
-
-    ```bash
-    pip uninstall -y memfabric_hybrid
-    git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
-    cd memfabric_hybrid
-    bash script/build_and_pack_run.sh
-    bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
-    ```
-
-    #### Memcache Hybrid
-
-    Install Memcache Hybrid after MemFabric Hybrid:
-
-    ```bash
-    git clone https://gitcode.com/Ascend/memcache.git
-    cd memcache
-    git submodule update --recursive --init
-    git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
-        submodule update --remote --recursive 3rdparty/memfabric_hybrid
-    bash script/build_and_pack_run.sh --build_mode RELEASE
-    bash output/memcache_hybrid-*_linux_aarch64.run
-    ```
-
-    Configure `mmc-meta.conf`:
+    Prefill offload relies on memcache service. Here we provide a simple guidance to launch memcache service. Configure `mmc-meta.conf`:
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_HOST>:5000
@@ -83,67 +49,22 @@ in sections 2 and 3.
     ock.mmc.local_service.dram.size = 10GB
     ```
 
-    The two files must use the same MetaService endpoint. The LocalService
-    Config Store endpoint must match the MetaService Config Store endpoint.
-
-    - Set `world_size` to the maximum supported LocalService rank count.
-    - Use `device_sdma` with HCCS.
-    - Set `dram.size` to at least the total KV cache size required by the target
-      sequence length and concurrency divided by the number of Prefill ranks.
-      Round the result up to a whole GiB.
-
-    > **Note:** The configuration paths below assume Python 3.11.10. If you use
-    > another Python version, replace the Python installation and
-    > `site-packages` directories with those of the active environment. Locate
-    > its `site-packages` directory with:
-    >
-    > `python -c "import site; print(site.getsitepackages())"`
-
     Start MetaService in a separate process:
 
     ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_META_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-meta.conf
+    export MMC_META_CONFIG_PATH=/path/to/config/mmc-meta.conf
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
     Prepare every Prefill node before starting vLLM:
 
     ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-local.conf
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH=/path/to/config/mmc-local.conf
     ```
 
-### Decode Build Dependencies
+### Decode Nodes
 
-=== "A3 series"
-
-    > **Important:** MemFabric Hybrid release 1.2 must be installed on both
-    > Prefill and Decode nodes. Memcache Hybrid is required only on Prefill.
-
-    Use the same MemFabric Hybrid build and installation commands shown above.
-    Decode also requires Clang and OpenMP. Prepare every Decode node:
-
-    ```bash
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    clang --version
-    ls "$(clang --print-resource-dir)/include/omp.h"
-    ```
-
-    If Clang or OpenMP is missing:
-
-    ```bash
-    apt-get update
-    apt-get install -y clang libomp-dev
-    ```
-
-    If the image provides a specific Clang version, install the matching OpenMP
-    package, for example `libomp-17-dev` for Clang 17.
+There is no extra work to do on decode nodes.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
@@ -190,7 +111,7 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 
 | Parameter | Description |
 | :--- | :--- |
-| `layerwise_num_shared_buffers` | Number of reusable NPU buffers. Start with two to four and tune for memory and transfer bandwidth. |
+| `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
 
 The following log confirms that buffer reuse is enabled:
@@ -203,7 +124,11 @@ Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... b
 
 Requirements and limitations:
 
+- Sparse Decode Offload is currently not supported on A5 (950DT/950PR). We are actively working on it to support it in the near future.
 - Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
+- The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
+  not supported. INT8 indexer KV is supported separately through
+  `--attention_config.indexer_kv_dtype int8`; it does not enable main-cache C8.
 - Sparse Decode Offload supports DP and TP on Decode; CP are not supported.
 - Sparse Decode Offload and `PreemptOffloadConnector` are mutually exclusive,
   including when the connector is configured inside `MultiConnector`. Use only

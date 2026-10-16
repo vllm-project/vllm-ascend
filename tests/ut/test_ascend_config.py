@@ -883,6 +883,30 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_a5_rejects_sparse_offload(self, mock_is_950):
+        for keep_device_kv_cache in (False, True):
+            for use_fused_overlap in (False, True):
+                with (
+                    self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
+                    self.assertRaisesRegex(ValueError, "not supported on A5"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(speculative_config=None),
+                        {
+                            "enabled": True,
+                            "keep_device_kv_cache": keep_device_kv_cache,
+                            "use_fused_overlap": use_fused_overlap,
+                        },
+                    )
+        mock_is_950.assert_called()
+
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_a5_allows_sparse_offload_disabled(self, mock_is_950):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(speculative_config=None), {})
+        self.assertFalse(config.enabled)
+        mock_is_950.assert_not_called()
+
     def test_preempt_offload_is_mutually_exclusive(self):
         for multi_connector in (False, True):
             transfer_config = KVTransferConfig(

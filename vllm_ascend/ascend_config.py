@@ -29,6 +29,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -1698,6 +1699,9 @@ class SparseKVOffloadConfig:
     def _validate_preconditions(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
+
+        if is_950():
+            raise ValueError("Sparse KV offload is not supported on A5 (950DT/950PR)")
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):

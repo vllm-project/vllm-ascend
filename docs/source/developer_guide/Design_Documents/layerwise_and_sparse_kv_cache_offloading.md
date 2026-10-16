@@ -74,7 +74,9 @@ through MemFabric. Optional LIC8 scale data follows the indexer destination.
 The MemFabric data path is selected at launch through
 `kv_connector_extra_config["memfabric_transfer_protocol"]` instead of hardware
 detection: `sdma` (default) and `device_rdma` target A3 series nodes, while
-`device_urma` targets 950PR&950DT Products nodes. Prefill and Decode must use the same
+`device_urma` is the connector protocol for 950PR&950DT Products nodes. Connector
+protocol availability does not imply sparse Decode offload support: sparse
+Decode offload rejects A5 (950DT/950PR). Prefill and Decode must use the same
 protocol.
 
 ### Transfer granularity
@@ -200,11 +202,10 @@ these operators in the installed `_C_ascend` extension:
 - `npu_fused_quant_lightning_indexer_manage` (LIM C8)
 - `npu_fused_scatter_copy_sparse_flash_attention`
 
-The expected interfaces are from
-[vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
-revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
-Python integration; it does not bundle these native kernels or their bindings.
-An operator-enabled native build is required to run the fused_copy_sfa path.
+The repository includes the native kernels, PyTorch bindings, and Python
+integration for fused LIM and Copy-SFA. The installed build must include these
+operators to run sparse Decode offload; the presence of Python source alone
+is not sufficient.
 
 LIM C8 uses `npu_fused_quant_lightning_indexer_manage`, which is included on
 this branch. Enable it with `--attention_config.indexer_kv_dtype int8`. The
@@ -215,10 +216,10 @@ stay unchanged. The C8 kernel is int8-only; `indexer_kv_dtype fp8` is not a
 LIM C8 serving path.
 
 Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
-by registered MemFabric memory. Its native adapter must permit those CPU views;
-the referenced PR revision needs this device-check adjustment. The remaining
-inputs stay on NPU. Ordinary CPU allocations are not valid replacements for
-registered DRAM, and the Python integration does not move the host cache to NPU.
+by registered MemFabric memory. The native adapter accepts these registered
+host views. The remaining inputs stay on NPU. Ordinary CPU allocations are not
+valid replacements for registered DRAM, and the Python integration does not
+move the host cache to NPU.
 
 ## 5. Joint Prefill and Decode Design
 
@@ -291,15 +292,23 @@ data.
 After Decode processes a readiness notification, it replies with `READ_DONE` or
 `READ_FAILED`. A reported MemFabric read failure invalidates the Decode
 destination and releases the Prefill-side waiter with an error, preventing
-silent corruption. A lost acknowledgement or stopped Decode process is not
-treated as a terminal state, so Prefill may continue waiting.
+silent corruption. The initial `MF_META` handshake has a 100-second timeout
+and raises an error if Decode does not reply. The per-layer read-completion
+gate is separate: it checks for reported errors and a stopped sender thread,
+but has no overall deadline. If a layer acknowledgement is lost while the
+sender thread remains alive, Prefill may continue waiting.
 
 ## 8. Current Boundaries
 
+- Sparse Decode Offload is not supported on A5 (950DT/950PR), including the
+  keep-device-cache and overlap paths. Config validation checks the installed
+  build's device metadata before offload allocation; it does not require NPU
+  initialization or a runtime SoC query.
 - Layerwise shared-buffer offload requires the Memcache backend and eager mode.
-- Sparse Decode Offload requires Model Runner V1 and an SFA/MLA sparse-attention
-  model. The main KV cache must use BF16; LIC8 quantization is supported only
-  for the device-resident indexer cache.
+- Sparse Decode Offload supports Model Runner V1 and V2 with an SFA/MLA
+  sparse-attention model. The main KV cache must use BF16; packed main caches
+  (C8 or TQ4) are rejected. LIC8 quantization is supported separately for the
+  device-resident indexer cache.
 - Hybrid KV cache layouts are not supported.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - Joint deployment requires Prefill TP to be greater than or equal to, and
