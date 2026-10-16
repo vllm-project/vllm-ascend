@@ -78,8 +78,9 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 ## How to Use EPLB
 
-> [!NOTE]
-> The examples below may use a non-zero `num_redundant_experts` to demonstrate redundant-expert placement. This setting is only valid on hardware that supports redundant experts, such as A3 or 950PR&950DT Products. A2 does not support redundant experts; on A2, set `num_redundant_experts` to `0`.
+!!!NOTE
+
+    The examples below may use a non-zero `num_redundant_experts` to demonstrate redundant-expert placement. This setting is only valid on hardware that supports redundant experts, such as A3 or 950PR&950DT Products. A2 does not support redundant experts; on A2, set `num_redundant_experts` to `0`.
 
 ### Model Runner V2: Asynchronous EPLB
 
