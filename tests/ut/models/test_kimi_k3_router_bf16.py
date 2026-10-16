@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.device.hardware_profile import WeightLayoutPolicy
 from vllm_ascend.models import kimi_k3 as k3
 
 
@@ -70,3 +72,30 @@ def test_repeat_forward_reuses_weight():
         gate(torch.zeros(4, 8, dtype=torch.bfloat16))
     assert mm.call_count == 2
     assert all(call.args[1].data_ptr() == ptr for call in mm.call_args_list)
+
+
+@pytest.mark.parametrize("nz_mode", [0, 1, 2])
+@pytest.mark.parametrize("force_nz", [False, True])
+def test_router_keeps_nd_after_weight_processing(nz_mode, force_nz):
+    gate = make_gate()
+    gate.weight.weight_loader(gate.weight, torch.randn(16, 8))
+    expected = gate.weight.detach().clone()
+    profile = MagicMock()
+    profile.weight_layout_policy = WeightLayoutPolicy.FORCE_NZ if force_nz else None
+    profile.supports.return_value = False
+    with (
+        patch("vllm_ascend.ops.linear.get_current_hardware_profile", return_value=profile),
+        patch("vllm_ascend.utils.get_current_hardware_profile", return_value=profile),
+        patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=nz_mode)),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, *args, **kwargs: weight) as cast,
+    ):
+        gate.quant_method.process_weights_after_loading(gate)
+        cast.assert_not_called()
+        assert gate.weight.dtype == torch.bfloat16
+        torch.testing.assert_close(gate.weight, expected)
+
+        # Counterfactual: without the Router-local opt-out, the real policy
+        # reaches NZ conversion for mode 2 or a FORCE_NZ hardware profile.
+        gate.skip_weight_nz_conversion = False
+        gate.quant_method.process_weights_after_loading(gate)
+        assert cast.call_count == int(force_nz or nz_mode == 2)

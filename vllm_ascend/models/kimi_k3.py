@@ -268,6 +268,8 @@ class KimiK3RouterLinear(AscendReplicatedLinear):
             quant_config=None,
             prefix=prefix,
         )
+        # Keep ND weights for this router's direct torch.mm path.
+        self.skip_weight_nz_conversion = True
 
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         logits = torch.mm(hidden_states, self.weight.T, out_dtype=torch.float32)
