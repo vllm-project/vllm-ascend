@@ -621,7 +621,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_producer",
             "kv_port":"36000",
-            "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
@@ -683,7 +682,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_consumer",
             "kv_port":"36100",
-            "engine_id":"1",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
@@ -798,7 +796,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_producer",
             "kv_port":"30000",
-            "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "ascend_local_comm_res_path":"/etc/hixlep",
@@ -858,7 +855,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_consumer",
             "kv_port":"26900",
-            "engine_id":"1",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "ascend_local_comm_res_path":"/etc/hixlep",
@@ -979,7 +975,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
 | Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
-| `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
+| `lookup_rpc_port` | Not used | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid IPC endpoint collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
@@ -1068,7 +1064,7 @@ fi
 
 #### 5.4.3 Prefill / Decode Scripts
 
-Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `$4` (DP rank) — do not hardcode the same values across ranks.
+Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Derive `lookup_rpc_port` from `$4` (DP rank) so each rank uses a distinct IPC endpoint.
 
 === "A3 series(W8A8)"
 
@@ -1134,7 +1130,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_producer",
-            "engine_id":"minimax-m3-prefill-dp'"$4"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1216,7 +1211,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$4"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1308,7 +1302,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
       '{
           "kv_connector":"MultiConnector",
           "kv_role":"kv_producer",
-          "engine_id":"minimax-m3-prefill-dp'"$4"'",
           "kv_connector_extra_config":{
               "connectors":[
                   {
@@ -1392,7 +1385,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$4"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
