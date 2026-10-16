@@ -141,9 +141,11 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 Start the online serving service with the following command:
+
+Select a platform or weight format using the tabs in each section to switch between deployment examples.
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -163,7 +165,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     Adding the wrong `--quantization` value (or adding it to BF16 weights) will cause the checkpoint to be misinterpreted and fail to load.
 
-=== "A3 series(BF16)"
+=== "A3 series (BF16)"
 
     ```bash
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -198,7 +200,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       }' > ${LOG_PATH} 2>&1 &
     ```
 
-=== "A3 series(W8A8)"
+=== "A3 series (W8A8)"
 
     ```bash
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -282,7 +284,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
-=== "A3 series(BF16)"
+=== "A3 series (BF16)"
 
     Run the following command on node 0:
 
@@ -359,7 +361,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
-=== "A3 series(W8A8)"
+=== "A3 series (W8A8)"
 
     Run the following command on node 0:
 
@@ -604,7 +606,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 | 5.3.2 950DT, two nodes | P | 2 | 4 | 1 | 2 | 0 | 31050 |
 | 5.3.2 950DT, two nodes | D | 2 | 4 | 1 | 2 | 0 | 31060 |
 
-=== "A3 series(W8A8)"
+=== "A3 series (W8A8)"
 
     Prefill-Decode disaggregation can be deployed on 3 Atlas 800 A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
@@ -1345,7 +1347,7 @@ The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB`
 
 Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3.1 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `DP_RANK` — do not hardcode the same values across ranks.
 
-=== "A3 series(W8A8)"
+=== "A3 series (W8A8)"
 
     Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
