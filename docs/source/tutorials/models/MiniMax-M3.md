@@ -165,7 +165,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 43008 \
+      --max-model-len 133000 \
       --data-parallel-size 2 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -201,7 +201,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --quantization ascend \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --data-parallel-size 4 \
       --api-server-count 1 \
@@ -295,7 +295,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 65920 \
+      --max-model-len 133000 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -334,7 +334,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
-      --max-model-len 65920 \
+      --max-model-len 133000 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -375,7 +375,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --quantization ascend \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -415,7 +415,7 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --trust-remote-code \
       --quantization ascend \
       --headless \
-      --max-model-len 131072 \
+      --max-model-len 133000 \
       --tensor-parallel-size 4 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
@@ -1509,6 +1509,187 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 ```
 
 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
+
+### 5.6 1M-Token Context Deployment
+
+MiniMax-M3 supports a 1M-token context on a single Atlas 800 A3 node with W8A8 weights or a single 950DT node with MXFP8 weights. The following configurations were verified for long-context functional deployment. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
+
+| Platform / weights | NPUs per node | TP / PP / DP | `max-model-len` | `max-num-batched-tokens` | KV cache dtype |
+| --- | --- | --- | --- | --- | --- |
+| Atlas 800 A3 / W8A8 | 16 × 64GB | 4 / 4 / 1 | 1049600 | 8192 | `auto` (default) |
+| 950DT / MXFP8 | 8 × 96GB | 8 / 1 / 1 | 1048576 | 2048 | `fp8`, excluding layers 0–2 |
+| 950DT / MXFP8 | 8 × 96GB | 4 / 2 / 1 | 1048576 | 8192 | `fp8`, excluding layers 0–2 |
+
+All three configurations use Model Runner V2, `max-num-seqs=1`, eager execution, and chunked prefill. Prefix caching, asynchronous scheduling, and static kernels are disabled; no speculative model is loaded. The smaller batched-token budget controls the size of each prefill chunk rather than the total context length.
+
+Prepare the container and weights as described in Sections 3 and 4. Replace `<MODEL_PATH>` (A3) or `<WEIGHT_PATH>` (950DT) with the local weight directory. Replace `<NIC_NAME>` in both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` with the same local communication interface. The commands use the CANN environment-script paths from the deployment configurations; adjust these paths to the installed CANN directory. The 950DT examples also require the matching `experimental_950_transformer` vendor package before sourcing its environment script.
+
+#### 5.6.1 Atlas 800 A3 (W8A8)
+
+Use one 16-NPU node with TP4/PP4/DP1. This long-context configuration splits the 60 transformer layers evenly as `15,15,15,15`. The `1049600` context limit leaves room for 1,048,576 input tokens and up to 1024 generated tokens. `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` permits the configured limit when it exceeds the checkpoint's declared maximum.
+
+```bash
+MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 W8A8 weights
+
+source /usr/local/Ascend/cann-9.1.0/set_env.sh
+
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+export VLLM_PP_LAYER_PARTITION="15,15,15,15"
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_BUFFSIZE=256
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --language-model-only \
+    --reasoning-parser minimax_m3 \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 4 \
+    --data-parallel-size 1 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --block-size 128 \
+    --max-model-len 1049600 \
+    --max-num-batched-tokens 8192 \
+    --long-prefill-token-threshold 8192 \
+    --max-num-seqs 1 \
+    --enable-chunked-prefill \
+    --no-enable-prefix-caching \
+    --enforce-eager \
+    --no-async-scheduling \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode":"NONE"}' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+            "enable_static_kernel": false,
+            "fuse_norm_quant": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "enable_shared_expert_dp": false,
+        "weight_nz_mode": 2,
+        "enable_flashcomm1": true,
+        "enable_reduce_sample": false
+    }' > ./minimax-m3-1m-a3.log 2>&1 &
+```
+
+#### 5.6.2 950DT Products (MXFP8)
+
+Choose either of the following single-node layouts on eight NPUs. Both use FP8 KV cache while keeping layers 0, 1, and 2 in the default KV dtype. The total input and generated tokens must fit within 1,048,576 tokens; for example, reserve 1024 output tokens by limiting the input to at most 1,047,552 tokens.
+
+=== "TP8 / PP1 / DP1"
+
+    ```bash
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
+
+    vllm serve "$WEIGHT_PATH" \
+        --host 0.0.0.0 \
+        --port 31050 \
+        --served-model-name minimax-m3 \
+        --trust-remote-code \
+        --distributed-executor-backend mp \
+        --tensor-parallel-size 8 \
+        --pipeline-parallel-size 1 \
+        --data-parallel-size 1 \
+        --dtype bfloat16 \
+        --quantization mxfp8 \
+        --max-model-len 1048576 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 2048 \
+        --gpu-memory-utilization 0.92 \
+        --kv-cache-dtype fp8 \
+        --kv-cache-dtype-skip-layers 0 1 2 \
+        --limit-mm-per-prompt '{"image":0,"video":0}' \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
+        --enforce-eager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_qknorm_rope": false,
+                "fuse_norm_quant": false,
+                "enable_static_kernel": false
+            },
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": false,
+            "enable_flashcomm1": false
+        }' > ./minimax-m3-1m-950dt-tp8.log 2>&1 &
+    ```
+
+=== "TP4 / PP2 / DP1"
+
+    ```bash
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
+
+    vllm serve "$WEIGHT_PATH" \
+        --host 0.0.0.0 \
+        --port 31050 \
+        --served-model-name minimax-m3 \
+        --trust-remote-code \
+        --distributed-executor-backend mp \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --dtype bfloat16 \
+        --quantization mxfp8 \
+        --max-model-len 1048576 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.92 \
+        --kv-cache-dtype fp8 \
+        --kv-cache-dtype-skip-layers 0 1 2 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
+        --enforce-eager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_qknorm_rope": false,
+                "fuse_norm_quant": false,
+                "enable_static_kernel": false
+            },
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": false,
+            "enable_flashcomm1": false
+        }' > ./minimax-m3-1m-950dt-tp4pp2.log 2>&1 &
+    ```
+
+Wait for `Application startup complete` in the log file at the end of the selected command before sending requests. Check the reported KV cache capacity against the configured context length. These examples demonstrate the verified long-context deployment shapes; tune concurrency and performance separately for the target workload.
 
 ## 6 Thinking and Parser Configuration
 
