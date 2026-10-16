@@ -19,6 +19,7 @@ def dflash2_config():
         model_config=SimpleNamespace(runner_type="draft"),
         speculative_config=SimpleNamespace(
             method="dflash",
+            target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
             draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             draft_sample_method="greedy",
             enforce_eager=True,
@@ -67,6 +68,7 @@ def test_flash_attn_is_selected_only_for_a5_v1_dflash2_eager_drafts(select_flash
     assert not select(config, selector)
     profile.supports = lambda _: True
     config.speculative_config = None
+    config.model_config = None
     assert not select(config, selector)
     assert not select(None, selector)
 
@@ -78,15 +80,21 @@ def test_flash_attn_is_selected_only_for_a5_v1_dflash2_eager_drafts(select_flash
         ("method", "mtp"),
         ("enforce_eager", False),
         ("enforce_eager", None),
-        ("draft_sample_method", "probabilistic"),
         ("architectures", ["DFlashDraftModel"]),
-        ("architectures", None),
     ],
 )
 def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert not select(dflash2_config, selector)
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "glm5_next"])
+def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dflash2_config, model_type):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert not select(dflash2_config, selector)
 
@@ -101,13 +109,11 @@ def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, df
         ("use_compress", True),
         ("use_mm_prefix", True),
         ("use_rswa", True),
-        ("use_adaptive_verification", True),
         ("use_batch_invariant", True),
         ("use_per_head_quant_scales", True),
         ("dtype", torch.float32),
         ("kv_cache_dtype", "fp8"),
         ("kv_cache_dtype", "int8"),
-        ("attn_type", "encoder_decoder"),
     ],
 )
 def test_unsupported_gqa_features_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):

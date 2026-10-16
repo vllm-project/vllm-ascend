@@ -192,7 +192,8 @@ def test_get_spec_decode_method_dispatches_dflash2():
 
 
 @pytest.mark.parametrize("causal", [False, True])
-def test_dflash2_loader_still_selects_device_length_flash_attn(monkeypatch, causal):
+def test_dflash2_loader_selects_flash_attn_without_causality_override(monkeypatch, causal):
+    from vllm.v1.attention import selector as selector_module
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
     from vllm_ascend import platform
@@ -203,12 +204,22 @@ def test_dflash2_loader_still_selects_device_length_flash_attn(monkeypatch, caus
         architectures=["DFlash2DraftModel"],
         hf_config=SimpleNamespace(num_hidden_layers=6, is_causal=causal),
     )
+    target_model = SimpleNamespace(
+        runner_type="generate",
+        architectures=["GlmMoeDsaForCausalLM"],
+        use_mla=True,
+        hf_text_config=SimpleNamespace(model_type="glm_moe_dsa", index_topk=2048),
+    )
     spec = SimpleNamespace(
-        method="dflash", draft_model_config=draft_model, enforce_eager=True, draft_sample_method="greedy"
+        method="dflash",
+        target_model_config=target_model,
+        draft_model_config=draft_model,
+        enforce_eager=True,
+        draft_sample_method="greedy",
     )
     target = SimpleNamespace(
         use_v2_model_runner=False,
-        model_config=SimpleNamespace(runner_type="generate", architectures=["GlmMoeDsaForCausalLM"]),
+        model_config=target_model,
         attention_config=SimpleNamespace(use_non_causal=False),
         speculative_config=spec,
     )
@@ -230,7 +241,7 @@ def test_dflash2_loader_still_selects_device_length_flash_attn(monkeypatch, caus
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
     draft = proposer._create_draft_vllm_config()
     assert draft.model_config.runner_type == "draft"
-    assert draft.attention_config.use_non_causal is not causal
+    assert not draft.attention_config.use_non_causal
     selector = AttentionSelectorConfig(
         head_size=128,
         block_size=128,
@@ -238,16 +249,24 @@ def test_dflash2_loader_still_selects_device_length_flash_attn(monkeypatch, caus
         kv_cache_dtype="auto",
         use_non_causal=draft.attention_config.use_non_causal,
     )
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: draft)
-    assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == (
-        "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
-    )
     assert target.model_config.runner_type == "generate"
     assert not target.attention_config.use_non_causal
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
-    assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == (
-        "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
-    )
+    monkeypatch.setattr("vllm.platforms.current_platform", platform.NPUPlatform)
+    monkeypatch.setattr(selector_module, "resolve_obj_by_qualname", lambda path: path)
+    # Exercise the upstream selection cache with the GLM target's sparse FP8
+    # attention selected before the draft's GQA attention.
+    target_selector = selector._replace(use_mla=True, use_sparse=True, kv_cache_dtype="fp8")
+    select = selector_module._cached_get_attn_backend
+    select.cache_clear()
+    try:
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
+        assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: draft)
+        assert select(None, selector) == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
+        assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+    finally:
+        select.cache_clear()
 
 
 def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):

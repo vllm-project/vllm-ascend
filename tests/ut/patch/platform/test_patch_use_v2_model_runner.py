@@ -16,13 +16,14 @@ def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
             "dspark speculative decoding",
             "dflash2 drafts",
             "pipeline parallelism with async scheduling",
+            "adaptive draft verification",
             "diffusion models",
         ],
     )
 
     unsupported = patch_use_v2_model_runner._patched_get_v1_model_runner_unsupported_features(object())
 
-    assert unsupported == ["prefill context parallel", "diffusion models"]
+    assert unsupported == ["prefill context parallel", "adaptive draft verification", "diffusion models"]
 
 
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
@@ -60,6 +61,7 @@ def test_native_v1_pp_async_validation(pipeline_parallel_size, async_scheduling,
     [
         ("DFlash2DraftModel", "greedy", True),
         ("DFlash2DraftModel", "probabilistic", False),
+        ("DFlash2DraftModel", "synthetic", False),
         ("DFlashDraftModel", "greedy", False),
     ],
 )
