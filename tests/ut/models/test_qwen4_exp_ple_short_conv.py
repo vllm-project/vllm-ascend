@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[3]
 MODEL_DIR = ROOT / "vllm_ascend" / "models" / "qwen4_exp"
-NULL_BLOCK_ID = -1
+NULL_BLOCK_ID = 0
 
 
 @dataclass
@@ -179,7 +179,7 @@ def _common(lengths, phases, computed=None, slots=None):
         num_actual_tokens=int(starts[-1]),
         max_query_len=int(lengths.max()),
         max_seq_len=int(seq_lens.max()),
-        block_table_tensor=torch.tensor(slots or list(range(len(lengths))), dtype=torch.int32).view(-1, 1),
+        block_table_tensor=torch.tensor(slots or list(range(1, len(lengths) + 1)), dtype=torch.int32).view(-1, 1),
         slot_mapping=torch.arange(int(starts[-1])),
         is_prefilling=torch.tensor(phases, dtype=torch.bool),
         seq_lens_cpu_upper_bound=seq_lens.clone(),
@@ -210,7 +210,7 @@ def _reference_chunk(layer, inputs, initial, weights):
 
 
 def test_normal_chunk_group_retains_real_phase_counts(runtime):
-    common = _common([1, 3, 1, 2], [True, False, False, True], computed=[0, 7, 9, 4], slots=[3, 2, 1, 0])
+    common = _common([1, 3, 1, 2], [True, False, False, True], computed=[0, 7, 9, 4], slots=[4, 3, 2, 1])
     result = _builder(runtime).build(0, common)
 
     assert isinstance(result, runtime.upstream_metadata)
@@ -218,11 +218,11 @@ def test_normal_chunk_group_retains_real_phase_counts(runtime):
     assert (result.num_prefills, result.num_prefill_tokens) == (2, 3)
     assert result.num_spec_decodes == 0
     assert result.normal_chunk.token_indices.tolist() == [1, 2, 3]
-    assert result.normal_chunk.state_indices_tensor.tolist() == [2]
+    assert result.normal_chunk.state_indices_tensor.tolist() == [3]
     assert result.normal_chunk.query_start_loc.tolist() == [0, 3]
     assert result.remaining_token_indices.tolist() == [4, 0, 5, 6]
     assert result.remaining_metadata.query_start_loc_p.tolist() == [0, 1, 3]
-    assert result.remaining_metadata.state_indices_tensor.tolist() == [1, 3, 0]
+    assert result.remaining_metadata.state_indices_tensor.tolist() == [2, 4, 1]
     assert result.remaining_metadata.has_initial_states_p.tolist() == [False, True]
     assert runtime.metadata.PleShortConvAttentionMetadataBuilder.needs_causal_conv1d_metadata is False
 
@@ -251,12 +251,39 @@ def test_replay_chunks_match_sequential_decode_and_commit_all_tokens(runtime, di
     torch.testing.assert_close(state[[0, 3]], before[[0, 3]])
 
 
+def test_null_state_slot_has_zero_output_and_keeps_reserved_state(runtime):
+    torch.manual_seed(10)
+    layer = _layer(runtime)
+    state = torch.randn(3, 2, layer.conv_state_len)
+    before = state.clone()
+    inputs = torch.randn(5, 2)
+    weights = torch.randn(2, 3)
+    expected_output, expected_state = _reference_chunk(layer, inputs[3:], before[1], weights)
+
+    result = layer._short_conv_dilated_chunk_batched(
+        inputs,
+        state,
+        weights,
+        torch.tensor([0, 3, 5]),
+        torch.tensor([NULL_BLOCK_ID, 1]),
+        torch.tensor([True, True]),
+        2,
+        5,
+        3,
+    )
+
+    torch.testing.assert_close(result[:3], torch.zeros_like(result[:3]))
+    torch.testing.assert_close(result[3:], expected_output)
+    torch.testing.assert_close(state[1], expected_state)
+    torch.testing.assert_close(state[[0, 2]], before[[0, 2]])
+
+
 @pytest.mark.parametrize(
     "lengths,phases,computed,slots",
     [
-        ([1, 3, 2], [True, False, True], [0, 8, 3], [2, 0, 1]),
-        ([1, 3, 1, 2], [True, False, False, True], [0, 8, 11, 3], [2, 0, 3, 1]),
-        ([1, 1, 2], [True, False, True], [0, 11, 3], [2, 0, 1]),
+        ([1, 3, 2], [True, False, True], [0, 8, 3], [3, 1, 2]),
+        ([1, 3, 1, 2], [True, False, False, True], [0, 8, 11, 3], [3, 1, 4, 2]),
+        ([1, 1, 2], [True, False, True], [0, 11, 3], [3, 1, 2]),
     ],
 )
 def test_dispatch_scatter_preserves_interleaved_request_order_and_state(runtime, lengths, phases, computed, slots):
@@ -265,7 +292,7 @@ def test_dispatch_scatter_preserves_interleaved_request_order_and_state(runtime,
     layer = _layer(runtime)
     torch.manual_seed(9)
     inputs = torch.randn(sum(lengths), 2)
-    state = torch.randn(len(lengths), 2, layer.conv_state_len)
+    state = torch.randn(len(lengths) + 1, 2, layer.conv_state_len)
     before = state.clone()
     weights = torch.randn(2, 3)
     expected = []
@@ -326,11 +353,11 @@ def test_single_token_prefill_uses_upstream_prefill_offsets(runtime):
 
 
 def test_mixed_spec_group_gathers_accepted_counts_by_request(runtime):
-    common = _common([1, 3, 1, 2], [False, False, True, False], slots=[3, 1, 0, 2])
+    common = _common([1, 3, 1, 2], [False, False, True, False], slots=[4, 2, 1, 3])
     result = _builder(runtime, spec_tokens=2).build(0, common, num_accepted_tokens=torch.tensor([1, 2, 1, 3]))
     assert result.spec_token_indx.tolist() == [1, 2, 3, 5, 6]
     assert result.non_spec_token_indx.tolist() == [0, 4]
-    assert result.spec_state_indices_tensor.tolist() == [1, 2]
+    assert result.spec_state_indices_tensor.tolist() == [2, 3]
     assert result.num_accepted_tokens.tolist() == [2, 3]
     assert result.query_start_loc_p.tolist() == [0, 1]
     assert result.normal_chunk is None
@@ -343,7 +370,7 @@ def test_spec_full_graph_padding_excluded_from_phase_masks(runtime):
     result = builder.build(0, common, num_reqs_actual=1, num_accepted_tokens=torch.tensor([2, 99, 99]))
     assert result.num_reqs == 1
     assert result.num_actual_tokens == 8
-    assert result.spec_state_indices_tensor.tolist() == [0, -1, -1]
+    assert result.spec_state_indices_tensor.tolist() == [1, 0, 0]
     assert result.spec_query_start_loc.tolist() == [0, 3, 3, 3]
     assert result.num_accepted_tokens.tolist() == [2, 1, 1]
 
@@ -357,7 +384,7 @@ def test_spec_full_graph_padding_excluded_from_phase_masks(runtime):
 
 
 def test_pure_replay_chunks_exclude_graph_padding(runtime):
-    common = _common([3, 2, 0], [False, False, True], computed=[7, 0, 0], slots=[2, 0, 1])
+    common = _common([3, 2, 0], [False, False, True], computed=[7, 0, 0], slots=[3, 1, 2])
     common.num_actual_tokens = 8
     result = _builder(runtime).build(0, common, num_reqs_actual=2)
     assert result.num_actual_tokens == 5
