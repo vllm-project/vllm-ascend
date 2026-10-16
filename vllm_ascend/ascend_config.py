@@ -1699,6 +1699,10 @@ class SparseKVOffloadConfig:
         if not self.enabled:
             return
 
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
+            raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
+
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")
         if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):

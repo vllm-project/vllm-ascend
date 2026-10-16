@@ -191,6 +191,35 @@ The full history remains available in host memory, but transfer volume is
 proportional to top-k misses rather than total sequence length. This makes
 offload practical for the low-compute Decode stage.
 
+### Fused Copy-SFA Operators
+
+Decode sparse offload uses fused LIM and Copy-SFA by default. The Python integration requires
+these operators in the installed `_C_ascend` extension:
+
+- `npu_fused_lightning_indexer_manage`
+- `npu_fused_quant_lightning_indexer_manage` (LIM C8)
+- `npu_fused_scatter_copy_sparse_flash_attention`
+
+The expected interfaces are from
+[vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
+revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
+Python integration; it does not bundle these native kernels or their bindings.
+An operator-enabled native build is required to run the fused_copy_sfa path.
+
+LIM C8 uses `npu_fused_quant_lightning_indexer_manage`, which is included on
+this branch. Enable it with `--attention_config.indexer_kv_dtype int8`. The
+indexer then Hadamard-rotates and int8-quantizes query and key, and
+`_lim_select` forwards that int8 query and the fp16 dequant scales to the C8
+LIM. The 19-parameter management ABI matches BF16 LIM, so Copy-SFA and miss H2D
+stay unchanged. The C8 kernel is int8-only; `indexer_kv_dtype fp8` is not a
+LIM C8 serving path.
+
+Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
+by registered MemFabric memory. Its native adapter must permit those CPU views;
+the referenced PR revision needs this device-check adjustment. The remaining
+inputs stay on NPU. Ordinary CPU allocations are not valid replacements for
+registered DRAM, and the Python integration does not move the host cache to NPU.
+
 ## 5. Joint Prefill and Decode Design
 
 ### Connector composition
