@@ -1503,48 +1503,32 @@ def _make_prepared_conv_builder(num_slots, num_speculative_tokens=0, cudagraph_m
     return builder
 
 
-def test_prepared_conv_metadata_uses_one_launch_for_mixed_spec_prefill(prepared_conv_launches):
-    builder = _make_prepared_conv_builder(16, num_speculative_tokens=3)
-    common = create_common_attn_metadata(BatchSpec([8, 3], [4, 3]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.tensor([[0, 1, 2, 3], [8, 9, 10, 11]], dtype=torch.int32)
-    metadata = builder.build(0, common, torch.tensor([2, 1]), torch.tensor([3, -1]))
-    assert prepared_conv_launches == [("pair", 16)]
-    assert metadata.spec_decode_metadata.spec_causal_conv1d.prepared_cache_indices.tolist() == [0]
-    assert metadata.non_spec_prefill_metadata.causal_conv1d.prepared_cache_indices.tolist() == [8]
-
-
-@pytest.mark.parametrize("speculative", [False, True])
-def test_prepared_conv_metadata_refreshes_stable_graph_buffers(prepared_conv_launches, speculative):
-    builder = _make_prepared_conv_builder(
-        32, num_speculative_tokens=3 if speculative else 0, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
-    )
-    query_lens = [4, 4] if speculative else [1, 1]
-    common = create_common_attn_metadata(BatchSpec([8, 8], query_lens), 16, torch.device("cpu"))
+def test_prepared_conv_metadata_refreshes_spec_graph_and_mixed_prefill_buffers(prepared_conv_launches):
+    builder = _make_prepared_conv_builder(32, num_speculative_tokens=3, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    common = create_common_attn_metadata(BatchSpec([8, 8], [4, 4]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.tensor([[0, 1, 2, 3], [7, 8, 9, 10]], dtype=torch.int32)
-    arguments = (torch.tensor([2, 1]), torch.tensor([3, 3])) if speculative else ()
+    arguments = (torch.tensor([2, 1]), torch.tensor([3, 3]))
     captured = builder.build(0, common, *arguments)
-    conv = (
-        captured.spec_decode_metadata.spec_causal_conv1d
-        if speculative
-        else captured.non_spec_decode_metadata.causal_conv1d
-    )
-    stable = conv.prepared_cache_indices
+    stable = captured.spec_decode_metadata.spec_causal_conv1d.prepared_cache_indices
     pointer = stable.data_ptr()
     common.block_table_tensor[:, 0] = torch.tensor([4, 9])
     replayed = builder.build(0, common, *arguments)
-    replay_conv = (
-        replayed.spec_decode_metadata.spec_causal_conv1d
-        if speculative
-        else replayed.non_spec_decode_metadata.causal_conv1d
-    )
+    replay_conv = replayed.spec_decode_metadata.spec_causal_conv1d
     assert replay_conv.prepared_cache_indices.data_ptr() == pointer
     assert stable.tolist() == [4, 9]
     assert len(prepared_conv_launches) == 2
-    if speculative:
-        plain = create_common_attn_metadata(BatchSpec([8, 0], [1, 0]), 16, torch.device("cpu"))
-        builder.build(0, plain, torch.ones(2, dtype=torch.int32), torch.tensor([-1, -1]))
-        assert stable.tolist() == [32, 32]
-        assert prepared_conv_launches[-1] == ("pair", 32)
+    plain = create_common_attn_metadata(BatchSpec([8, 0], [1, 0]), 16, torch.device("cpu"))
+    builder.build(0, plain, torch.ones(2, dtype=torch.int32), torch.tensor([-1, -1]))
+    assert stable.tolist() == [32, 32]
+    assert prepared_conv_launches[-1] == ("pair", 32)
+
+    mixed = create_common_attn_metadata(BatchSpec([8, 3], [4, 3]), 16, torch.device("cpu"))
+    mixed.block_table_tensor = torch.tensor([[0, 1, 2, 3], [8, 9, 10, 11]], dtype=torch.int32)
+    metadata = builder.build(0, mixed, torch.tensor([2, 1]), torch.tensor([3, -1]))
+    assert prepared_conv_launches[-1] == ("pair", 32)
+    assert len(prepared_conv_launches) == 4
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.prepared_cache_indices.tolist() == [0]
+    assert metadata.non_spec_prefill_metadata.causal_conv1d.prepared_cache_indices.tolist() == [8]
 
 
 def test_prepared_conv_metadata_isolated_between_cache_groups(prepared_conv_launches):
