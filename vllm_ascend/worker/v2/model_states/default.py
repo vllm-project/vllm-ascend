@@ -19,7 +19,6 @@
 
 from collections.abc import Callable, Collection
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +60,9 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 
 
 if TYPE_CHECKING:
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
+    from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+    from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
@@ -117,7 +119,7 @@ class AscendModelState(DefaultModelState):
         self._initialize_decoder_replay()
 
     def _initialize_decoder_replay(self) -> None:
-        self.decoder_replay = getattr(self.model, "decoder_replay_layers", None)
+        self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
         if self.decoder_replay is None:
             return
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -134,20 +136,21 @@ class AscendModelState(DefaultModelState):
         )
         self._decoder_replay_start = torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device)
         self._decoder_replay_zero_start = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device)
-        self._decoder_replay_slot_mappings = None
-        self._decoder_replay_source_slot_mappings = None
-        self._decoder_replay_builders = []
-        self._decoder_replay_common_metadata = {}
-        self._decoder_replay_metadata = None
+        self._decoder_replay_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_source_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self._decoder_replay_common_metadata: dict[int, AscendCommonAttentionMetadata] = {}
+        self._decoder_replay_metadata: dict[str, AscendDSAV41Metadata] | None = None
         self._decoder_replay_num_tokens = 0
         self._decoder_replay_num_actual_tokens = 0
-        self._decoder_replay_counts = None
-        self._decoder_replay_counts_device = None
+        self._decoder_replay_counts: torch.Tensor | None = None
+        self._decoder_replay_counts_device: torch.Tensor | None = None
         self.prompt_logprobs_worker = None
 
     def _initialize_decoder_replay_metadata(self, attn_groups, kv_cache_config) -> None:
         from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 
+        assert self.decoder_replay is not None
         self._decoder_replay_slot_mappings = torch.empty(
             (len(kv_cache_config.kv_cache_groups), self._decoder_replay_rows.numel()),
             dtype=torch.int64,
@@ -251,6 +254,9 @@ class AscendModelState(DefaultModelState):
         from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
         from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 
+        assert self.decoder_replay is not None
+        assert self._decoder_replay_source_slot_mappings is not None
+        assert self._decoder_replay_slot_mappings is not None
         num_reqs = len(kept_lens)
         num_tokens = self._decoder_replay_num_tokens
         self._decoder_replay_dropped_before.copy_to_gpu(num_reqs + 1)
@@ -274,8 +280,7 @@ class AscendModelState(DefaultModelState):
             num_tokens,
             self.decoder_replay.window,
         )
-        common = replace(
-            original,
+        common = original.replace(
             query_start_loc=self._decoder_replay_offsets.gpu[: num_reqs + 1],
             query_start_loc_cpu=self._decoder_replay_offsets.cpu[: num_reqs + 1],
             seq_lens=original.seq_lens[:num_reqs],
@@ -290,11 +295,10 @@ class AscendModelState(DefaultModelState):
         )
         rope = get_cos_and_sin_dsa(common.positions, use_cache=False)
         metadata = {}
-        batch_shared = {}
-        group_shared = {}
+        batch_shared: dict[str, Any] = {}
+        group_shared: dict[int, dict[str, Any]] = {}
         for group_id, layer_names, builder in self._decoder_replay_builders:
-            group_common = replace(
-                common,
+            group_common = common.replace(
                 block_table_tensor=self.block_tables[group_id][:num_reqs],
                 slot_mapping=slots[group_id],
             )
@@ -315,6 +319,7 @@ class AscendModelState(DefaultModelState):
     @contextmanager
     def _decoder_replay_context(self):
         outer = get_forward_context()
+        assert self._decoder_replay_slot_mappings is not None
         slot_mapping = {
             name: self._decoder_replay_slot_mappings[group_id, : self._decoder_replay_num_tokens]
             for group_id, names, _ in self._decoder_replay_builders

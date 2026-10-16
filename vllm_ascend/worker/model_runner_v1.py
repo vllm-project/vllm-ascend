@@ -383,7 +383,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.decoder_replay: AscendDecoderReplayLayers | None = None
-        self._decoder_replay_common_metadata = None
+        self._decoder_replay_common_metadata: AscendCommonAttentionMetadata | None = None
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
         model_config = getattr(vllm_config, "model_config", None)
@@ -3331,7 +3331,7 @@ class NPUModelRunner(GPUModelRunner):
     def _prepare_decoder_replay(self, num_tokens: int, is_dummy: bool) -> None:
         layers = self.decoder_replay
         assert layers is not None
-        layers.rows = layers.forward_context = layers.context_factory = None
+        layers.rows = layers.context_factory = None
         if self.parallel_config.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(self.vllm_config):
             logger.warning_once(
                 "Decoder bounded replay requires synchronized Ascend DP execution modes; skipping replay."
@@ -3356,6 +3356,7 @@ class NPUModelRunner(GPUModelRunner):
         kept_lens = np.empty(0, dtype=np.int32)
         self._decoder_replay_num_actual_tokens = num_tokens
         if real_batch:
+            assert common is not None
             num_reqs = self.input_batch.num_reqs
             offsets = common.query_start_loc_cpu[: num_reqs + 1].numpy()
             query_lens = np.diff(offsets)
@@ -3447,8 +3448,8 @@ class NPUModelRunner(GPUModelRunner):
         # overwrite the runtime buffers referenced by the encoder metadata.
         rope = get_cos_and_sin_dsa(common.positions, use_cache=False)
         metadata: dict[str, AscendDSAV41Metadata] = {}
-        batch_shared = {}
-        group_shared = {}
+        batch_shared: dict[str, Any] = {}
+        group_shared: dict[int, dict[str, Any]] = {}
         for group_id, layer_names, builder in self._decoder_replay_builders:
             cm = common.replace(
                 block_table_tensor=self.input_batch.block_table[group_id].get_device_tensor(num_reqs),
@@ -3489,6 +3490,7 @@ class NPUModelRunner(GPUModelRunner):
                 yield
         finally:
             if saved_mask is not None:
+                assert mask is not None
                 mask.copy_(saved_mask)
 
     def _model_forward(
