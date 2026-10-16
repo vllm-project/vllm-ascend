@@ -3060,11 +3060,13 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
+def _stub_moe_runner_init(
+    monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None, quant_type=QuantType.NONE
+):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
-        quant_type=QuantType.NONE,
+        quant_type=quant_type,
         quant_method=object(),
         return_with_event=False,
         router=None,
@@ -3306,11 +3308,13 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
 
 @pytest.mark.parametrize("initial_comm", [MoECommType.ALLGATHER, MoECommType.MC2])
 @pytest.mark.parametrize("layout", ["tp", "no_shared", "shared_dp", "sp", "latent"])
+@pytest.mark.parametrize("defer_shared", [False, True])
 def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
     monkeypatch,
     runtime_moe_all_reduce,
     initial_comm,
     layout,
+    defer_shared,
 ):
     from torch.fx.experimental.proxy_tensor import make_fx
 
@@ -3320,6 +3324,7 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
     has_shared = layout != "no_shared"
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
+    runner._defer_shared_submission = defer_shared
     runner.layer_name = "test.runtime_maybe_all_reduce"
     context.no_compile_layers[runner.layer_name] = runner
     runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sp, tp_size=tp_size, ep_size=tp_size)
@@ -3375,3 +3380,108 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("quant_type", [QuantType.NONE, QuantType.W4A8])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_release_schedule_selected_at_construction(monkeypatch, quant_type, overlap):
+    monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *_: overlap)
+    runner = _stub_moe_runner_init(monkeypatch, quant_type=quant_type)
+    assert runner._defer_shared_submission is (overlap and quant_type is QuantType.W4A8)
+
+
+@pytest.mark.parametrize("internal_router", [False, True])
+@pytest.mark.parametrize("routed_fails", [False, True])
+def test_release_schedule_submits_shared_after_routed(monkeypatch, internal_router, routed_fails):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._defer_shared_submission = True
+    runner.routed_input_transform = object()
+    runner.routed_output_transform = object()
+    runner._sequence_parallel_context = lambda: nullcontext()
+    order = []
+    states, logits, shared_out, routed_out = [object() for _ in range(4)]
+    milestones = RoutedMoEMilestones()
+    events = []
+
+    def record():
+        event = object()
+        events.append(event)
+        order.append("record")
+        return event
+
+    def routed(**kwargs):
+        order.append("routed")
+        if routed_fails:
+            raise RuntimeError("routed failed")
+        return routed_out, milestones
+
+    def shared(prepared, actual_milestones, **kwargs):
+        order.append("shared")
+        assert prepared.hidden_states is states and prepared.is_gathered
+        assert actual_milestones is milestones
+        assert milestones.shared_input_ready is events[0]
+        assert milestones.router_output_ready is events[1 if internal_router else 0]
+        assert milestones.routed_finalize_done is events[-1]
+        assert kwargs == {"defer_output_wait": True}
+        return shared_out
+
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=lambda: SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+        prepare_for_router_overlap=MagicMock(side_effect=AssertionError("early prepare")),
+        enqueue_gate_up_after_router=MagicMock(side_effect=AssertionError("early GateUp")),
+        forward=MagicMock(side_effect=shared),
+    )
+    runner.routed_experts = SimpleNamespace(forward_impl=routed)
+    runner._prepare_router_input = lambda *_: states
+    runner._apply_router_linear = lambda *_: order.append("router") or logits
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: internal_router))
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: SimpleNamespace(record_event=record))
+    monkeypatch.setattr(fused_moe_module, "maybe_record_event", record)
+    if routed_fails:
+        with pytest.raises(RuntimeError, match="routed failed"):
+            runner._forward_impl(states, logits, states)
+        runner.ascend_shared_experts.forward.assert_not_called()
+    else:
+        assert runner._forward_impl(states, logits, states) == (shared_out, routed_out)
+        assert order == (["record", "router", "record"] if internal_router else ["record"]) + [
+            "routed",
+            "record",
+            "shared",
+        ]
+    runner.ascend_shared_experts.prepare_for_router_overlap.assert_not_called()
+    runner.ascend_shared_experts.enqueue_gate_up_after_router.assert_not_called()
+
+
+@pytest.mark.parametrize("release_schedule", [False, True])
+@pytest.mark.parametrize("num_tokens", [0, 1, 4])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_release_output_add_preserves_values_and_inputs(monkeypatch, release_schedule, num_tokens, dtype):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._defer_shared_submission = release_schedule
+    shared = torch.randn(num_tokens, 7168, dtype=dtype)
+    routed = torch.randn_like(shared)
+    originals = (shared.clone(), routed.clone())
+    runner._maybe_pad_hidden_states = lambda *args: (routed, None, None)
+    runner._forward_entry = lambda *args: (shared, routed)
+    runner._encode_layer_name = lambda: "test"
+    monkeypatch.setattr(
+        AscendMoERunner, "_quant_method", property(lambda _: SimpleNamespace(has_unpadded_output=False))
+    )
+    monkeypatch.setattr(AscendMoERunner, "_fused_output_is_reduced", property(lambda _: True))
+    monkeypatch.setattr(fused_moe_module, "_unpack", lambda x: x)
+    runner._maybe_reduce_routed_output_before_transform = lambda x, reduced: (x, reduced)
+    runner._maybe_reduce_shared_expert_output = lambda x, reduced: x
+    runner._maybe_apply_routed_scale_to_output = lambda a, b: (a, b)
+    runner.apply_routed_output_transform = lambda x: x
+    runner._maybe_reduce_final_output = lambda x, *args: x
+    runner._maybe_add_zero_expert_output = lambda x: x
+    foreach = MagicMock(wraps=torch._foreach_add)
+    monkeypatch.setattr(torch, "_foreach_add", foreach)
+    result = runner.forward(routed, routed, shared_experts_input=shared)
+    torch.testing.assert_close(result, shared + routed, rtol=0, atol=0)
+    torch.testing.assert_close(shared, originals[0], rtol=0, atol=0)
+    torch.testing.assert_close(routed, originals[1], rtol=0, atol=0)
+    assert foreach.call_count == (0 if release_schedule else 1)
