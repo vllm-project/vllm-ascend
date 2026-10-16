@@ -815,7 +815,6 @@ Parameter descriptions:
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -880,7 +879,6 @@ Parameter descriptions:
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30300",
-            "engine_id": "3",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,

@@ -649,7 +649,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_producer",
     "kv_port": "30100",
-    "engine_id": "1",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {
@@ -725,7 +724,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_consumer",
     "kv_port": "30300",
-    "engine_id": "3",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {

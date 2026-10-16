@@ -312,7 +312,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "35880",
-        "engine_id": "0",
         "kv_connector_extra_config": {
              "use_ascend_direct": true,
              "prefill": {"dp_size": 2, "tp_size": 8},
@@ -369,7 +368,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "56900",
-        "engine_id": "1",
         "kv_connector_extra_config": {
              "use_ascend_direct": true,
              "prefill": {"dp_size": 2, "tp_size": 8},

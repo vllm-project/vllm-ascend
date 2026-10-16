@@ -627,7 +627,6 @@ four nodes, while the A2 reference uses eight nodes.
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
-                    "engine_id": "glm53-prefill",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -715,7 +714,6 @@ four nodes, while the A2 reference uses eight nodes.
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
-                    "engine_id": "glm53-prefill",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -797,7 +795,6 @@ four nodes, while the A2 reference uses eight nodes.
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
                     "kv_port": "30100",
-                    "engine_id": "glm53-decode-dp'"$4"'",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -878,7 +875,6 @@ four nodes, while the A2 reference uses eight nodes.
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
                     "kv_port": "30100",
-                    "engine_id": "glm53-decode-dp'"$4"'",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -969,8 +965,6 @@ four nodes, while the A2 reference uses eight nodes.
     - `MooncakeConnectorV2` declares the same Prefill DP1/PP2/TP16 and
       Decode DP16/TP2 topology on both sides. The non-pooled base KV ports
       are 30000 on Prefill and 30100 on Decode; reserve derived worker ports.
-    - The examples give Prefill and each Decode engine distinct `engine_id`
-      values so P-to-D peer registration cannot conflict.
 
 === "Atlas 800I A2 series"
 
@@ -1157,7 +1151,6 @@ four nodes, while the A2 reference uses eight nodes.
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "glm53-a2-prefill",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1246,7 +1239,6 @@ four nodes, while the A2 reference uses eight nodes.
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
         "kv_port": "30100",
-        "engine_id": "glm53-a2-decode-dp'"$DP_RANK"'",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1256,9 +1248,7 @@ four nodes, while the A2 reference uses eight nodes.
     ```
 
     Both sides declare the same topology and use `MooncakeConnectorV2` for
-    this non-uniform DP × TP layout. Prefill and Decode use different
-    `engine_id` values; each independently launched Decode engine includes
-    its global DP rank in its ID.
+    this non-uniform DP × TP layout.
 
     **Start the Engines**
 
@@ -1526,7 +1516,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
-                    "engine_id": "glm53-prefill",
                     "kv_connector_extra_config": {
                         "connectors":[
                         {
@@ -1638,7 +1627,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
-                    "engine_id": "glm53-prefill",
                     "kv_connector_extra_config": {
                         "connectors":[
                         {
@@ -1746,7 +1734,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
                     "kv_port": "30200",
-                    "engine_id": "glm53-decode-dp'"$4"'",
                     "kv_connector_extra_config": {
                         "connectors":[
                         {
@@ -1853,7 +1840,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
                     "kv_port": "30200",
-                    "engine_id": "glm53-decode-dp'"$4"'",
                     "kv_connector_extra_config": {
                         "connectors":[
                         {
@@ -1881,9 +1867,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             ```
 
     The pooled configuration uses base KV ports 30000 on Prefill and
-    30200 on Decode. The outer `engine_id` is unique per engine and is
-    inherited by the child connectors. This differs from the supplied pooled
-    reference's repeated `"0"` IDs to avoid Mooncake peer identity conflicts.
+    30200 on Decode.
     `lookup_rpc_port="0"` is retained: Ascend Store uses an IPC endpoint that
     also includes the DP rank, and P/D run on separate hosts. It is not a TCP
     listener on port zero. `backend="memcache"` and `use_layerwise=false`
@@ -2063,10 +2047,9 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     **Prefill Engine Script (Pooled)**
 
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
-    PP node rank, API port, local IP, instance leader IP, instance ID, and
-    visible devices. Both PP stages of one instance use the same master
-    address, partition, and engine ID. The two independent instances have
-    different master addresses and engine IDs.
+    PP node rank, API port, local IP, instance leader IP, and visible devices.
+    Both PP stages of one instance use the same master address and partition.
+    The two independent instances have different master addresses.
 
     ```shell
     #!/usr/bin/env bash
@@ -2076,8 +2059,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     PORT=${2:-8000}
     LOCAL_IP=${3:?need local_ip}
     INSTANCE_LEADER_IP=${4:?need instance_leader_ip}
-    INSTANCE_ID=${5:?need instance_id}
-    VISIBLE_DEVICES=${6:-0,1,2,3,4,5,6,7}
+    VISIBLE_DEVICES=${5:-0,1,2,3,4,5,6,7}
     : "${MODEL_PATH:?export MODEL_PATH}"
     : "${NIC_NAME:?export NIC_NAME}"
     : "${MEMCACHE_ROOT:?export MEMCACHE_ROOT}"
@@ -2151,7 +2133,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "glm53-a2-prefill-pool-'"$INSTANCE_ID"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -2272,7 +2253,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "glm53-a2-decode-pool-dp'"$DP_RANK"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -2301,8 +2281,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Both scripts use `MultiConnector` with `MooncakeConnectorV2` for KV
     transfer and `AscendStoreConnector` for non-layerwise MemCache pooling.
-    Distinct instance/rank-based engine IDs avoid P-to-D peer identity
-    conflicts. The outer ID is inherited by the child connectors.
     `lookup_rpc_port="0"` identifies an IPC endpoint that also includes the
     DP rank; it is not a TCP listener on port zero.
 
@@ -2321,16 +2299,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
         ```shell
         # P0: instance 0 leader and API server
-        bash start_p_pool.sh 0 8000 "<PREFILL_NODE0_IP>" "<PREFILL_NODE0_IP>" 0 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 0 8000 "<PREFILL_NODE0_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
 
         # P1: instance 0 headless PP partner
-        bash start_p_pool.sh 1 8000 "<PREFILL_NODE1_IP>" "<PREFILL_NODE0_IP>" 0 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 1 8000 "<PREFILL_NODE1_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
 
         # P2: instance 1 leader and API server
-        bash start_p_pool.sh 0 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE2_IP>" 1 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 0 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
 
         # P3: instance 1 headless PP partner
-        bash start_p_pool.sh 1 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE2_IP>" 1 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 1 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
         ```
 
     3. Export the settings from [Prepare MemCache](#glm53-pool-a2-prepare)
@@ -2550,7 +2528,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -2638,7 +2615,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -2726,7 +2702,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -2814,7 +2789,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
