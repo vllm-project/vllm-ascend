@@ -7,6 +7,13 @@ from vllm.config.vllm import VllmConfig
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
 
 
+def test_use_v2_model_runner_is_driven_by_ascend_default():
+    assert isinstance(VllmConfig.use_v2_model_runner, property)
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+    assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
+
+
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
     monkeypatch.setattr(
         patch_use_v2_model_runner,
@@ -43,33 +50,3 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
     # Spec+PP is natively supported; unrelated upstream guards still apply.
     assert unsupported == (["sequence parallelism"] if enable_sp else [])
-
-
-def _mock_defaults_model_runner_v2(monkeypatch, *, default_v2: bool):
-    # Compatibility stacks (310P) lack STANDARD_WORKER_PATCHES → default V2.
-    monkeypatch.setattr(patch_use_v2_model_runner, "defaults_model_runner_v2", lambda: default_v2)
-
-
-def test_use_v2_model_runner_defaults_to_true_without_standard_worker_patches(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
-    _mock_defaults_model_runner_v2(monkeypatch, default_v2=True)
-
-    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True
-
-
-def test_use_v2_model_runner_defaults_to_false_with_standard_worker_patches(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
-    _mock_defaults_model_runner_v2(monkeypatch, default_v2=False)
-
-    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
-
-
-def test_use_v2_model_runner_env_override_wins(monkeypatch):
-    _mock_defaults_model_runner_v2(monkeypatch, default_v2=True)
-
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", False)
-    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
-
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", True)
-    _mock_defaults_model_runner_v2(monkeypatch, default_v2=False)
-    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True

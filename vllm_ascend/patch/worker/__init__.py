@@ -49,10 +49,9 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
-# Reuse the platform patch for VllmConfig.use_v2_model_runner so EngineCore
-# and worker processes share the same selection: honor
-# VLLM_USE_V2_MODEL_RUNNER when set; otherwise defaults_model_runner_v2()
-# (310P / no STANDARD_WORKER_PATCHES → MRV2; standard platforms → MRV1).
+# Re-apply the default-V2 runner selection (with the V2 feature blacklist)
+# and related V2/V1 feature patches in worker processes.
+# VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

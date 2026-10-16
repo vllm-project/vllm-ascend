@@ -845,30 +845,32 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Upstream vLLM enables the v2 model runner not only via the
-#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
-#       architecture whitelists, Triton availability, and feature
-#       compatibility checks. On Ascend the NPU v2 runner is not yet
-#       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read VLLM_USE_V2_MODEL_RUNNER when set, deferring
-#       model/framework checks to the NPU runner itself. Profiles without
-#       STANDARD_WORKER_PATCHES (Ascend 310P) default to Model Runner V2
-#       when the env var is unset because MRV1 is no longer maintained there.
+#       Ascend uses the NPU v2 runner by default (this branch also keeps
+#       Ascend 310P on V2; #17681 blacklists 310P and that entry is omitted
+#       here). Features that are not V2-ready (pooling KV, VL encoder
+#       disaggregation, draft_window_size, enable_dsa_cp, suffix
+#       speculative decoding, ngram speculative decoding, draft_model
+#       speculative decoding, dflash2 graph, and p-eagle)
+#       default to v1.
+#       Upstream GPU-specific architecture, feature, and Triton gates must not
+#       silently switch an
+#       Ascend request back to v1. VLLM_USE_V2_MODEL_RUNNER=0 remains the
+#       explicit v1 escape hatch.
 #    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER when set; otherwise
-#       defaults_model_runner_v2() (HardwareCapability HAL). Explicit 0 / 1
-#       always wins. worker/patch_v2/patch_use_v2_model_runner.py reuses this
-#       platform patch so EngineCore and worker processes share the same
-#       behavior.
+#       Call apply_v2_model_runner_config_patch() to install the Ascend
+#       default-v2 use_v2_model_runner property (with the V2 feature
+#       blacklist) and neutralize upstream V2 validation. Spec+PP is
+#       native upstream, so this patch no longer rewrites that unsupported
+#       list. Keep the Ascend-supported V1 feature allowlist
+#       (dspark / dflash2).
+#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
+#       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner and can rely on upstream's default enablement heuristics
-#       (model architecture, Triton, feature checks) without crashes or
-#       degraded functionality.
+#       Remove this patch once upstream exposes a platform-specific default
+#       runner-selection hook.
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
@@ -1506,7 +1508,8 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
+#       in `platform/patch_use_v2_model_runner.py` (default-v2 selection plus
+#       remaining V2/V1 feature patches).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.

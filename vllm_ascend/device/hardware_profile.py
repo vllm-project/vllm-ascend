@@ -420,14 +420,3 @@ def get_current_hardware_profile() -> HardwareProfile:
     """Return the profile selected by the current device configuration."""
 
     return _CURRENT_HARDWARE_PROFILE
-
-
-def defaults_model_runner_v2() -> bool:
-    """Whether unset ``VLLM_USE_V2_MODEL_RUNNER`` should select Model Runner V2.
-
-    Compatibility stacks without :attr:`HardwareCapability.STANDARD_WORKER_PATCHES`
-    (Ascend 310P) default to V2 because MRV1 is no longer maintained there.
-    Standard A2/A3/A5 profiles keep MRV1 until explicitly opted in.
-    """
-
-    return not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES)

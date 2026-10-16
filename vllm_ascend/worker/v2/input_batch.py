@@ -82,6 +82,9 @@ class AscendInputBatch(InputBatch):
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
     is_cpp_profile: bool = False
+    # MRV2 prepare_inputs may pass these; base vLLM InputBatch may not declare them yet.
+    decode_graph_eligible: bool = True
+    prefill_runs_as_decode_np: np.ndarray | None = None
 
     @staticmethod
     def _prepare_cpp_profile_dummy(
