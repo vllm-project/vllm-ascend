@@ -491,6 +491,15 @@ def _common_serve_args(
         "--enable-sleep-mode",
         "--max-model-len",
         "1024",
+        # The oracle issues tiny requests. A utilization-sized KV cache can
+        # make FIA graph capture reserve a workspace larger than the free HBM
+        # on a 64 GiB chip, before either weight-transfer lane even starts.
+        "--kv-cache-memory-bytes",
+        str(512 * 1024 * 1024),
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "1024",
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--tensor-parallel-size",
