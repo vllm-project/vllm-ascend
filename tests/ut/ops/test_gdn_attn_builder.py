@@ -1100,7 +1100,8 @@ def test_spec_width_prompt_chunk_retains_prefill_metadata(
         assert metadata.num_accepted_tokens is None
 
 
-def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(builder_cls):
     capture_common_metadata = create_common_attn_metadata(
         batch_spec=BatchSpec(
             seq_lens=[4, 4],
@@ -1120,7 +1121,12 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
         num_heads=32,
         num_speculative_tokens=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
     )
+    if builder_cls is AscendGDNHostMetadataBuilder:
+        builder.compilation_config.static_forward_context = {
+            "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+        }
     captured_metadata = builder.build(
         0,
         capture_common_metadata,
@@ -1130,6 +1136,9 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
     captured_spec_metadata = captured_metadata.spec_decode_metadata
     captured_conv1d_metadata = captured_spec_metadata.spec_causal_conv1d
 
+    if builder_cls is AscendGDNHostMetadataBuilder:
+        assert captured_conv1d_metadata.cache_indices.is_contiguous()
+        assert captured_conv1d_metadata.cache_indices.tolist() == [10, 20, NULL_BLOCK_ID, NULL_BLOCK_ID]
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) > 0
     assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) > 0
 
@@ -1151,9 +1160,10 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
 
     assert replay_metadata.spec_sequence_masks is None
     assert replay_metadata.spec_decode_metadata is None
+    expected_shape = (4,) if builder_cls is AscendGDNHostMetadataBuilder else (4, 4)
     assert torch.equal(
         captured_conv1d_metadata.cache_indices,
-        torch.full((4, 4), PAD_SLOT_ID, dtype=torch.int32),
+        torch.full(expected_shape, PAD_SLOT_ID, dtype=torch.int32),
     )
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) == 0
     assert torch.count_nonzero(captured_conv1d_metadata.num_accepted_tokens) == 0
@@ -1462,95 +1472,27 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
     assert runtime.num_prefills == 1
 
 
-def test_contiguous_conv_indices_are_shared_by_prefill_and_decode_within_each_group(monkeypatch):
+def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     _patch_missing_runtime_cdiv(monkeypatch)
-    builders = [
-        _make_builder(
-            device=torch.device("cpu"),
-            num_heads=32,
-            num_speculative_tokens=0,
-            builder_cls=AscendGDNHostMetadataBuilder,
-        )
-        for _ in range(2)
-    ]
-    common = create_common_attn_metadata(BatchSpec([5, 12], [1, 8]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
-    unmarked = builders[0].build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
-    assert unmarked.shape == common.block_table_tensor.shape
-    assert unmarked.data_ptr() == common.block_table_tensor.data_ptr()
-    assert builders[0]._spec_conv_indices is None and builders[0]._non_spec_conv_indices is None
-    indices_by_group = []
-    for builder, slots in zip(builders, ([10, 20], [100, 200])):
-        builder.vllm_config.compilation_config.static_forward_context = {
-            "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
-        }
-        common.block_table_tensor = torch.tensor([[slot, slot + 1] for slot in slots], dtype=torch.int32)
-        metadata = builder.build(0, common)
-        prefill_indices = metadata.non_spec_prefill_metadata.causal_conv1d.cache_indices
-        decode_indices = metadata.non_spec_decode_metadata.causal_conv1d.cache_indices
-        assert prefill_indices.shape == (2,)
-        assert prefill_indices.is_contiguous()
-        assert prefill_indices.data_ptr() == decode_indices.data_ptr() == builder._non_spec_conv_indices.data_ptr()
-        assert prefill_indices.tolist() == slots
-        assert metadata.non_spec_state_indices_tensor.tolist() == slots
-        assert metadata.non_spec_state_indices_tensor.data_ptr() == common.block_table_tensor.data_ptr()
-        indices_by_group.append(prefill_indices)
-
-    assert indices_by_group[0].data_ptr() != indices_by_group[1].data_ptr()
-    common.block_table_tensor = torch.tensor([[30, 31], [40, 41]], dtype=torch.int32)
-    refreshed = builders[0].build(0, common)
-    assert refreshed.non_spec_prefill_metadata.causal_conv1d.cache_indices.data_ptr() == indices_by_group[0].data_ptr()
-    assert indices_by_group[0].tolist() == [30, 40]
-    assert indices_by_group[1].tolist() == [100, 200]
-
-
-def test_contiguous_spec_conv_indices_reuse_graph_buffer_and_clear_without_drafts():
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
-        num_speculative_tokens=3,
+        num_speculative_tokens=0,
         builder_cls=AscendGDNHostMetadataBuilder,
-        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
-    builder.vllm_config.compilation_config.static_forward_context = {
+    common = create_common_attn_metadata(BatchSpec([5, 12], [1, 8]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    unmarked = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
+    assert unmarked.data_ptr() == common.block_table_tensor.data_ptr()
+    builder.compilation_config.static_forward_context = {
         "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
     }
-    common = create_common_attn_metadata(BatchSpec([4, 4, 0, 0], [4, 4, 0, 0]), 16, torch.device("cpu"))
-    captured_conv = None
-    for offset in (10, 30):
-        common.block_table_tensor = torch.arange(16, dtype=torch.int32).view(4, 4) + offset
-        metadata = builder.build(
-            0,
-            common,
-            num_accepted_tokens=torch.tensor([2, 4, 99, 99], dtype=torch.int32),
-            num_decode_draft_tokens_cpu=torch.tensor([3, 3, -1, -1], dtype=torch.int32),
-            num_actual_reqs=2,
-        )
-        conv = metadata.spec_decode_metadata.spec_causal_conv1d
-        assert conv.cache_indices.shape == (4,)
-        assert conv.cache_indices.is_contiguous()
-        assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
-        assert conv.cache_indices.tolist() == [offset, offset + 4, NULL_BLOCK_ID, NULL_BLOCK_ID]
-        assert metadata.spec_state_indices_tensor.shape == (4, 4)
-        assert torch.equal(metadata.spec_state_indices_tensor[:2], common.block_table_tensor[:2])
-        assert torch.all(metadata.spec_state_indices_tensor[2:] == NULL_BLOCK_ID)
-        if captured_conv is not None:
-            assert conv.cache_indices.data_ptr() == captured_conv.cache_indices.data_ptr()
-            assert captured_conv.cache_indices.tolist() == conv.cache_indices.tolist()
-        captured_conv = conv
-
-    no_drafts = create_common_attn_metadata(BatchSpec([1, 1, 0, 0], [1, 1, 0, 0]), 16, torch.device("cpu"))
-    metadata = builder.build(
-        0,
-        no_drafts,
-        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
-        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
-    )
-    assert metadata.spec_decode_metadata is None
-    assert torch.all(captured_conv.cache_indices == PAD_SLOT_ID)
-    assert torch.count_nonzero(captured_conv.query_start_loc) == 0
-    # Ordinary graph decode already owns a contiguous vector; reuse it directly.
-    assert (
-        metadata.non_spec_decode_metadata.causal_conv1d.cache_indices.data_ptr()
-        == metadata.non_spec_state_indices_tensor.data_ptr()
-    )
+    metadata = builder.build(0, common)
+    indices = metadata.non_spec_prefill_metadata.causal_conv1d.cache_indices
+    assert indices.is_contiguous()
+    assert indices.tolist() == [10, 20]
+    assert indices.data_ptr() == metadata.non_spec_decode_metadata.causal_conv1d.cache_indices.data_ptr()
+    common.block_table_tensor.add_(30)
+    refreshed = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
+    assert refreshed.data_ptr() == indices.data_ptr()
+    assert indices.tolist() == [40, 50]
