@@ -2,21 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Store drain controls and opt-in v1 host timing for the single-card Layerwise benchmark."""
 
+from __future__ import annotations
+
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tests.e2e.pull_request.one_card.ascendstore_v1_layerwise_timing import LayerwiseLoadTiming
 from tests.e2e.pull_request.one_card.ascendstore_v1_performance import AscendStoreBenchmarkWorkerExtension
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
 
 class AscendStoreLayerwiseWorkerExtension(AscendStoreBenchmarkWorkerExtension):
+    # vLLM mixes this extension into the Worker; this benchmark explicitly enables Model Runner V2.
+    model_runner: NPUModelRunner
+
     def start_ascendstore_layerwise_load_timing(self) -> dict[str, str]:
         from vllm.distributed.kv_transfer import get_kv_transfer_group
 
         assert not hasattr(self, "_layerwise_load_timing"), "Layerwise timing is already active"
         worker, backend, implementation = self._layerwise_resources()
         assert implementation == "v1", "Load diagnostics must not instrument production"
-        # vLLM mixes this extension into the real Worker, which owns model_runner.
         timing = LayerwiseLoadTiming(worker, backend, get_kv_transfer_group().lookup_server, self.model_runner)
         timing.install()
         self._layerwise_load_timing = timing

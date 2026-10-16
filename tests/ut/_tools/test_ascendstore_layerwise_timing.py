@@ -174,6 +174,11 @@ def test_record_limit_does_not_change_calls_and_reports_dropped_intervals(monkey
     assert report["steps"][0]["execute_outside_load_calls_ms"] is None
 
 
+def test_worker_extension_declares_runner_type_without_overriding_worker_owned_instance():
+    assert AscendStoreLayerwiseWorkerExtension.__annotations__["model_runner"] == "NPUModelRunner"
+    assert not hasattr(AscendStoreLayerwiseWorkerExtension(), "model_runner")
+
+
 def test_stop_restores_hooks_even_if_out_of_timing_store_drain_fails(monkeypatch):
     extension = AscendStoreLayerwiseWorkerExtension()
     timing = Mock()
