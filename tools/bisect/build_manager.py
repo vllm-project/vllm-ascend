@@ -38,6 +38,8 @@ from tools.bisect.config import (
     REQUIREMENTS_GLOBS,
     BisectOptions,
 )
+from tools.bisect.git_ops import GitError
+from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +122,18 @@ class BuildManager:
     def prepare(self, target_commit: str, log_file: Path | None = None) -> BuildDecision:
         """Checkout ``target_commit`` and rebuild/reinstall as needed.
 
-        Raises ``BuildError`` on a failed install so the caller can record a
-        SKIP (rather than a misleading FAIL) for this commit.
+        The target is resolved first: on a multi-node worker (or any node whose
+        repo is a shallow clone, e.g. the nightly ``--depth 1`` container) the
+        commanded commit -- an ancestor in the bisect range -- is usually NOT
+        present locally, so it must be recovered from origin exactly like the
+        master's ``describe()`` does. When the commit is already local this is
+        a single no-op rev-parse.
+
+        Raises ``BuildError`` on a failed install and ``GitError`` when the
+        commit cannot be recovered, so the caller can record a SKIP (rather
+        than a misleading FAIL) for this commit.
         """
+        target_commit = git_ops.resolve_commit(self.repo, target_commit)
         decision = self.decide(target_commit)
         logger.info("[build] %s -> %s", target_commit[:12], decision.reason)
 
@@ -171,3 +182,11 @@ class BuildManager:
 
 class BuildError(RuntimeError):
     pass
+
+
+# Everything a deploy (resolve + checkout + build + version adaptation) can
+# raise that must surface as a per-round SKIP instead of killing the driving
+# agent. One shared tuple so every catch site (master runner, worker agent,
+# orchestrator trial loop) stays in lockstep -- a missed copy leaves the other
+# side waiting out the full barrier timeout on every remaining round.
+DEPLOY_ERRORS = (BuildError, GitError, VersionAdaptationError)

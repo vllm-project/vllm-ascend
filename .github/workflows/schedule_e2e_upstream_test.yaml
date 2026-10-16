@@ -41,6 +41,12 @@ env:
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
 
 jobs:
     resolve-tag:
@@ -56,6 +62,9 @@ jobs:
     ensure-csrc-cache:
         needs: resolve-tag
         uses: ./.github/workflows/_ensure_csrc_cache.yaml
+        secrets:
+          HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+          HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
         with:
           source_ref: ${{ github.sha }}
           target_ids: '["a2-arm64-ubuntu"]'
@@ -118,7 +127,6 @@ jobs:
               pip install -e tests/plugins/prithvi_io_processor_plugin
               pip install -e tests/plugins/colbert_query_plugin
               pip install -e tests/plugins/vllm_add_dummy_endpoint_plugin
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -191,7 +199,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \

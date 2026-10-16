@@ -12,6 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import contextlib
 import weakref
 from unittest.mock import MagicMock, Mock, patch
 
@@ -23,10 +24,11 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPImpl,
     AscendAttentionDCPMetadata,
     AscendMetadataForDecode,
+    DCPFIAParamProvider,
 )
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
@@ -44,10 +46,12 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
-def test_update_full_graph_params_dispatches_draft_metadata_by_keyword():
+@patch("vllm_ascend.compilation.acl_graph.use_updatable_graph", return_value=False)
+def test_update_full_graph_params_dispatches_draft_metadata_by_keyword(mock_use_updatable):
     impl_cls = MagicMock()
     attn_backend = MagicMock()
     attn_backend.get_impl_cls.return_value = impl_cls
@@ -122,6 +126,12 @@ class TestACLGraphWrapper(TestBase):
         self.mock_get_ascend_config = self.get_ascend_config_patcher.start()
         self.addCleanup(self.get_ascend_config_patcher.stop)
         self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = False
+
+        self.exit_stack = contextlib.ExitStack()
+        self.addCleanup(self.exit_stack.close)
+        self.mock_updatable_graph = self.exit_stack.enter_context(
+            patch("vllm_ascend.compilation.acl_graph.UpdatableGraph")
+        )
 
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -284,7 +294,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -316,7 +326,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
 
@@ -333,6 +343,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(result, "test_output")
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
+    @patch("vllm_ascend.utils.torch")
     @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -349,6 +360,7 @@ class TestACLGraphWrapper(TestBase):
         mock_get_forward_context,
         mock_get_forward_context_2,
         mock_validate_cudagraph_capturing_enabled,
+        mock_utils_torch,
         mock_torch,
     ):
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
@@ -361,13 +373,14 @@ class TestACLGraphWrapper(TestBase):
         for enabled in (False, True):
             with self.subTest(enable_super_kernel=enabled):
                 mock_torch.reset_mock()
+                mock_utils_torch.reset_mock()
                 mock_validate_cudagraph_capturing_enabled.reset_mock()
                 self.mock_runnable.reset_mock()
                 mock_compilation_counter.num_cudagraph_captured = 0
                 self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = enabled
 
                 mock_npu_graph = MagicMock()
-                mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+                self.mock_updatable_graph.return_value = mock_npu_graph
                 mock_graph_context = MagicMock()
                 mock_torch.npu.graph.return_value = mock_graph_context
                 mock_graph_context.__enter__ = Mock(return_value=None)
@@ -382,14 +395,14 @@ class TestACLGraphWrapper(TestBase):
                 wrapper(torch.tensor([1, 2, 3]), "arg2")
 
                 if enabled:
-                    mock_torch.npu.super_kernel_scope_begin.assert_called_once_with("full_model")
-                    mock_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_called_once_with("full_model")
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
                     mock_npu_graph.super_kernel_optimize.assert_called_once_with(
                         optimize_options={"dcci_after_kernel_end": [".*"]},
                     )
                 else:
-                    mock_torch.npu.super_kernel_scope_begin.assert_not_called()
-                    mock_torch.npu.super_kernel_scope_end.assert_not_called()
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_not_called()
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_not_called()
                     mock_npu_graph.super_kernel_optimize.assert_not_called()
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
@@ -422,7 +435,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -454,7 +467,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened during first call
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once()
 
         # Reset mock to track second call
@@ -501,7 +514,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -562,7 +575,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -633,7 +646,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -675,7 +688,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
         # Should return the original output (not weak ref) since weak_ref_output is not enabled
@@ -712,7 +725,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -749,7 +762,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
         # Should return the weak ref output when weak_ref_output option is enabled
@@ -778,7 +791,7 @@ class TestACLGraphWrapper(TestBase):
         with patch("vllm_ascend.compilation.acl_graph.torch") as mock_torch:
             # Mock torch.npu.NPUGraph
             mock_npu_graph = MagicMock()
-            mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+            self.mock_updatable_graph.return_value = mock_npu_graph
 
             # Mock torch.npu.graph context manager
             mock_graph_context = MagicMock()
@@ -1034,71 +1047,30 @@ class TestDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
-    @patch("vllm_ascend.attention.context_parallel.attention_cp._EXTRA_CTX")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_end")
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_begin", MagicMock())
-    @patch(
-        "vllm_ascend.attention.context_parallel.attention_cp.torch_npu.npu_fused_infer_attention_score.out",
-        MagicMock(),
-    )
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.stream")
-    def test_update_attn_dcp_params(self, mock_stream, _mock_graph_task_end, mock_context, mock_extra_ctx):
-        mock_extra_ctx.is_draft_model = False
-        mock_extra_ctx.is_draft_model_prefill = False
-        block_table = torch.zeros(2, 5, dtype=torch.long)
-        num_heads = 256
-        scale = 0.1
-        num_kv_heads = 8
-        qk_head_dim = 96
-        qk_nope_head_dim = 64
-        query = torch.randn(4, num_heads, qk_head_dim)
-        q_nope = query[..., :qk_nope_head_dim]
-        k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
-        actual_seq_lengths_kv = [1, 1]
-        actual_seq_lengths_q = np.array([1, 1])
-        out = torch.randn(2, 16, 128)
-        lse = torch.randn(2, 16, 8)
-
-        num_computed_tokens_of_dcp = np.array([[1, 1], [1, 1]])
-        decode = AscendMetadataForDecode(num_computed_tokens_of_dcp)
-        metadata = AscendAttentionDCPMetadata(
-            num_actual_tokens=2,
-            actual_seq_lengths_q=actual_seq_lengths_q,
-            num_decode_tokens=1,
-            decode_meta=decode,
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_begin")
+    def test_update_attn_dcp_params(self, mock_begin, mock_end):
+        """Update GQA DCP tasks with the provider's runtime parameters."""
+        block_table = torch.zeros(2, 5, dtype=torch.int32)
+        decode = AscendMetadataForDecode(
+            num_computed_tokens_of_dcp=np.array([[3, 2], [4, 3]]),
+            actual_seq_lengths_q=[1, 2],
+            block_tables=block_table,
         )
-        forward_context = MagicMock()
-        forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_draft_model = False
-        forward_context.additional_kwargs = {
-            "is_draft_model": False,
-            "is_draft_model_prefill": False,
-        }
-        mock_context.return_value = forward_context
-
-        self.graph_params.attn_params[4] = []
-        self.graph_params.attn_params[4].append(
-            (
-                q_nope,
-                k_nope,
-                k_nope,
-                num_heads,
-                num_kv_heads,
-                scale,
-                block_table,
-                128,
-                actual_seq_lengths_kv,
-                actual_seq_lengths_q,
-                out,
-                lse,
-                2,
-                0,
-                None,
-            )
+        metadata = AscendAttentionDCPMetadata(decode=decode)
+        provider = DCPFIAParamProvider("attn_layer_0", 1, CPKVScope.FULL)
+        operation, handle, event = MagicMock(), MagicMock(), MagicMock()
+        query = torch.randn(2, 4, 8)
+        task = GraphUpdateTask(operation, {"query": query, "actual_seq_lengths_kv": [1, 1]}, provider, 0, handle, event)
+        params = provider.resolve({"attn_layer_0": metadata})
+        task.bind(params).apply(self.update_stream)
+        operation.assert_called_once_with(
+            query=query,
+            actual_seq_lengths=[1, 2],
+            actual_seq_lengths_kv=[2, 3],
+            block_table=block_table,
         )
-
-        with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendAttentionDCPImpl.update_graph_params(self.update_stream, forward_context, 4, None)
-
-        _mock_graph_task_end.assert_called_once()
+        mock_begin.assert_called_once_with(self.update_stream, handle)
+        mock_end.assert_called_once_with(self.update_stream)
+        event.record.assert_called_once_with(self.update_stream)
+        assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]

@@ -29,6 +29,13 @@ from vllm_ascend.core.kv_cache_interface import (
     get_dsv4_scheduler_dcp_world_size,
     is_prefix_cacheable,
 )
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    get_deepseek_v41_kv_cache_config,
+    get_deepseek_v41_pool_bytes_per_block,
+    group_cache_specs,
+    is_deepseek_v41_cache,
+    make_cache_groups,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -37,6 +44,8 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -48,8 +57,6 @@ _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache
 _orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
-
-
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -101,11 +108,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
-    if filtered_private_groups:
+    if filtered_private_groups and not is_deepseek_v41_cache(groups):
         # A fixed tail block is not a token-page scheduling or hashing unit.
         # Pool alignment is enforced by the GLM planner and prefix coordinator.
         kv_cache_config = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
         groups = cacheable_groups
+
+    cacheable_groups = [g for g in groups if is_prefix_cacheable(g.kv_cache_spec)]
+    if len(cacheable_groups) != len(groups):
+        scheduler_block_size = math.lcm(*(g.kv_cache_spec.block_size for g in groups)) * dcp
+        if not cache_config.enable_prefix_caching or not cacheable_groups:
+            return scheduler_block_size, scheduler_block_size
+        filtered = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
+        if dcp == 1:
+            _, hash_block_size = _orig_resolve_kv_cache_block_sizes(filtered, vllm_config)
+        else:
+            hash_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in cacheable_groups))
+        return scheduler_block_size, hash_block_size
 
     if len(groups) <= 1:
         # EngineCore's global size is the minimum across all original groups.
@@ -117,18 +136,12 @@ def _ascend_resolve_kv_cache_block_sizes(
         # sharded groups. A scheduler-replicated group must instead use its
         # own logical token span because the global minimum may belong to a
         # different cache role.
-        block_size = (
-            group_spec.block_size
-            if filtered_private_groups or group_dcp != dcp
-            else cache_config.block_size
-        )
+        block_size = group_spec.block_size if filtered_private_groups or group_dcp != dcp else cache_config.block_size
         bs = block_size * group_dcp
         return bs, bs
 
     group_block_sizes = [
-        group.kv_cache_spec.block_size
-        * get_dsv4_scheduler_dcp_world_size(group.kv_cache_spec, dcp)
-        for group in groups
+        group.kv_cache_spec.block_size * get_dsv4_scheduler_dcp_world_size(group.kv_cache_spec, dcp) for group in groups
     ]
     if dcp != 1:
         # Ascend supports CP with multiple KV cache groups; compute
@@ -140,9 +153,7 @@ def _ascend_resolve_kv_cache_block_sizes(
         # Keep the existing fine-grained hash unit based on the unscaled
         # logical group sizes. FullAttentionManager can resolve those hashes
         # to each group's effective scheduler block size during lookup.
-        hash_block_size = math.gcd(
-            *(group.kv_cache_spec.block_size for group in groups)
-        )
+        hash_block_size = math.gcd(*(group.kv_cache_spec.block_size for group in groups))
         return scheduler_block_size, hash_block_size
 
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
@@ -279,9 +290,7 @@ def group_and_unify_kv_cache_specs(
         if isinstance(spec, SlidingWindowMLASpec):
             grouped_swa_mla_specs[spec.block_size][name] = spec
         elif isinstance(spec, MLAAttentionSpec):
-            scheduler_replication = int(
-                getattr(spec, "dcp_scheduler_replication_size", 1)
-            )
+            scheduler_replication = int(getattr(spec, "dcp_scheduler_replication_size", 1))
             logical_block_specs[(spec.block_size, scheduler_replication)][name] = spec
 
     mla_uniform_specs = []
@@ -307,13 +316,16 @@ def _get_kv_cache_groups_uniform_groups(
     Generate the KV cache groups from the grouped specs.
     """
     assert len(grouped_specs) > 0 and all(isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs)
+    if any(
+        getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
+        for group in grouped_specs
+        for spec in group.kv_cache_specs.values()
+    ):
+        return tq_cache.group_specs(grouped_specs)
     full_mla_specs = [
         grouped_spec
         for grouped_spec in grouped_specs
-        if all(
-            isinstance(spec, MLAAttentionSpec)
-            for spec in grouped_spec.kv_cache_specs.values()
-        )
+        if all(isinstance(spec, MLAAttentionSpec) for spec in grouped_spec.kv_cache_specs.values())
     ]
     assert full_mla_specs
     full_mla_groups = [
@@ -341,10 +353,7 @@ def _get_kv_cache_groups_uniform_groups(
     swa_mla_specs = [
         grouped_spec
         for grouped_spec in grouped_specs
-        if all(
-            isinstance(spec, SlidingWindowMLASpec)
-            for spec in grouped_spec.kv_cache_specs.values()
-        )
+        if all(isinstance(spec, SlidingWindowMLASpec) for spec in grouped_spec.kv_cache_specs.values())
     ]
 
     assert all(
@@ -356,7 +365,7 @@ def _get_kv_cache_groups_uniform_groups(
     # Legacy SWA/state groups reuse the full-MLA page-size buckets. Globally
     # replicated DCP groups retain the page sizes declared by their caches:
     # their block counts do not shrink with the sharded C4 history.
-    all_page_sizes = set().union(*(_page_sizes(spec) for spec in full_mla_specs))
+    all_page_sizes = _page_sizes(full_mla_specs[0])
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
         sm_page_sizes = _page_sizes(sm_spec)
@@ -413,17 +422,20 @@ def _ascend_get_packed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
     """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
-    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
-    if grouped_specs is None:
-        assert _orig_get_packed_kv_cache_groups is not None
-        return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
-
-    groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    if is_deepseek_v41_cache(kv_cache_spec):
+        grouped_specs = group_cache_specs(kv_cache_spec)
+        groups = make_cache_groups(grouped_specs)
+    else:
+        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+        if grouped_specs is None:
+            assert _orig_get_packed_kv_cache_groups is not None
+            return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=True,
+        use_trailing_layer_fallback=True,
     )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,
@@ -437,9 +449,9 @@ def _get_deepseek_v4_cache_layout(
 ) -> tuple[list[int], list[dict[int, list[str]]], list[str], int, int]:
     """Return the geometry shared by DSV4 planning and rank normalization.
 
-    Include page-size buckets from every group. Globally replicated DCP
-    SWA/state groups can retain smaller pages than the full-MLA group, so
-    those pages need their own region in the same shared backing allocation.
+    Keep the legacy full-MLA buckets for ordinary groups. Globally replicated
+    DCP groups retain their own page sizes, which need additional regions in
+    the same shared backing allocation.
 
     For each group, bucket its layers by page_size_bytes and place each layer
     at tuple_idx = position-within-bucket.
@@ -458,7 +470,8 @@ def _get_deepseek_v4_cache_layout(
         specs = group.kv_cache_spec.kv_cache_specs
         b: dict[int, list[str]] = defaultdict(list)
         for name in group.layer_names:
-            page_sizes.add(specs[name].page_size_bytes)
+            if getattr(specs[name], "dcp_scheduler_replication_size", 1) > 1:
+                page_sizes.add(specs[name].page_size_bytes)
             if "mtp" not in name:
                 b[specs[name].page_size_bytes].append(name)
             else:
@@ -473,7 +486,6 @@ def _get_deepseek_v4_cache_layout(
     num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
 
     return sorted(page_sizes), bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples
- 
 
 
 def _get_kv_cache_config_deepseek_v4_main(
@@ -481,6 +493,8 @@ def _get_kv_cache_config_deepseek_v4_main(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
     (
         page_sizes,
         bucketed,
@@ -542,8 +556,10 @@ def _get_kv_cache_config_deepseek_v4_main(
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    if not kv_cache_groups or not all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups
+    if (
+        is_deepseek_v41_cache(kv_cache_groups)
+        or not kv_cache_groups
+        or not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     ):
         return False
     for group in kv_cache_groups:
@@ -564,6 +580,10 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.pool_bytes_per_block(kv_cache_groups)
+    if is_deepseek_v41_cache(kv_cache_groups):
+        return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -578,16 +598,37 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
 
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
-    # Use the planner's actual shared-tuple stride, including any MTP slots.
-    # A second, independently computed stride can admit more block IDs than
-    # the backing allocation provides.
-    return _ascend_pool_bytes_per_block(kv_cache_groups) * sum(
+    has_scheduler_replicated_groups = any(
+        getattr(spec, "dcp_scheduler_replication_size", 1) > 1
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for spec in group.kv_cache_spec.kv_cache_specs.values()
+    )
+    if has_scheduler_replicated_groups:
+        # New DCP layouts keep independent page buckets and trailing MTP slots.
+        # Admission must use the same stride as their physical backing pool.
+        bytes_per_tuple = _ascend_pool_bytes_per_block(kv_cache_groups)
+    else:
+        # Preserve main's admission estimate for existing layouts, including
+        # MTP: its largest bucket count can differ from the planner's trailing
+        # slot count. Changing that estimate is outside the DCP feature scope.
+        full_mla_spec = kv_cache_groups[0].kv_cache_spec
+        assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+        num_layer_tuples = max(
+            _get_max_layers_per_page_size(group.kv_cache_spec)
+            for group in kv_cache_groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        )
+        bytes_per_tuple = sum(_page_sizes(full_mla_spec)) * num_layer_tuples
+    return bytes_per_tuple * sum(
         group.kv_cache_spec.max_memory_usage_pages(vllm_config)
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -608,23 +649,60 @@ def _ascend_get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
-    if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
 
-    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
-        vllm_config,
-        kv_cache_groups,
-        available_memory,
-    )
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
-    )
+    Attach ``kv_transfer_config`` onto every built config: ``KVCacheConfig``
+    has no native field, and the PD prefill-producer role read back by the
+    kv-cache coordinator (see ``patch_kv_cache_coordinator.py``) must ride on
+    the config object - the coordinator factory receives ``KVCacheConfig``
+    but not ``VllmConfig``. The attribute survives the scheduler-side
+    ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
+    dropped by worker pickle IPC, which never reads it.
+    """
+    if is_deepseek_v41_cache(kv_cache_groups):
+        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif not _is_deepseek_v4_groups(kv_cache_groups):
+        kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    else:
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
+            vllm_config,
+            kv_cache_groups,
+            available_memory,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None and speculative_config.method == "dspark":
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
+
+        # Upstream scheduler conversion keeps only the first spec in a uniform
+        # group, losing draft residency when target and draft share block IDs.
+        # Preserve the worker-derived ownership through that deepcopy. Remove
+        # this bridge once upstream KVCacheConfig carries per-layer ownership.
+        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
+        draft_only_group_ids = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            specs = (
+                tuple(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            # Keep mixed target/draft groups in the ordinary target lookup.
+            # Empty PP-local layer names still carry the global group spec.
+            if specs and all(
+                isinstance(spec, MLAAttentionSpec) and spec.non_causal_multi_token_decode for spec in specs
+            ):
+                draft_only_group_ids.append(group_id)
+        kv_cache_config.dspark_draft_only_group_ids = tuple(draft_only_group_ids)
+    return kv_cache_config
 
 
 def _ascend_get_kv_cache_configs(
@@ -648,19 +726,14 @@ def _ascend_get_kv_cache_configs(
         and parallel.pipeline_parallel_size == 1
         and cache_config.num_gpu_blocks_override is None
         and kv_cache_specs
-        and any(
-            getattr(spec, "model_version", None) == "deepseek_v4"
-            for spec in kv_cache_specs[0].values()
-        )
+        and any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in kv_cache_specs[0].values())
     ):
         # DeepSeek-V4 grouping pads some SlidingWindowMLASpec pages in-place.
         # This preflight runs before upstream validates that the per-worker
         # KVCacheSpecs are identical, so grouping the live worker-0 objects
         # would make worker 0 differ from the remaining TP/DCP workers.
         probe_specs = copy.deepcopy(kv_cache_specs[0])
-        groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups(
-            vllm_config, probe_specs
-        )
+        groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups(vllm_config, probe_specs)
         # Match upstream get_kv_cache_configs(): BlockPool permanently reserves
         # one null block, so admission checks plan against usable memory rather
         # than the full profiled KV-cache memory. Without this subtraction the
@@ -692,11 +765,7 @@ def _ascend_get_kv_cache_configs(
                 )
 
     configs = _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory)
-    if (
-        parallel.decode_context_parallel_size > 1
-        and configs
-        and _is_deepseek_v4_groups(configs[0].kv_cache_groups)
-    ):
+    if parallel.decode_context_parallel_size > 1 and configs and _is_deepseek_v4_groups(configs[0].kv_cache_groups):
         groups = configs[0].kv_cache_groups
         full_history_blocks = 0
         recycled_peak_blocks = 0

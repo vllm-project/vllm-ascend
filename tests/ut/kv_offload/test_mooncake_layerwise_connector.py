@@ -45,6 +45,7 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
@@ -1443,7 +1444,11 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         group = MagicMock()
         group.kv_cache_spec = UniformTypeKVCacheSpecs(
             block_size=16,
-            kv_cache_specs={layer_name: SimpleNamespace(block_size=16, cache_sparse_sfa_c8=True)},
+            kv_cache_specs={
+                layer_name: AscendMLAAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, cache_sparse_sfa_c8=True
+                )
+            },
         )
         group.layer_names = [layer_name]
         kv_cache_config = MagicMock()
@@ -1452,7 +1457,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         kv_cache_config.num_blocks = 10
         worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
 
-        with self.assertRaisesRegex(NotImplementedError, "does not support sparse SFA C8 packed main KV cache"):
+        with self.assertRaisesRegex(NotImplementedError, "does not support packed SFA main KV caches"):
             worker.register_kv_caches({layer_name: (MagicMock(),)})
 
         self.assertEqual(worker.layer_metadata, {})

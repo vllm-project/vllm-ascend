@@ -4,7 +4,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.ut.kvpp_utils import indexer_name, layer_name, make_cache_config, make_kvpp_config, make_kvpp_specs
+from tests.ut.kvpp_utils import (
+    indexer_name,
+    layer_name,
+    make_cache_config,
+    make_dspark_kvpp_case,
+    make_kvpp_config,
+    make_kvpp_specs,
+)
 from vllm_ascend.worker import kvpp_cache
 
 
@@ -46,3 +53,29 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
         part.fill_(value)
     for value, part in enumerate(parts, 1):
         assert torch.all(part == value)
+
+
+@pytest.mark.parametrize("rank", [0, 1, 2])
+@pytest.mark.parametrize("draft_names", [None, ("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")])
+def test_dspark_context_writes_survive_target_scratch_reuse(monkeypatch, rank, draft_names):
+    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=rank))
+    config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
+    caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs), torch.device("cpu"))
+    draft_storage = set()
+    # DSpark populates every draft layer before running the draft network.
+    for value, name in enumerate(drafts, 1):
+        k, v = caches[name]
+        assert (k.numel(), v.numel()) == (3 * 64, 3 * 64)
+        k.view(torch.float16).fill_(value)
+        v.view(torch.float16).fill_(-value)
+        draft_storage.add(k.untyped_storage().data_ptr())
+    assert len(draft_storage) == len(drafts)
+    for name, parts in caches.items():
+        if name not in drafts:
+            for part in parts:
+                assert part.untyped_storage().data_ptr() not in draft_storage
+                part.fill_(42)
+    for value, name in enumerate(drafts, 1):
+        k, v = caches[name]
+        assert torch.all(k.view(torch.float16) == value)
+        assert torch.all(v.view(torch.float16) == -value)

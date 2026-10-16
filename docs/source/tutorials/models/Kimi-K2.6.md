@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 Kimi K2.6 is an open-source, native multimodal agentic model built through continual pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base. It seamlessly integrates vision and language understanding with advanced agentic capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
@@ -25,6 +31,15 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block <br>diffusion model for parallel drafting) |          | [Hugging Face](https://huggingface.co/z-lab/Kimi-K2.5-DFlash) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+With vLLM 0.30, Ascend preserves the vLLM 0.29 YaRN amplitude for the
+legacy `Kimi-K2.5-DFlash` configuration used here. The draft's plain YaRN
+configuration has `factor=64`, `mscale=1` and `mscale_all_dim=1`; without
+compatibility handling, the new scaling semantics reduce its acceptance rate.
+For this recognized configuration, a missing `attention_factor` defaults to
+`1 + 0.1 * ln(64)` (approximately `1.4158883083`). An explicit
+`attention_factor` in the draft checkpoint takes precedence, including `1.0`
+to select the new ratio-based amplitude. The target model's RoPE is unchanged.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -140,9 +155,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
@@ -304,9 +316,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -386,9 +395,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -467,9 +473,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -548,9 +551,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0

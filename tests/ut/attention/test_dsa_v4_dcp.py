@@ -117,7 +117,7 @@ def test_c4_decode_metadata_keeps_global_lengths_and_builds_local_scfa_view(dcp_
     builder._device_metadata_enabled = False
     metadata_op = MagicMock(return_value=torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
     plan = _make_plan(get_dsa_sparse_attn_metadata_op=metadata_op)
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda _: plan)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda *_: plan)
 
     builder._populate_c4_local_attention_metadata(SimpleNamespace(query_start_loc_cpu=req.query_start_loc), req)
 
@@ -254,8 +254,8 @@ def test_c4_local_attention_passes_local_addresses_and_masks_empty_rows(monkeypa
         events.append("metadata_ready")
 
     plan = _make_plan(get_dsa_sparse_attn_op=attention_op)
-    monkeypatch.setattr(dsa_cp, "get_dsa_attn_kv_plan", lambda _: plan)
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda _: plan)
+    monkeypatch.setattr(dsa_cp, "get_dsa_attn_kv_plan", lambda *_: plan)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda *_: plan)
     monkeypatch.setattr(dsa_cp, "wait_for_device_metadata", wait)
 
     output, lse = dsa_cp.forward_dsa_c4_local_attention(q, c4_kv, swa_kv, topk, req, swa_req, _make_config(), 2, 1, 0.5)
@@ -271,6 +271,7 @@ def test_c4_decode_exchanges_partial_attention_and_merges_swa_once(monkeypatch):
     impl.compress_ratio, impl.dcp_size, impl.dcp_rank = 4, 2, 1
     impl.n_local_heads, impl.head_dim, impl.softmax_scale = 2, 3, 0.5
     impl.vllm_config = _make_config()
+    impl.turboquant = None
     impl.dcp_group = SimpleNamespace(unique_name="test_dcp_group")
     req = _make_req_metadata([16, 20], [[3, 7], [5, 9]])
     swa_req = _make_req_metadata([16, 20], [[11, 13], [15, 17]])
@@ -336,12 +337,12 @@ def test_c4_decode_exchanges_partial_attention_and_merges_swa_once(monkeypatch):
         return local_output
 
     monkeypatch.setattr(dsa_cp, "forward_dsa_c4_local_attention", c4_attention)
-    monkeypatch.setattr(torch.ops.vllm, "sfa_dcp_a2a_fused", exchange, raising=False)
-    monkeypatch.setattr(dsa_cp, "fused_sfa_dcp_lse_combine", combine)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
+    monkeypatch.setattr(dsa_cp, "fused_dcp_lse_combine", combine)
     monkeypatch.setattr(impl, "_forward_swa_local_attention", swa_attention)
     monkeypatch.setattr(impl, "_log_dcp_memory_once", lambda *_: None)
     monkeypatch.setattr(impl, "_log_dcp_path_once", lambda *_: None)
-    monkeypatch.setattr(dsa_cp, "record_attention_compute_start", lambda: None)
+    monkeypatch.setattr(dsa_cp, "attention_transfer_window", nullcontext)
     monkeypatch.setattr(dsa_cp, "_dsv4_dcp_comm_stream", lambda: comm_stream)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
     monkeypatch.setattr(torch.npu, "stream", lambda _: nullcontext())
@@ -362,6 +363,7 @@ def test_prefill_attention_gathers_once_and_does_not_replace_persistent_metadata
     impl.compress_ratio = 4
     impl.dcp_size = 2
     impl.vllm_config = _make_config()
+    impl.turboquant = None
     impl.window_size = 8
     impl.attn_sink = torch.zeros(2)
     impl.softmax_scale = 0.5
@@ -433,9 +435,9 @@ def test_prefill_attention_gathers_once_and_does_not_replace_persistent_metadata
     impl.indexer = indexer
     impl.multistream_dsv4_dsa_overlap = False
     plan.dsa_kv_compress_scatter.side_effect = scatter
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda _: plan)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda *_: plan)
     monkeypatch.setattr("vllm_ascend.attention.dsa_v1.wait_for_device_metadata", lambda *_: None)
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.record_attention_compute_start", lambda: None)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.attention_transfer_window", nullcontext)
     monkeypatch.setattr(impl, "_start_prefill_kv_gather", start_gather)
     monkeypatch.setattr(impl, "_log_dcp_path_once", lambda *_: None)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: SimpleNamespace(wait_event=wait_event))
@@ -467,6 +469,7 @@ def test_unsharded_layers_keep_original_attention_contract(compress_ratio, dcp_s
     impl.compress_ratio = compress_ratio
     impl.dcp_size = dcp_size
     impl.vllm_config = _make_config()
+    impl.turboquant = None
     impl.window_size = 8
     impl.attn_sink = torch.zeros(2)
     impl.softmax_scale = 0.5
@@ -503,9 +506,9 @@ def test_unsharded_layers_keep_original_attention_contract(compress_ratio, dcp_s
         return query, None
 
     plan = _make_plan(get_dsa_sparse_attn_op=attention_op)
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda _: plan)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", lambda *_: plan)
     monkeypatch.setattr("vllm_ascend.attention.dsa_v1.wait_for_device_metadata", lambda *_: None)
-    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.record_attention_compute_start", lambda: None)
+    monkeypatch.setattr("vllm_ascend.attention.dsa_v1.attention_transfer_window", nullcontext)
 
     assert impl._start_attention_query(q, layer_metadata) is None
     impl._execute_attention(q, c4_kv, swa_kv, topk, layer_metadata)
@@ -518,6 +521,7 @@ def test_unsharded_layers_keep_original_attention_contract(compress_ratio, dcp_s
     [
         ("sparse_flash_mla", "supports the Ascend A2 SCFA path only"),
         ("kv_compress_epilog", "supports the Ascend A2 SCFA path only"),
+        ("turboquant", "TurboQuant KV cache is not supported"),
         ("graph", "requires eager execution"),
         ("prefix", "does not support prefix caching"),
         ("speculative", "does not support speculative decoding"),
@@ -531,6 +535,8 @@ def test_phase_one_rejects_unsupported_execution_modes(unsupported_feature, mess
     plan = _make_plan()
     if unsupported_feature in ("sparse_flash_mla", "kv_compress_epilog"):
         setattr(plan, f"uses_{unsupported_feature}", True)
+    elif unsupported_feature == "turboquant":
+        pass
     elif unsupported_feature == "graph":
         config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     elif unsupported_feature == "prefix":
@@ -541,13 +547,19 @@ def test_phase_one_rejects_unsupported_execution_modes(unsupported_feature, mess
     def init_base(self):
         self.compress_ratio = 4
         self.vllm_config = config
+        self.turboquant = object() if unsupported_feature == "turboquant" else None
 
     monkeypatch.setattr(AscendDSAImpl, "__init__", init_base)
     monkeypatch.setattr(
         "vllm_ascend.attention.context_parallel.common_cp.get_dcp_group",
         lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=object()),
     )
-    monkeypatch.setattr(dsa_cp, "get_dsa_attn_kv_plan", lambda _: plan)
+    for group in ("pcp", "tp"):
+        monkeypatch.setattr(
+            f"vllm_ascend.attention.context_parallel.common_cp.get_{group}_group",
+            lambda: SimpleNamespace(world_size=1, rank_in_group=0),
+        )
+    monkeypatch.setattr(dsa_cp, "get_dsa_attn_kv_plan", lambda *_: plan)
 
     with pytest.raises(NotImplementedError, match=message):
         dsa_cp.AscendDSADCPImpl()

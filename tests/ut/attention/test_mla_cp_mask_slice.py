@@ -42,13 +42,17 @@ def test_mla_dcp_decode_metadata_slices_lengths_to_decode_batch(mock_build, dcp_
     builder.dcp_rank = dcp_rank
     builder.cp_local_block_size = 4
     builder.query_lens = dcp_metadata.query_lens_cpu
+    builder.seq_lens = torch.tensor([20, 28], dtype=torch.int32)
 
     result = builder.build_decode_metadata(
         common_prefix_len=0,
-        common_attn_metadata=SimpleNamespace(context_parallel_metadata=dcp_metadata),
+        common_attn_metadata=SimpleNamespace(
+            context_parallel_metadata=dcp_metadata,
+            dcp_local_seq_lens_cpu=local_lengths[:, dcp_rank],
+        ),
     )
 
-    assert result.cp_seq_len.tolist() == [12 if dcp_rank == 0 else 8]
+    assert result.cp_seq_len == [12 if dcp_rank == 0 else 8]
     # Only the decode request contributes: 20 total tokens - 4 current tokens.
     assert result.cp_history_seq_len == [8]
     assert result.actual_seq_lengths_q == [4]

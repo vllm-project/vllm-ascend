@@ -4,7 +4,7 @@
 import dataclasses
 import weakref
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +23,12 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from .updatable_graph import (
+    ContextSource,
+    SharedSource,
+    UpdatableGraph,
+)
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -32,19 +37,6 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
-
-
-@contextmanager
-def _super_kernel_scope(scope: str, enabled: bool):
-    if not enabled:
-        yield
-        return
-
-    torch.npu.super_kernel_scope_begin(scope)
-    try:
-        yield
-    finally:
-        torch.npu.super_kernel_scope_end(scope)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -105,6 +97,7 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        update_stream: torch.npu.Stream | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -131,7 +124,20 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.update_stream = update_stream
+        self.attn_backend = None
+        self.draft_model_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
+
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_attn_backend(self, attn_backend):
+        self.attn_backend = attn_backend
+
+    def update_draft_model_metadata(self, draft_model_metadata: list[dict[str, Any]]):
+        # This has been prepared for the update full graph of MRV1.
+        self.draft_model_metadata = draft_model_metadata
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -173,13 +179,13 @@ class ACLGraphWrapper:
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
-                logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+                logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+            aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -203,7 +209,7 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        with _super_kernel_scope("full_model", self.enable_super_kernel):
+                        with super_kernel_scope("full_model", self.enable_super_kernel):
                             output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
@@ -243,6 +249,7 @@ class ACLGraphWrapper:
                         "dcci_after_kernel_end": [".*"],
                     },
                 )
+                logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
             # here we always use weak ref for the workspaces
             # to save memory
@@ -274,7 +281,6 @@ class ACLGraphWrapper:
                 f"got {new_input_addresses}"
             )
 
-        logger.info_once("Replaying aclgraph")
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.
@@ -288,8 +294,29 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
+            self._updatable_graph_replay(forward_context, entry.aclgraph)
+        else:
+            entry.aclgraph.replay()
+        logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
+
+    def _updatable_graph_replay(
+        self,
+        forward_context,
+        graph: UpdatableGraph,
+    ):
+        assert self.update_stream is not None
+        if _EXTRA_CTX.is_draft_model:
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_model_metadata))
+        else:
+            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
+        if self.enable_enpu:
+            graph.update(self.update_stream, resolved_tasks)
+            graph.replay()
+        else:
+            graph.replay()
+            graph.update(self.update_stream, resolved_tasks)
 
 
 def weak_ref_workspaces(params):
@@ -310,6 +337,9 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
+    if use_updatable_graph(attn_backend):
+        return
+
     # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
     # AssertionError outside set_current_vllm_config(); the SFA backend
     # resolution in get_impl_cls() needs the config.

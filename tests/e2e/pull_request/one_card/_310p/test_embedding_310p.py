@@ -16,10 +16,13 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
+import os
+from unittest.mock import patch
+
 import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
-from tests.e2e.conftest import HfRunner, VllmRunner
+from tests.e2e.conftest import HfRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.utils import check_embeddings_close
 
 MODELS = [
@@ -57,6 +60,31 @@ def test_embed_models_correctness(model: str):
         name_1="vllm",
         tol=1e-2,
     )
+
+
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
+def test_qwen3_vl_embedding_mrv2_pooling():
+    """Verify Qwen3-VL-Embedding pooling execution with Model Runner V2 on 310P."""
+    queries = [
+        "The capital of China is Beijing.",
+        "Gravity is a force that attracts two bodies towards each other.",
+    ]
+    model_name = snapshot_download("Qwen/Qwen3-VL-Embedding-2B")
+
+    with VllmRunner(
+        model_name,
+        runner="pooling",
+        max_model_len=1024,
+        dtype="float16",
+        gpu_memory_utilization=0.6,
+        compilation_config={"cudagraph_capture_sizes": [1024, 512]},
+        additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
+    ) as vllm_runner:
+        outputs = vllm_runner.embed(queries)
+
+    assert len(outputs) == len(queries)
+    assert all(embedding for embedding in outputs)
 
 
 def test_bge_m3_correctness():

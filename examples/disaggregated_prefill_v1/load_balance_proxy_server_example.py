@@ -162,6 +162,7 @@ class InstanceInfo:
     decoder_host: str
     decoder_port: int
     prefiller_cached_tokens: int | None = None
+    decoder_released: bool = False
 
 
 TAINT_PRIORITY = 1e15
@@ -925,10 +926,18 @@ async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, releas
         "finish_request",
         info.prefiller_key,
         info.prefiller_score,
-        info.decoder_key,
+        None if info.decoder_released else info.decoder_key,
         info.decoder_score,
         release_prefill_kv,
     )
+    info.decoder_released = True
+
+
+async def _release_decoder_once(runtime: WorkerRuntime, info: InstanceInfo) -> None:
+    if info.decoder_released:
+        return
+    await runtime.schedule("release_decoder", info.decoder_key, info.decoder_score)
+    info.decoder_released = True
 
 
 async def assign_instances(
@@ -942,7 +951,7 @@ async def assign_instances(
     args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
-    request_id = next_req_id()
+    request_id = req_data.get("request_id") or next_req_id()
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
     prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
@@ -1002,7 +1011,7 @@ async def reassign_instances(
     runtime = get_runtime()
     if not previous_prefiller_kv_released:
         await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
+    await _release_decoder_once(runtime, previous_instance)
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 
@@ -1026,6 +1035,8 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
+        if request_id := request.headers.get("X-Request-Id"):
+            req_data["request_id"] = request_id
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)

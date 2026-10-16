@@ -61,6 +61,18 @@ def test_prepare_indexer_indices_noncontiguous():
     torch.testing.assert_close(actual.cpu(), reference(selected.cpu(), positions.cpu(), 2), rtol=0, atol=0)
 
 
+@torch.inference_mode()
+def test_prepare_indexer_indices_uses_supplied_output():
+    selected = torch.tensor([[7, 3, -1], [5, 1, 3]], dtype=torch.int32, device="npu")
+    positions = torch.tensor([7, 5], dtype=torch.int64, device="npu")
+    output = torch.empty_like(selected)
+
+    actual = prepare_indexer_indices(selected, positions, 2, output=output)
+
+    assert actual.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(actual.cpu(), reference(selected.cpu(), positions.cpu(), 2), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("tokens", [41, 129])
 @torch.inference_mode()

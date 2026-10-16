@@ -147,9 +147,9 @@ def remap_sparse_indices_triton(
         topk_indices = topk_indices.contiguous()
     indices = topk_indices if topk_indices.dtype == torch.int32 else topk_indices.to(torch.int32)
     topk_count = indices.shape[-1]
-    rows = indices.numel() // topk_count
-    if rows == 0 or topk_count == 0:
+    if indices.numel() == 0:
         return topk_indices
+    rows = indices.numel() // topk_count
     # The torch implementation operates per-row on the last dim, so arbitrary
     # leading dims (e.g. [dcp_size, 1, topk_count] from the DCP all_gather) can
     # be flattened to a 2D view and restored afterwards.
@@ -275,10 +275,7 @@ def mask_invalid_sparse_attention_rows(
     if local_topk_indices.shape[0] != num_tokens or local_topk_indices.shape[1] != 1:
         raise ValueError("C4 local TopK indices must have shape [tokens, 1, topk]")
     if softmax_lse.shape != (num_tokens, num_heads, 1):
-        raise ValueError(
-            "C4 partial LSE must have shape [tokens, heads, 1], "
-            f"got {tuple(softmax_lse.shape)}."
-        )
+        raise ValueError(f"C4 partial LSE must have shape [tokens, heads, 1], got {tuple(softmax_lse.shape)}.")
     if num_tokens == 0:
         return
     _mask_invalid_sparse_attention_rows_kernel[(num_tokens * num_heads,)](
@@ -295,4 +292,3 @@ def mask_invalid_sparse_attention_rows(
         BLOCK_D=next_power_of_2(head_dim),
         multibuffer=False,
     )
-

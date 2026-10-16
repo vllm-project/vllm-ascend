@@ -55,7 +55,7 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
     char *layoutKPtr = const_cast<char *>(layoutKStr.c_str());
 
     if (output.device().is_meta()) return output;
-    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2Metadata, cuSeqlensQVal, cuSeqlensKVal, sequsedQVal, sequsedKVal,
+    EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2Metadata, cuSeqlensQVal, cuSeqlensKVal, sequsedQVal, sequsedKVal,
               cmpResidualKVal, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
               layoutQPtr, layoutKPtr, maskMode, cmpRatio, output);
     return output;
@@ -147,7 +147,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     int64_t keyStride0 = key.stride(0);
     int64_t keyScaleStride0 = keyDequantScale.stride(0);
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2, query, key, weights, queryDequantScale, keyDequantScale,
+    EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, queryDequantScale, keyDequantScale,
               cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset,
               metadata, candidateTopkIndexIn, topk, quantMode, maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode,
               cmpRatio, returnValue, candidateMode, candidateTopkBlocks, candidateBlockSize, keyStride0,

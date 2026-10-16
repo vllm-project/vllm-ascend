@@ -1,4 +1,6 @@
 import math
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
@@ -14,16 +16,24 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, Att
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
-from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin, DCPMetadataBuilderMixin
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import (
+    DCPImplMixin,
+    DCPMetadataBuilderMixin,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
-    get_sfa_dcp_max_local_block_table_cols,
     get_sfa_dcp_local_block_table,
+    get_sfa_dcp_max_local_block_table_cols,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+from vllm_ascend.attention.dsa_attn_kv_plan import (
+    get_dsa_attn_kv_plan,
+    is_a5_bf16_kv_enabled,
+)
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
     _dsa_swa_only_cmp_ratio,
@@ -43,18 +53,27 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_stor
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    attention_transfer_window,
+    record_attention_compute_start,
+)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
+from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
-from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
-from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import enable_dsa_cp_full_o_proj
-from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
+from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
+from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import enable_dsa_cp_full_o_proj, enable_pcp_o_proj_weight_sharding
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchMixin,
+    WeightSwitchState,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -117,6 +136,23 @@ class DSADCPAttentionContext:
 
     query_gather: DSAQueryGatherContext | None = None
     prefill_kv_gather: DSAPrefillKVGatherContext | None = None
+
+
+def restore_tp_heads(output, tp_group):
+    """Exchange [local tokens, all heads] for [all tokens, local heads]."""
+    if tp_group.world_size == 1:
+        return output
+    tokens, heads, width = output.shape
+    local_heads = heads // tp_group.world_size
+    send = (
+        output.view(tokens, tp_group.world_size, local_heads, width)
+        .permute(1, 0, 2, 3)
+        .contiguous()
+        .view(-1, local_heads, width)
+    )
+    recv = torch.empty_like(send)
+    dist.all_to_all_single(recv, send, group=tp_group.device_group)
+    return recv
 
 
 def hadamard_transform_ref(
@@ -1207,8 +1243,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if query_start_loc.device.type != "cpu" and HAS_TRITON:
             assert local_query_start_loc is not None and local_seq_lens is not None
-            # Use next-power-of-2 block size to avoid wasted compute.
-            build_local_metadata_triton[(1,)](
+            grid = (triton.cdiv(num_reqs, BUILD_LOCAL_METADATA_BLOCK_SIZE),)
+            build_local_metadata_triton[grid](
                 query_start_loc,
                 seq_lens,
                 local_query_start_loc,
@@ -1217,7 +1253,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_end,
                 num_reqs,
                 start_pos_out if start_pos_out is not None else self._zero_i32,
-                BLOCK_NUM_REQS=triton.next_power_of_2(num_reqs),
                 COMPUTE_START_POS=start_pos_out is not None,
             )
         else:
@@ -1491,6 +1526,14 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
 
+        # V4.1 CP preprocessing uses the same split projections as ordinary DSA.
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
+        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
+            self.multistream_dsv4_dsa_overlap = False
+
         # indexer param
         if self.indexer is not None:
             self.indexer_heads: int = self.indexer.n_heads
@@ -1754,51 +1797,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             common_attn_metadata,
             skip_all_to_all=full_gather_wo_a_enabled,
         )
-        num_tokens = o_proj_input.shape[0]
-
-        # o
+        # Keep gathered projection weights alive until all asynchronous NPU
+        # consumers, including reduce-scatter and the output copy, are queued.
+        # V4.1 calls _forward_o_proj only without temporary gathered weights.
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight()
-        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-            if use_a5_quant_o_proj:
-                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
-                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
-                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
-                else:
-                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                    o = torch_npu.npu_transpose_quant_batchmatmul(
-                        o,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        dtype=torch.bfloat16,
-                        bias=None,
-                        group_sizes=(0, 0, 32),
-                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                    )
-                o_proj_input = o.reshape(num_tokens, -1)
-            else:
-                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self._get_batched_wo_a_weight(o_proj_groups),
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled=full_gather_wo_a_enabled)
             if need_gather_q_kv and not full_gather_wo_a_enabled:
                 projected_output = sp_reduce_scatter(projected_output)
             output[...] = projected_output
@@ -1808,6 +1813,53 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
+        return output
+
+    def _forward_o_proj(
+        self, o_proj_input: torch.Tensor, output: torch.Tensor | None = None, *, full_gather_wo_a_enabled: bool = False
+    ) -> torch.Tensor:
+        """Project with the active weights; the caller owns their lifetime."""
+        num_tokens = o_proj_input.shape[0]
+        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+        if use_a5_quant_o_proj:
+            o = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+            if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
+                o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
+            else:
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
+                    self._get_batched_wo_a_weight(o_proj_groups),
+                    dtype=torch.bfloat16,
+                    bias=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
+                    perm_x1=(1, 0, 2),
+                    perm_x2=(0, 1, 2),
+                    perm_y=(1, 0, 2),
+                )
+            o_proj_input = o.reshape(num_tokens, -1)
+        else:
+            o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self._get_batched_wo_a_weight(o_proj_groups),
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+        projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        if output is None:
+            return projected_output
+        output[...] = projected_output
         return output
 
     def _forward(
@@ -2047,8 +2099,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        num_tokens = local_attn_output.shape[0]
-
         negate_sin = get_current_hardware_profile().supports(HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN)
         sin = cp_metadata.local_sin[layer_name]
         sin_arg = sin if negate_sin else -sin
@@ -2065,15 +2115,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
-        send = (
-            local_attn_output.view(num_tokens, self.tp_size, self.n_local_heads, self.head_dim)
-            .permute(1, 0, 2, 3)
-            .contiguous()
-            .view(-1, self.n_local_heads, self.head_dim)
-        )
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
-        return recv
+        return restore_tp_heads(local_attn_output, self.tp_group)
 
     def _update_indexer_cache(
         self,
@@ -2215,6 +2257,7 @@ class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
     local_num_tokens_after_padding: int
     hidden_restore_idx: torch.Tensor
     global_dsa_metadata: dsa_v1.AscendDSAMetadata
+    pcp_has_global_prefill: bool = False
 
     @classmethod
     def from_local_metadata(
@@ -2223,6 +2266,7 @@ class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
         local_num_tokens_after_padding: int,
         hidden_restore_idx: torch.Tensor,
         global_dsa_metadata: dsa_v1.AscendDSAMetadata,
+        pcp_has_global_prefill: bool = False,
     ) -> "AscendDSAPCPMetadata":
         return cls(
             num_actual_tokens=local_metadata.num_actual_tokens,
@@ -2237,11 +2281,12 @@ class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
             local_num_tokens_after_padding=local_num_tokens_after_padding,
             hidden_restore_idx=hidden_restore_idx,
             global_dsa_metadata=global_dsa_metadata,
+            pcp_has_global_prefill=pcp_has_global_prefill,
         )
 
 
 class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
-    """Build rank-local attention and canonical global cache metadata."""
+    """Build ordinary decode metadata or PCP prefill cache metadata."""
 
     # DualChunkSwap expands each prefill into at most two local rows.
     _request_capacity_factor: ClassVar[int] = 2
@@ -2268,11 +2313,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
             device=device,
         )
+        self._global_rope_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -2285,13 +2332,19 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
     def _prepare_graph_pcp_context(
         self,
         pcp_context: "AscendPCPAttentionContext",
+        full_graph_mode: bool,
     ) -> "AscendPCPAttentionContext":
         """Prepare graph-stable DSA tensors without changing the PCP batch layout."""
         global_batch = pcp_context.global_batch
         num_actual_tokens = global_batch.num_tokens
 
+        # FULL graphs replay the fixed padded batch, so the restore indices
+        # must cover every padded row. Other modes run the DSA cache update
+        # with the actual token extent, and compact indices avoid restoring
+        # placeholder rows that would be trimmed before the cache write anyway.
+        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
         # Use the preallocated buffer to keep the address fixed for graph replay.
-        hidden_restore_idx = self._hidden_restore_idx_buffer[: global_batch.num_tokens_after_padding]
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
         hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
         hidden_restore_idx[num_actual_tokens:].zero_()
 
@@ -2414,15 +2467,27 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         self,
         pcp_context: "AscendPCPAttentionContext",
         common_attn_metadata: AscendCommonAttentionMetadata,
+        cache_group_idx: int,
+        has_prefill: bool,
     ) -> AscendCommonAttentionMetadata:
         num_local_padded_tokens = common_attn_metadata.num_input_tokens
-        gathered_slot_mapping = common_attn_metadata.slot_mapping
-        if pcp_context.global_batch.is_dummy:
-            gathered_slot_mapping.fill_(-1)
-        local_slot_mapping = gathered_slot_mapping.view(
-            self._pcp_world_size,
-            num_local_padded_tokens,
-        )[self._pcp_rank]
+        # Sharded decode owns different requests per rank, so it uses the same
+        # rank-local slot slice as prefill. Replicated decode writes every rank.
+        if has_prefill or self._is_decode_sharded:
+            gathered_slot_mapping = common_attn_metadata.slot_mapping
+            if pcp_context.global_batch.is_dummy:
+                gathered_slot_mapping.fill_(-1)
+            local_slot_mapping = gathered_slot_mapping.view(
+                self._pcp_world_size,
+                num_local_padded_tokens,
+            )[self._pcp_rank]
+        else:
+            # Decode tokens are replicated, so every rank must write its own
+            # SWA cache. The gathered mapping masks these writes off rank 0.
+            local_slot_mapping = pcp_context.global_slot_mappings[cache_group_idx]
+            if pcp_context.global_batch.is_dummy:
+                local_slot_mapping.fill_(-1)
+            assert local_slot_mapping.shape[0] == num_local_padded_tokens
         return common_attn_metadata.replace(
             slot_mapping=local_slot_mapping,
         )
@@ -2434,14 +2499,18 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         fast_build: bool,
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
+        full_graph_mode: bool = False,
     ) -> dsa_v1.AscendDSAMetadata:
-        if local_common_attn_metadata.num_actual_tokens > 0:
+        # A captured graph still runs its padded queries, so their metadata
+        # must be refreshed even when this rank owns no tokens.
+        if local_common_attn_metadata.query_start_loc_cpu[-1] > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
                 fast_build,
                 num_actual_reqs=num_actual_reqs,
                 common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                full_graph_mode=full_graph_mode,
             )
 
         # Empty ranks still participate in the global cache update collectives.
@@ -2455,7 +2524,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self._global_metadata_builder.hadamard,
         )
 
     def build(
@@ -2467,32 +2536,62 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_cache_group_idx: int | None = None,
         num_actual_reqs: int | None = None,
         common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
+        full_graph_mode: bool = False,
         **kwargs: Any,
-    ) -> AscendDSAPCPMetadata:
+    ) -> dsa_v1.AscendDSAMetadata:
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None
-        pcp_context = self._prepare_graph_pcp_context(pcp_context)
-        global_common_attn_metadata = self._build_global_common_attn_metadata(
-            pcp_context,
-            pcp_cache_group_idx,
-            common_attn_metadata,
-        )
-        global_common_attn_metadata = self._build_graph_common_attn_metadata(
-            global_common_attn_metadata,
-            pcp_context.global_batch.num_reqs,
-        )
-        global_dsa_metadata = self._global_metadata_builder.build(
-            common_prefix_len,
-            global_common_attn_metadata,
-            fast_build,
-            num_actual_reqs=pcp_context.global_batch.num_reqs,
-            common_ratio_to_sas_metadata={},
-        )
+        has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+        # Replicated decode stays on the local metadata path. Sharded decode
+        # owns different requests per rank, so it still needs global metadata.
+        needs_global_metadata = has_prefill or self._is_decode_sharded
+        if needs_global_metadata:
+            pcp_context = self._prepare_graph_pcp_context(
+                pcp_context,
+                full_graph_mode=full_graph_mode,
+            )
+            global_common_attn_metadata = self._build_global_common_attn_metadata(
+                pcp_context,
+                pcp_cache_group_idx,
+                common_attn_metadata,
+            )
+            global_common_attn_metadata = self._build_graph_common_attn_metadata(
+                global_common_attn_metadata,
+                pcp_context.global_batch.num_reqs,
+            )
+            # num_prefills can miss short prefills; prevent local PCP RoPE
+            # from overwriting the global RoPE buffer. Sharded decode also
+            # cannot share that buffer, because each rank has different positions.
+            global_dsa_metadata = self._global_metadata_builder.build(
+                common_prefix_len,
+                global_common_attn_metadata,
+                fast_build,
+                num_actual_reqs=pcp_context.global_batch.num_reqs,
+                common_ratio_to_sas_metadata={},
+                can_use_rope_cache=False,
+                full_graph_mode=full_graph_mode,
+            )
+            if (
+                not has_prefill
+                and self._is_decode_sharded
+                and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Keep the global RoPE at graph-stable addresses of its own.
+                req_metadata = global_dsa_metadata.req_metadata
+                assert req_metadata is not None
+                req_metadata.cos, req_metadata.sin = req_metadata.cos.copy_to_buffers(
+                    self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
+                )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
+            pcp_cache_group_idx,
+            has_prefill,
         )
+        if local_common_attn_metadata.num_actual_tokens == 0:
+            # The placeholder request of an empty rank is graph padding too.
+            num_actual_reqs = 0
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
             num_actual_reqs,
@@ -2503,12 +2602,20 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             fast_build,
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+            full_graph_mode=full_graph_mode,
         )
+        # Replicated decode tokens stay in scheduler order on every PCP rank.
+        # The local metadata therefore describes the canonical cache update
+        # directly and can use the ordinary non-PCP DSA execution path.
+        if not needs_global_metadata:
+            return local_dsa_metadata
+
         return AscendDSAPCPMetadata.from_local_metadata(
             local_dsa_metadata,
             local_common_attn_metadata.num_input_tokens,
             pcp_context.hidden_restore_idx,
             global_dsa_metadata,
+            pcp_has_global_prefill=has_prefill,
         )
 
     def enable_device_metadata(self) -> None:
@@ -2524,15 +2631,283 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
 
 
 class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
-    """Run batched global DSA cache updates before rank-local PCP attention."""
+    """Use ordinary decode updates or global PCP prefill cache updates."""
 
     supports_pcp: ClassVar[bool] = True
+    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
         # PCP prepares replicated caches before local attention, leaving no
         # cache-update work for the auxiliary stream to overlap.
         self.multistream_dsv4_dsa_overlap = False
+
+        # V4 and V4.1 share this projector; the batch context selects its O path.
+        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
+
+        self._pcp_o_proj_weight_switches = None
+        self._pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        # Fall back to ordinary O weights if groups or quantization cannot be sharded.
+        pcp_size = get_pcp_group().world_size
+        try:
+            if self.n_local_groups % pcp_size != 0:
+                raise ValueError(f"n_local_groups={self.n_local_groups} is not divisible by pcp_size={pcp_size}")
+            self._get_pcp_weight_switch_method(self.wo_a)
+            self._get_pcp_weight_switch_method(self.wo_b)
+        except (RuntimeError, ValueError) as exc:
+            logger.warning_once(
+                "DSA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
+                exc,
+            )
+            self.enable_pcp_o_proj_weight_sharding = False
+            return
+
+        # Configure PCP weight loading before the model weights are loaded.
+        self._prepare_pcp_o_proj_weight_shards()
+        # Sharded decode needs exchange buffers allocated before graph capture.
+        if self._pcp_decode_sharded:
+            self._initialize_pcp_o_proj_exchange_buffers()
+
+    @staticmethod
+    def _get_pcp_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
+        quant_method = layer.quant_method
+        linear_method = getattr(quant_method, "quant_method", quant_method)
+        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
+            raise RuntimeError(
+                "DSA-PCP O-proj weight sharding requires a weight-switch capable method, "
+                f"got {type(linear_method).__name__}."
+            )
+        return linear_method
+
+    def _prepare_pcp_o_proj_weight_shards(self) -> None:
+        pcp_group = get_pcp_group()
+        if self.n_local_groups % pcp_group.world_size != 0:
+            raise ValueError(
+                "DSA-PCP O-proj weight sharding requires n_local_groups to be "
+                "divisible by the PCP size, got "
+                f"n_local_groups={self.n_local_groups}, pcp_size={pcp_group.world_size}."
+            )
+
+        self.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group)
+        load_partition = WeightLoadPartition.from_nested_groups(get_tp_group(), pcp_group)
+        self.wo_a_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_a)
+        self.wo_b_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_b)
+        self.wo_a_pcp_weight_method.prepare_layer_for_parallel_output_weight_load(
+            self.wo_a,
+            self.pcp_o_proj_weight_switch_config,
+            load_partition,
+        )
+        self.wo_b_pcp_weight_method.prepare_layer_for_parallel_weight_load(
+            self.wo_b,
+            self.pcp_o_proj_weight_switch_config,
+            load_partition,
+        )
+
+        # wo_a post-processing reshapes the raw output shard into a batched
+        # group layout. Keep its layer/method metadata aligned with the
+        # PCP-local resident shard; the attention implementation itself keeps
+        # the TP-local group count because runtime all-gather restores it.
+        local_groups = self.n_local_groups // pcp_group.world_size
+        self.wo_a.n_local_groups = local_groups
+        if hasattr(self.wo_a_pcp_weight_method, "n_local_groups"):
+            self.wo_a_pcp_weight_method.n_local_groups = local_groups
+
+    def _initialize_pcp_o_proj_exchange_buffers(self) -> None:
+        """Allocate activation-typed collective storage before graph capture."""
+        pcp_size = get_pcp_group().world_size
+        compilation_config = self.vllm_config.compilation_config
+        decode_query_len = 1 + self.vllm_config.num_speculative_tokens
+        capacity = max(
+            self.vllm_config.scheduler_config.max_num_seqs * decode_query_len,
+            compilation_config.max_cudagraph_capture_size or 0,
+            max(compilation_config.cudagraph_capture_sizes or [0]),
+        )
+        input_size = self.n_local_heads * self.head_dim
+        output_size = self.wo_b.output_size_per_partition
+        dtype = self.vllm_config.model_config.dtype
+        device = self.wo_b.weight.device
+        # Compatible layers share storage because O projections execute in
+        # sequence. Forward slices the active bucket without reallocating or
+        # sending the unused capacity; all HCCL addresses stay graph-stable.
+        shapes = {
+            "_pcp_o_proj_ag_in_buf": (capacity, input_size),
+            "_pcp_o_proj_ag_out_buf": (pcp_size * capacity, input_size),
+            "_pcp_o_proj_rs_in_buf": (pcp_size * capacity, output_size),
+            "_pcp_o_proj_rs_out_buf": (capacity, output_size),
+        }
+        for name, shape in shapes.items():
+            key = ("dsa_pcp_o_proj_decode", name, device, dtype, shape)
+            buffer = self.o_proj_full_pools.get(key)
+            if buffer is None:
+                buffer = torch.empty(shape, dtype=dtype, device=device)
+                self.o_proj_full_pools[key] = buffer
+            setattr(self, name, buffer)
+
+    def forward(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        attn_metadata: dsa_v1.DSAMetadataDict | None,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        metadata = next(iter(attn_metadata.values())) if attn_metadata is not None else None
+        pcp_metadata = metadata if isinstance(metadata, AscendDSAPCPMetadata) else None
+        # Global prefill must select the same collectives on every rank;
+        # a one-token prefill shard can look like DecodeOnly locally.
+        has_prefill = pcp_metadata is not None and pcp_metadata.pcp_has_global_prefill
+        with self._o_proj_batch(needs_global_metadata=pcp_metadata is not None, has_prefill=has_prefill):
+            result = super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+            # V4 returns after cache preparation on empty query ranks. They
+            # still project other owners' requests with their resident O groups.
+            # Keep this on the successful path, outside exception cleanup.
+            if (
+                self._pcp_o_proj_use_activation_exchange
+                and pcp_metadata is not None
+                and pcp_metadata.num_actual_tokens == 0
+            ):
+                o_proj_input = hidden_states.new_zeros(self._get_o_proj_input_shape(attn_metadata))
+                self._forward_o_proj(o_proj_input, output)
+                output.zero_()
+            return result
+
+    @contextmanager
+    def _o_proj_batch(
+        self,
+        needs_global_metadata: bool,
+        has_prefill: bool,
+    ) -> Generator[None, None, None]:
+        """Own the O-projection mode and weight lifetime for V4 and V4.1.
+
+        Callers translate their metadata into global batch facts before cache
+        preparation. Prefill gathers weights, sharded decode exchanges
+        activations, and replicated decode/profile uses resident local weights.
+        """
+        try:
+            self._pcp_o_proj_use_activation_exchange = (
+                self.enable_pcp_o_proj_weight_sharding
+                and needs_global_metadata
+                and self._pcp_decode_sharded
+                and not has_prefill
+            )
+            self._pcp_o_proj_use_full_weight = (
+                self.enable_pcp_o_proj_weight_sharding
+                and needs_global_metadata
+                and not self._pcp_o_proj_use_activation_exchange
+            )
+            # V4.1 calls O projection directly rather than DSA forward. Prepare
+            # persistent aliases during warmup, before either caller captures.
+            if self.enable_pcp_o_proj_weight_sharding:
+                self._get_pcp_o_proj_weight_switches()
+            yield
+        finally:
+            # An empty query rank or an early return may skip O projection.
+            # Drain launched weight gathers and restore resident shards.
+            if self.enable_pcp_o_proj_weight_sharding:
+                for layer, method, state in self._pcp_o_proj_weight_switches or ():
+                    if state.handles:
+                        method.wait_weight_all_gather(state)
+                    if self._pcp_o_proj_use_full_weight:
+                        method.switch_weight(layer, state, use_full_weight=False)
+
+    def _maybe_all_gather_pcp_o_proj_weights(self) -> None:
+        if not self._pcp_o_proj_use_full_weight:
+            return
+
+        for _, method, state in self._get_pcp_o_proj_weight_switches():
+            method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
+
+    def _get_pcp_o_proj_weight_switches(self):
+        if self._pcp_o_proj_weight_switches is None:
+            weight_switches = []
+            for name, layer, method in (
+                ("wo_a", self.wo_a, self.wo_a_pcp_weight_method),
+                ("wo_b", self.wo_b, self.wo_b_pcp_weight_method),
+            ):
+                state = method.enable_weight_switch(
+                    layer,
+                    self.pcp_o_proj_weight_switch_config,
+                    pool=AscendDSAPCPImpl.o_proj_full_pools,
+                    pool_key_prefix=(type(method).__qualname__, name, "dsa_pcp_o_proj"),
+                )
+                weight_switches.append((layer, method, state))
+            self._pcp_o_proj_weight_switches = tuple(weight_switches)
+        return self._pcp_o_proj_weight_switches
+
+    def _project_o_proj_with_local_weights(self, group_input: torch.Tensor) -> torch.Tensor:
+        """Project only the O groups owned by this PCP rank, then reduce TP."""
+        pcp_group = get_pcp_group()
+        projected = self._wo_a_bmm(group_input).reshape(group_input.shape[0], -1)
+        linear_method = self._get_pcp_weight_switch_method(self.wo_b)
+        if isinstance(linear_method, AscendLinearScheme):
+            tp_group = get_tp_group()
+            # The complete O-projection bias belongs to only one TP/PCP shard.
+            bias_rank = 0 if tp_group.rank_in_group == 0 and pcp_group.rank_in_group == 0 else 1
+            bias = self.wo_b.bias if bias_rank == 0 and not self.wo_b.skip_bias_add else None
+            partial_output = linear_method.apply(self.wo_b, projected, bias=bias, tp_rank=bias_rank)
+            if self.wo_b.reduce_results and tp_group.world_size > 1:
+                partial_output = tp_group.all_reduce(partial_output)
+        else:
+            partial_output = self.wo_b(projected)
+        return partial_output
+
+    def _forward_o_proj_with_local_weights(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        # Decode tokens and their KV cache updates are replicated across PCP
+        # ranks, so each rank projects the same attention output locally.
+        pcp_group = get_pcp_group()
+        num_tokens = o_proj_input.shape[0]
+        groups_per_rank = self.n_local_groups // pcp_group.world_size
+        group_input = o_proj_input.reshape(num_tokens, self.n_local_groups, -1)
+        group_input = group_input.narrow(1, pcp_group.rank_in_group * groups_per_rank, groups_per_rank).contiguous()
+
+        output[...] = pcp_group.all_reduce(self._project_o_proj_with_local_weights(group_input))
+        return output
+
+    def _forward_o_proj_with_sharded_tokens(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Gather decode tokens, project local O groups, and scatter sums."""
+        pcp_group = get_pcp_group()
+        num_tokens = o_proj_input.shape[0]
+        groups_per_rank = self.n_local_groups // pcp_group.world_size
+        group_hidden_dim = self.n_local_heads * self.head_dim // self.n_local_groups
+        local_rows = self._pcp_o_proj_ag_in_buf[:num_tokens]
+        local_rows.copy_(o_proj_input.reshape(num_tokens, -1))
+        global_rows = self._pcp_o_proj_ag_out_buf[: pcp_group.world_size * num_tokens]
+        # AllToAll reduces payload but adds a channel-packing transpose; measured
+        # small-batch decode showed no clear benefit, so use token AllGather.
+        dist.all_gather_into_tensor(global_rows, local_rows, group=pcp_group.device_group)
+        # Rank-major padded rows match ReduceScatter's token ownership. Select
+        # resident O groups after gathering to avoid packing channels to send.
+        group_input = global_rows.view(pcp_group.world_size * num_tokens, self.n_local_groups, group_hidden_dim)
+        group_input = group_input.narrow(1, pcp_group.rank_in_group * groups_per_rank, groups_per_rank).contiguous()
+        partial_output = self._project_o_proj_with_local_weights(group_input)
+        scatter_input = self._pcp_o_proj_rs_in_buf[: pcp_group.world_size * num_tokens]
+        scatter_input.copy_(partial_output)
+        reduced = self._pcp_o_proj_rs_out_buf[:num_tokens]
+        dist.reduce_scatter_tensor(reduced, scatter_input, group=pcp_group.device_group)
+        output.copy_(reduced)
+        return output
+
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return super()._forward_o_proj(o_proj_input, output)
+        if self._pcp_o_proj_use_activation_exchange:
+            return self._forward_o_proj_with_sharded_tokens(o_proj_input, output)
+        if not self._pcp_o_proj_use_full_weight:
+            return self._forward_o_proj_with_local_weights(o_proj_input, output)
+
+        weight_switches = self._get_pcp_o_proj_weight_switches()
+        for layer, method, state in weight_switches:
+            method.wait_weight_all_gather(state)
+            method.switch_weight(layer, state, use_full_weight=True)
+        try:
+            return super()._forward_o_proj(o_proj_input, output)
+        finally:
+            for layer, method, state in weight_switches:
+                method.switch_weight(layer, state, use_full_weight=False)
 
     def _gather_and_restore_hidden_states(
         self,
@@ -2568,6 +2943,9 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             1,
             self.nope_head_dim + self.rope_head_dim,
         )
+        # cos/sin/slot_mapping are built at the restored batch length -- padded
+        # for FULL graphs, actual tokens otherwise -- so they already match the
+        # kv rows and need no trimming here.
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1),
             req_metadata.cos[layer_name],
@@ -2626,9 +3004,15 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: dsa_v1.DSAMetadataDict,
     ) -> bool:
-        """Restore one global batch and update each replicated cache once."""
+        """Use ordinary decode updates or restore the global prefill batch."""
         pcp_metadata = next(iter(attn_metadata.values()))
-        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
+            return super()._prepare_caches_before_attention(
+                layer_name,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+            )
         global_hidden_states = self._gather_and_restore_hidden_states(
             hidden_states,
             pcp_metadata,
@@ -2671,6 +3055,10 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
                     kv_cache,
                     indexer_metadata,
                 )
+        # Every rank must join the weight gathers, including ranks that return
+        # before local attention. Launch after the cache collectives to overlap
+        # local attention on nonempty ranks.
+        self._maybe_all_gather_pcp_o_proj_weights()
         return True
 
     def _get_o_proj_input_shape(
@@ -2680,7 +3068,8 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         if attn_metadata is None:
             return super()._get_o_proj_input_shape(attn_metadata)
         pcp_metadata = next(iter(attn_metadata.values()))
-        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
+            return super()._get_o_proj_input_shape(attn_metadata)
         return (
             pcp_metadata.local_num_tokens_after_padding,
             self.n_local_heads,
@@ -2833,8 +3222,8 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
         main-KV and Indexer cache builders. Its dynamic ``seqused_k`` and
         ``cmp_residual_k`` inputs must have the same ownership: otherwise the
         builder that reuses the cached tiling tensor can expose its untouched
-        private buffers to the Indexer. Sharing the persistent pair also avoids
-        launching duplicate div/remainder work for the replicated Indexer.
+        private buffers to the Indexer. Refreshing the selected pair also keeps
+        reused tiling metadata consistent with the current request lengths.
         """
         buffers = metadata_cache.get(self._QLI_GLOBAL_LENGTH_BUFFERS_KEY)
         if buffers is None:
@@ -2918,9 +3307,7 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
             int(local_compressed_seq_lens_cpu.max().item()) * self.compressor_ratio if num_reqs else 0
         )
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-        max_seqlen_q = (
-            int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max().item()) if num_reqs else 0
-        )
+        max_seqlen_q = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max().item()) if num_reqs else 0
 
         def build_local_sas_metadata() -> None:
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -2992,8 +3379,7 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
         num_blocks = valid_block_ids.shape[0]
         rank_order = self.dcp_collective_rank_order[: self.dcp_size]
         compact_global_table = (
-            compact_local_table.unsqueeze(-1)
-            + (rank_order * num_blocks).view(1, 1, -1).to(compact_local_table)
+            compact_local_table.unsqueeze(-1) + (rank_order * num_blocks).view(1, 1, -1).to(compact_local_table)
         ).reshape(num_reqs, -1)
         req_metadata.dcp_prefill_kv_gather_block_ids = valid_block_ids
         req_metadata.dcp_prefill_kv_gather_block_table = compact_global_table.to(torch.int32)
@@ -3070,8 +3456,7 @@ def remap_dsa_c4_sparse_indices(
     """Map global C4 TopK indices into this rank's page-local cache view."""
     if global_topk_indices.dtype != torch.int32:
         raise RuntimeError(
-            "DSV4 C4 TopK indices must use int32 for the graph-stable remap buffers, "
-            f"got {global_topk_indices.dtype}."
+            f"DSV4 C4 TopK indices must use int32 for the graph-stable remap buffers, got {global_topk_indices.dtype}."
         )
     local_indices = req_metadata.dcp_local_cmp_sparse_indices
     chunk_out = req_metadata.dcp_local_remap_chunk_out
@@ -3139,12 +3524,7 @@ def forward_dsa_c4_local_attention(
     local_seqused_kv = c4_req_metadata.dcp_local_seqused_kv
     local_sas_metadata = c4_req_metadata.dcp_local_sas_metadata
     disabled_sinks = c4_req_metadata.dcp_cmp_only_sinks
-    if (
-        local_block_table is None
-        or local_seqused_kv is None
-        or local_sas_metadata is None
-        or disabled_sinks is None
-    ):
+    if local_block_table is None or local_seqused_kv is None or local_sas_metadata is None or disabled_sinks is None:
         raise RuntimeError("DSV4 C4-only attention metadata is incomplete.")
 
     local_topk_indices = remap_dsa_c4_sparse_indices(
@@ -3210,11 +3590,14 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-        if self.compress_ratio == 4 and self.dcp_size > 1 and (
-            kv_plan.uses_sparse_flash_mla or kv_plan.uses_kv_compress_epilog
+        if (
+            self.compress_ratio == 4
+            and self.dcp_size > 1
+            and (kv_plan.uses_sparse_flash_mla or kv_plan.uses_kv_compress_epilog or self.turboquant is not None)
         ):
             raise NotImplementedError(
-                "DeepSeek-V4 DSA DCP currently supports the Ascend A2 SCFA path only."
+                "DeepSeek-V4 DSA DCP currently supports the Ascend A2 SCFA path only; "
+                "TurboQuant KV cache is not supported."
             )
 
         if self.compress_ratio == 4 and self.dcp_size > 1:
@@ -3231,9 +3614,7 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
                     "Start the service with --no-enable-prefix-caching."
                 )
             if self.vllm_config.speculative_config is not None:
-                raise NotImplementedError(
-                    "DeepSeek-V4 DSA DCP phase one does not support speculative decoding."
-                )
+                raise NotImplementedError("DeepSeek-V4 DSA DCP phase one does not support speculative decoding.")
 
         self._last_dcp_local_seq_lens: torch.Tensor | None = None
         self._last_dcp_local_topk_indices: torch.Tensor | None = None
@@ -3260,15 +3641,12 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
             if common_attn_metadata is None:
                 common_attn_metadata = layer_metadata.swa
             if common_attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                raise NotImplementedError(
-                    "DeepSeek-V4 DSA DCP does not support speculative decoding now."
-                )
+                raise NotImplementedError("DeepSeek-V4 DSA DCP does not support speculative decoding now.")
             if common_attn_metadata.num_prefills == 0 and (
                 common_attn_metadata.attn_state != AscendAttentionState.DecodeOnly
             ):
                 raise NotImplementedError(
-                    "DeepSeek-V4 DSA DCP phase one supports ordinary prefill/mixed batches "
-                    "and standard decode only."
+                    "DeepSeek-V4 DSA DCP phase one supports ordinary prefill/mixed batches and standard decode only."
                 )
         return super().forward(
             layer_name,
@@ -3313,9 +3691,7 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
             gather_done = comm_stream.record_event()
         gathered_q.record_stream(main_stream)
 
-        self._last_dcp_q_gather_bytes = (
-            head_major_q.numel() * head_major_q.element_size() * (self.dcp_size - 1)
-        )
+        self._last_dcp_q_gather_bytes = head_major_q.numel() * head_major_q.element_size() * (self.dcp_size - 1)
         context.query_gather = DSAQueryGatherContext(
             gathered_head_major=gathered_q,
             completion_event=gather_done,
@@ -3356,9 +3732,7 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
             gather_done = comm_stream.record_event()
         gathered_kv.record_stream(main_stream)
 
-        self._last_dcp_prefill_kv_bytes = (
-            local_kv.numel() * local_kv.element_size() * (self.dcp_size - 1)
-        )
+        self._last_dcp_prefill_kv_bytes = local_kv.numel() * local_kv.element_size() * (self.dcp_size - 1)
         self._last_dcp_entered_kv_collective = True
         return DSAPrefillKVGatherContext(
             gathered_kv=gathered_kv,
@@ -3504,66 +3878,66 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
             )
 
         self._log_dcp_memory_once(compress_kv_cache, c4_req_metadata)
-        record_attention_compute_start()
-        c4_output, c4_lse = forward_dsa_c4_local_attention(
-            global_q,
-            compress_kv_cache,
-            swa_kv_cache,
-            compress_topk_idxs,
-            c4_req_metadata,
-            swa_req_metadata,
-            self.vllm_config,
-            self.dcp_size,
-            self.dcp_rank,
-            self.softmax_scale,
-        )
-        self._last_dcp_local_seq_lens = c4_req_metadata.dcp_local_compressed_seq_lens
-        self._last_dcp_local_topk_indices = c4_req_metadata.dcp_local_cmp_sparse_indices
-
-        # Move C4 partial output and its lossless packed FP32 LSE while the
-        # main stream computes the replicated SWA contribution exactly once.
-        main_stream = torch.npu.current_stream()
-        comm_stream = _dsv4_dcp_comm_stream()
-        c4_ready = main_stream.record_event()
-        c4_output.record_stream(comm_stream)
-        c4_lse.record_stream(comm_stream)
-        with torch.npu.stream(comm_stream):
-            comm_stream.wait_event(c4_ready)
-            c4_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
-                c4_output,
-                c4_lse,
+        with attention_transfer_window():
+            c4_output, c4_lse = forward_dsa_c4_local_attention(
+                global_q,
+                compress_kv_cache,
+                swa_kv_cache,
+                compress_topk_idxs,
+                c4_req_metadata,
+                swa_req_metadata,
+                self.vllm_config,
                 self.dcp_size,
-                1,
-                self.dcp_group.unique_name,
-                defer_combine=True,
+                self.dcp_rank,
+                self.softmax_scale,
             )
-            c4_comm_done = comm_stream.record_event()
-        c4_recv.record_stream(main_stream)
+            self._last_dcp_local_seq_lens = c4_req_metadata.dcp_local_compressed_seq_lens
+            self._last_dcp_local_topk_indices = c4_req_metadata.dcp_local_cmp_sparse_indices
 
-        lse_pack_dim = 4 if c4_output.dtype in (torch.bfloat16, torch.float16) else 1
-        self._last_dcp_output_lse_bytes = (
-            c4_output.shape[0]
-            * self.n_local_heads
-            * (c4_output.shape[-1] + lse_pack_dim)
-            * c4_output.element_size()
-            * (self.dcp_size - 1)
-        )
+            # Move C4 partial output and its lossless packed FP32 LSE while the
+            # main stream computes the replicated SWA contribution exactly once.
+            main_stream = torch.npu.current_stream()
+            comm_stream = _dsv4_dcp_comm_stream()
+            c4_ready = main_stream.record_event()
+            c4_output.record_stream(comm_stream)
+            c4_lse.record_stream(comm_stream)
+            with torch.npu.stream(comm_stream):
+                comm_stream.wait_event(c4_ready)
+                c4_recv = torch.ops.vllm.dcp_a2a_fused(
+                    c4_output,
+                    c4_lse,
+                    self.dcp_size,
+                    1,
+                    self.dcp_group.unique_name,
+                    defer_combine=True,
+                )
+                c4_comm_done = comm_stream.record_event()
+            c4_recv.record_stream(main_stream)
 
-        swa_output, swa_lse = self._forward_swa_local_attention(
-            q,
-            swa_kv_cache,
-            swa_req_metadata,
-        )
-        main_stream.wait_event(c4_comm_done)
-        output = fused_sfa_dcp_lse_combine(
-            c4_recv,
-            self.head_dim,
-            scatter_dim=1,
-            local_output=swa_output,
-            local_lse=swa_lse,
-        )
-        self._log_dcp_path_once("decode", c4_req_metadata, q.shape[0])
-        return output
+            lse_pack_dim = 4 if c4_output.dtype in (torch.bfloat16, torch.float16) else 1
+            self._last_dcp_output_lse_bytes = (
+                c4_output.shape[0]
+                * self.n_local_heads
+                * (c4_output.shape[-1] + lse_pack_dim)
+                * c4_output.element_size()
+                * (self.dcp_size - 1)
+            )
+
+            swa_output, swa_lse = self._forward_swa_local_attention(
+                q,
+                swa_kv_cache,
+                swa_req_metadata,
+            )
+            main_stream.wait_event(c4_comm_done)
+            output = fused_dcp_lse_combine(
+                c4_recv,
+                self.head_dim,
+                scatter_dim=1,
+                local_output=swa_output,
+                local_lse=swa_lse,
+            )
+            self._log_dcp_path_once("decode", c4_req_metadata, q.shape[0])
+            return output
 
     def _log_dcp_memory_once(
         self,

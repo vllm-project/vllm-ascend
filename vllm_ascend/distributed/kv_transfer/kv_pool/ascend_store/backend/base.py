@@ -98,7 +98,15 @@ class Backend(ABC):
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)
 
-    def batch_get_key_info(self, keys: list[str]):
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Return whether each key is committed and readable.
+
+        Layerwise backends may use different metadata and data planes to
+        determine readiness, so each supporting backend owns this mapping.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_is_readable")
+
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
@@ -150,7 +158,12 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+        """Store a batch, returning False for a detected backend failure.
+
+        A per-key boolean list preserves partial-success information. ``None``
+        remains valid for legacy backends that report failures by raising.
+        """
         pass
 
     @abstractmethod

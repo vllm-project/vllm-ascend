@@ -160,6 +160,35 @@ def test_dcp_one_keeps_combined_c4_indexer_group_and_legacy_swa_padding():
     assert specs["c4_state.0"].page_size_bytes == 576
 
 
+@pytest.mark.parametrize("runtime_dcp", [1, 2])
+def test_legacy_mtp_admission_preserves_main_bucket_count(runtime_dcp):
+    specs = _make_specs(dcp=1)
+    target = specs["c4_attn.0"]
+    specs = {name: spec for name, spec in specs.items() if not name.startswith("c4_attn.")}
+    specs.update({f"c4_attn.{index}": replace(target) for index in range(22)})
+    # A distinct MTP page bucket makes main's maximum bucket count (22)
+    # differ from the physical planner's target plus trailing slots (25).
+    specs.update({f"mtp_attn.{index}": replace(target, head_size=64) for index in range(3)})
+    groups = _make_groups(specs)
+    if runtime_dcp > 1:
+        # Ordinary SWA does not support DCP upstream. Full-history groups alone
+        # still exercise the legacy admission branch under a non-unit topology.
+        groups = [
+            group
+            for group in groups
+            if all(isinstance(spec, AscendMLAAttentionSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
+        ]
+    config = _make_config(dcp=runtime_dcp)
+    page_bytes = sum(kv_cache_utils_patch._page_sizes(groups[0].kv_cache_spec))
+    peak_blocks = sum(group.kv_cache_spec.max_memory_usage_pages(config) for group in groups)
+
+    assert max(kv_cache_utils_patch._get_max_layers_per_page_size(group.kv_cache_spec) for group in groups) == 22
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block(groups) == 25 * page_bytes
+    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) == (
+        22 * page_bytes * peak_blocks
+    )
+
+
 @pytest.mark.parametrize("with_mtp", [False, True])
 def test_dcp_planner_stride_includes_all_page_buckets_and_mtp(with_mtp):
     specs = _make_specs(with_mtp=with_mtp)

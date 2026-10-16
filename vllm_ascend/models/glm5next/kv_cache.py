@@ -25,6 +25,23 @@ def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
     return getattr(spec, "model_version", None) == "glm5_next"
 
 
+def get_kpool_tail_ring_capacity(vllm_config: VllmConfig, compress_ratio: int) -> int:
+    """Keep the open pool plus every not-yet-accepted speculative token.
+
+    Target verification writes all draft rows before rejection sampling is
+    known.  The first row is the already-sampled token and is committed; the
+    remaining ``num_speculative_tokens`` rows are lookahead.  Retaining that
+    lookahead in addition to one full pool prevents rejected rows from wrapping
+    around and destroying committed history that a replayed boundary token
+    still needs.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    lookahead = int(getattr(speculative_config, "num_speculative_tokens", 0) or 0)
+    if lookahead < 0:
+        raise ValueError(f"num_speculative_tokens must be nonnegative, got {lookahead}.")
+    return compress_ratio + lookahead
+
+
 def format_indexer_kpool_slot_mapping(
     slot_mapping: torch.Tensor,
     positions: torch.Tensor,
@@ -233,6 +250,7 @@ class KpoolTailManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 

@@ -106,10 +106,17 @@ class Ascend310PSampler:
     def add_request(
         self,
         req_idx: int,
-        prompt_len: int,
         sampling_params: SamplingParams,
     ) -> None:
-        del prompt_len
+        # vLLM #56497 dropped the prompt_len argument from
+        # Sampler.add_request (and added custom logits processors).
+        self._add_request_impl(req_idx, sampling_params)
+
+    def _add_request_impl(
+        self,
+        req_idx: int,
+        sampling_params: SamplingParams,
+    ) -> None:
         unsupported = []
         if sampling_params.min_p != 0.0:
             unsupported.append("min_p")

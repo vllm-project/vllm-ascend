@@ -10,7 +10,7 @@ import requests
 from modelscope import snapshot_download  # type: ignore
 
 if TYPE_CHECKING:
-    from tests.e2e.nightly.single_node.models.scripts.single_node_config import SingleNodeConfig
+    from tests.e2e.common.single_node.single_node_config import SingleNodeConfig
 
 DEFAULT_TEXT_PROMPT = "What is the content of this image?"
 

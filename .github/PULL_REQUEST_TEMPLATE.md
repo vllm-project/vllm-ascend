@@ -25,3 +25,28 @@ CI passed with new added/existing test.
 If it was tested in a way different from regular unit tests, please clarify how you tested step by step, ideally copy and paste-able, so that other reviewers can test and check, and descendants can verify in the future.
 If tests were not added, please describe why they were not added and/or why it was difficult to add.
 -->
+
+---
+
+### Checklist
+
+<!--
+Please go through the checklist below before requesting review.
+Tick the boxes that apply ([x]). If an item does not apply, leave it unchecked;
+optionally explain why in the PR description.
+-->
+
+#### Testing
+
+- [ ] **Boundary / edge-case coverage**: I reviewed whether this change involves
+  boundary conditions (e.g. empty input, single/zero element, min/max values,
+  off-by-one, sequence-length limits, integer overflow). Where applicable, I
+  added unit tests covering these edge cases in `tests/ut/` or `tests/e2e/`.
+- [ ] **Regression test**: If this PR fixes a bug, I added a regression test
+  that would fail without the fix.
+- [ ] **Error / failure path coverage**: I covered abnormal paths (exceptions,
+  timeouts, out-of-range, division by zero) in addition to the happy path.
+- [ ] **Meaningful & reliable tests**: New tests assert real behavior and are
+  not written merely to satisfy CI.
+- [ ] **Performance impact**: If this PR touches a performance-sensitive path,
+  I attached benchmark results and added performance regression tests.

@@ -296,14 +296,8 @@ msgstr ""
 msgid "Verify the health endpoint:"
 msgstr "验证健康检查端点："
 
-msgid "Expected output:"
-msgstr "预期输出："
-
 msgid "Verify that the configured model is available:"
 msgstr "验证配置的模型是否可用："
-
-msgid "Expected output:"
-msgstr "预期输出："
 
 msgid ""
 "An HTTP 200 response and a model entry whose `id` is `dsv4-vision` indicate\n"
@@ -437,3 +431,15 @@ msgstr ""
 "- 使用TP4 ACL Graph时，图捕获批大小必须是四的倍数。\n"
 "- DSpark使用目标端多模态Prefill，随后进行纯文本投机Decode；草稿模型不消费图像嵌入，\n"
 "  也不在图像跨度内提出token。"
+
+msgid "### 3.3 Verify Multi-node Communication (Optional)"
+msgstr "### 3.3 验证多节点通信（可选）"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，需要根据[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)进行验证。"

@@ -15,8 +15,8 @@
   1. Grid `(num_reqs, num_layers * num_state_types)` — `program_id(1)` indexes pre-flattened per-layer/per-state-type metadata directly. With `HAS_IDX_MAPPING` (V2 model runner / PP), `program_id(0)` is a batch row resolved to a request-state slot through `idx_mapping` (`-1` = skip sentinel).
   2. Load the per-request decision scalars, recompute the copy decision, and early-return when no copy is needed.
   3. Load the state metadata (base address, block stride, element size, inner size, conv width, group index), index the owning group's block table, and widen the src/dst block ids to int64 (block stride can exceed 2^31 bytes).
-  4. Byte-level copy loop in `COPY_BLOCK_SIZE` chunks: contiguous region for SD conv / temporal states; per-dim-row copy for DS conv `dim-first` layout.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by the Mamba speculative-decode decode step of hybrid GDN models (e.g. Qwen3-Next); works in both eager and graph-capture modes. Two version-gated variants live in the source file: vllm 0.27.1 (2D grid, output-buffer semantics after upstream #50432) and v0.26.0 (3D grid with `TEMPORAL_TILES`, which partitions the temporal copy across extra CTAs to keep cores filled at small batch).
+  4. Temporal states use `COPY_BLOCK_SIZE` uint64 elements per iteration when both addresses are 8-byte aligned, with a byte tail and a byte-copy fallback for unaligned addresses. SD conv keeps its contiguous byte-copy loop; DS conv `dim-first` layout copies per dimension row.
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. Used by the Mamba speculative-decode decode step of hybrid GDN models (e.g. Qwen3-Next); works in both eager and graph-capture modes. Two version-gated variants live in the source file: vllm 0.27.1 (2D grid, output-buffer semantics after upstream #50432) and v0.26.0 (3D grid with `TEMPORAL_TILES`, which partitions the temporal copy across extra CTAs to keep cores filled at small batch).
 
 ## Parameters
 
@@ -44,7 +44,7 @@
 | `idx_mapping_ptr` | Input | Optional `batch_idx -> req_idx` mapping for the V2 model runner / PP (required when `HAS_IDX_MAPPING`) | int32 / None | ND, per-batch |
 | `num_reqs` | Input (attribute) | Number of active batch rows (runtime value, not constexpr — avoids recompilation) | int32 | scalar |
 | `block_size` | Input (attribute) | Mamba cache block size, fixed after model init (constexpr) | int32 | scalar |
-| `COPY_BLOCK_SIZE` | Input (attribute) | Chunk size of the byte-copy loop (constexpr tuning parameter) | int32 | scalar |
+| `COPY_BLOCK_SIZE` | Input (attribute) | Elements per copy-loop iteration: uint64 for aligned temporal states, bytes otherwise (constexpr tuning parameter) | int32 | scalar |
 | `CONV_STATE_DIM_FIRST` | Input (attribute) | `True` when conv states use the DS `[block, dim, state_len]` layout (constexpr) | bool | scalar |
 | `HAS_IDX_MAPPING` | Input (attribute) | Resolve `program_id(0)` as batch index via `idx_mapping_ptr` (V2) instead of request index (constexpr, default `False`) | bool | scalar |
 | `PRECOMPUTED_NEW_COMPUTED` | Input (attribute) | `num_computed_tokens_ptr` already holds the post-step value (constexpr, default `False`) | bool | scalar |
@@ -72,4 +72,10 @@ The test drives the patched `run_fused_postprocess` path against an independent 
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_postprocess_mamba.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_postprocess_temporal_copy.py
 ```
+
+The temporal-copy tests compare exact bytes including page guards, aligned and
+unaligned addresses, zero-sized copies, byte tails, and multiple temporal tiles.
+Mixed conv/temporal tests change accepted counts, request mappings and copy
+decisions between graph replays while retaining persistent buffers.

@@ -23,13 +23,30 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
+    def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
+        kv_cache_spec = self.get_kv_cache_spec()
+        layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
+        if isinstance(kv_cache_spec, dict) and callable(layout_resolver):
+            groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+            share_slots = get_310p_shared_cache_slots(groups, layout_resolver()) if groups else {}
+        else:
+            share_slots = {}
+        if share_slots:
+            # Both 310P runners alias compatible Mamba groups at each slot,
+            # matching the v0.28 shared_by allocation.
+            logger.info_once("310P reuses uniform KV cache group slots without extra budget scaling.", scope="local")
+            return available_memory
+        return super()._scale_kv_cache_memory_for_multi_group(available_memory)
+
     def _create_model_runner(self):
         if self.use_v2_model_runner:
             from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2

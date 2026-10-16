@@ -56,20 +56,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
-
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
@@ -88,8 +75,7 @@ if(SOC_VERSION MATCHES "ascend310p.*")
 else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 endif()
 
 # Sparse KV cache offloading is currently supported on Atlas A3 only.
@@ -101,9 +87,10 @@ include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
   ${TORCH_INCLUDE_DIRS}
-  ${TORCH_NPU_PATH}/include
+  # Prefer the selected CANN toolkit headers over the ACL snapshot bundled in
+  # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
+  ${TORCH_NPU_PATH}/include
 )
 
 set(
@@ -172,6 +159,27 @@ else()
   else()
     message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
   endif()
+endif()
+
+# ECCPUConnector stores encoder-cache data in a shared mmap. Newer CANN releases
+# expose aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED), which turns those mmap
+# pages into real page-locked host memory. Keep the custom op available on older
+# CANN releases as well, but make it fail with an actionable error at runtime
+# instead of silently claiming that pageable memory is pinned.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    void* ptr = nullptr;
+    (void)aclrtHostRegisterV2(ptr, 0, ACL_HOST_REG_PINNED);
+    (void)aclrtHostUnregister;
+    return 0;
+  }
+" HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+if(HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+  message(STATUS "aclrtHostRegisterV2: pinned host registration available")
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_HOST_REGISTER_V2_PINNED)
+else()
+  message(STATUS "aclrtHostRegisterV2: pinned host registration unavailable; ECCPUConnector will be rejected")
 endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*")

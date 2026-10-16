@@ -23,8 +23,14 @@ class XliteWorker(NPUWorker):
     """Xlite worker bases on NPUWorker. Only xlite specified code should be added in this class."""
 
     def init_device(self):
-        """Override init_device to init xlite model runner"""
         self.device = self._init_device()
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
-        self.model_runner = XliteModelRunner(self.vllm_config, self.device)
+        self.xlite_runner = self.model_runner = XliteModelRunner(self.vllm_config, self.device)  # type: ignore[assignment]
+
+    def compile_or_warm_up_model(self):
+        # Currently, the xlite runner does not need explicit compile or warmup
+        if not hasattr(self, "xlite_runner"):
+            return super().compile_or_warm_up_model()
+        with self.xlite_runner._bypass_xlite_wrapper():
+            return super().compile_or_warm_up_model()

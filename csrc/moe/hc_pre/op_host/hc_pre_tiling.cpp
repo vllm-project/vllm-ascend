@@ -134,7 +134,9 @@ ge::graphStatus HcPreTiling::GetShapeAttrsInfoInner()
                              "hc_base size should be equal with mixhc, but is %ld", baseFirstDim),
                     return ge::GRAPH_FAILED);
 
+    // 可选输入 pre_mix: [bs, hc_mult] fp32
     tilingData_.set_hasPreMix(context_->GetInputShape(4) != nullptr ? 1 : 0);
+    // 可选输出 pre: 内部计算的 pre 结果拷出
     tilingData_.set_hasPreOut(context_->GetOutputShape(3) != nullptr ? 1 : 0);
 
     OPS_ERR_IF(GetAttr() != ge::GRAPH_SUCCESS,
@@ -261,6 +263,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
     tilingData_.set_d(d_);
     tilingData_.set_hcMultAlign(hcMultAlign_);
     tilingData_.set_rowOfFormerBlock(rowOfFormerBlock_);
+    tilingData_.set_rowOfTailBlock(rowOfTailBlock_);
     tilingData_.set_rowLoopOfFormerBlock(rowLoopOfFormerBlock_);
     tilingData_.set_rowLoopOfTailBlock(rowLoopOfTailBlock_);
     tilingData_.set_stage2RowFactor(rowFactor_);

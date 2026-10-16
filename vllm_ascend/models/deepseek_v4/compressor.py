@@ -66,11 +66,7 @@ class AscendCompressorStateCache(CompressorStateCache):
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         replication_size = get_dsv4_dcp_replication_size(vllm_config)
-        spec_cls = (
-            AscendDSAReplicatedSlidingWindowMLASpec
-            if replication_size > 1
-            else AscendSlidingWindowMLASpec
-        )
+        spec_cls = AscendDSAReplicatedSlidingWindowMLASpec if replication_size > 1 else AscendSlidingWindowMLASpec
         return spec_cls(
             block_size=self.block_size,
             num_kv_heads=1,

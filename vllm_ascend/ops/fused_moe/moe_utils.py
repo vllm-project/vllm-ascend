@@ -38,7 +38,7 @@ COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
-_CANN_MEGA_MOE_QUANT_MODE_None = 0
+_CANN_MEGA_MOE_QUANT_MODE_NONE = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 _CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
 # Constants adapt to A5 cann_ops_transformer mega moe operator.
@@ -53,7 +53,7 @@ _CANN_ACL_FLOAT4_E2M1 = 296
 _QUANT_SETTING_MAP: dict[QuantType, tuple[int, int | None, int | None]] = {
     QuantType.W8A8: (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8),
     QuantType.W4A8: (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4),
-    QuantType.NONE: (_CANN_MEGA_MOE_QUANT_MODE_None, None, None),
+    QuantType.NONE: (_CANN_MEGA_MOE_QUANT_MODE_NONE, None, None),
     QuantType.W8A8MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT8_E4M3FN),
     QuantType.W4A8MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT4_E2M1),
     QuantType.W4A4MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT4_E2M1, _CANN_ACL_FLOAT4_E2M1),
@@ -145,6 +145,22 @@ def load_cann_mega_moe_ops():
     ops_module = import_module("cann_ops_transformer.ops")
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe
+    # A5's communication extension is lazy-loaded by SymmBuffer. Compile it
+    # during initialization, before TorchDynamo / ACL graph capture starts.
+    try:
+        comm_context = import_module("cann_ops_transformer.ops.mc2.common.comm_context")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "cann_ops_transformer.ops.mc2",
+            "cann_ops_transformer.ops.mc2.common",
+            "cann_ops_transformer.ops.mc2.common.comm_context",
+        }:
+            raise
+        # Older CANN packages keep the communication extension at this path.
+        comm_context = import_module("cann_ops_transformer.ops.comm_context")
+        comm_context.CommContextManager._ensure_loaded()
+    else:
+        comm_context.comm_context_op_builder.load()
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
@@ -155,6 +171,8 @@ def select_mega_moe_activation_kwargs(
     activation_clamp: float | None,
     swiglu_alpha: float,
     swiglu_beta: float,
+    situ_beta: float | None = None,
+    situ_linear_beta: float | None = None,
 ) -> dict[str, object]:
     """Build activation kwargs compatible with the installed MegaMoe wrapper.
 
@@ -165,7 +183,8 @@ def select_mega_moe_activation_kwargs(
     """
     kwargs: dict[str, object] = {"activation_clamp": activation_clamp}
     activation_name = getattr(activation, "value", activation)
-    if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
+    is_situ = activation_name == "situ"
+    if not is_situ and activation_name not in ("swigluoai", "swigluoai_uninterleave"):
         return kwargs
 
     activation_parameter_pairs = (
@@ -203,6 +222,18 @@ def select_mega_moe_activation_kwargs(
         }
         parameter_names.update(name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata))
 
+    if is_situ:
+        if not {"activation", "activation_params"}.issubset(parameter_names):
+            raise RuntimeError(
+                "The installed CANN MegaMoe wrapper does not expose SiTU activation parameters. "
+                "Install a compatible cann_ops_transformer build or disable fused MC2."
+            )
+        # CANN calls SituAndMul 'situglu'. Omitting linear_beta preserves the
+        # unbounded up projection; passing zero would change the activation.
+        params = {"beta": 1.0 if situ_beta is None else situ_beta}
+        if situ_linear_beta is not None:
+            params["linear_beta"] = situ_linear_beta
+        return {"activation": "situglu", "activation_params": params}
     if {"activation", "activation_params"}.issubset(parameter_names):
         kwargs.update(
             activation="swigluoai",

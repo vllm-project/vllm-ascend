@@ -12,58 +12,56 @@ as the baseline (no offloading).
 """
 
 import pytest
+from vllm.outputs import RequestOutput
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request import utils as e2e_utils
-from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
+from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 MODEL = "Qwen/Qwen3-0.6B"
 
-_OFFLOAD_KEYS = {
-    "offload_backend",
-    "offload_group_size",
-    "offload_num_in_group",
-    "offload_prefetch_step",
-    "offload_params",
-    "cpu_offload_gb",
-}
+_NZ_GRAPH_SKIP_REASON = (
+    "NZ static buffers make the prefetch H2D copy a "
+    "cross-format (ND->NZ) conversion that is aclop-only on "
+    "CANN 9.0.0 and rejected during ACL graph capture; "
+    "AscendPrefetchOffloader fails fast with a clear error "
+    "for this combo. Remove this skip and the offloader "
+    "guard once the no-transdata prefetch path lands."
+)
 
 
-def _compare_offload_logprobs(
+def _eager_baseline_kwargs(nz_mode: int) -> dict:
+    return {
+        "model_name": MODEL,
+        "max_model_len": 512,
+        "enforce_eager": True,
+        "additional_config": {"weight_nz_mode": nz_mode},
+    }
+
+
+def _generate_eager_baseline(nz_mode: int) -> list[RequestOutput]:
+    with VllmRunner(**_eager_baseline_kwargs(nz_mode)) as runner:
+        return runner.model.generate(
+            prompts=PROMPTS_SHORT,
+            sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
+        )
+
+
+def _assert_offload_matches_baseline(
+    baseline_outputs: list[RequestOutput],
     runner_kwargs: dict,
-    prompts: list[str],
     atol: float = 0.0689,
     decode_atol: float | None = None,
     num_runs: int = 3,
 ) -> None:
-    """Compare prefetch/offload run against a no-offload eager baseline.
-
-    Unlike ``compare_logprobs``, this keeps ``additional_config`` (e.g.
-    ``weight_nz_mode``) on both sides and strips offload-related kwargs from
-    the baseline so accuracy of the offloader itself is exercised.
-
-    The offload runner generates ``num_runs`` times; each run must match
-    the same baseline outputs (stability across repeated inference).
-    """
+    """Generate with offload enabled and compare logprobs to a shared baseline."""
     if decode_atol is None:
         decode_atol = 2 * atol
 
-    baseline_kwargs = {k: v for k, v in runner_kwargs.items() if k not in _OFFLOAD_KEYS}
-    baseline_kwargs.pop("cudagraph_capture_sizes", None)
-    baseline_kwargs["enforce_eager"] = True
-
-    # baseline(eager, no offload)
-    with VllmRunner(**baseline_kwargs) as runner:
-        baseline_outputs = runner.model.generate(
-            prompts=prompts,
-            sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
-        )
-
-    # enabled offload: repeat generate and compare each run to baseline
     with VllmRunner(**runner_kwargs) as runner:
         for run_idx in range(num_runs):
             offload_outputs = runner.model.generate(
-                prompts=prompts,
+                prompts=PROMPTS_SHORT,
                 sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
             )
 
@@ -85,45 +83,7 @@ def _compare_offload_logprobs(
                     e2e_utils._check_decode_token(base_seq, offload_seq, token_idx, prompt_idx, decode_atol)
 
 
-# -------------------- Prefetch backend tests --------------------
-
-
-@pytest.mark.parametrize(
-    "enforce_eager, nz_mode",
-    [
-        pytest.param(True, 0, id="ND-eager"),
-        pytest.param(False, 0, id="ND-graph"),
-        pytest.param(True, 2, id="NZ-eager"),
-        # TODO(wangfiox): nz+graph not supported yet
-        pytest.param(
-            False,
-            2,
-            id="NZ-graph",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "NZ static buffers make the prefetch H2D copy a "
-                    "cross-format (ND->NZ) conversion that is aclop-only on "
-                    "CANN 9.0.0 and rejected during ACL graph capture; "
-                    "AscendPrefetchOffloader fails fast with a clear error "
-                    "for this combo. Remove this marker and the offloader "
-                    "guard once the no-transdata prefetch path lands."
-                ),
-            ),
-        ),
-    ],
-)
-@wait_until_npu_memory_free()
-def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
-    """Test prefetch CPU offloading across eager/graph × ND/NZ.
-
-    Compares outputs between:
-    1. Baseline (eager, no offloading, same weight_nz_mode)
-    2. Prefetch offloading (group_size=4, num_in_group=1)
-
-    NZ uses weight_nz_mode=2 so BF16 weights are converted to FRACTAL_NZ
-    (mode 1 only enables NZ for quantized weights).
-    """
+def _prefetch_kwargs(*, enforce_eager: bool, nz_mode: int) -> dict:
     runner_kwargs: dict = {
         "model_name": MODEL,
         "max_model_len": 512,
@@ -136,25 +96,53 @@ def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
         runner_kwargs["enforce_eager"] = True
     else:
         runner_kwargs["cudagraph_capture_sizes"] = [1, 2, 4, 8]
+    return runner_kwargs
 
-    _compare_offload_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
+
+# -------------------- Prefetch backend tests --------------------
 
 
 @wait_until_npu_memory_free()
-def test_prefetch_offload_selective_params():
-    """Test selective parameter offloading (MLP weights only).
+def test_prefetch_offload_nd_accuracy():
+    """ND prefetch offload vs one eager baseline (eager, graph, selective MLP)."""
+    baseline_outputs = _generate_eager_baseline(nz_mode=0)
 
-    Only offloads gate_up_proj and down_proj parameters, leaving
-    attention weights on NPU.
-    """
-    runner_kwargs = {
-        "model_name": MODEL,
-        "max_model_len": 512,
-        "enforce_eager": True,
-        "offload_backend": "prefetch",
-        "offload_group_size": 8,
-        "offload_num_in_group": 2,
-        "offload_prefetch_step": 1,
-        "offload_params": {"gate_up_proj", "down_proj"},
-    }
-    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=True, nz_mode=0),
+    )
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=False, nz_mode=0),
+    )
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        {
+            "model_name": MODEL,
+            "max_model_len": 512,
+            "enforce_eager": True,
+            "offload_backend": "prefetch",
+            "offload_group_size": 8,
+            "offload_num_in_group": 2,
+            "offload_prefetch_step": 1,
+            "offload_params": {"gate_up_proj", "down_proj"},
+            "additional_config": {"weight_nz_mode": 0},
+        },
+        num_runs=1,
+    )
+
+
+@wait_until_npu_memory_free()
+def test_prefetch_offload_nz_eager_accuracy():
+    """NZ prefetch offload vs one eager baseline. NZ-graph is skipped (unsupported)."""
+    baseline_outputs = _generate_eager_baseline(nz_mode=2)
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=True, nz_mode=2),
+    )
+
+
+@pytest.mark.skip(reason=_NZ_GRAPH_SKIP_REASON)
+def test_prefetch_offload_nz_graph_accuracy():
+    """Placeholder until NZ+graph prefetch is supported."""
+    raise AssertionError("NZ+graph prefetch should stay skipped")
