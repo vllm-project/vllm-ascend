@@ -199,7 +199,7 @@ class TestVllmAdaptor(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "EPLB expert weight shapes mismatch"):
             VllmEplbAdaptor(model)
 
-    def test_w4a8_mxfp_uses_nz_buffers_and_tensor_copy(self):
+    def test_w4a8_mxfp_uses_nz_buffers_and_memory_copy(self):
         key = (QuantType.W4A8MXFP, False)
         names = EPLB_EXPERT_WEIGHT_NAMES[key]
         expert_tensors = [torch.zeros(2, 2) for _ in names]
@@ -221,7 +221,17 @@ class TestVllmAdaptor(unittest.TestCase):
             buffer_tensor.fill_(index + 1)
         adaptor.expert_param_per_layer = {0: [expert_tensors]}
 
-        adaptor.do_update_expert_weight(0, 0, 0)
+        with patch(
+            "vllm_ascend.eplb.adaptor.vllm_adaptor.torch_npu.copy_memory_",
+            side_effect=lambda dst, src, **kwargs: dst.copy_(src),
+            create=True,
+        ) as mock_copy_memory:
+            adaptor.do_update_expert_weight(0, 0, 0)
+        self.assertEqual(mock_copy_memory.call_count, len(expert_tensors))
+        for actual_call, expert_tensor, buffer_tensor in zip(mock_copy_memory.call_args_list, expert_tensors, buffers):
+            self.assertIs(actual_call.args[0], expert_tensor)
+            self.assertIs(actual_call.args[1], buffer_tensor)
+            self.assertEqual(actual_call.kwargs, {"non_blocking": True})
         for expert_tensor, buffer_tensor in zip(expert_tensors, buffers):
             torch.testing.assert_close(expert_tensor, buffer_tensor)
 

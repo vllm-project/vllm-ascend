@@ -236,7 +236,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[layer_id][local_expert_to_replace],
             self.buffer_tensor_list[expert_weight_key][buffer_tensor_id],
         ):
-            expert_tensor.copy_(buffer_tensor)
+            torch_npu.copy_memory_(expert_tensor, buffer_tensor, non_blocking=True)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
