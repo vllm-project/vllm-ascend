@@ -31,8 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding, pair_mxfp_scales
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg, get_mxfp_tp_padding, pair_mxfp_scales
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     FP8_METHOD,

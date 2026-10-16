@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding, pair_mxfp_scales
+from vllm_ascend.quantization.utils import get_mxfp_tp_padding, pair_mxfp_scales
 
 
 class TestMXFPUtils(unittest.TestCase):

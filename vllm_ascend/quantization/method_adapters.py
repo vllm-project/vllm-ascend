@@ -26,7 +26,7 @@ from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorSca
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
-from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding
+from vllm_ascend.quantization.utils import get_mxfp_tp_padding
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
