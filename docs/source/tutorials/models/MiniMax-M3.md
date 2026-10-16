@@ -12,7 +12,7 @@ MiniMax-M3 is a multimodal large language model that supports text, image, and v
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
-This document is written based on the vLLM-Ascend v0.30.0 release. This model is supported in this release.
+This document is written based on the vLLM-Ascend main branch. This model is supported on this branch.
 
 ## 2 Supported Features
 
