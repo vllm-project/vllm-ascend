@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from statistics import median
 from types import SimpleNamespace
@@ -32,18 +33,25 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
     connectors = (("production", "production", "module"), ("v1", "v1", "module"))
 
     def exercise(path, model, tokenizer, inputs, warmup, connector, observations, **kwargs):
+        diagnostic = kwargs.pop("after_measurements")
         assert kwargs == {"use_layerwise": True, "worker_extension": "layerwise-extension"}
         assert path.is_dir()
         launches.append(connector[0])
         observations.append({"cold_store": {}, "external_load": {}})
         if connector[0] == failure:
             raise AssertionError("Injected serving failure")
+        if connector[0] == "v1":
+            assert diagnostic is not None
+            diagnostic("server")
+        else:
+            assert diagnostic is None
 
     compare = Mock(return_value={"output_and_performance_comparison": True})
 
     namespace: dict[str, Any] = {
         "Path": Path,
         "Any": object,
+        "partial": partial,
         "shutil": SimpleNamespace(which=lambda _: "master"),
         "MODEL": "model",
         "maybe_model_redirect": lambda model: model,
@@ -54,6 +62,7 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
         "CROSSOVER_RUNS": connectors + connectors[::-1],
         "LAYERWISE_WORKER_EXTENSION": "layerwise-extension",
         "_exercise_connector": exercise,
+        "_diagnose_external_load": lambda server, **kwargs: kwargs["run"]["external_load_diagnostic"].update(done=True),
         "compare_runs": compare,
         "time": SimpleNamespace(monotonic=lambda: 1),
         "write_report": lambda *args: reports.append(args[-1]),
@@ -65,6 +74,12 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
         assert launches == ["production", "v1", "v1", "production"]
         assert reports[0]["status"] == "measured"
         assert reports[0]["comparisons"] == compare.return_value
+        assert [run.get("external_load_diagnostic") for run in reports[0]["runs"]] == [
+            None,
+            {"done": True},
+            {"done": True},
+            None,
+        ]
         compare.assert_called_once_with(reports[0]["runs"])
     else:
         with pytest.raises(AssertionError, match="Injected serving failure"):
