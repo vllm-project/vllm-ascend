@@ -31,6 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding, pair_mxfp_scales
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -194,9 +195,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         prefix_padding = suffix_padding = 0
         if isinstance(layer, RowParallelLinear):
-            global_start = layer.tp_rank * layer.input_size_per_partition
-            prefix_padding = global_start % self.group_size
-            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+            prefix_padding, suffix_padding = get_mxfp_tp_padding(
+                layer.input_size_per_partition, self.group_size, layer.tp_rank
+            )
         layer.mxfp8_tp_padding = (prefix_padding, suffix_padding)
 
         padded_weight = layer.weight.data
@@ -208,14 +209,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
                 value=0,
             )
 
-        n_dim, k_dim = layer.weight_scale.data.shape
-        # Shape should be padded if it cannot be divided by 2
-        if layer.weight_scale.data.shape[-1] % 2 != 0:
-            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
-            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
-        else:
-            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        target_scale = reshaped_scale.transpose(0, 1)
+        target_scale = pair_mxfp_scales(layer.weight_scale.data).transpose(0, 1)
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.

@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding, pair_mxfp_scales
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
@@ -181,9 +182,9 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         # same positions, so these zero-valued entries do not change the GEMM.
         prefix_padding = suffix_padding = 0
         if isinstance(layer, RowParallelLinear):
-            global_start = layer.tp_rank * layer.input_size_per_partition
-            prefix_padding = global_start % self.group_size
-            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+            prefix_padding, suffix_padding = get_mxfp_tp_padding(
+                layer.input_size_per_partition, self.group_size, layer.tp_rank
+            )
             # Packed FP4 stores two logical K values per byte, so logical
             # padding is halved when applied to the packed weight tensor.
             if prefix_padding % 2 != 0 or suffix_padding % 2 != 0:
@@ -197,13 +198,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
                 )
         layer.mxfp4_tp_padding = (prefix_padding, suffix_padding)
 
-        n_dim, k_dim = layer.weight_scale.data.shape
-        # Shape should be padded if it cannot be divided by 2
-        if k_dim % 2 != 0:
-            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
-        else:
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        layer.weight_scale.data = pair_mxfp_scales(layer.weight_scale.data)
         # Keep packed MXFP4 weights in ND, even when weight_nz_mode is enabled.
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
@@ -321,19 +316,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         _rename_packed_weight_parameter(layer, "w13_weight")
         _rename_packed_weight_parameter(layer, "w2_weight")
 
-        g_num, n_size, k_size = layer.w13_weight_scale.shape
-        # The NPU scale layout packs two adjacent MX scales together. Append
-        # one neutral entry when a valid local shard contains an odd count.
-        if k_size % 2 != 0:
-            layer.w13_weight_scale.data = F.pad(layer.w13_weight_scale.data, (0, 1), mode="constant", value=0)
-            k_size += 1
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        g_num, n_size, k_size = layer.w2_weight_scale.shape
-        # Apply the same pair-alignment rule independently to the down weight.
-        if k_size % 2 != 0:
-            layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
-            k_size += 1
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        layer.w13_weight_scale.data = pair_mxfp_scales(layer.w13_weight_scale.data)
+        layer.w2_weight_scale.data = pair_mxfp_scales(layer.w2_weight_scale.data)
         # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
         # (out, in) layout — weight1=(E, 2*inter, hidden//2), weight2=(E,
         # hidden, inter//2) for packed FP4 — and the reshaped (not transposed)

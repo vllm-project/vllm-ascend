@@ -32,6 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding, pair_mxfp_scales
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
 
 from ..base import (
@@ -192,9 +193,9 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             }
         prefix_padding = suffix_padding = 0
         if isinstance(layer, RowParallelLinear) and layer.tp_size > 1:
-            global_start = layer.tp_rank * layer.input_size_per_partition
-            prefix_padding = global_start % self.group_size
-            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+            prefix_padding, suffix_padding = get_mxfp_tp_padding(
+                layer.input_size_per_partition, self.group_size, layer.tp_rank
+            )
         layer.mxfp4_tp_padding = (prefix_padding, suffix_padding)
         padded_weight = layer.weight.data
         if prefix_padding or suffix_padding:
@@ -207,13 +208,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             input_dtype=torch_npu.float4_e2m1fn_x2,
         )
         layer.weight.data = layer.weight.data.transpose(-1, -2)
-        n, k = layer.weight_scale.shape
-        # MX scales are paired in the Weight-NZ layout. Preserve the final
-        # partial group (e.g. ViT K=4304) and pad only the unused scale byte.
-        if k % 2:
-            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1))
-            k += 1
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
+        layer.weight_scale.data = pair_mxfp_scales(layer.weight_scale.data).transpose(-3, -2)
         layer._mxfp4_transformed = True
 
     def restore_weights_for_rl_loading(self, layer):
