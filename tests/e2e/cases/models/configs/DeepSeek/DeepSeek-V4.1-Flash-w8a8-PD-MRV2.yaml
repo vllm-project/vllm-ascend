@@ -1,4 +1,4 @@
-test_name: "DeepSeek-V4.1-Flash-w8a8-PD-prefix-MRV2"
+test_name: "DeepSeek-V4.1-Flash-w8a8-PD-MRV2"
 model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
