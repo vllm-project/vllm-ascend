@@ -20,7 +20,7 @@ kv_pool:
       ock.mmc.log_level: error
     local:
       ock.mmc.log_level: error
-      ock.mmc.local_service.world_size: 64
+      ock.mmc.local_service.world_size: 16
       ock.mmc.local_service.protocol: device_sdma
       ock.mmc.local_service.dram.size: 5GB
 
