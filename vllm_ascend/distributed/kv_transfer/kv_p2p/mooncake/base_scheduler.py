@@ -186,6 +186,7 @@ class MooncakeBaseConnectorScheduler:
 
     def shutdown(self) -> None:
         """Release scheduler-side resources when the engine shuts down."""
+        raise NotImplementedError
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
