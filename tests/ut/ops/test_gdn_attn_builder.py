@@ -173,7 +173,6 @@ def _make_vllm_config(
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
-            static_forward_context={},
         ),
         speculative_config=speculative_config,
         use_v2_model_runner=False,

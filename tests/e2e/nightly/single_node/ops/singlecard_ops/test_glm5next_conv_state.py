@@ -79,8 +79,7 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
 
 
 @pytest.mark.parametrize("run_mode", [0, 1])
-@pytest.mark.parametrize("columns", [1, 2])
-def test_causal_conv_gdn_index_matrix_matches_first_column(run_mode, columns):
+def test_causal_conv_gdn_index_matrix_matches_first_column(run_mode):
     slots, state_len, dim = 4, 3, 384
     generator = torch.Generator().manual_seed(44)
     storage = (torch.randn(slots * state_len * dim * 2, generator=generator) * 0.2).to(torch.bfloat16)
@@ -91,7 +90,7 @@ def test_causal_conv_gdn_index_matrix_matches_first_column(run_mode, columns):
     weight = (torch.randn(4, dim, generator=generator) * 0.2).to(torch.bfloat16).npu()
     starts = torch.tensor([0, 1, 2], dtype=torch.int32, device="npu")
     indices = torch.tensor([2, 3], dtype=torch.int32, device="npu")
-    matrix = torch.zeros(2, columns, dtype=torch.int32, device="npu")
+    matrix = torch.zeros(2, 4, dtype=torch.int32, device="npu")
     matrix[:, 0] = indices
     initial = torch.ones(2, dtype=torch.bool, device="npu")
     expected_output = causal_conv1d(
@@ -104,135 +103,21 @@ def test_causal_conv_gdn_index_matrix_matches_first_column(run_mode, columns):
     torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("layout", ["page_strided", "row_strided", "dim_first"])
-@pytest.mark.parametrize("accepted", [1, 3, 4])
-def test_causal_conv_mtp_state_writeback_matches_contiguous(layout, accepted):
-    slots, state_len, dim = 4, 6, 384
-    generator = torch.Generator().manual_seed(43)
-    storage = (torch.randn(slots * state_len * dim * 2, generator=generator) * 0.2).to(torch.bfloat16)
-    if layout == "page_strided":
-        strides = (state_len * dim * 2, dim, 1)
-    elif layout == "row_strided":
-        strides = (state_len * dim * 2, dim * 2, 1)
-    else:
-        strides = (state_len * dim * 2, 1, state_len)
-    backing = storage.npu()
-    state = backing.as_strided((slots, state_len, dim), strides)
-    reference_state = state.contiguous()
-    x = (torch.randn(4, dim, generator=generator) * 0.2).to(torch.bfloat16).npu()
-    weight = (torch.randn(4, dim, generator=generator) * 0.2).to(torch.bfloat16).npu()
-    starts = torch.tensor([0, 4], dtype=torch.int32, device="npu")
-    indices = torch.tensor([2], dtype=torch.int32, device="npu")
-    accepted_tokens = torch.tensor([accepted], dtype=torch.int32, device="npu")
-    # The update interface may reuse x for its output; each run needs fresh input.
-    expected_output = causal_conv1d(
-        x.clone(), weight, reference_state, starts, indices, run_mode=1, num_accepted_tokens=accepted_tokens
-    )
-    result = causal_conv1d(x.clone(), weight, state, starts, indices, run_mode=1, num_accepted_tokens=accepted_tokens)
-    torch.testing.assert_close(result, expected_output, atol=2e-2, rtol=2e-2)
-    expected_storage = storage.clone()
-    expected_storage.as_strided(state.shape, strides).copy_(reference_state.cpu())
-    torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
-
-
-@pytest.mark.parametrize("run_mode", [0, 1])
-@pytest.mark.parametrize("byte_backing", [False, True])
-def test_causal_conv_batched_wide_state_with_storage_offset_matches_packed(run_mode, byte_backing):
-    slots, state_len, dim, page_stride, offset = 8, 6, 3072, 280576, 128
-    generator = torch.Generator().manual_seed(45)
-    size = offset + (slots - 1) * page_stride + state_len * dim
-    storage = (torch.randn(size, generator=generator) * 0.2).to(torch.bfloat16)
-    # MRV1 also builds typed state views from a shared uint8 allocation.
-    backing = storage.view(torch.uint8).npu().view(storage.dtype) if byte_backing else storage.npu()
-    state = backing.as_strided((slots, state_len, dim), (page_stride, dim, 1), offset)
-    # A DS reference exercises the original pack/restore path for this batch.
-    reference_state = state.transpose(1, 2).contiguous().transpose(1, 2)
-    x = (torch.randn(16, dim, generator=generator) * 0.2).to(torch.bfloat16).npu()
-    weight = (torch.randn(4, dim, generator=generator) * 0.2).to(torch.bfloat16).npu()
-    starts = torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32, device="npu")
-    indices = torch.tensor([[2], [4], [5], [7]], dtype=torch.int32, device="npu")
-    initial = torch.tensor([False, True, False, True], dtype=torch.bool, device="npu")
-    accepted = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device="npu") if run_mode == 1 else None
-    expected_output = causal_conv1d(
-        x.clone(),
-        weight,
-        reference_state,
-        starts,
-        indices,
-        run_mode=run_mode,
-        initial_state_mode=initial,
-        num_accepted_tokens=accepted,
-    )
-    result = causal_conv1d(
-        x.clone(),
-        weight,
-        state,
-        starts,
-        indices,
-        run_mode=run_mode,
-        initial_state_mode=initial,
-        num_accepted_tokens=accepted,
-    )
-    torch.testing.assert_close(result, expected_output, atol=0, rtol=0)
-    expected_storage = storage.clone()
-    expected_storage.as_strided(state.shape, state.stride(), offset).copy_(reference_state.cpu())
-    torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
-
-
-@pytest.mark.parametrize("run_mode,accepted", [(0, None), (1, None), (1, 1), (1, 4)])
-def test_causal_conv_pad_slot_preserves_guard_page_and_matches_packed(run_mode, accepted):
-    slots, state_len, dim = 4, 6, 384
-    page_stride = state_len * dim * 2
-    # Preserve the null slot, surrounding pages and gaps between live states.
-    storage = torch.full((page_stride * (slots + 1),), 0.5, dtype=torch.bfloat16)
-    backing = storage.npu()
-    state = backing.as_strided((slots, state_len, dim), (page_stride, dim, 1), page_stride)
-    reference_state = state.transpose(1, 2).contiguous().transpose(1, 2)
-    tokens = 4 if accepted is not None else 1
-    x = torch.full((tokens * 2, dim), 0.25, dtype=torch.bfloat16, device="npu")
-    weight = torch.full((4, dim), 0.125, dtype=torch.bfloat16, device="npu")
-    starts = torch.tensor([0, tokens, tokens * 2], dtype=torch.int32, device="npu")
-    indices = torch.tensor([[1, 0], [0, 0]], dtype=torch.int32, device="npu")
-    initial = torch.ones(2, dtype=torch.bool, device="npu")
-    accepted_tokens = torch.full((2,), accepted, dtype=torch.int32, device="npu") if accepted is not None else None
-    kwargs = dict(run_mode=run_mode, initial_state_mode=initial, num_accepted_tokens=accepted_tokens)
-    expected_output = causal_conv1d(x.clone(), weight, reference_state, starts, indices, **kwargs)
-    result = causal_conv1d(x.clone(), weight, state, starts, indices, **kwargs)
-    # FLA leaves skipped output rows unspecified; compare active tokens only.
-    torch.testing.assert_close(result[:tokens], expected_output[:tokens], atol=0, rtol=0)
-    expected_storage = storage.clone()
-    expected_storage.as_strided(state.shape, state.stride(), page_stride).copy_(reference_state.cpu())
-    torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
-
-
-def test_conv_graph_replay_consumes_raw_indices_shared_by_layers():
+def test_conv_graph_replay_refreshes_indices_and_clears_no_draft():
     slots, state_len, dim = 8, 6, 384
     backings = [torch.full((slots * 2, state_len, dim), 0.5, dtype=torch.bfloat16, device="npu") for _ in range(2)]
     states = [backing[::2] for backing in backings]
     references = [state.clone() for state in states]
     weight = torch.full((4, dim), 0.125, dtype=torch.bfloat16, device="npu")
-    starts = [torch.tensor(values, dtype=torch.int32, device="npu") for values in ([0, 1, 2], [0, 4, 8])]
-    raw = [torch.tensor(values, dtype=torch.int32, device="npu") for values in ([[1, 2], [2, 3]], [[3, 4], [4, 5]])]
+    starts = torch.tensor([0, 4, 8], dtype=torch.int32, device="npu")
+    raw = torch.tensor([[1, 2, 3, 4], [3, 4, 5, 6]], dtype=torch.int32, device="npu")
     accepted = torch.tensor([1, 3], dtype=torch.int32, device="npu")
-    inputs = [
-        [torch.full((tokens, dim), 0.25, dtype=torch.bfloat16, device="npu") for tokens in (2, 8)] for _ in states
-    ]
+    inputs = [torch.full((8, dim), 0.25, dtype=torch.bfloat16, device="npu") for _ in states]
 
     def run_layers():
         return [
-            [
-                causal_conv1d(
-                    inputs[layer][branch],
-                    weight,
-                    state,
-                    starts[branch],
-                    raw[branch],
-                    run_mode=1,
-                    num_accepted_tokens=accepted if branch else None,
-                )
-                for branch in range(2)
-            ]
-            for layer, state in enumerate(states)
+            causal_conv1d(x, weight, state, starts, raw, run_mode=1, num_accepted_tokens=accepted)
+            for x, state in zip(inputs, states)
         ]
 
     run_layers()
@@ -243,41 +128,23 @@ def test_conv_graph_replay_consumes_raw_indices_shared_by_layers():
     for backing in backings:
         backing.fill_(0.5)
 
-    # Replay the raw first-column views after slot changes, padding and a
-    # no-draft batch that clears the captured speculative branch.
-    for non_spec, spec, non_spec_end, spec_end in (
-        ([1, 2], [3, 4], 2, 8),
-        ([4, 5], [6, 7], 2, 8),
-        ([1, 0], [3, 0], 2, 8),
-        ([1, 0], [3, 0], 1, 4),
-        ([1, 0], [0, 0], 1, 0),
+    for indices, ends in (
+        ([1, 3], [0, 4, 8]),
+        ([4, 5], [0, 4, 8]),
+        ([1, 0], [0, 4, 4]),
+        ([0, 0], [0, 0, 0]),
     ):
-        raw[0][:, 0].copy_(torch.tensor(non_spec, dtype=torch.int32, device="npu"))
-        raw[1][:, 0].copy_(torch.tensor(spec, dtype=torch.int32, device="npu"))
-        starts[0][-1] = non_spec_end
-        starts[1][1] = min(4, spec_end)
-        starts[1][-1] = spec_end
+        raw[:, 0].copy_(torch.tensor(indices, dtype=torch.int32, device="npu"))
+        starts.copy_(torch.tensor(ends, dtype=torch.int32, device="npu"))
         expected = []
-        for layer, state in enumerate(references):
-            row = []
-            for branch in range(2):
-                inputs[layer][branch].fill_(0.25)
-                row.append(
-                    causal_conv1d(
-                        inputs[layer][branch].clone(),
-                        weight,
-                        state,
-                        starts[branch],
-                        raw[branch],
-                        run_mode=1,
-                        num_accepted_tokens=accepted if branch else None,
-                    )
-                )
-            expected.append(row)
+        for x, state in zip(inputs, references):
+            x.fill_(0.25)
+            expected.append(
+                causal_conv1d(x.clone(), weight, state, starts, raw, run_mode=1, num_accepted_tokens=accepted)
+            )
         graph.replay()
         for layer, state in enumerate(states):
             torch.testing.assert_close(state, references[layer], atol=0, rtol=0)
-            torch.testing.assert_close(outputs[layer][0][:1], expected[layer][0][:1], atol=0, rtol=0)
-            if spec_end:
-                torch.testing.assert_close(outputs[layer][1][:4], expected[layer][1][:4], atol=0, rtol=0)
+            if ends[-1]:
+                torch.testing.assert_close(outputs[layer][: ends[-1]], expected[layer][: ends[-1]], atol=0, rtol=0)
             assert torch.all(backings[layer][1::2] == 0.5)

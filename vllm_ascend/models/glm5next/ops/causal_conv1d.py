@@ -24,7 +24,7 @@ def causal_conv1d(
     if cache_indices.shape[0] == 0:
         return torch.zeros_like(x)
     kernel_state = conv_state
-    # FLA requires 1D indices. ACLNN still copies a strided column internally.
+    # Match Kimi K3: pass one contiguous cache index per request to AscendC.
     kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
     null_block_id = NULL_BLOCK_ID
     # AscendC reads and updates page-strided SD states in place. Only stage
@@ -39,6 +39,7 @@ def causal_conv1d(
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
         # Packed row zero is live; the gather kernel uses requests for padding.
         null_block_id = requests
+    kernel_indices = kernel_indices.contiguous()
     if run_mode == 0:
         result = causal_conv1d_fn(
             x,
