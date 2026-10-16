@@ -1,5 +1,6 @@
-"""Tests for Ascend-specific MultiConnector allocation fan-out."""
+"""Tests for Ascend-specific MultiConnector configuration and allocation fan-out."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -8,10 +9,53 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.config import KVTransferConfig  # noqa: E402
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory  # noqa: E402
+
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
     AscendMultiConnector,
     MultiConnector,
 )
+
+
+@pytest.mark.parametrize("child_engine_id", [None, "parent", "child"])
+def test_cache_layout_query_preserves_child_engine_id_override(child_engine_id):
+    children = [
+        {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer"},
+        {"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer"},
+    ]
+    if child_engine_id is not None:
+        children[1]["engine_id"] = child_engine_id
+    original_children = deepcopy(children)
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_producer",
+        engine_id="parent",
+        kv_connector_extra_config={"connectors": children},
+    )
+    config = SimpleNamespace(kv_transfer_config=transfer)
+    child_connector = MagicMock()
+    child_connector.get_required_kvcache_layout.return_value = "NHD"
+
+    with patch.object(KVConnectorFactory, "get_connector_class", return_value=child_connector) as factory:
+        assert AscendMultiConnector.get_required_kvcache_layout(config) == "NHD"
+
+    resolved_configs = [args.args[0] for args in child_connector.get_required_kvcache_layout.call_args_list]
+    assert [item.kv_transfer_config.engine_id for item in resolved_configs] == [
+        "parent",
+        child_engine_id if child_engine_id is not None else "parent",
+    ]
+    assert [item.kv_transfer_config.kv_connector for item in resolved_configs] == [
+        "AscendStoreConnector",
+        "MooncakeHybridConnector",
+    ]
+    assert factory.call_count == 2
+    assert resolved_configs[0] is not config
+    assert resolved_configs[1] is not config
+    assert resolved_configs[0] is not resolved_configs[1]
+    assert config.kv_transfer_config is transfer
+    assert transfer.engine_id == "parent"
+    assert children == original_children
 
 
 @pytest.mark.parametrize(

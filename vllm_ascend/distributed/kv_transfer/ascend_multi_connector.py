@@ -1,5 +1,8 @@
+import copy
 from typing import TYPE_CHECKING, Any, cast
 
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
@@ -13,12 +16,35 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBaseType
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type["KVConnectorBaseType"], "VllmConfig"]]:
+        """Build child configs with explicit engine IDs overriding the parent default."""
+        assert vllm_config.kv_transfer_config is not None
+        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get("connectors")
+        assert ktcs is not None
+        ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
+        for ktc in ktcs:
+            temp_config = copy.copy(vllm_config)
+            engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
+            # Merge before unpacking so an explicit child engine_id is passed only once.
+            temp_config.kv_transfer_config = KVTransferConfig(**{"engine_id": engine_id, **ktc})
+            ret.append(
+                (
+                    KVConnectorFactory.get_connector_class(temp_config.kv_transfer_config),
+                    temp_config,
+                )
+            )
+        return ret
+
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
         super().__init__(
             vllm_config=vllm_config,
