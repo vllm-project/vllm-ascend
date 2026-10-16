@@ -549,8 +549,8 @@ class AscendConfig:
       options consumed by the factory before schema validation.
     - ``refresh`` forces reconstruction of the cached singleton config.
     - Pure-derived fields computed automatically and not user-settable:
-      ``enable_sp_by_pass``, ``pd_tp_ratio``, ``pd_head_ratio``,
-      ``num_head_replica``.
+      ``enable_sp_by_pass``, ``enable_dense_sp``, ``pd_tp_ratio``,
+      ``pd_head_ratio``, ``num_head_replica``.
     - Deprecated top-level scheduler keys (``enable_balance_scheduling``,
       ``recompute_scheduler_enable``, ``short_request_first_config``,
       ``profiling_chunk_config``, ``batch_job_sched_config``) still resolve,
@@ -634,6 +634,7 @@ class AscendConfig:
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
+    enable_dense_sp: bool = False
     enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
@@ -735,7 +736,7 @@ class AscendConfig:
             )
 
         # enable_shared_expert_dp = val and ep and tp>1
-        from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_dense_sp, enable_sp
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
@@ -754,15 +755,28 @@ class AscendConfig:
 
         effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
 
+        # Dense Qwen3.5-family sequence parallelism: the same FlashComm switch
+        # also drives SP for dense checkpoints (no MoE to shard). Resolved
+        # once here; vllm_ascend.utils.enable_dense_sp mirrors the predicate
+        # for runtime reads that only see a VllmConfig.
+        self.enable_dense_sp = flashcomm_explicitly_enabled and enable_dense_sp(vllm_config=vc)
+
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
+        elif vc.parallel_config.use_sequence_parallel_moe:
             logger.info_once("FlashComm1 is enabled.")
+        elif self.enable_dense_sp:
+            logger.info_once("FlashComm1 dense sequence parallelism is enabled for the Qwen3.5 dense family.")
+        else:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence "
+                "parallelism (requires tensor_parallel_size > 1, pipeline_parallel_size == 1, "
+                "and an SP-capable model family: MoE with expert parallelism or the dense "
+                "Qwen3.5 family). Disabling."
+            )
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
@@ -1851,6 +1865,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_sparse_li_c4",
         "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
+        # enable_dense_sp is resolved from the FlashComm switch + the dense
+        # Qwen3.5-family model check in derive_and_validate.
+        "enable_dense_sp",
         "pd_tp_ratio",
         "pd_head_ratio",
         "num_head_replica",
