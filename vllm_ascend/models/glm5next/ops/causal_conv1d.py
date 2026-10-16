@@ -6,7 +6,7 @@ import torch
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state, prepare_conv_indices
+from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
 
 def causal_conv1d(
@@ -19,8 +19,6 @@ def causal_conv1d(
     run_mode: int,
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
-    prepared_cache_indices: torch.Tensor | None = None,
-    prepared_null_block_id: int | None = None,
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
     # Padded requests can be skipped by the kernel; their output must stay zero.
@@ -28,10 +26,12 @@ def causal_conv1d(
     if cache_indices.shape[0] == 0:
         return output
     kernel_state = conv_state
-    kernel_indices = cache_indices
-    # AscendC reads and updates page-strided SD states in place. Only stage
-    # layouts outside its stride contract, such as a transposed DS state whose
-    # channel dimension is not contiguous. Copy only this batch's state rows.
+    # GLM metadata shares a contiguous vector across this group's layers.
+    # Standalone callers can still pass a matrix, using its first column.
+    kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
+    null_block_id = 0
+    # AscendC updates page- and row-strided SD states in place. Keep staging
+    # for unsupported layouts, such as DS views with strided channels.
     needs_state_copy = conv_state.stride(0) <= 0 or conv_state.stride(1) <= 0 or conv_state.stride(2) != 1
     if needs_state_copy:
         requests = cache_indices.shape[0]
@@ -39,20 +39,10 @@ def causal_conv1d(
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-    # AscendC enables null_block_id only when it is nonnegative. Map inactive
-    # requests outside the kernel-state allocation, keeping packed row zero
-    # available to DS staging.
-    # FLA requires 1D indices; GDN matrices contribute their first column.
-    if not needs_state_copy and prepared_cache_indices is not None:
-        if prepared_null_block_id is None:
-            raise ValueError("Prepared convolution indices require a null_block_id")
-        kernel_indices = prepared_cache_indices
-        null_block_id = prepared_null_block_id
-    else:
-        # Standalone callers and the DS-layout staging path still prepare
-        # indices locally; packed rows have different cache coordinates.
-        null_block_id = kernel_state.shape[0]
-        kernel_indices = prepare_conv_indices(kernel_indices, query_start_loc, null_block_id)
+        # Packed rows start at zero, so zero is now a valid cache slot. Invalid
+        # requests were mapped to PAD_SLOT_ID by the gather kernel.
+        null_block_id = PAD_SLOT_ID
+    kernel_indices = kernel_indices.contiguous()
     if run_mode == 0:
         result = causal_conv1d_fn(
             x,

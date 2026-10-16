@@ -106,8 +106,7 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
-    # The GLM convolution wrapper consumes group-level, sanitized indices.
-    use_prepared_conv_indices = True
+    use_contiguous_conv_indices = True
 
     head_dim: int
     num_heads: int
@@ -437,8 +436,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=1,
                 num_accepted_tokens=conv_meta.num_accepted_tokens,
-                prepared_cache_indices=getattr(conv_meta, "prepared_cache_indices", None),
-                prepared_null_block_id=getattr(conv_meta, "null_block_id", None),
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -455,8 +452,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=0,
                 initial_state_mode=conv_meta.initial_state_mode,
-                prepared_cache_indices=getattr(conv_meta, "prepared_cache_indices", None),
-                prepared_null_block_id=getattr(conv_meta, "null_block_id", None),
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
@@ -469,8 +464,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.query_start_loc,
                 conv_meta.cache_indices,
                 run_mode=1,
-                prepared_cache_indices=getattr(conv_meta, "prepared_cache_indices", None),
-                prepared_null_block_id=getattr(conv_meta, "null_block_id", None),
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 

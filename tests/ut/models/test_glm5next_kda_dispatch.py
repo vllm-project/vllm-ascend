@@ -72,8 +72,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         query_start_loc=metadata.non_spec_query_start_loc,
         cache_indices=metadata.non_spec_state_indices_tensor[:, None],
         initial_state_mode=metadata.has_initial_state,
-        prepared_cache_indices=metadata.non_spec_state_indices_tensor.to(torch.int32),
-        null_block_id=8,
     )
     metadata.non_spec_prefill_metadata.causal_conv1d = prefill_conv
     if speculative:
@@ -82,8 +80,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
                 query_start_loc=metadata.spec_query_start_loc,
                 cache_indices=metadata.spec_state_indices_tensor,
                 num_accepted_tokens=metadata.num_accepted_tokens,
-                prepared_cache_indices=metadata.spec_state_indices_tensor[:, 0].to(torch.int32),
-                null_block_id=8,
             )
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
@@ -115,18 +111,18 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         torch.testing.assert_close(weight, expected_weight)
         assert weight is layer._merged_conv_weight
         if kwargs["run_mode"] == 0:
-            assert kwargs["cache_indices_opt"] is prefill_conv.prepared_cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], prefill_conv.cache_indices[:, 0])
             assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
             assert kwargs["num_accepted_tokens_opt"] is None
         else:
             spec_conv = metadata.spec_decode_metadata.spec_causal_conv1d
-            assert kwargs["cache_indices_opt"] is spec_conv.prepared_cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], spec_conv.cache_indices[:, 0])
+            assert kwargs["cache_indices_opt"].is_contiguous()
             assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
             assert kwargs["initial_state_mode_opt"] is None
         return x.clone()
 
     def fla_fn(x, weight, bias=None, **kwargs):
-        assert kwargs["null_block_id"] == prefill_conv.null_block_id
         return conv(
             torch.zeros_like(x),
             x,
@@ -139,7 +135,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
 
     def fla_update(x, conv_state, weight, bias=None, **kwargs):
-        assert kwargs["null_block_id"] == metadata.spec_decode_metadata.spec_causal_conv1d.null_block_id
         return conv(
             torch.zeros_like(x),
             x,
@@ -254,12 +249,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
         num_decodes=0 if empty else 3,
         num_decode_tokens=3,
         non_spec_decode_metadata=SimpleNamespace(
-            causal_conv1d=SimpleNamespace(
-                query_start_loc=starts,
-                cache_indices=ids[:, None],
-                prepared_cache_indices=ids,
-                null_block_id=8,
-            )
+            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None])
         ),
     ).items():
         setattr(metadata, key, value)
