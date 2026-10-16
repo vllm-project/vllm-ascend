@@ -958,6 +958,7 @@ class KVPoolScheduler:
         # Capture the preceding snapshot before _build_req_meta records this step.
         previous_snapshot_end_token = request_tracker.last_layerwise_snapshot_end_token
         previous_snapshot_block_index = request_tracker.last_layerwise_snapshot_block_index
+        previous_snapshot_start_block = request_tracker.last_layerwise_snapshot_start_block
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if req_tuple:
             request = req_tuple[0]
@@ -979,6 +980,7 @@ class KVPoolScheduler:
                 can_load=True,
                 layerwise_snapshot_end_token=previous_snapshot_end_token,
                 layerwise_snapshot_block_index=previous_snapshot_block_index,
+                layerwise_snapshot_start_block=previous_snapshot_start_block,
                 layerwise_previous_step=True,
             )
         return self._build_req_meta(
