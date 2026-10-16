@@ -76,12 +76,16 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     manager.vllm_config = config
     cls = AscendDSparkSpeculator if kind == "dspark" else AscendMTPSpeculator
     spec = object.__new__(cls)
+    spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
     if kind == "mtp":
         spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
         spec.model_state = object()
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
+    # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
+    spec.dcp_size = config.parallel_config.decode_context_parallel_size
     spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
@@ -120,6 +124,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.kv_cache_config = SimpleNamespace(kv_cache_groups=[None])
 
     class RecordingBuilder:
+        # vLLM main inspects this on the builder before building metadata.
+        supports_update_block_table = False
+
         def build(self, common_prefix_len, common_attn_metadata):
             common = common_attn_metadata
             decode = FakeDecodeMetadata(common.query_start_loc_cpu[1:].tolist())
@@ -177,7 +184,9 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        assert common.is_prefilling.tolist() == [False, False]
+        # vLLM 0.31 slices is_prefilling to the padded request count.
+        expected_is_prefilling = [False] * padded
+        assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
         expected = [31 + width, 128] + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected

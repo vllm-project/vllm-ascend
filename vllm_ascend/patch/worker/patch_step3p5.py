@@ -145,7 +145,7 @@ def _patched_fused_moe_block_init(
         config.hidden_size,
         config.moe_num_experts,
         out_dtype=torch.float32,
-        params_dtype=torch.float32,  # Use FP32 for higher precision.
+        params_dtype=torch.float32,
         prefix=f"{prefix}.gate",
     )
     self.use_moe_router_bias = config.use_moe_router_bias

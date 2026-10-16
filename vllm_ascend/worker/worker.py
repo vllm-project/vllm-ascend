@@ -19,7 +19,6 @@
 
 import copy
 import gc
-import inspect
 import logging
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
@@ -32,7 +31,12 @@ from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
-from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.ec_transfer import (
+    ensure_ec_transfer_initialized,
+    ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
+)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -84,6 +88,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -95,6 +100,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -244,6 +250,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -258,6 +265,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
+        self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -297,6 +305,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+        self.synchronize_device()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -363,8 +372,13 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if ensure_ec_transfer_shutdown is not None:
+            ensure_ec_transfer_shutdown()
 
         if self.profiler is not None:
             self.profiler.shutdown()
@@ -499,9 +513,17 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+                with torch_cuda_wrapper():
+                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
+            else:
+                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+
+                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
@@ -701,9 +723,13 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` budget gate below.
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
@@ -842,6 +868,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+            get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
@@ -1009,23 +1038,13 @@ class NPUWorker(WorkerBase):
 
         # Run a real model forward with attention enabled in eager mode.
         # _dummy_run handles PP internally (intermediate tensors, etc.).
-        old_max_num_reqs = self.model_runner.max_num_reqs
-        try:
-            self.model_runner.max_num_reqs = 1
-
-            dummy_run_kwargs = {
-                "num_tokens": num_tokens,
-                "force_attention": True,
-                "is_profile": False,
-                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
-            }
-
-            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
-                dummy_run_kwargs["profile_cpp"] = True
-
-            self.model_runner._dummy_run(**dummy_run_kwargs)
-        finally:
-            self.model_runner.max_num_reqs = old_max_num_reqs
+        self.model_runner._dummy_run(
+            num_tokens=num_tokens,
+            force_attention=True,
+            is_profile=False,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            profile_cpp=True,
+        )
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
@@ -1130,7 +1149,7 @@ class NPUWorker(WorkerBase):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.method == "dspark"
+                and speculative_config.use_eagle()
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and
@@ -1261,6 +1280,33 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def synchronize_device(self) -> None:
+        torch.npu.synchronize()
+
+    def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
+        """Return serializable encoder graph state for diagnostics.
+
+        Utility RPCs use safe serialization by default, so callers must invoke
+        a worker method by name instead of sending a Python callback. Keep the
+        result limited to primitive containers supported by that serializer.
+        """
+        model_state = getattr(self.model_runner, "model_state", None)
+        encoder_runner = getattr(model_state, "encoder_runner", None)
+        manager = getattr(encoder_runner, "cudagraph_manager", None)
+        if manager is None:
+            # Model Runner V1 owns the manager directly.
+            manager = getattr(self.model_runner, "encoder_cudagraph_manager", None)
+        if manager is None:
+            return None
+        return {
+            "manager": type(manager).__name__,
+            "captured": manager.is_captured(),
+            **manager.get_cumulative_stats(),
+        }
+
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

@@ -10,13 +10,13 @@ rank reaches that decision independently from the same gathered snapshot --
 there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
 design.
 
-The ``schedule()`` body is a verbatim copy of the **v0.24.0** release tag's
-``Scheduler.schedule()`` (the production pin), plus exactly three balance
-deltas: (1) the disabled-path early return that delegates to ``super()``,
+The copied ``schedule()`` retains the existing scheduling behavior with
+version-specific upstream compatibility changes. The balance deltas are:
+(1) the disabled-path early return that delegates to ``super()``,
 (2) the ``balance_flag`` break inside the WAITING loop
-(``any-rank-at-cap => global freeze``), and (3) ``if request_queue is None:
-break`` in place of upstream's ``assert request_queue is not None`` (so a
-drained-rank schedule does not assert when balance defers admission). Both
+(``any-rank-at-cap => global freeze``). The shared queue path uses
+``if not request_queue: break`` so drained ranks stop before peeking an
+empty waiting queue, including when every request is deferred. Both
 supported vLLM refs expose ``schedule(throttle_prefills=False)``, so the
 disabled fast path forwards that argument directly.
 
@@ -57,18 +57,18 @@ touch configs that don't use it, e.g. PD-disaggregated recompute).
 """
 
 import time
+from collections import deque
 
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import KVConnectorBlockState, NewRequestData, SchedulerOutput
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.engine.core import DPEngineCoreProc
@@ -78,6 +78,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -310,6 +311,15 @@ class BalanceScheduler(Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    # Check before removing the victim from the running queue.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
@@ -389,10 +399,24 @@ class BalanceScheduler(Scheduler):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
+            # Both supported versions prioritize waiting requests holding KV blocks.
+            step_skipped_waiting: deque[Request] = deque()
+            step_skipped_kv_holding: deque[Request] = deque()
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+            def _skip_request(from_queue) -> None:
+                skipped = from_queue.pop_request()
+                self.deferred_waiting.add(skipped)
+                if self._holds_kv_blocks(skipped):
+                    step_skipped_kv_holding.appendleft(skipped)
+                else:
+                    step_skipped_waiting.appendleft(skipped)
+
+            while token_budget > 0:
+                # Requests holding KV blocks are always drained first.
+                request_queue = self.kv_holding_waiting or self.waiting
+                if not request_queue:
+                    break
+                if len(self.running) == self.max_num_active_reqs:
                     break
 
                 # Keep admission balanced across DP ranks: if any rank was at
@@ -401,24 +425,12 @@ class BalanceScheduler(Scheduler):
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
-                if request_queue is None:
-                    break
-
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                if not self._handle_blocked_waiting_request(request):
+                    _skip_request(request_queue)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -432,8 +444,7 @@ class BalanceScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 num_external_computed_tokens = 0
@@ -490,8 +501,7 @@ class BalanceScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            _skip_request(request_queue)
                             continue
 
                         num_external_computed_tokens = ext_tokens
@@ -509,8 +519,7 @@ class BalanceScheduler(Scheduler):
                         and request.mm_features
                         and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
                     ):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        _skip_request(request_queue)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -553,7 +562,11 @@ class BalanceScheduler(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens > token_budget
+                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                    ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
@@ -651,12 +664,10 @@ class BalanceScheduler(Scheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -672,8 +683,11 @@ class BalanceScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    _skip_request(request_queue)
                     continue
 
+                request = request_queue.pop_request()
+                self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
@@ -711,13 +725,16 @@ class BalanceScheduler(Scheduler):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
+            if step_skipped_kv_holding:
+                self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
             if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+                self.waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                _, num_waiting = self.get_request_counts()
+                self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

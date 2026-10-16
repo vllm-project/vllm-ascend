@@ -43,8 +43,13 @@ def test_mla_dcp_extends_v1_backend() -> None:
 
 @pytest.mark.parametrize("dcp_size", [1, 8])
 def test_mla_dcp_passes_runner_v2_cp_compatibility(dcp_size) -> None:
-    group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
-    with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
+    # vLLM main resolves the DCP group through
+    # ``get_dcp_world_size_and_rank`` and computes the LSE capability from
+    # its result inside ``__new__``.
+    with patch(
+        "vllm.distributed.parallel_state.get_dcp_world_size_and_rank",
+        return_value=(dcp_size, 0),
+    ):
         impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     assert impl.need_to_return_lse_for_decode == (dcp_size > 1)
     config = SimpleNamespace(

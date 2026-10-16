@@ -44,9 +44,14 @@ class AscendBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
+        # Forward the per-group sharding selection when supplied by the caller.
+        super_kwargs: dict[str, list[bool]] = {}
+        if dcp_sharded is not None:
+            super_kwargs["dcp_sharded"] = dcp_sharded
         super().__init__(
             block_sizes,
             max_num_reqs,
@@ -58,21 +63,26 @@ class AscendBlockTables(BlockTables):
             cp_rank,
             cp_interleave,
             slot_mapping_enabled=slot_mapping_enabled,
+            **super_kwargs,
         )
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
-        # touched by one token tile. Use the smallest kernel block size to form
-        # one safe constexpr window for all groups, without staging a whole
-        # row.
-        min_kernel_block_size = min(kernel_block_sizes)
-        window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
-        self._block_table_window_size = triton.next_power_of_2(window_size)
+        # touched by one token tile. Use the smallest kernel block size to
+        # form one safe constexpr window for all groups, without staging a
+        # whole row.
+        if kernel_block_sizes:
+            min_kernel_block_size = min(kernel_block_sizes)
+            window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
+            self._block_table_window_size = triton.next_power_of_2(window_size)
+        else:
+            # Encoder-only producers do not allocate decoder KV-cache groups.
+            self._block_table_window_size = 1
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
         # vllm-ascend' reshape_and_cache function requires slot_mappings to be int32.
         # so we need to redefine slot_mappings to be int32.
-        self.slot_mappings: torch.Tensor = torch.zeros(
+        self.slot_mappings: torch.Tensor = torch.zeros(  # type: ignore[no-redef]
             self.num_kv_cache_groups,
             self.max_num_batched_tokens,
             dtype=torch.int32,
@@ -90,6 +100,8 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        if num_groups == 0:
+            return slot_mappings[:, :num_tokens_padded]
         slot_mapping_enabled = self.slot_mapping_enabled
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],

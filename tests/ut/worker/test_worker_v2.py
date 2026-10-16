@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,148 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    def test_get_encoder_cudagraph_stats_is_serializable(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            manager = MagicMock()
+            manager.is_captured.return_value = True
+            manager.get_cumulative_stats.return_value = {
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            }
+            worker.model_runner = SimpleNamespace(
+                model_state=SimpleNamespace(
+                    encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+                ),
+            )
+
+            stats = worker.get_encoder_cudagraph_stats()
+
+        self.assertEqual(
+            stats,
+            {
+                "manager": type(manager).__name__,
+                "captured": True,
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            },
+        )
+
+    @staticmethod
+    def _make_worker_for_lifecycle_test():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+        worker.use_v2_model_runner = True
+        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.model_config.enable_sleep_mode = False
+        worker.vllm_config.weight_transfer_config = None
+        return worker
+
+    def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        device = object()
+        runner = MagicMock()
+        events = []
+
+        @contextmanager
+        def wrapper():
+            events.append("wrapper_enter")
+            yield
+            events.append("wrapper_exit")
+
+        def make_runner(vllm_config, runner_device):
+            events.append("runner")
+            return runner
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+            patch.object(NPUWorker, "_init_device", return_value=device),
+            patch("vllm_ascend.worker.worker.init_workspace_manager"),
+            patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
+            patch(
+                "vllm_ascend.worker.v2.utils.torch_cuda_wrapper",
+                side_effect=wrapper,
+            ) as torch_cuda_wrapper,
+            patch(
+                "vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner",
+                side_effect=make_runner,
+            ) as mm_encoder_runner,
+        ):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
+            worker.rank = 1
+
+            worker.init_device()
+
+        self.assertEqual(events, ["wrapper_enter", "runner", "wrapper_exit"])
+        torch_cuda_wrapper.assert_called_once_with()
+        mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
+        self.assertIs(worker.model_runner, runner)
+        report_usage_stats.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=True)
+    def test_load_model_starts_ec_worker_services(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        """Start MRV2 EC services only after model loading completes."""
+        events = []
+        connector = mock_get_ec_transfer.return_value
+        connector.start_worker_services.side_effect = lambda: events.append("ec")
+        worker = self._make_worker_for_lifecycle_test()
+        worker.model_runner.load_model.side_effect = lambda: events.append("model")
+
+        worker.load_model()
+
+        self.assertEqual(events, ["model", "ec"])
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_called_once_with()
+        connector.start_worker_services.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=False)
+    def test_load_model_skips_ec_worker_services_when_disabled(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+
+        worker.load_model()
+
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_releases_ec_connector(
+        self,
+        mock_kv_shutdown,
+        mock_ec_shutdown,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+        worker.profiler = None
+
+        worker.shutdown()
+
+        mock_kv_shutdown.assert_called_once_with()
+        mock_ec_shutdown.assert_called_once_with()
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
@@ -92,7 +235,7 @@ class TestNPUWorkerV2(TestBase):
 
     @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
     @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_restores_runner_state(
+    def test_profile_prefill_latency_v2_delegates_cpp_state(
         self,
         mock_get_pp_group,
         mock_synchronize,
@@ -108,28 +251,24 @@ class TestNPUWorkerV2(TestBase):
             model_runner.max_num_reqs = 8
             worker.model_runner = model_runner
 
-            def check_temporary_state(**kwargs):
-                self.assertEqual(model_runner.max_num_reqs, 1)
-
-            model_runner._dummy_run.side_effect = check_temporary_state
             mock_get_pp_group.return_value.is_first_rank = True
 
             with patch("time.perf_counter", side_effect=[10.0, 10.25]):
                 latency_ms = worker.profile_prefill_latency(512)
 
             self.assertEqual(latency_ms, 250.0)
-            self.assertEqual(model_runner.max_num_reqs, 8)
             model_runner._dummy_run.assert_called_once_with(
                 num_tokens=512,
                 force_attention=True,
                 is_profile=False,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                profile_cpp=True,
             )
             self.assertEqual(mock_synchronize.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
     @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_restores_state_on_error(
+    def test_profile_prefill_latency_v2_propagates_dummy_error(
         self,
         mock_get_pp_group,
         mock_synchronize,
@@ -151,7 +290,6 @@ class TestNPUWorkerV2(TestBase):
             with self.assertRaisesRegex(RuntimeError, "dummy failure"):
                 worker.profile_prefill_latency(512)
 
-            self.assertEqual(model_runner.max_num_reqs, 8)
             self.assertEqual(mock_synchronize.call_count, 1)
 
     def test_sample_tokens_v2_attaches_execution_time(self):

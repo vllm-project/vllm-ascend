@@ -72,6 +72,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
+from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -157,7 +158,8 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
         self.vllm_config = args[0]
         self.policy = SchedulingPolicy.FCFS
         self.waiting = create_request_queue(self.policy)
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.deferred_waiting = set()
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -473,8 +475,8 @@ def test_balance_deltas_present_in_schedule():
     assert "max(t.item() for t in self.balance_queue)" in src
     assert "self.max_num_running_reqs" in src
 
-    # delta 3: `if request_queue is None: break` replaces upstream's assert.
-    assert "if request_queue is None:" in src
+    # The shared queue path must stop before peeking an empty request queue.
+    assert "if not request_queue:" in src
 
 
 # ---------------------------------------------------------------------------
@@ -611,9 +613,9 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
-    "_select_waiting_queue_for_scheduling",
+    "_holds_kv_blocks",
     "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
+    "_handle_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
@@ -681,7 +683,7 @@ def _make_output(scheduler):
     )
 
 
-def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
+def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_blocks=10000):
     from contextlib import ExitStack
     from unittest.mock import PropertyMock
 
@@ -691,7 +693,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -711,8 +712,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
-        if not vllm_version_is("0.27.1"):
-            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+        stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
         stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
 
@@ -730,6 +730,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
         model_config.runner_type = "generate"
         scheduler_config = SchedulerConfig(
             max_num_seqs=max_num_seqs,
+            policy=policy,
             max_model_len=8192,
             long_prefill_token_threshold=0,
             disable_chunked_mm_input=False,
@@ -750,7 +751,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
         vllm_config.parallel_config.data_parallel_size = dp_size
         vllm_config.model_config.hf_config.is_encoder_decoder = False
         kv_cache_config = KVCacheConfig(
-            num_blocks=10000,
+            num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
                 KVCacheGroupSpec(
@@ -760,7 +761,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
             ],
         )
         kv_cache_config.hash_block_size = _BLOCK_SIZE
-        cache_config.num_gpu_blocks = 10000
+        cache_config.num_gpu_blocks = num_blocks
         scheduler = BalanceScheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -819,6 +820,29 @@ def test_balance_schedule_waiting_and_running_paths():
     out2 = scheduler.schedule()
     assert out2.total_num_scheduled_tokens >= 0
     scheduler.schedule(throttle_prefills=True)
+
+
+@pytest.mark.parametrize("holds_kv_blocks", [False, True])
+def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
+    scheduler = _make_balance_scheduler()
+    empty = scheduler.schedule()
+    assert empty.total_num_scheduled_tokens == 0
+    assert not empty.num_scheduled_tokens
+
+    request = _create_requests(1, num_tokens=8)[0]
+    request.num_computed_tokens = 4 if holds_kv_blocks else 0
+    scheduler.add_request(request)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
+
+    output = scheduler.schedule()
+
+    scheduler._handle_blocked_waiting_request.assert_called_once_with(request)
+    assert output.total_num_scheduled_tokens == 0
+    assert not output.num_scheduled_tokens
+    assert not scheduler.running
+    assert list(scheduler.kv_holding_waiting) == ([request] if holds_kv_blocks else [])
+    assert list(scheduler.waiting) == ([] if holds_kv_blocks else [request])
+    assert request in scheduler.deferred_waiting
 
 
 def test_balance_schedule_pause_freeze_and_v2():
@@ -895,7 +919,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler.add_request(blocked)
     blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
     scheduler.schedule()
 
     preempt = _make_balance_scheduler()
@@ -955,3 +979,153 @@ def test_balance_engine_core_hooks(monkeypatch):
             assert pe._engine_core_mod.DPEngineCoreProc is orig
     finally:
         pe._engine_core_mod.DPEngineCoreProc = orig
+
+
+# ---------------------------------------------------------------------------
+# Deferred block freeing (vllm-project/vllm#49675)
+# ---------------------------------------------------------------------------
+# With PP > 1 and a KV-consumer connector, a preempted request's blocks return
+# to the pool only after its in-flight step is processed. Preempting such a
+# request cannot help the current allocation, so the retry loop must stop
+# instead of cascading. BalanceScheduler runs on the sync path, so PP overlap is
+# reproduced by scheduling the next prefill chunk before the previous step's
+# output is processed.
+
+
+def _make_deferring_balance_scheduler(policy="fcfs", num_blocks=10000):
+    scheduler = _make_balance_scheduler(policy=policy, num_blocks=num_blocks)
+    # The production gate also requires PP > 1 and a KV-consumer connector;
+    # the mechanism itself is independent of them.
+    scheduler.defer_block_free = True
+    scheduler.scheduler_config.long_prefill_token_threshold = 2 * _BLOCK_SIZE
+    return scheduler
+
+
+def _schedule_step(scheduler):
+    output = scheduler.schedule()
+    # A request samples a token unless this step only ran a partial prefill chunk.
+    sampled = {req_id: not scheduler.requests[req_id].is_prefill_chunk for req_id in output.num_scheduled_tokens}
+    return output, sampled
+
+
+def _make_step_output(output, sampled):
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    req_ids = list(output.num_scheduled_tokens)
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[1000] if sampled[req_id] else [] for req_id in req_ids],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
+def _fail_one_allocation(scheduler, call_number):
+    real_allocate = scheduler.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            return None
+        return real_allocate(*args, **kwargs)
+
+    return patch.object(scheduler.kv_cache_manager, "allocate_slots", side_effect=allocate)
+
+
+@pytest.mark.parametrize(
+    ("policy", "failed_call"),
+    [
+        ("fcfs", 1),
+        ("priority", 2),
+    ],
+)
+def test_balance_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
+    scheduler = _make_deferring_balance_scheduler(policy)
+    requests = _create_requests(3, num_tokens=4 * _BLOCK_SIZE, max_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+    first_chunk = _schedule_step(scheduler)
+
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
+
+    # The next chunk is scheduled while the first one is still in flight, so
+    # preempting any victim frees nothing this step.
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        blocked = _schedule_step(scheduler)
+    assert allocate.call_count == failed_call
+    assert not blocked[0].preempted_req_ids
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked[0].num_scheduled_tokens
+
+    for output, sampled in (first_chunk, blocked):
+        if output.total_num_scheduled_tokens:
+            scheduler.update_from_output(output, _make_step_output(output, sampled))
+
+    # Once the fence has advanced, preempting the victim makes progress.
+    expected_victim = worst if policy == "priority" else tail
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        resumed = scheduler.schedule()
+
+    assert allocate.call_count > failed_call
+    assert expected_victim.request_id in resumed.preempted_req_ids
+    assert retry_trigger.request_id in resumed.num_scheduled_tokens
+    if policy == "priority":
+        assert tail.request_id in resumed.num_scheduled_tokens
+
+
+def test_balance_full_pool_does_not_cascade_preempt_on_deferred_free():
+    def run(balance_enabled):
+        # Long prompt chunked in two steps plus three short prompts: the first
+        # step fills every block (one more for the null block).
+        scheduler = _make_deferring_balance_scheduler(num_blocks=2 + 3 * 2 + 1)
+        scheduler._balance_enabled = balance_enabled
+        long_request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE, max_tokens=8, id_offset=100)[0]
+        # Skip the first one: its prompt would share a prefix-cached block with the long prompt.
+        short_requests = _create_requests(4, num_tokens=2 * _BLOCK_SIZE, max_tokens=8)[1:]
+        for request in (long_request, *short_requests):
+            scheduler.add_request(request)
+
+        first = _schedule_step(scheduler)
+        assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 0
+        # The long prompt's second chunk needs blocks while every other request
+        # is still in flight. Without the guard the retry loop preempted the
+        # whole running queue while the free-block count stayed 0.
+        overlapped = scheduler.schedule()
+        assert not overlapped.preempted_req_ids
+        assert len(scheduler.running) == 4
+        assert not scheduler.deferred_frees
+
+        scheduler.update_from_output(first[0], _make_step_output(*first))
+        resumed = scheduler.schedule()
+        return resumed.preempted_req_ids, set(resumed.num_scheduled_tokens)
+
+    # With balance disabled schedule() delegates to upstream Scheduler.
+    assert run(balance_enabled=True) == run(balance_enabled=False)
+
+
+@pytest.mark.parametrize("encoder_only", [False, True])
+@pytest.mark.parametrize("chunked_prefill", [False, True])
+@pytest.mark.parametrize("num_tokens", [512, 2500])
+def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_tokens):
+    scheduler = _make_balance_scheduler()
+    token_budget = 1024
+    scheduler.max_num_scheduled_tokens = token_budget
+    scheduler.scheduler_config.max_num_batched_tokens = token_budget
+    scheduler.scheduler_config.enable_chunked_prefill = chunked_prefill
+    scheduler.is_mm_encoder_only = encoder_only
+    request = _create_requests(1, num_tokens=num_tokens)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    can_chunk = chunked_prefill or (encoder_only and not vllm_version_is("0.31.0"))
+    expected = min(num_tokens, token_budget) if can_chunk or num_tokens <= token_budget else 0
+    assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
+    assert output.total_num_scheduled_tokens == expected
+    assert (request in scheduler.running) == bool(expected)
+    assert (request in scheduler.waiting) == (not expected)
