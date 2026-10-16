@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+from pydantic import TypeAdapter
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -493,6 +494,53 @@ class TestAscendConfig(TestBase):
                 self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
             ):
                 init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_chunked_prefill_workspace_size_defaults_to_none(self, mock_fix_incompatible_config):
+        for additional_config in ({}, {"chunked_prefill_workspace_size": None}):
+            clear_ascend_config()
+            config = VllmConfig()
+            config.additional_config = additional_config
+            with self.subTest(additional_config=additional_config):
+                self.assertIsNone(init_ascend_config(config).chunked_prefill_workspace_size)
+                self.assertEqual(config.additional_config, additional_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_chunked_prefill_workspace_size_accepts_positive_int(self, mock_fix_incompatible_config):
+        for value in (1, 512 * 1024):
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"chunked_prefill_workspace_size": value}
+            with self.subTest(value=value):
+                self.assertEqual(init_ascend_config(test_vllm_config).chunked_prefill_workspace_size, value)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_chunked_prefill_workspace_size_rejects_invalid_values(self, mock_fix_incompatible_config):
+        # Unlike lax int fields, numeric strings and integral floats are
+        # rejected: the value is a row count, not a coercible switch.
+        for invalid_value in (True, False, 0, -1, 1.0, 131072.5, "131072", [131072]):
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"chunked_prefill_workspace_size": invalid_value}
+            with (
+                self.subTest(invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, "chunked_prefill_workspace_size must be a positive integer"),
+            ):
+                init_ascend_config(test_vllm_config)
+
+    def test_chunked_prefill_workspace_size_serialization(self):
+        for value in (None, 1, 524288):
+            with self.subTest(value=value):
+                config = AscendConfig(sparse_kv_offload_config=None, chunked_prefill_workspace_size=value)
+                adapter = TypeAdapter(AscendConfig)
+                payload = adapter.dump_json(
+                    config, include={"sparse_kv_offload_config", "chunked_prefill_workspace_size"}
+                )
+                self.assertEqual(json.loads(payload)["chunked_prefill_workspace_size"], value)
+                self.assertEqual(adapter.validate_json(payload).chunked_prefill_workspace_size, value)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
