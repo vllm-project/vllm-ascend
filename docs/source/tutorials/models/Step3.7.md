@@ -40,7 +40,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   ```bash
   # Set the vLLM Ascend image name.
   export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-  export NAME=minimax-m3-dev
+  export NAME=step3p7-dev
 
   # Start the container with the variables defined above.
   # Update --device for your hardware (Atlas A3: /dev/davinci[0-15]; Atlas A2: /dev/davinci[0-7]).
@@ -118,7 +118,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       --gpu-memory-utilization 0.92 \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"multistream_overlap_shared_expert":true, "enable_shared_expert_dp":true}' \
-      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3} \
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
       --safetensors-load-strategy prefetch \
       --reasoning-parser step3p5 \
       --enable-auto-tool-choice \
@@ -155,7 +155,7 @@ The Step-3.7-Flash reasoning parser (`--reasoning-parser step3p5`) extracts the 
 
 ### 6.2 Tool Call Parser
 
-Step-3.7-Flash uses a namespace-delimited XML format for tool calls. Enable it with `--tool-parser step3p5`.
+Step-3.7-Flash uses a namespace-delimited XML format for tool calls. Enable it with `--tool-call-parser step3p5`.
 
 ## 7 Functional Verification
 
