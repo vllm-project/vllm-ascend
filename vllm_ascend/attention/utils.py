@@ -28,7 +28,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
-from vllm_ascend.device.hardware_profile import HardwareCapability, HardwareProfile, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     _is_glm_model,
@@ -42,14 +42,6 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
-# Token-row capacity of the MLA chunked-prefill context workspace when
-# additional_config.chunked_prefill_workspace_size is unset.
-DEFAULT_CHUNKED_PREFILL_WORKSPACE_CAPACITY = 128 * 1024
-KIMI_K3_CHUNKED_PREFILL_WORKSPACE_CAPACITY = 512 * 1024
-KIMI_K3_ARCHITECTURES = frozenset(
-    ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration", "KimiK3MTPModel", "K3DSparkModel")
-)
-KIMI_K3_MODEL_TYPES = frozenset(("kimi_k3", "kimi_linear", "k3_dspark"))
 
 
 def supports_strided_mla_cache(
@@ -258,51 +250,6 @@ def needs_layer_aware_fia_graph_replay() -> bool:
     return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
 
-def is_kimi_k3_model(model_config: Any) -> bool:
-    """Identify Kimi K3 from its registered architectures or HF model type."""
-    hf_config = getattr(model_config, "hf_config", None)
-    configs = (
-        model_config,
-        hf_config,
-        getattr(model_config, "hf_text_config", None),
-        getattr(hf_config, "text_config", None),
-    )
-    for config in configs:
-        architectures = getattr(config, "architectures", None) or ()
-        if any(architecture in KIMI_K3_ARCHITECTURES for architecture in architectures):
-            return True
-        if getattr(config, "model_type", None) in KIMI_K3_MODEL_TYPES:
-            return True
-    return False
-
-
-def select_chunked_prefill_workspace_capacity(model_config: Any, hardware_profile: HardwareProfile) -> int:
-    """Heuristic capacity, in token rows, used when the user sets none.
-
-    ``hardware_profile`` is an explicit input so SoC-specific policies can be
-    added here. No current policy depends on it.
-    """
-    if is_kimi_k3_model(model_config):
-        return KIMI_K3_CHUNKED_PREFILL_WORKSPACE_CAPACITY
-    return DEFAULT_CHUNKED_PREFILL_WORKSPACE_CAPACITY
-
-
-def resolve_chunked_prefill_workspace_capacity(vllm_config: VllmConfig) -> tuple[int, str]:
-    """Return the capacity and its source; an explicit config value wins.
-
-    The configured value is read, never written back, so
-    ``chunked_prefill_workspace_size`` stays ``None`` unless the user sets it.
-    """
-    # Platform configuration initializes AscendConfig before metadata builders
-    # (including the upstream MLA base constructor) ask for this workspace.
-    configured_capacity = get_ascend_config().chunked_prefill_workspace_size
-    if configured_capacity is not None:
-        return configured_capacity, "additional_config.chunked_prefill_workspace_size"
-    capacity = select_chunked_prefill_workspace_capacity(vllm_config.model_config, get_current_hardware_profile())
-    source = "Kimi K3 model policy" if is_kimi_k3_model(vllm_config.model_config) else "default fallback policy"
-    return capacity, source
-
-
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
@@ -313,7 +260,8 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     # (kv_lora_rank + qk_rope_head_dim)-wide row per token: 128K rows of a
     # 576-wide FP16 latent take 144 MiB. Context chunks up-projected from it
     # also scale with the row count.
-    capacity, capacity_source = resolve_chunked_prefill_workspace_capacity(vllm_config)
+    capacity = get_ascend_config().chunked_prefill_workspace_size
+    capacity_source = "additional_config.chunked_prefill_workspace_size"
     # Make sure there is enough for 8 full length request or at least
     # 4 pages of cache per request
     requested_size = max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size)

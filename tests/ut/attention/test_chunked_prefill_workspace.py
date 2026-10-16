@@ -22,18 +22,10 @@ from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
-from vllm_ascend.attention.utils import (
-    DEFAULT_CHUNKED_PREFILL_WORKSPACE_CAPACITY,
-    KIMI_K3_CHUNKED_PREFILL_WORKSPACE_CAPACITY,
-    ascend_chunked_prefill_workspace_size,
-    is_kimi_k3_model,
-    resolve_chunked_prefill_workspace_capacity,
-    select_chunked_prefill_workspace_capacity,
-)
+from vllm_ascend.attention.utils import ascend_chunked_prefill_workspace_size
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
-K3_CAPACITY = 512 * 1024
 DEFAULT_CAPACITY = 128 * 1024
 ALL_HARDWARE_PROFILES = [get_hardware_profile(device_type) for device_type in AscendDeviceType]
 
@@ -62,7 +54,7 @@ def _vllm_config(model_config=None, max_num_seqs=16, block_size=128, pcp_size=1,
 
 @pytest.fixture
 def ascend_config(monkeypatch):
-    config = SimpleNamespace(chunked_prefill_workspace_size=None)
+    config = SimpleNamespace(chunked_prefill_workspace_size=DEFAULT_CAPACITY)
     monkeypatch.setattr(attention_utils, "get_ascend_config", lambda: config)
     return config
 
@@ -74,114 +66,30 @@ def mock_logger(monkeypatch):
     return logger
 
 
-def test_capacity_constants_match_policy():
-    assert DEFAULT_CHUNKED_PREFILL_WORKSPACE_CAPACITY == DEFAULT_CAPACITY
-    assert KIMI_K3_CHUNKED_PREFILL_WORKSPACE_CAPACITY == K3_CAPACITY
-
-
 @pytest.mark.parametrize("hardware_profile", ALL_HARDWARE_PROFILES)
-@pytest.mark.parametrize(
-    "architectures,model_type",
-    [
-        (("KimiK3ForCausalLM",), "kimi_linear"),
-        (("KimiK3MTPModel",), "unknown"),
-        (("K3DSparkModel",), "unknown"),
-        ((), "kimi_linear"),
-        ((), "k3_dspark"),
-        (("KimiLinearForCausalLM",), "kimi_linear"),
-        (("KimiK3ForConditionalGeneration",), "kimi_k3"),
-        # The HF model type alone identifies K3 when architectures are unusual.
-        (("SomeWrapperForCausalLM",), "kimi_k3"),
-        ((), "kimi_k3"),
-    ],
-)
-def test_kimi_k3_selects_512k_on_every_hardware(architectures, model_type, hardware_profile):
-    model_config = _model_config(architectures=architectures, model_type=model_type)
-
-    assert is_kimi_k3_model(model_config)
-    assert select_chunked_prefill_workspace_capacity(model_config, hardware_profile) == K3_CAPACITY
-
-
-@pytest.mark.parametrize("hardware_profile", ALL_HARDWARE_PROFILES)
-@pytest.mark.parametrize(
-    "model_config",
-    [
-        _model_config(),
-        _model_config(architectures=("KimiK25ForConditionalGeneration",), model_type="kimi_k25"),
-        # A checkpoint path mentioning K3 does not select the K3 policy.
-        _model_config(model="/data/weights/Kimi-K3-Instruct", tokenizer="/data/weights/Kimi-K3-Instruct"),
-        SimpleNamespace(architectures=None, hf_config=None),
-    ],
-)
-def test_other_models_fall_back_to_128k(model_config, hardware_profile):
-    assert not is_kimi_k3_model(model_config)
-    assert select_chunked_prefill_workspace_capacity(model_config, hardware_profile) == DEFAULT_CAPACITY
-
-
-@pytest.mark.parametrize("location", ["hf_config", "hf_text_config", "text_config"])
-@pytest.mark.parametrize("identity", [{"architectures": ["KimiLinearForCausalLM"]}, {"model_type": "kimi_linear"}])
-def test_nested_kimi_k3_config_selects_policy(location, identity):
-    model = _model_config()
-    config = SimpleNamespace(**identity)
-    if location == "text_config":
-        model.hf_config.text_config = config
-    else:
-        setattr(model, location, config)
-
-    assert is_kimi_k3_model(model)
-    assert select_chunked_prefill_workspace_capacity(model, ALL_HARDWARE_PROFILES[0]) == K3_CAPACITY
-
-
-def test_resolve_uses_heuristic_and_current_hardware_when_unset(ascend_config, monkeypatch):
-    hardware_profile = ALL_HARDWARE_PROFILES[0]
-    selector_inputs = []
-
-    def selector(model_config, profile):
-        selector_inputs.append((model_config, profile))
-        return 4096
-
+@pytest.mark.parametrize("architecture", ["DeepseekV3ForCausalLM", "KimiK3ForConditionalGeneration"])
+def test_default_capacity_is_128k(ascend_config, mock_logger, monkeypatch, hardware_profile, architecture):
     monkeypatch.setattr(attention_utils, "get_current_hardware_profile", lambda: hardware_profile)
-    monkeypatch.setattr(attention_utils, "select_chunked_prefill_workspace_capacity", selector)
-    vllm_config = _vllm_config()
+    vllm_config = _vllm_config(_model_config(architectures=(architecture,), max_model_len=128 * 1024))
 
-    capacity, _ = resolve_chunked_prefill_workspace_capacity(vllm_config)
-
-    assert capacity == 4096
-    assert selector_inputs == [(vllm_config.model_config, hardware_profile)]
-    assert ascend_config.chunked_prefill_workspace_size is None
-
-
-@pytest.mark.parametrize("configured_capacity", [1, 64 * 1024, 1024 * 1024])
-def test_explicit_capacity_wins_over_kimi_k3_default(ascend_config, monkeypatch, configured_capacity):
-    ascend_config.chunked_prefill_workspace_size = configured_capacity
-    selector = MagicMock(return_value=K3_CAPACITY)
-    monkeypatch.setattr(attention_utils, "select_chunked_prefill_workspace_capacity", selector)
-    vllm_config = _vllm_config(_model_config(architectures=("KimiK3ForConditionalGeneration",)))
-
-    capacity, source = resolve_chunked_prefill_workspace_capacity(vllm_config)
-
-    assert capacity == configured_capacity
-    assert source == "additional_config.chunked_prefill_workspace_size"
-    selector.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "architectures,expected",
-    [
-        (("DeepseekV3ForCausalLM",), DEFAULT_CAPACITY),
-        (("KimiK3ForConditionalGeneration",), K3_CAPACITY),
-    ],
-)
-def test_default_capacity_caps_long_context_workspace(ascend_config, mock_logger, architectures, expected):
-    # 8 * 128K = 1M rows of demand exceed both defaults.
-    vllm_config = _vllm_config(_model_config(architectures=architectures, max_model_len=128 * 1024))
-
-    assert ascend_chunked_prefill_workspace_size(vllm_config) == expected
-    assert ascend_config.chunked_prefill_workspace_size is None
+    assert ascend_chunked_prefill_workspace_size(vllm_config) == DEFAULT_CAPACITY
+    assert ascend_config.chunked_prefill_workspace_size == DEFAULT_CAPACITY
     mock_logger.warning_once.assert_called_once()
     args = mock_logger.warning_once.call_args.args
-    assert args[1:3] == (1024 * 1024, expected)
-    assert args[3] == ("Kimi K3 model policy" if expected == K3_CAPACITY else "default fallback policy")
+    assert args[1:4] == (1024 * 1024, DEFAULT_CAPACITY, "additional_config.chunked_prefill_workspace_size")
+
+
+@pytest.mark.parametrize("configured_capacity", [1, 64 * 1024, 512 * 1024, 1024 * 1024])
+def test_explicit_capacity_is_used(ascend_config, mock_logger, configured_capacity):
+    ascend_config.chunked_prefill_workspace_size = configured_capacity
+    vllm_config = _vllm_config(
+        _model_config(architectures=("KimiK3ForConditionalGeneration",), max_model_len=128 * 1024),
+        max_num_seqs=1,
+        block_size=1,
+    )
+
+    assert ascend_chunked_prefill_workspace_size(vllm_config) == configured_capacity
+    assert ascend_config.chunked_prefill_workspace_size == configured_capacity
 
 
 def test_demand_below_capacity_is_not_capped(ascend_config, mock_logger):
@@ -229,12 +137,12 @@ def test_minimum_capacity_overrides_smaller_cap_and_is_reported(ascend_config, m
 @pytest.mark.parametrize(
     "configured,architectures,expected",
     [
-        (None, ("DeepseekV3ForCausalLM",), DEFAULT_CAPACITY),
-        (None, ("KimiLinearForCausalLM",), K3_CAPACITY),
+        (DEFAULT_CAPACITY, ("DeepseekV3ForCausalLM",), DEFAULT_CAPACITY),
+        (DEFAULT_CAPACITY, ("KimiLinearForCausalLM",), DEFAULT_CAPACITY),
         (256 * 1024, ("KimiLinearForCausalLM",), 256 * 1024),
     ],
 )
-def test_mla_and_sfa_builders_use_capacity_policy(
+def test_mla_and_sfa_builders_use_configured_capacity(
     ascend_config, mock_logger, builder_cls, configured, architectures, expected
 ):
     ascend_config.chunked_prefill_workspace_size = configured

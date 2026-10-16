@@ -263,7 +263,7 @@ def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
     monkeypatch.setattr(
-        attention_utils, "get_ascend_config", lambda: SimpleNamespace(chunked_prefill_workspace_size=None)
+        attention_utils, "get_ascend_config", lambda: SimpleNamespace(chunked_prefill_workspace_size=128 * 1024)
     )
 
     config = SimpleNamespace(

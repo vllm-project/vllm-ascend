@@ -497,14 +497,11 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_chunked_prefill_workspace_size_defaults_to_none(self, mock_fix_incompatible_config):
-        for additional_config in ({}, {"chunked_prefill_workspace_size": None}):
-            clear_ascend_config()
-            config = VllmConfig()
-            config.additional_config = additional_config
-            with self.subTest(additional_config=additional_config):
-                self.assertIsNone(init_ascend_config(config).chunked_prefill_workspace_size)
-                self.assertEqual(config.additional_config, additional_config)
+    def test_chunked_prefill_workspace_size_defaults_to_128k(self, mock_fix_incompatible_config):
+        config = VllmConfig()
+        config.additional_config = {}
+        self.assertEqual(init_ascend_config(config).chunked_prefill_workspace_size, 128 * 1024)
+        self.assertEqual(config.additional_config, {})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -521,7 +518,7 @@ class TestAscendConfig(TestBase):
     def test_chunked_prefill_workspace_size_rejects_invalid_values(self, mock_fix_incompatible_config):
         # Unlike lax int fields, numeric strings and integral floats are
         # rejected: the value is a row count, not a coercible switch.
-        for invalid_value in (True, False, 0, -1, 1.0, 131072.5, "131072", [131072]):
+        for invalid_value in (None, True, False, 0, -1, 1.0, 131072.5, "131072", [131072]):
             clear_ascend_config()
             test_vllm_config = VllmConfig()
             test_vllm_config.additional_config = {"chunked_prefill_workspace_size": invalid_value}
@@ -532,7 +529,7 @@ class TestAscendConfig(TestBase):
                 init_ascend_config(test_vllm_config)
 
     def test_chunked_prefill_workspace_size_serialization(self):
-        for value in (None, 1, 524288):
+        for value in (128 * 1024, 1, 524288):
             with self.subTest(value=value):
                 config = AscendConfig(sparse_kv_offload_config=None, chunked_prefill_workspace_size=value)
                 adapter = TypeAdapter(AscendConfig)

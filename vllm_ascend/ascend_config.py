@@ -435,7 +435,7 @@ class AscendConfig:
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
-            "chunked_prefill_workspace_size": null,
+            "chunked_prefill_workspace_size": 131072,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -595,9 +595,9 @@ class AscendConfig:
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
     mega_moe_max_tokens: int = 65536
-    # Chunked-prefill workspace cap in token rows. None selects 512K for
-    # Kimi K3 and 128K otherwise; minimum allocation requirements still apply.
-    chunked_prefill_workspace_size: int | None = None
+    # Chunked-prefill workspace cap in token rows; minimum allocation
+    # requirements still apply.
+    chunked_prefill_workspace_size: int = 128 * 1024
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -658,10 +658,8 @@ class AscendConfig:
     def _validate_chunked_prefill_workspace_size(cls, value: Any) -> Any:
         # Strict: a bool, float or numeric string is a configuration mistake
         # rather than a row count.
-        if value is None:
-            return value
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"chunked_prefill_workspace_size must be a positive integer or null, got {value!r}")
+            raise ValueError(f"chunked_prefill_workspace_size must be a positive integer, got {value!r}")
         return value
 
     @model_validator(mode="after")
