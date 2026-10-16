@@ -331,7 +331,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
-        --served-model-name dsv \
+        --served-model-name dsv4 \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
@@ -354,6 +354,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
                 "enable_static_kernel": false
             },
             "enable_cpu_binding": true,
+            "enable_dsa_cp": true,
             "multistream_overlap_shared_expert": true
         }'
     ```
@@ -384,7 +385,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
   
     vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
-        --port 9999 \
+        --port 8000 \
         --served-model-name dsv4 \
         --data-parallel-size 2 \
         --prefill-context-parallel-size 2 \
@@ -1238,6 +1239,7 @@ Before you start, please:
         vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
         --host $local_ip \
         --port 7100 \
+        --served-model-name dsv4 \
         --data-parallel-size 1 \
         --data-parallel-rank 0 \
         --data-parallel-address $local_ip \
@@ -1262,7 +1264,7 @@ Before you start, please:
         --reasoning-parser deepseek_v4 \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/l00943162/profiling_p", "torch_profiler_with_stack": false}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV2",
@@ -1282,7 +1284,7 @@ Before you start, please:
         }' \
         2>&1 | tee v4_flash_p.log
 
-2. Prepare `run_decode.sh`.
+3. Prepare `run_decode.sh`.
         unset https_proxy
         unset http_proxy
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
@@ -1313,6 +1315,7 @@ Before you start, please:
         vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
         --host $local_ip \
         --port "${api_port}" \
+        --served-model-name dsv4 \  
         --data-parallel-size 4 \
         --data-parallel-rank "${dp_rank}" \
         --data-parallel-address $local_ip \
@@ -1359,7 +1362,7 @@ Before you start, please:
         --additional-config '{
             "ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,
             "recompute_scheduler_enable":true, "enable_shared_expert_dp":true,"combine_quant_mode":4}' \2>&1 | tee v4_flash_d.log
-3. Start the Prefill and Decode services in separate terminals.
+5. Start the Prefill and Decode services in separate terminals.
 
     ```bash
     # Prefill terminal
@@ -1368,7 +1371,7 @@ Before you start, please:
     # Decode terminal
     bash run_decode.sh
     ```
-4. Deploy the P-D disaggregation proxy.
+6. Deploy the P-D disaggregation proxy.
 
    Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the proxy. Configure the Prefill endpoint as `<prefill_node_ip>:7100`. Because the Decode node uses `DP4` with external DP load balancing, configure all four Decode endpoints as `<decode_node_ip>:7200` through `<decode_node_ip>:7203`.
 
@@ -1471,6 +1474,7 @@ Prepare `run_prefill_memcache.sh` on the Prefill node.
         vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
         --host 0.0.0.0 \
         --port 7100 \
+        --served-model-name dsv4 \ 
         --data-parallel-size 1 \
         --data-parallel-rank 0 \
         --data-parallel-address $local_ip \
@@ -1495,7 +1499,7 @@ Prepare `run_prefill_memcache.sh` on the Prefill node.
         --reasoning-parser deepseek_v4 \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/l00943162/profiling_p", "torch_profiler_with_stack": false}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
         --kv-transfer-config '{
           "kv_connector": "MultiConnector",
@@ -1574,6 +1578,7 @@ Prepare `run_decode_memcache.sh` on the Decode node.
         vllm serve  /root/.cache/DeepSeek-V4-Flash-0731 \
         --host $local_ip \
         --port 7200 \
+        --served-model-name dsv4 \ 
         --data-parallel-size 4 \
         --data-parallel-rank "${dp_rank}" \
         --data-parallel-address $local_ip  \
@@ -1600,7 +1605,7 @@ Prepare `run_decode_memcache.sh` on the Decode node.
         --gpu-memory-utilization 0.95 \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": \"${profiler_output_dir}\", "torch_profiler_with_stack": false}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
@@ -1669,12 +1674,18 @@ P-D proxy
 ```
 
 ```bash
-# Decode node: Start all four Decode ranks first
-bash run_decode_memcache.sh 0 7200 0 1
-bash run_decode_memcache.sh 1 7201 1 2
-bash run_decode_memcache.sh 2 7202 2 3
-bash run_decode_memcache.sh 3 7203 3 4
+# Decode node: wait until all four Decode endpoints are ready
+decode_ip="<decode_ip>"
 
+for port in 7200 7201 7202 7203; do
+    until curl --noproxy '*' -fsS \
+        "http://${decode_ip}:${port}/health" >/dev/null; do
+        sleep 2
+    done
+
+    echo "Decode endpoint ${port} is ready"
+done
+bash run_prefill_memcache.sh
 # Prefill node: Start after all Decode ranks are ready
 bash run_prefill_memcache.sh
 
@@ -1806,7 +1817,7 @@ Query the Prefill metrics again:
 
 ```bash
 curl --noproxy '*' -fsS \
-    http://<prefill_node_ip>:7000/metrics \
+    http://<prefill_node_ip>:7100/metrics \
     > /tmp/dsv4_prefill_metrics_after.txt
 
 grep -E \
