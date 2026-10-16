@@ -231,6 +231,18 @@ def test_runtime_scoring_is_throttled_per_batch_bucket():
     assert manager._physical_k_recommendation == (8, 3)
 
 
+def test_new_single_request_is_scored_without_waiting_for_periodic_timer():
+    manager = profiled_manager(10.0, 1.0)
+    manager.req_states.req_id_to_index["new"] = 1
+    manager.get_num_tokens({"0": 5}, {"0": [1, 2, 3, 4]})
+    assert manager._physical_k_recommendation == (1, 4)
+    manager.get_num_tokens({"0": 5}, {"0": [1, 2, 3, 4]})
+    assert manager._physical_k_recommendation is None
+
+    manager.get_num_tokens({"new": 5}, {"new": [1, 2, 3, 4]})
+    assert manager._physical_k_recommendation == (1, 4)
+
+
 def test_full_width_probe_rescores_after_narrow_draft_without_waiting_for_timer():
     manager = profiled_manager(1.0, 10.0)
     per_req = {str(i): 5 for i in range(8)}

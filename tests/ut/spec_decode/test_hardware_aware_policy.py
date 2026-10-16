@@ -133,6 +133,31 @@ def test_output_recommendation_drives_controller():
     assert controller.cap(5, 16) == 3
 
 
+def test_new_single_request_does_not_inherit_previous_prompt_width():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={"first": [1] * 5})
+    model_output = SimpleNamespace(
+        physical_k_recommendation=(1, 3),
+        req_ids=["first"],
+        sampled_token_ids=[[1, 2]],
+    )
+    for _ in range(3):
+        _update_controller(controller, scheduler_output, model_output)
+    assert controller.cap(5, 1) == 3
+
+    scheduler_output.scheduled_spec_decode_tokens = {"second": [1] * 3}
+    model_output.req_ids = ["second"]
+    model_output.physical_k_recommendation = None
+    _update_controller(controller, scheduler_output, model_output)
+    assert controller.cap(5, 1) == 5
+    assert controller._state(1).profile_k is None
+
+    model_output.physical_k_recommendation = (1, 4)
+    for _ in range(3):
+        _update_controller(controller, scheduler_output, model_output)
+    assert controller.cap(5, 1) == 4
+
+
 def test_full_k_profile_is_a_runtime_noop():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     controller.recommend(8, 5)
