@@ -597,6 +597,22 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
+# ** File: platform/patch_process_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.system_utils.kill_process_tree` and its loaded aliases
+#    Why:
+#       The verified-main pin predates the vLLM #59984 shutdown race fix.
+#       A child can exit between enumeration and name lookup, aborting engine
+#       shutdown and leaving the remaining processes alive.
+#    How:
+#       Backport the upstream per-child NoSuchProcess guard and update loaded
+#       shutdown/DP-supervisor aliases. Retain the original signal ordering.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/59984
+#    Future Plan:
+#       Remove when both supported vLLM dependency targets contain commit
+#       f4b8d43a681a908ce22b63ece3a86ab5b198e760.
+#
 # ** 18. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
