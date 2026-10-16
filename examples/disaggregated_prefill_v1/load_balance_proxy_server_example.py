@@ -192,10 +192,16 @@ class ServerState:
         self.active_tokens = 0
         self.active_kv_cache = 0  # Only for prefiller
         self.active_requests = 0  # Number of active requests
+        # Number of requests currently using this instance. Used to drain
+        # tainted instances per-instance instead of waiting until ALL proxy
+        # requests finish (which may never happen under continuous traffic).
+        self.in_flight = 0
         self.aborted_requests = set()  # Track aborted requests
         # Removed individual server lock - will use global locks instead
 
     def __eq__(self, other):
+        if not isinstance(other, ServerState):
+            return NotImplemented
         self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
         other_host = other.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
         return self_host == other_host and str(self.port) == str(other.port)
@@ -214,13 +220,19 @@ class ProxyState:
         self.prefill_lb_policy = prefill_lb_policy
         self.tainted_prefillers: list[ServerState] = []
         self.tainted_decoders: list[ServerState] = []
+        # Guards synchronous instance selection/release/add/remove critical
+        # sections against the NodeListener background thread, which may
+        # tombstone instances while requests are being selected. Never held
+        # across an await. Private _drop/_taint/_update helpers assume the
+        # caller already holds this lock. Must be created before NodeListener
+        # starts its background thread (see NodeListener.__init__).
+        self.instance_lock = threading.Lock()
         self.node_listener = NodeListener(self)
 
         self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
         self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
-        # Removed selection locks - no longer needed for synchronous methods
 
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
@@ -257,7 +269,7 @@ class ProxyState:
         prefiller node.
         """
         # No lock needed - atomic operation
-        if server_idx >= len(self.prefillers):
+        if server_idx >= len(self.prefillers) or self.prefillers[server_idx] is None:
             return
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
@@ -267,7 +279,7 @@ class ProxyState:
         This is used to release kv cache in prefiller node.
         """
         # No lock needed - atomic operation
-        if server_idx >= len(self.prefillers):
+        if server_idx >= len(self.prefillers) or self.prefillers[server_idx] is None:
             return set()
         aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
         self.prefillers[server_idx].aborted_requests.clear()
@@ -278,64 +290,84 @@ class ProxyState:
             return str(uuid.uuid4())
 
     def select_prefiller(self, token_count):  # Changed to synchronous
-        # No lock needed - entire function is atomic
-        if not self.prefiller_heap:
-            raise RuntimeError("No prefiller servers available")
+        with self.instance_lock:
+            if not self.prefiller_heap:
+                raise RuntimeError("No prefiller servers available")
 
-        priority, chosen, server = heapq.heappop(self.prefiller_heap)
+            # Skip stale entries whose slot no longer holds the same instance
+            # (the background listener may have tombstoned it concurrently).
+            while True:
+                priority, chosen, server = heapq.heappop(self.prefiller_heap)
+                if chosen < len(self.prefillers) and self.prefillers[chosen] is server:
+                    break
+                if not self.prefiller_heap:
+                    raise RuntimeError("No prefiller servers available")
 
-        # Update the chosen server atomically
-        self.prefillers[chosen].active_tokens += token_count
-        self.prefillers[chosen].active_kv_cache += token_count
-        if self.prefill_lb_policy == "least_requests":
-            self.prefillers[chosen].active_requests += 1
+            # Update the chosen server atomically
+            self.prefillers[chosen].active_tokens += token_count
+            self.prefillers[chosen].active_kv_cache += token_count
+            self.prefillers[chosen].in_flight += 1
+            if self.prefill_lb_policy == "least_requests":
+                self.prefillers[chosen].active_requests += 1
 
-        # Update priority and re-add to heap
-        self._update_prefiller_priority(chosen)
+            # Update priority and re-add to heap
+            self._update_prefiller_priority(chosen)
 
-        return chosen
+            return chosen
 
     def release_prefiller(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        if idx >= len(self.prefillers):
-            return
-        self.prefillers[idx].active_tokens -= token_count
-        if self.prefill_lb_policy == "least_requests" and self.prefillers[idx].active_requests > 0:
-            self.prefillers[idx].active_requests -= 1
-        # Update priority queue after releasing
-        self._update_prefiller_priority(idx)
+        with self.instance_lock:
+            if idx >= len(self.prefillers) or self.prefillers[idx] is None:
+                return
+            self.prefillers[idx].active_tokens -= token_count
+            if self.prefillers[idx].in_flight > 0:
+                self.prefillers[idx].in_flight -= 1
+            if self.prefill_lb_policy == "least_requests" and self.prefillers[idx].active_requests > 0:
+                self.prefillers[idx].active_requests -= 1
+            # Update priority queue after releasing
+            self._update_prefiller_priority(idx)
 
     def release_prefiller_kv(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        if idx >= len(self.prefillers):
-            return
-        if self.prefillers[idx].active_kv_cache > 0:
-            self.prefillers[idx].active_kv_cache -= token_count
-        # Update priority queue after releasing
-        self._update_prefiller_priority(idx)
+        with self.instance_lock:
+            if idx >= len(self.prefillers) or self.prefillers[idx] is None:
+                return
+            if self.prefillers[idx].active_kv_cache > 0:
+                self.prefillers[idx].active_kv_cache -= token_count
+            # Update priority queue after releasing
+            self._update_prefiller_priority(idx)
 
     def select_decoder(self, token_count):  # Changed to synchronous
-        # No lock needed - entire function is atomic
-        if not self.decoder_heap:
-            raise RuntimeError("No decoder servers available")
+        with self.instance_lock:
+            if not self.decoder_heap:
+                raise RuntimeError("No decoder servers available")
 
-        priority, chosen, server = heapq.heappop(self.decoder_heap)
+            # Skip stale entries whose slot no longer holds the same instance
+            # (the background listener may have tombstoned it concurrently).
+            while True:
+                priority, chosen, server = heapq.heappop(self.decoder_heap)
+                if chosen < len(self.decoders) and self.decoders[chosen] is server:
+                    break
+                if not self.decoder_heap:
+                    raise RuntimeError("No decoder servers available")
 
-        # Update the chosen server atomically
-        self.decoders[chosen].active_tokens += token_count
+            # Update the chosen server atomically
+            self.decoders[chosen].active_tokens += token_count
+            self.decoders[chosen].in_flight += 1
 
-        # Update priority and re-add to heap
-        self._update_decoder_priority(chosen)
+            # Update priority and re-add to heap
+            self._update_decoder_priority(chosen)
 
-        return chosen
+            return chosen
 
     def release_decoder(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        if idx >= len(self.decoders):
-            return
-        self.decoders[idx].active_tokens -= token_count
-        # Update priority queue after releasing
-        self._update_decoder_priority(idx)
+        with self.instance_lock:
+            if idx >= len(self.decoders) or self.decoders[idx] is None:
+                return
+            self.decoders[idx].active_tokens -= token_count
+            if self.decoders[idx].in_flight > 0:
+                self.decoders[idx].in_flight -= 1
+            # Update priority queue after releasing
+            self._update_decoder_priority(idx)
 
     # Omni_infer's calculate_input_scores function
     def calculate_prefill_scores(self, request_length: int) -> float:
@@ -363,91 +395,129 @@ class ProxyState:
         return added_nodes, waiting_nodes
 
     def add_prefillers(self, instances: list[ServerState]) -> None:
-        for server in instances:
-            if server in self.tainted_prefillers:
-                self.tainted_prefillers.remove(server)
-                self.prefiller_heap = [
-                    (0, idx, server) if srv == server else (priority, idx, srv)
-                    for priority, idx, srv in self.prefiller_heap
-                ]
-                heapq.heapify(self.prefiller_heap)
-            elif server not in self.prefillers:
-                self.prefillers.append(server)
-                # prefiller_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.prefiller_heap, (0, len(self.prefillers) - 1, server))
+        with self.instance_lock:
+            for server in instances:
+                if server in self.tainted_prefillers:
+                    self.tainted_prefillers.remove(server)
+                    # Keep the existing heap object (in-flight requests may still
+                    # reference it); only reset its tainted priority.
+                    self.prefiller_heap = [
+                        (0, idx, srv) if srv == server else (priority, idx, srv)
+                        for priority, idx, srv in self.prefiller_heap
+                    ]
+                    heapq.heapify(self.prefiller_heap)
+                elif server not in self.prefillers:
+                    self.prefillers.append(server)
+                    # prefiller_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
+                    heapq.heappush(self.prefiller_heap, (0, len(self.prefillers) - 1, server))
         self.print_status(f"Add prefiller instances: {instances}.")
 
     def add_decoders(self, instances: list[ServerState]) -> None:
-        for server in instances:
-            if server in self.tainted_decoders:
-                self.tainted_decoders.remove(server)
-                self.decoder_heap = [
-                    (0, idx, server) if srv == server else (priority, idx, srv)
-                    for priority, idx, srv in self.decoder_heap
-                ]
-                heapq.heapify(self.decoder_heap)
-            elif server not in self.decoders:
-                self.decoders.append(server)
-                # decoder_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.decoder_heap, (0, len(self.decoders) - 1, server))
+        with self.instance_lock:
+            for server in instances:
+                if server in self.tainted_decoders:
+                    self.tainted_decoders.remove(server)
+                    # Keep the existing heap object (in-flight requests may still
+                    # reference it); only reset its tainted priority.
+                    self.decoder_heap = [
+                        (0, idx, srv) if srv == server else (priority, idx, srv)
+                        for priority, idx, srv in self.decoder_heap
+                    ]
+                    heapq.heapify(self.decoder_heap)
+                elif server not in self.decoders:
+                    self.decoders.append(server)
+                    # decoder_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
+                    heapq.heappush(self.decoder_heap, (0, len(self.decoders) - 1, server))
         self.print_status(f"Add decoder instances: {instances}.")
 
     def remove_prefillers(self, instances: list[ServerState]) -> bool:
         if not instances:
             return False
 
-        if self.request_num > 0:
-            logger.warning("Start to taint prefill instances %s.", instances)
-            self._taint_prefillers(instances)
-            return True
+        with self.instance_lock:
+            instances_to_remove = set(instances)
+            # Per-instance draining: idle instances are removed immediately even
+            # while other requests are in flight; busy ones are tainted (isolated
+            # from new selection) and removed by the listener once they drain.
+            busy, idle = [], []
+            for server in self.prefillers:
+                if server is not None and server in instances_to_remove:
+                    (busy if server.in_flight > 0 else idle).append(server)
 
+            if busy:
+                logger.warning("Start to taint prefill instances %s.", busy)
+                self._taint_prefillers(busy)
+
+            if idle:
+                self._drop_prefillers(idle)
+        # print_status moved outside the lock to avoid holding it during I/O.
+        if idle:
+            self.print_status(f"Remove prefiller instances: {idle}.")
+        return bool(busy)
+
+    def _drop_prefillers(self, instances: list[ServerState]) -> None:
+        # Caller must hold self.instance_lock.
         instances_to_remove = set(instances)
-        self.prefillers = [server for server in self.prefillers if server not in instances_to_remove]
-        prefiller_heap_copy = self.prefiller_heap.copy()
-        prefiller_heap_copy.sort(key=lambda x: x[1])  # sorted by key: prefiller_idx
-        prefiller_heap = []
-        idx = 0
-        for priority, _, server in prefiller_heap_copy:
-            if server not in instances_to_remove:
-                prefiller_heap.append((priority, idx, server))
-                idx += 1
-
-        # prefiller_heap: [(priority_0, 0, server_0), (priority_1, 1, server_1)] -> [(priority_1, 0, server_1)]
-        self.prefiller_heap = prefiller_heap
+        # Tombstone the slots instead of compacting the list, so indices held
+        # by in-flight requests to OTHER instances never shift.
+        for idx, server in enumerate(self.prefillers):
+            if server in instances_to_remove:
+                self.prefillers[idx] = None
+        self.prefiller_heap = [
+            (priority, idx, server)
+            for priority, idx, server in self.prefiller_heap
+            if server not in instances_to_remove
+        ]
         heapq.heapify(self.prefiller_heap)
-        self.print_status(f"Remove prefiller instances: {instances}.")
-        return False
 
     def remove_decoders(self, instances: list[ServerState]) -> bool:
         if not instances:
             return False
 
-        if self.request_num > 0:
-            logger.warning("Start to taint decode instances %s.", instances)
-            self._taint_decoders(instances)
-            return True
+        with self.instance_lock:
+            instances_to_remove = set(instances)
+            # Per-instance draining: idle instances are removed immediately even
+            # while other requests are in flight; busy ones are tainted (isolated
+            # from new selection) and removed by the listener once they drain.
+            busy, idle = [], []
+            for server in self.decoders:
+                if server is not None and server in instances_to_remove:
+                    (busy if server.in_flight > 0 else idle).append(server)
 
+            if busy:
+                logger.warning("Start to taint decode instances %s.", busy)
+                self._taint_decoders(busy)
+
+            if idle:
+                self._drop_decoders(idle)
+        # print_status moved outside the lock to avoid holding it during I/O.
+        if idle:
+            self.print_status(f"Remove decoder instances: {idle}.")
+        return bool(busy)
+
+    def _drop_decoders(self, instances: list[ServerState]) -> None:
+        # Caller must hold self.instance_lock.
         instances_to_remove = set(instances)
-        self.decoders = [server for server in self.decoders if server not in instances_to_remove]
-        decoder_heap_copy = self.decoder_heap.copy()
-        decoder_heap_copy.sort(key=lambda x: x[1])  # sorted by key: decoder_idx
-        decoder_heap = []
-        idx = 0
-        for priority, _, server in decoder_heap_copy:
-            if server not in instances_to_remove:
-                decoder_heap.append((priority, idx, server))
-                idx += 1
-
-        # decoder_heap: [(priority_0, 0, server_0), (priority_1, 1, server_1)] -> [(priority_1, 0, server_1)]
-        self.decoder_heap = decoder_heap
+        # Tombstone the slots instead of compacting the list, so indices held
+        # by in-flight requests to OTHER instances never shift.
+        for idx, server in enumerate(self.decoders):
+            if server in instances_to_remove:
+                self.decoders[idx] = None
+        self.decoder_heap = [
+            (priority, idx, server)
+            for priority, idx, server in self.decoder_heap
+            if server not in instances_to_remove
+        ]
         heapq.heapify(self.decoder_heap)
-        self.print_status(f"Remove decoder instances: {instances}.")
-        return False
 
     def _taint_prefillers(self, instances: list[ServerState]) -> None:
         instances_to_taint = set(instances)
         for server in self.prefillers:
-            if server in instances_to_taint and server not in self.tainted_prefillers:
+            if (
+                server is not None
+                and server in instances_to_taint
+                and server not in self.tainted_prefillers
+            ):
                 self.tainted_prefillers.append(server)
 
         self.prefiller_heap = [
@@ -459,7 +529,11 @@ class ProxyState:
     def _taint_decoders(self, instances: list[ServerState]) -> None:
         instances_to_taint = set(instances)
         for server in self.decoders:
-            if server in instances_to_taint and server not in self.tainted_decoders:
+            if (
+                server is not None
+                and server in instances_to_taint
+                and server not in self.tainted_decoders
+            ):
                 self.tainted_decoders.append(server)
 
         self.decoder_heap = [
@@ -469,11 +543,14 @@ class ProxyState:
         heapq.heapify(self.decoder_heap)
 
     def print_status(self, msg: str) -> None:
-        status = {
-            "prefill_instances": [str(server) for server in self.prefillers],
-            "decode_instances": [str(server) for server in self.decoders],
-        }
-        log_print(f"{msg} Status: {status}")
+        # Take a snapshot under the lock to avoid "list changed size during
+        # iteration" if NodeListener or the event loop appends concurrently.
+        # The lock is held only for the in-memory traversal (extremely fast);
+        # log_print (I/O) runs after release.
+        with self.instance_lock:
+            prefill = [str(s) for s in self.prefillers if s is not None]
+            decode = [str(s) for s in self.decoders if s is not None]
+        log_print(f"{msg} Status: {{'prefill_instances': {prefill}, 'decode_instances': {decode}}}")
 
 
 proxy_state = None
@@ -511,15 +588,44 @@ class NodeListener:
                 else:
                     self.waiting_nodes[node] = (instance_type, server, check_times)
 
-            if self.proxy_state.tainted_prefillers and not self.proxy_state.request_num:
-                need_waiting = self.proxy_state.remove_prefillers(self.proxy_state.tainted_prefillers)
-                if not need_waiting:
-                    self.proxy_state.tainted_prefillers.clear()
+            # Drained tainted instances are removed per-instance as soon as
+            # their own in_flight count reaches zero, regardless of requests
+            # handled by other instances.
+            # All accesses to tainted_* lists and in_flight are protected by
+            # instance_lock to prevent races with the event-loop thread which
+            # may modify tainted_* inside add_prefillers/add_decoders and
+            # modify in_flight in error paths.
+            with self.proxy_state.instance_lock:
+                if self.proxy_state.tainted_prefillers:
+                    tainted_prefillers_snapshot = list(self.proxy_state.tainted_prefillers)
+                else:
+                    tainted_prefillers_snapshot = []
 
-            if self.proxy_state.tainted_decoders and not self.proxy_state.request_num:
-                need_waiting = self.proxy_state.remove_decoders(self.proxy_state.tainted_decoders)
-                if not need_waiting:
-                    self.proxy_state.tainted_decoders.clear()
+            if tainted_prefillers_snapshot:
+                self.proxy_state.remove_prefillers(tainted_prefillers_snapshot)
+
+            with self.proxy_state.instance_lock:
+                self.proxy_state.tainted_prefillers[:] = [
+                    server
+                    for server in self.proxy_state.tainted_prefillers
+                    if server.in_flight > 0 and server in self.proxy_state.prefillers
+                ]
+
+            with self.proxy_state.instance_lock:
+                if self.proxy_state.tainted_decoders:
+                    tainted_decoders_snapshot = list(self.proxy_state.tainted_decoders)
+                else:
+                    tainted_decoders_snapshot = []
+
+            if tainted_decoders_snapshot:
+                self.proxy_state.remove_decoders(tainted_decoders_snapshot)
+
+            with self.proxy_state.instance_lock:
+                self.proxy_state.tainted_decoders[:] = [
+                    server
+                    for server in self.proxy_state.tainted_decoders
+                    if server.in_flight > 0 and server in self.proxy_state.decoders
+                ]
             time.sleep(global_args.waiting_retry_interval)
 
     @staticmethod
@@ -582,13 +688,18 @@ async def lifespan(app: FastAPI):
         global_args.decoder_instances,
         prefill_lb_policy=global_args.prefill_lb_policy,
     )
-    log_print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
+    log_print(
+        f"Initialized {sum(1 for s in proxy_state.prefillers if s is not None)} prefill clients "
+        f"and {sum(1 for s in proxy_state.decoders if s is not None)} decode clients."
+    )
     log_print(f"Prefiller load balancing policy: {proxy_state.prefill_lb_policy}")
     yield
     for p in proxy_state.prefillers:
-        await p.client.aclose()
+        if p is not None:
+            await p.client.aclose()
     for d in proxy_state.decoders:
-        await d.client.aclose()
+        if d is not None:
+            await d.client.aclose()
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -725,15 +836,25 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     prefiller = proxy_state.prefillers[prefiller_idx]
     # Send request to prefiller
-    response = await send_request_to_service(
-        prefiller.client,
-        prefiller_idx,
-        api,
-        req_data,
-        request_id,
-        max_retries=global_args.max_retries,
-        base_delay=global_args.retry_delay,
-    )
+    try:
+        response = await send_request_to_service(
+            prefiller.client,
+            prefiller_idx,
+            api,
+            req_data,
+            request_id,
+            max_retries=global_args.max_retries,
+            base_delay=global_args.retry_delay,
+        )
+    except Exception:
+        # The prefill request failed before release_prefiller(); balance the
+        # in_flight count only so the instance can still be drained/removed.
+        # Protect with instance_lock because the NodeListener thread reads
+        # in_flight inside remove_prefillers to decide busy vs idle.
+        with proxy_state.instance_lock:
+            if prefiller.in_flight > 0:
+                prefiller.in_flight -= 1
+        raise
     proxy_state.release_prefiller(prefiller_idx, prefiller_score)
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
@@ -897,6 +1018,15 @@ async def _handle_completions(api: str, request: Request):
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
+                            # The current decoder is no longer used after
+                            # reselecting; fully release it (active_tokens AND
+                            # in_flight) so its priority score is not leaked.
+                            # Only the last selected decoder is released in
+                            # finally, so old decoders must be released here.
+                            proxy_state.release_decoder(
+                                instance_info.decoder_idx,
+                                instance_info.decoder_score,
+                            )
                             if chat_flag:
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
@@ -1046,8 +1176,12 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
                 all_msg = f"Instances {instances} are isolated and waiting to be removed."
         return {
             "message": all_msg,
-            "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
-            "current_decode_instances": [str(decoder) for decoder in proxy_state.decoders],
+            "current_prefill_instances": [
+                str(prefiller) for prefiller in proxy_state.prefillers if prefiller is not None
+            ],
+            "current_decode_instances": [
+                str(decoder) for decoder in proxy_state.decoders if decoder is not None
+            ],
         }
     except Exception as e:
         logger.error("Failed to %s instances: %s", adjust_mode, e)
@@ -1078,8 +1212,8 @@ async def handle_chat_completions(request: Request):
 async def healthcheck():
     return {
         "status": "ok",
-        "prefill_instances": len(proxy_state.prefillers),
-        "decode_instances": len(proxy_state.decoders),
+        "prefill_instances": sum(1 for s in proxy_state.prefillers if s is not None),
+        "decode_instances": sum(1 for s in proxy_state.decoders if s is not None),
     }
 
 
