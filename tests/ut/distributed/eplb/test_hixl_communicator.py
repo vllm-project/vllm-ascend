@@ -197,7 +197,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     communicator.execute()
 
     assert engine.local_engine == "192.0.2.1:12345"
-    assert engine.options == {}
+    assert engine.options is None
     assert engine.connected == [("192.0.2.2:12346", 300_000)]
     assert len(engine.registered) == 1
     assert (engine.registered[0].addr, engine.registered[0].len) == (0, 2_097_152)
@@ -216,6 +216,61 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
 
     session.close()
     assert engine.deregistered == [1]
+    assert engine.finalized
+
+
+def test_hixl_engine_host_replaces_loopback(monkeypatch):
+    monkeypatch.setattr(eplb_communicator, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(eplb_communicator, "_probe_routable_host", lambda: "10.0.5.33")
+    monkeypatch.setattr(eplb_communicator, "_hostname_addresses", lambda: ["127.0.0.1"])
+
+    assert eplb_communicator._hixl_engine_host() == "10.0.5.33"
+
+
+def test_hixl_engine_host_rejects_loopback_only(monkeypatch):
+    monkeypatch.setattr(eplb_communicator, "get_ip", lambda: "::1")
+    monkeypatch.setattr(eplb_communicator, "_probe_routable_host", lambda: None)
+    monkeypatch.setattr(eplb_communicator, "_hostname_addresses", lambda: ["localhost", "127.0.0.1"])
+
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        eplb_communicator._hixl_engine_host()
+
+
+def test_official_initialize_retries_disabled_buffer_pool(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    session._hixl.__name__ = "hixl"
+    monkeypatch.setattr(eplb_communicator, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(eplb_communicator, "_probe_routable_host", lambda: "10.0.5.33")
+    attempts = []
+
+    def initialize(local_engine, options):
+        attempts.append((local_engine, options))
+        engine.local_engine = local_engine
+        engine.options = options
+        return 103900 if len(attempts) == 1 else 0
+
+    engine.initialize = initialize
+    session.initialize(models)
+
+    assert attempts == [
+        ("10.0.5.33:12345", None),
+        ("10.0.5.33:12345", {"BufferPool": "0:0"}),
+    ]
+    assert engine.finalizations == 1
+    session.close()
+
+
+def test_ctypes_initialize_does_not_retry_options(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    attempts = []
+    engine.initialize = lambda local_engine, options: attempts.append(options) or 103900
+
+    with pytest.raises(eplb_communicator.HixlEngineInitializeError, match="192.0.2.1:12345") as caught:
+        session.initialize(models)
+
+    assert attempts == [None]
+    assert "103900" in str(caught.value)
+    assert session._engine is None
     assert engine.finalized
 
 

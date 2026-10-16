@@ -11,7 +11,12 @@ from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import eplb_state
-from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
+from vllm_ascend.distributed.eplb.eplb_communicator import (
+    AscendGlooEplbCommunicator,
+    AscendHixlEplbCommunicator,
+    HixlEngineInitializeError,
+    _HixlSession,
+)
 from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
@@ -404,6 +409,34 @@ def test_hixl_initialization_failure_never_starts_the_async_worker(monkeypatch):
         state.start_async_loop()
     start.assert_not_called()
     assert state._hixl_session is session
+
+
+def test_hixl_initialize_failure_falls_back_to_gloo(monkeypatch):
+    state = _shutdown_state()
+    group = MagicMock()
+    main = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
+    main._cpu_group = group
+    main._session = object()
+    model = SimpleNamespace(communicator=main)
+    state.model_states = {"main": model}
+    state.parallel_config = SimpleNamespace(eplb_config=SimpleNamespace(communicator="hixl"))
+    state.policy = SimpleNamespace(config=SimpleNamespace(rank_transfer_limit=-1))
+    clamped = SimpleNamespace(rank_transfer_limit=1, cross_node_transfer_limit=1)
+    monkeypatch.setattr(eplb_state, "_clamp_live_stair_config", lambda config: clamped)
+    session = MagicMock(spec=_HixlSession)
+    session.initialize.side_effect = HixlEngineInitializeError(
+        "HIXL EPLB initialize failed with status 103900 for engine 10.0.5.33:12345"
+    )
+    monkeypatch.setattr(eplb_state, "_HixlSession", MagicMock(return_value=session))
+    with patch.object(upstream_eplb_state.EplbState, "start_async_loop") as start:
+        state.start_async_loop()
+    start.assert_called_once_with()
+    assert state._hixl_session is None
+    assert isinstance(model.communicator, AscendGlooEplbCommunicator)
+    assert model.communicator._cpu_group is group
+    assert main._session is None
+    assert state.parallel_config.eplb_config.communicator == "torch_gloo"
+    assert state.policy.config is clamped
 
 
 @pytest.mark.parametrize("entry", ["step", "ready", "close"])

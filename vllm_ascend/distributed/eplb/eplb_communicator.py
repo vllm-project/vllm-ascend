@@ -4,6 +4,8 @@
 """Ascend communicators for asynchronous EPLB."""
 
 import contextlib
+import ipaddress
+import socket
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -23,10 +25,19 @@ from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
+from vllm_ascend.distributed.eplb.hixl_compat import PARAM_INVALID as _HIXL_PARAM_INVALID
+
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _HIXL_MAX_REGISTERED_REGIONS = 4000
 _TRANSFER_TIMEOUT_SECONDS = 300
 _STATUS_POLL_SECONDS = 0.0005
+# CANN rejects an unknown initialize map. Disabling the relay pool is the
+# documented BufferPool value newer toolkits still accept.
+_HIXL_BUFFER_POOL_OPTION = "BufferPool"
+_HIXL_DISABLED_BUFFER_POOL = "0:0"
+_OFFICIAL_HIXL_MODULE = "hixl"
+# UDP connect selects the kernel's default-route address without sending a packet.
+_ROUTABLE_PROBE_DESTINATION = ("8.8.8.8", 80)
 
 _ExpertMetadata = dict[tuple[int, int], tuple[tuple[int, ...], int]]
 
@@ -63,6 +74,76 @@ def _resolve_hixl_module() -> Any:
             "HIXL EPLB requires the official hixl Python package or a CANN toolkit providing libcann_hixl.so"
         ) from error
     return hixl_compat
+
+
+class HixlEngineInitializeError(RuntimeError):
+    """HIXL rejected engine initialization on every rank of this EPLB group.
+
+    No expert memory has been registered yet, so the caller can replace the
+    HIXL communicators with the Gloo staging path.
+    """
+
+
+def _is_loopback_address(host: str) -> bool:
+    normalized = host.strip().strip("[]")
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _probe_routable_host() -> str | None:
+    """Return the default-route IPv4 address when it is not loopback."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(_ROUTABLE_PROBE_DESTINATION)
+            host = sock.getsockname()[0]
+    except OSError:
+        return None
+    if not host or _is_loopback_address(host):
+        return None
+    return host
+
+
+def _hostname_addresses() -> list[str]:
+    addresses: list[str] = []
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        return addresses
+    with contextlib.suppress(OSError):
+        addresses.append(socket.gethostbyname(hostname))
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return addresses
+    addresses.extend(info[4][0] for info in infos if info[4])
+    return addresses
+
+
+def _hixl_engine_host() -> str:
+    """Pick a non-loopback address for ``Hixl.initialize``.
+
+    Several engines on one host cannot share loopback: CANN reports
+    ``PARAM_INVALID`` for every rank. ``get_ip()`` follows ``VLLM_HOST_IP``
+    and may still be loopback on a single-node job whose collective master
+    address is ``127.0.0.1``.
+    """
+    configured = get_ip()
+    if not _is_loopback_address(configured):
+        return configured
+    for candidate in (_probe_routable_host(), *_hostname_addresses()):
+        if candidate and not _is_loopback_address(candidate):
+            logger.info("HIXL EPLB replaced loopback engine host %s with %s.", configured, candidate)
+            return candidate
+    raise RuntimeError(f"HIXL EPLB requires a non-loopback engine address; get_ip() returned {configured!r}")
+
+
+def _hixl_binding_accepts_options(hixl_module: Any) -> bool:
+    """The ctypes binding rejects every initialize option map."""
+    return getattr(hixl_module, "__name__", "") == _OFFICIAL_HIXL_MODULE
 
 
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
@@ -189,16 +270,27 @@ class _HixlSession:
             torch.npu.set_device(self._device)
             self._acl_context, status = acl.rt.get_context()
             self._check_status(status, "get ACL context")
+            local_engine = join_host_port(_hixl_engine_host(), get_open_port())
             self._engine = self._hixl.Hixl()
-            local_engine = join_host_port(get_ip(), get_open_port())
-            self._check_status(self._engine.initialize(local_engine, {}), "initialize")
+            init_status = self._initialize_hixl_engine(local_engine)
+            if init_status != self._hixl.SUCCESS:
+                raise RuntimeError(f"HIXL EPLB initialize failed with status {init_status} for engine {local_engine}")
 
         self._initializing = True
         for communicator in communicators.values():
             communicator._session = self
         try:
             self._initialize_phase(preflight, "preflight")
-            self._initialize_phase(initialize_engine, "initialization")
+            try:
+                self._initialize_phase(initialize_engine, "initialization")
+            except Exception as error:
+                # Registration has not started. Drop the local engine without
+                # another collective so a rejected initialize can fall back.
+                # A broken CPU group stays fatal: Gloo needs that same group.
+                self._rollback_rejected_engine()
+                if self._group_error is not None:
+                    raise
+                raise HixlEngineInitializeError(str(error)) from error
             self._initialize_phase(
                 lambda: self._exchange_remote_state(local_engine, communicators, local_meta), "metadata exchange"
             )
@@ -217,6 +309,8 @@ class _HixlSession:
                 communicator._all_expert_weights = ()
                 communicator._expert_buffer = ()
                 communicator._log_initialized()
+        except HixlEngineInitializeError:
+            raise
         except Exception:
             try:
                 self.close()
@@ -230,6 +324,52 @@ class _HixlSession:
     def check_usable(self) -> None:
         if not self._usable:
             raise RuntimeError("HIXL EPLB session is closed or failed") from self._error
+
+    def _initialize_hixl_engine(self, local_engine: str) -> int:
+        assert self._engine is not None
+        status = self._invoke_hixl_initialize(local_engine, None)
+        if status != _HIXL_PARAM_INVALID or not _hixl_binding_accepts_options(self._hixl):
+            return status
+        logger.info(
+            "HIXL EPLB initialize rejected engine %s with status %s; retrying with the relay buffer pool disabled.",
+            local_engine,
+            status,
+        )
+        self._discard_hixl_engine()
+        self._engine = self._hixl.Hixl()
+        return self._invoke_hixl_initialize(
+            local_engine,
+            {_HIXL_BUFFER_POOL_OPTION: _HIXL_DISABLED_BUFFER_POOL},
+        )
+
+    def _invoke_hixl_initialize(self, local_engine: str, options: dict[str, str] | None) -> int:
+        assert self._engine is not None
+        try:
+            return int(self._engine.initialize(local_engine, options))
+        except TypeError:
+            if options is not None or not _hixl_binding_accepts_options(self._hixl):
+                raise
+            # Older official bindings require a dict and treat None as a type error.
+            return int(self._engine.initialize(local_engine, {}))
+
+    def _discard_hixl_engine(self) -> None:
+        engine = self._engine
+        self._engine = None
+        if engine is None:
+            return
+        finalize = getattr(engine, "finalize", None)
+        if not callable(finalize):
+            return
+        try:
+            finalize()
+        except Exception:
+            logger.info("HIXL EPLB ignored finalize failure while replacing a rejected engine.", exc_info=True)
+
+    def _rollback_rejected_engine(self) -> None:
+        """Release an engine that never registered memory."""
+        self._usable = False
+        self._initializing = False
+        self._discard_hixl_engine()
 
     def _initialize_phase(self, operation: Callable[[], None], name: str) -> None:
         local_error: Exception | None = None

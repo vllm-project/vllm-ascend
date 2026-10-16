@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,12 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
+from vllm_ascend.distributed.eplb.eplb_communicator import (
+    AscendGlooEplbCommunicator,
+    AscendHixlEplbCommunicator,
+    HixlEngineInitializeError,
+    _HixlSession,
+)
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 from vllm_ascend.utils import vllm_version_is
@@ -131,6 +137,13 @@ def refresh_model_routing_tables(
         layer_state = layer.eplb_state
         if isinstance(layer_state, AscendEplbLayerState):
             layer_state.refresh_expert_replica_routing_table()
+
+
+def _clamp_live_stair_config(stair_config: Any) -> Any:
+    """Reuse the selection-time STAIR clamp after a runtime HIXL fallback."""
+    from vllm_ascend.patch.platform.patch_eplb import _clamp_stair_limits_for_gloo_fallback
+
+    return _clamp_stair_limits_for_gloo_fallback(SimpleNamespace(stair_config=stair_config))
 
 
 def _raise_if_async_worker_stopped(state: Any) -> None:
@@ -250,10 +263,41 @@ class AscendEplbState(_eplb_state.EplbState):
             }
             if communicators and self._hixl_session is None:
                 self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
-                self._hixl_session.initialize(communicators)
+                try:
+                    self._hixl_session.initialize(communicators)
+                except HixlEngineInitializeError as error:
+                    logger.warning("Ascend EPLB fell back to torch_gloo; HIXL initialize failed: %s", error)
+                    self._replace_hixl_communicators(communicators)
+                    self._hixl_session = None
             if self._hixl_session is not None:
                 self._hixl_session.check_usable()
             super().start_async_loop(*args, **kwargs)
+
+    def _replace_hixl_communicators(self, communicators: dict[str, AscendHixlEplbCommunicator]) -> None:
+        for key, communicator in communicators.items():
+            model_state = self.model_states[key]
+            if model_state.communicator is not communicator:
+                continue
+            model_state.communicator = AscendGlooEplbCommunicator(cpu_group=communicator._cpu_group)
+            communicator._session = None
+        parallel_config = getattr(self, "parallel_config", None)
+        eplb_config = getattr(parallel_config, "eplb_config", None)
+        if eplb_config is not None and getattr(eplb_config, "communicator", None) == "hixl":
+            eplb_config.communicator = "torch_gloo"
+        self._clamp_stair_policy_for_gloo_fallback()
+
+    def _clamp_stair_policy_for_gloo_fallback(self) -> None:
+        policy = getattr(self, "policy", None)
+        stair_config = getattr(policy, "config", None)
+        if stair_config is None or not hasattr(stair_config, "rank_transfer_limit"):
+            return
+        try:
+            policy.config = _clamp_live_stair_config(stair_config)
+        except Exception as error:
+            logger.warning(
+                "Ascend EPLB fell back to torch_gloo without clamping STAIR transfer limits: %s",
+                error,
+            )
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(
