@@ -1,4 +1,3 @@
-import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -86,13 +85,9 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
-    # Draft config initialization can reset the process-global support flag.
-    # Use the current model request for both communicator init and forward.
-    requested = (getattr(vllm_config, "additional_config", None) or {}).get("enable_fused_mc2", 0)
-    if requested != 2:
-        return False
+    # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
-        importlib.util.find_spec("cann_ops_transformer") is not None
+        is_mega_moe_supported()
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)

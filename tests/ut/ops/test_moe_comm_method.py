@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -204,7 +203,7 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(captured["glu_bias"], 0.0)
         self.assertIsNone(captured["activation_clamp"])
 
-    def test_situ_activation_is_bound_after_draft_resets_global_flag(self):
+    def test_situ_activation_is_bound_at_initialization(self):
         self.mock_ascend_config.enable_fused_mc2 = 1
         self.moe_config.activation = "situ"
         self.moe_config.activation_situ_beta = 4.0
@@ -218,22 +217,10 @@ class TestMoECommMethod(TestBase):
             calls.append((activation, activation_params, kwargs))
             return torch.empty(2, 8), torch.empty(2)
 
-        vllm_config = SimpleNamespace(
-            additional_config={"enable_fused_mc2": 2},
-            parallel_config=SimpleNamespace(enable_expert_parallel=True),
-        )
         with (
             patch.object(FusedMC2CommImpl, "_get_token_dispatcher"),
             patch.object(FusedMC2CommImpl, "_get_prepare_finalize"),
-            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config", return_value=vllm_config),
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
-            patch("vllm_ascend.ascend_forward_context.importlib.util.find_spec", return_value=object()),
-            patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True),
-            patch("vllm_ascend.ascend_forward_context.get_ep_group", return_value=SimpleNamespace(world_size=64)),
-            patch(
-                "vllm_ascend.ascend_forward_context.get_current_hardware_profile",
-                return_value=get_hardware_profile(AscendDeviceType.A3),
-            ),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True),
             patch("vllm_ascend.ops.fused_moe.moe_utils.load_cann_mega_moe_ops", return_value=(MagicMock(), op)),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros"),
         ):
