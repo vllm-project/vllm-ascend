@@ -151,7 +151,7 @@ benchmarks:
     dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    max_out_len: 65536
+    max_out_len: 32768
     batch_size: 32
     work_dir: /root/.cache/benchmark_results/${BENCHMARK_JOB_NAME}/aisbench
     thinking: true
