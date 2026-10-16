@@ -1298,7 +1298,6 @@ def _publish_action_artifacts(
     action_identity: str,
     artifacts: Sequence[dict],
 ) -> None:
-    publish_dir.mkdir(parents=True, exist_ok=True)
     publish_state_dir.mkdir(parents=True, exist_ok=True)
 
     lock_path = publish_state_dir / ".publish.lock"
@@ -1309,6 +1308,7 @@ def _publish_action_artifacts(
     )
 
     with _file_lock(lock_path):
+        publish_dir.mkdir(parents=True, exist_ok=True)
         owners = _load_publish_state(
             owners_path,
             {
