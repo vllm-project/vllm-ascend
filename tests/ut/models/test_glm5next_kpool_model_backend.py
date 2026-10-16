@@ -371,7 +371,7 @@ def test_cann_backend_serializes_concurrent_operator_imports(monkeypatch, tmp_pa
     context = get_context("fork")
     barrier = context.Barrier(2)
     importing = context.Lock()
-    monkeypatch.setattr(backend_module, "gettempdir", lambda: str(tmp_path), raising=False)
+    monkeypatch.setattr(backend_module, "_get_build_directory", lambda *args, **kwargs: str(tmp_path), raising=False)
     monkeypatch.setattr(torch.ops, "cann_ops_transformer", MagicMock())
 
     def load(name):
