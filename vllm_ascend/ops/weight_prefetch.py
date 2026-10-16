@@ -11,7 +11,7 @@ from vllm_ascend.ops.linear import AscendQKVParallelLinear, AscendRowParallelLin
 from vllm_ascend.utils import is_moe_model
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
-MOE_PREFETCH_TOKEN_THRESHOLD = 96
+MOE_PREFETCH_TOKEN_THRESHOLD = 1
 MAX_PREFETCH_WEIGHT_SIZE = 18 * 1024 * 1024
 
 
@@ -103,6 +103,15 @@ class WeightPrefetchMethod:
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=None, max_weight_size=int(weight_size))
 
+        # iter27d: also prefetch next-layer shared expert gate_up weight so it
+        # lands in L2 cache during the current-layer routed expert GroupedMatmul.
+        # Without this, the next-layer shared expert's part1 matmul stalls on
+        # HBM reads during the gap exposed by iter27a.
+        shared_weight = self._get_moe_shared_expert_gate_up_prefetch_weight()
+        if shared_weight is not None:
+            shared_size = shared_weight.data.element_size() * shared_weight.data.numel()
+            torch.ops.vllm.prefetch_preprocess(weight=shared_weight, start_flag=None, max_weight_size=int(shared_size))
+
     def maybe_prefetch_moe_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.moe.is_active_this_forward:
             return
@@ -129,6 +138,22 @@ class WeightPrefetchMethod:
             return None
 
         return getattr(experts, "w13_weight", None)
+
+    def _get_moe_shared_expert_gate_up_prefetch_weight(self) -> torch.Tensor | None:
+        layer_idx = _EXTRA_CTX.layer_idx
+        model_instance = _EXTRA_CTX.model_instance
+        if layer_idx is None or layer_idx <= 0 or model_instance is None:
+            return None
+
+        # layer_idx is subtracted by 1 because it was incremented by 1 at layernorm.
+        layer = model_instance.model.layers[layer_idx - 1]
+        shared_expert = getattr(getattr(layer, "mlp", None), "shared_expert", None)
+        if shared_expert is None:
+            return None
+        gate_up_proj = getattr(shared_expert, "gate_up_proj", None)
+        if gate_up_proj is None:
+            return None
+        return getattr(gate_up_proj, "weight", None)
 
     # x_dependency only eager mode can pass None
     def maybe_prefetch_mlp_weight_preprocess(

@@ -572,7 +572,7 @@ class AscendFusedMoE(FusedMoE):
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
@@ -620,7 +620,7 @@ class AscendFusedMoE(FusedMoE):
             elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                     hidden_states, dst_type=torch.float8_e4m3fn
                 )
@@ -644,7 +644,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
@@ -654,19 +654,24 @@ class AscendFusedMoE(FusedMoE):
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts_part2(hidden_states, part1_out)
 
-        # Make sure the default stream waits for the shared experts stream to
-        # finish.
+        # iter27a: When overlap is enabled, keep the AllReduce on the side stream
+        # so it overlaps with routed expert computation on the default stream.
         if self.multistream_overlap_shared_expert:
+            moe_comm_type = _EXTRA_CTX.moe_comm_type
+            if (
+                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+                and not shared_expert_dp_enabled()
+            ):
+                with torch.npu.stream(shared_experts_calculation_stream()):
+                    shared_out = tensor_model_parallel_all_reduce(shared_out)
+        else:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
-
-        # NOTE: This is exactly the opposite of
-        # `maybe_all_reduce_tensor_model_parallel`
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-            and not shared_expert_dp_enabled()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+            moe_comm_type = _EXTRA_CTX.moe_comm_type
+            if (
+                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+                and not shared_expert_dp_enabled()
+            ):
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out
 
     def shared_forward_impl(  # type: ignore[override]
@@ -690,21 +695,54 @@ class AscendFusedMoE(FusedMoE):
             before_routed_experts = torch.npu.current_stream().record_event()
             after_routed_experts = None
 
-        fused_moe_results = self.forward_impl(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            return_with_event=True,
-        )
-        routed_out = fused_moe_results.routed_out
-
         if self._shared_experts is None:
-            return routed_out
+            fused_moe_results = self.forward_impl(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                return_with_event=True,
+            )
+            return fused_moe_results.routed_out
 
         if self.shared_multistream_overlap_gate:
+            fused_moe_results = self.forward_impl(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                return_with_event=True,
+            )
+            routed_out = fused_moe_results.routed_out
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
             shared_out = fc3_context.shared_out
+            return shared_out, routed_out
+
+        if self.multistream_overlap_shared_expert:
+            _EXTRA_CTX.skip_dispatch_combine_events = True
+            shared_out = self._forward_shared_experts(
+                hidden_states,
+                FusedMoEEvents(
+                    after_routed_experts=after_routed_experts,
+                    before_routed_experts=before_routed_experts,
+                    before_dispatch=None,
+                    before_gmm2=None,
+                    before_combine=None,
+                    swiglu_limit=0.0,
+                ),
+            )
+            fused_moe_results = self.forward_impl(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                return_with_event=True,
+            )
+            routed_out = fused_moe_results.routed_out
+            torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
+            _EXTRA_CTX.skip_dispatch_combine_events = False
         else:
+            fused_moe_results = self.forward_impl(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                return_with_event=True,
+            )
+            routed_out = fused_moe_results.routed_out
             shared_out = self._forward_shared_experts(
                 hidden_states,
                 FusedMoEEvents(

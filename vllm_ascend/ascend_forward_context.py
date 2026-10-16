@@ -395,6 +395,7 @@ class _ExtraForwardContextProxy:
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",
+        "skip_dispatch_combine_events",
     )
 
     def check_extra_attr(self, name: str):
