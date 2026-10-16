@@ -261,7 +261,7 @@ MODEL_CASES = (
     ),
     WeightUpdateModelCase(
         id="minimax-m3-sparse-moe-layout",
-        model="MiniMaxAI/MiniMax-M3",
+        model="MiniMax/MiniMax-M3",
         hf_overrides={
             "architectures": ["MiniMaxM3SparseForCausalLM"],
             "text_config": {

@@ -42,7 +42,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 )
 
 CASE = MODEL_CASES[0]
-MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMaxAI/MiniMax-M3")
+MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMax/MiniMax-M3")
 ORACLE_CASES = (CASE, MINIMAX_M3_CASE)
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
@@ -263,7 +263,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             id="deepseek-v4-integer-table",
         ),
         pytest.param(
-            "MiniMaxAI/MiniMax-M3",
+            "MiniMax/MiniMax-M3",
             3,
             "language_model.model.layers.3.block_sparse_moe.gate",
             (("e_score_correction_bias", (8,), torch.float32, True),),
