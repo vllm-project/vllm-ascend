@@ -46,7 +46,7 @@ defaults:
 # Extra coverage branch collected with the main run.
 # latest = newest releases/v* branch. none = skip. Or a releases/v* branch name.
 env:
-  COVERAGE_BRANCH: latest
+  COVERAGE_BRANCH: releases/v0.30.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
