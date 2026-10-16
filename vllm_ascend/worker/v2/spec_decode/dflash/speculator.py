@@ -162,8 +162,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     ) -> torch.Tensor:
         """Run the DFlash draft backbone and publish the draft LM-head
         capacity before this step's head call. DFlash drafts
-        ``num_query_per_req`` query tokens per request, so the group-agreed
-        request count is ``max query rows // num_query_per_req``."""
+        ``num_query_per_req`` query tokens per request and the head samples
+        ``num_speculative_steps`` of them, so the synced max query rows
+        already cover the head rows and are the capacity."""
         output = super()._run_model(
             num_tokens,
             attn_metadata,

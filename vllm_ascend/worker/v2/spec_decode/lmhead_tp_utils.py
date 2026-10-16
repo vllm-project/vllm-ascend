@@ -76,7 +76,9 @@ class LmheadTPDraftSamplingMixin:
         speculator injects the static bound post-load so the head-level pad
         has a fallback for steps without a DP sync. The coefficient mirrors
         the old sample_draft pad: ``num_speculative_steps + 1`` rows per
-        request.
+        request. The bound is deliberately loose — it only backs steps
+        without a DP sync, while the per-step publish feeds the tight
+        synced value.
         """
         if not lmhead_tp_enable():
             return
@@ -98,14 +100,18 @@ class LmheadTPDraftSamplingMixin:
 
         ``num_tokens_across_dp`` is the group-agreed per-rank query token
         count (upstream ``_build_uniform_batch_dp_sync``): identical on
-        every rank, so its max is the group-agreed request bound. The head
-        emits ``num_speculative_steps + 1`` rows per request (the mixin-era
-        coefficient), so the per-step capacity every rank must feed is
-        ``(max query rows // tokens_per_req) * (num_speculative_steps + 1)``.
-        Called from ``_run_model`` before this step's head call — inside
-        the captured region for FULL graphs, where the capture-time value
-        matches the capture shapes. Without a sync value the previous
-        dynamic value is dropped so the static ``lmhead_tp_capacity``
+        every rank, so its max is the tightest group-uniform row bound.
+        The draft head runs inside the same step on at most those rows —
+        autoregressive families (EAGLE) draft one query token per request
+        and the head runs on exactly those rows; the DFlash family's
+        ``num_query_per_req`` query rows per request already cover the
+        head's sample rows — so the raw synced max is the capacity.
+        ``tokens_per_req`` only sanity-checks that the synced rows are a
+        whole number of requests. Called from ``_run_model`` before this
+        step's head call — inside the captured region for FULL graphs,
+        where the capture-time value matches the capture shapes. Without a
+        sync value the previous dynamic value is dropped so the static
+        ``lmhead_tp_capacity`` (the deliberately loose load-time bound)
         stays authoritative. Gated on lmhead TP so non-lmhead-TP runs do
         not pay the per-step DP-sync ``.item()``.
         """
@@ -126,8 +132,7 @@ class LmheadTPDraftSamplingMixin:
                     f"not divisible by tokens_per_req ({tokens_per_req}); the "
                     "DP-synced capacity would desync the draft-head collectives."
                 )
-            group_max_reqs = max_query_rows // tokens_per_req
-            lm_head._lmhead_tp_dynamic_capacity = group_max_reqs * (self.num_speculative_steps + 1)
+            lm_head._lmhead_tp_dynamic_capacity = max_query_rows
         elif hasattr(lm_head, "_lmhead_tp_dynamic_capacity"):
             # No DP sync this round: drop the previous round's dynamic value
             # so the static lmhead_tp_capacity stays authoritative and a

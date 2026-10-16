@@ -615,9 +615,8 @@ def test_lmhead_tp_publish_draft_capacity_gated_off():
 def test_eagle_run_model_publishes_draft_capacity():
     """``AscendEagleSpeculator._run_model`` must publish the draft-head
     capacity derived from the DP sync: EAGLE drafts one query token per
-    request per step (tokens_per_req=1), so the synced max query rows are
-    the group-agreed request count, and the capacity keeps the mixin-era
-    ``num_speculative_steps + 1`` coefficient."""
+    request per step and the head runs on exactly those rows, so the
+    synced max query rows are the tightest group-uniform capacity."""
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
     spec = object.__new__(AscendEagleSpeculator)
@@ -635,9 +634,9 @@ def test_eagle_run_model_publishes_draft_capacity():
         _patch_super_method(AscendEagleSpeculator, "_run_model") as super_run_model,
     ):
         super_run_model.side_effect = fake_run_model
-        # one query token per req: group max reqs = 3; capacity = 3 * (2 + 1) = 9
+        # one query token per req: the synced max query rows are the capacity
         spec._run_model(3, None, None, torch.tensor([3, 2], dtype=torch.int32))
-    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 9
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 3
 
     # No sync value this round -> the previous dynamic capacity is dropped
     # so the static lmhead_tp_capacity stays authoritative.
@@ -675,9 +674,9 @@ def test_eagle_load_draft_model_injects_static_capacity():
 def test_dflash_run_model_publishes_draft_capacity():
     """``AscendDFlashSpeculator._run_model`` must publish the draft-head
     capacity derived from the DP sync: DFlash drafts ``num_query_per_req``
-    query tokens per request, so the group-agreed request count is
-    ``max query rows // num_query_per_req``, and the capacity keeps the
-    mixin-era ``num_speculative_steps + 1`` coefficient."""
+    query tokens per request and the head samples ``num_speculative_steps``
+    of them, so the synced max query rows already cover the head rows and
+    are the capacity."""
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 
     spec = object.__new__(AscendDFlashSpeculator)
@@ -696,9 +695,9 @@ def test_dflash_run_model_publishes_draft_capacity():
         _patch_super_method(AscendDFlashSpeculator, "_run_model") as super_run_model,
     ):
         super_run_model.side_effect = fake_run_model
-        # query rows = 3 reqs * 4 = 12 -> group max reqs 3; capacity = 3 * (2 + 1) = 9
+        # capacity = the synced max query rows = 12
         spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
-    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 9
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12
 
     # No sync value this round -> the previous dynamic capacity is dropped
     # so the static lmhead_tp_capacity stays authoritative.

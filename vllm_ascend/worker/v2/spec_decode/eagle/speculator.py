@@ -68,8 +68,9 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the EAGLE draft backbone and publish the draft LM-head
         capacity before this step's head call. EAGLE drafts one query token
-        per request per step, so the synced max query rows are the
-        group-agreed request count (``tokens_per_req=1``)."""
+        per request per step and the head runs on exactly those rows, so
+        the synced max query rows are the tightest group-uniform capacity
+        (``tokens_per_req=1``)."""
         output = super()._run_model(
             num_tokens,
             attn_metadata,
