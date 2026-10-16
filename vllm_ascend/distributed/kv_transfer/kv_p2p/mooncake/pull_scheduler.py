@@ -110,8 +110,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.ready_event = ready_event
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
-        self.early_finished_requests: set[str] = set()
-        self.finished_request_ids: set[str] = set()
         self.state_lock = threading.Lock()
 
     def _merge_metadata_by_pp_rank(
@@ -314,9 +312,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
     def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
         with self.state_lock:
             self.delayed_free_requests[request_id] = delay_start_time
-            if request_id in self.early_finished_requests:
-                self.early_finished_requests.remove(request_id)
-                self._mark_finished_locked(request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
@@ -368,18 +363,19 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
-            if request_id in self.finished_request_ids:
-                return
-            if request_id in self.delayed_free_requests:
-                self._mark_finished_locked(request_id)
-            else:
-                self.early_finished_requests.add(request_id)
+            self._mark_finished_locked(request_id)
 
     def _mark_finished_locked(self, request_id: str) -> None:
-        if request_id in self.finished_request_ids:
+        # request_finished registers the request before exposing its transfer
+        # parameters to D. Unknown IDs are therefore stale or duplicate DONEs;
+        # the control loop still ACKs them so D can stop retrying.
+        if request_id not in self.delayed_free_requests:
+            logger.warning(
+                "Received Mooncake DONE for request %s with no pending delayed free; ignoring completion",
+                request_id,
+            )
             return
-        self.finished_request_ids.add(request_id)
-        self.delayed_free_requests.pop(request_id, None)
+        del self.delayed_free_requests[request_id]
         self.finished_requests.put(request_id)
 
     def _retrieve_expired_requests_locked(self) -> None:
