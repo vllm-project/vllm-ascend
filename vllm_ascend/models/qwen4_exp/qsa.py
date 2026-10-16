@@ -524,8 +524,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             and qkv.dtype == torch.bfloat16
             and qkv.ndim == 2
             and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
-            and self.num_heads == 3
-            and self.num_kv_heads == 1
+            and self.num_heads > 0
+            and self.num_kv_heads > 0
             and self.head_dim == 256
             and getattr(self.rotary_emb, "rotary_dim", None) == 64
             and getattr(self.rotary_emb, "is_neox_style", False)

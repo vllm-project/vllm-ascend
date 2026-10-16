@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+from vllm_ascend.utils import vllm_version_is
 import math
 from collections import defaultdict
 from dataclasses import replace
