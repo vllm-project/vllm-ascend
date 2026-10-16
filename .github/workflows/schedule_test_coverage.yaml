@@ -58,10 +58,10 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
-      - name: Checkout coverage helper from this workflow
+      - name: Checkout coverage helper from main
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: main
           path: workflow-src
           fetch-depth: 1
           sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
