@@ -136,13 +136,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
-        # PR #18972: submit latent W4A8 SP shared work after routed forward.
-        self._defer_shared_submission = (
-            self.quant_type is QuantType.W4A8
-            and self._can_overlap_sp_shared_with(self.routed_input_transform)
-            and self._can_overlap_sp_shared_with(self.routed_output_transform)
-        )
-
         setup_moe_comm_method(self.moe_config)
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
@@ -169,9 +162,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
-        Latent W4A8 SP shared experts use the release/v0.27.1rc ordinary
-        tensor Add. Other paths retain the existing foreach combine. The
-        reduction hooks and configured router precision remain unchanged.
+        Shared and routed outputs use the same fused multi-tensor add path.
+        Reduction hooks and router precision are unchanged.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -234,10 +226,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            if getattr(self, "_defer_shared_submission", False):
-                result = shared_output + fused_output
-            else:
-                result = torch._foreach_add([shared_output], [fused_output])[0]
+            result = torch._foreach_add([shared_output], [fused_output])[0]
         else:
             result = fused_output
 
@@ -385,7 +374,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if (
             defer_join
             and self._early_shared_output_event
-            and not getattr(self, "_defer_shared_submission", False)
             and shared_experts is not None
             and shared_experts.quant_type is QuantType.W4A8
         ):
@@ -467,19 +455,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         torch.npu.Event,
         SubmittedSharedExpertGateUp | None,
     ]:
-        if getattr(self, "_defer_shared_submission", False):
-            # Record producer milestones now; enqueue shared after routed.
-            if self.is_internal_router:
-                router_input = self._prepare_router_input(shared_hidden_states, router_logits)
-                shared_input_ready = torch.npu.current_stream().record_event()
-                router_logits = self._apply_router_linear(router_input)
-                del router_input
-                router_output_ready = torch.npu.current_stream().record_event()
-            else:
-                shared_input_ready = torch.npu.current_stream().record_event()
-                router_output_ready = shared_input_ready
-            return router_logits, shared_input_ready, router_output_ready, None
-
         if self.is_internal_router:
             router_input = self._prepare_router_input(shared_hidden_states, router_logits)
             # Release shared Vector/AIV preparation after any external FP32

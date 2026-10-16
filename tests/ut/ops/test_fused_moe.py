@@ -3247,13 +3247,11 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
 
 @pytest.mark.parametrize("initial_comm", [MoECommType.ALLGATHER, MoECommType.MC2])
 @pytest.mark.parametrize("layout", ["tp", "no_shared", "shared_dp", "sp", "latent"])
-@pytest.mark.parametrize("release_schedule", [False, True])
 def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
     monkeypatch,
     runtime_moe_all_reduce,
     initial_comm,
     layout,
-    release_schedule,
 ):
     from torch.fx.experimental.proxy_tensor import make_fx
 
@@ -3262,7 +3260,6 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
     is_sp = layout == "sp"
     has_shared = layout != "no_shared"
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner._defer_shared_submission = release_schedule
     nn.Module.__init__(runner)
     runner.layer_name = "test.runtime_maybe_all_reduce"
     context.no_compile_layers[runner.layer_name] = runner
@@ -3325,12 +3322,8 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("quant_type", [QuantType.NONE, QuantType.W4A8])
 @pytest.mark.parametrize("fail_transform", [False, True])
-@pytest.mark.parametrize("release_schedule", [False, True])
-def test_early_shared_output_event_order_and_fallback(
-    monkeypatch, enabled, overlap, quant_type, fail_transform, release_schedule
-):
+def test_early_shared_output_event_order_and_fallback(monkeypatch, enabled, overlap, quant_type, fail_transform):
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner._defer_shared_submission = release_schedule
     runner._early_shared_output_event = enabled
     states = torch.randn(4, 2)
     output = torch.randn(4, 4)
@@ -3361,7 +3354,7 @@ def test_early_shared_output_event_order_and_fallback(
     stream = MagicMock()
     stream.wait_event.side_effect = lambda event: operations.append(("wait_event", event))
     monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
-    early = enabled and overlap and quant_type is QuantType.W4A8 and not release_schedule
+    early = enabled and overlap and quant_type is QuantType.W4A8
     for _ in range(2):
         operations.clear()
         if fail_transform:
@@ -3389,25 +3382,17 @@ def test_record_shared_output_ready_uses_shared_stream(monkeypatch):
     stream.synchronize.assert_not_called()
 
 
-@pytest.mark.parametrize("quant_type", [QuantType.NONE, QuantType.W4A8])
-@pytest.mark.parametrize("overlap", [False, True])
-def test_release_schedule_selected_at_construction(monkeypatch, quant_type, overlap):
-    monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *_: overlap)
-    runner = _stub_moe_runner_init(monkeypatch, quant_type=quant_type)
-    assert runner._defer_shared_submission is (overlap and quant_type is QuantType.W4A8)
-
-
 @pytest.mark.parametrize("internal_router", [False, True])
-@pytest.mark.parametrize("routed_fails", [False, True])
-def test_release_schedule_submits_shared_after_routed(monkeypatch, internal_router, routed_fails):
+def test_kimi_latent_sp_submits_shared_before_routed(monkeypatch, internal_router):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
-    runner._defer_shared_submission = True
     runner.routed_input_transform = object()
     runner.routed_output_transform = object()
     runner._sequence_parallel_context = lambda: nullcontext()
     order = []
-    states, logits, shared_out, routed_out = [object() for _ in range(4)]
+    states, logits, shared_out, routed_out, prepared_execution, submitted_gate_up = [
+        object() for _ in range(6)
+    ]
     milestones = RoutedMoEMilestones()
     events = []
 
@@ -3419,25 +3404,38 @@ def test_release_schedule_submits_shared_after_routed(monkeypatch, internal_rout
 
     def routed(**kwargs):
         order.append("routed")
-        if routed_fails:
-            raise RuntimeError("routed failed")
         return routed_out, milestones
 
+    def prepare_shared(prepared, event):
+        order.append("shared_prepare")
+        assert prepared.hidden_states is states and prepared.is_gathered
+        assert event is events[0]
+        return prepared_execution
+
+    def enqueue_shared(prepared, event):
+        order.append("shared_gate_up")
+        assert prepared is prepared_execution
+        assert event is events[1 if internal_router else 0]
+        return submitted_gate_up
+
     def shared(prepared, actual_milestones, **kwargs):
-        order.append("shared")
+        order.append("shared_finish")
         assert prepared.hidden_states is states and prepared.is_gathered
         assert actual_milestones is milestones
         assert milestones.shared_input_ready is events[0]
         assert milestones.router_output_ready is events[1 if internal_router else 0]
         assert milestones.routed_finalize_done is events[-1]
-        assert kwargs == {"defer_output_wait": True}
+        assert kwargs == {
+            "defer_output_wait": True,
+            "submitted_gate_up": submitted_gate_up,
+        }
         return shared_out
 
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=True,
         parallel_mode=lambda: SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
-        prepare_for_router_overlap=MagicMock(side_effect=AssertionError("early prepare")),
-        enqueue_gate_up_after_router=MagicMock(side_effect=AssertionError("early GateUp")),
+        prepare_for_router_overlap=MagicMock(side_effect=prepare_shared),
+        enqueue_gate_up_after_router=MagicMock(side_effect=enqueue_shared),
         forward=MagicMock(side_effect=shared),
     )
     runner.routed_experts = SimpleNamespace(forward_impl=routed)
@@ -3445,26 +3443,19 @@ def test_release_schedule_submits_shared_after_routed(monkeypatch, internal_rout
     runner._apply_router_linear = lambda *_: order.append("router") or logits
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: internal_router))
     monkeypatch.setattr(torch.npu, "current_stream", lambda: SimpleNamespace(record_event=record))
-    if routed_fails:
-        with pytest.raises(RuntimeError, match="routed failed"):
-            runner._forward_impl(states, logits, states)
-        runner.ascend_shared_experts.forward.assert_not_called()
-    else:
-        assert runner._forward_impl(states, logits, states) == (shared_out, routed_out)
-        assert order == (["record", "router", "record"] if internal_router else ["record"]) + [
-            "routed",
-            "record",
-            "shared",
-        ]
-    runner.ascend_shared_experts.prepare_for_router_overlap.assert_not_called()
-    runner.ascend_shared_experts.enqueue_gate_up_after_router.assert_not_called()
+    assert runner._forward_impl(states, logits, states) == (shared_out, routed_out)
+    assert order == (
+        ["record", "shared_prepare", "router", "record", "shared_gate_up"]
+        if internal_router
+        else ["record", "shared_prepare", "shared_gate_up"]
+    ) + ["routed", "record", "shared_finish"]
+    runner.ascend_shared_experts.prepare_for_router_overlap.assert_called_once()
+    runner.ascend_shared_experts.enqueue_gate_up_after_router.assert_called_once()
 
 
-@pytest.mark.parametrize("release_schedule", [False, True])
-def test_release_output_add_preserves_values_and_inputs(monkeypatch, release_schedule):
+def test_shared_output_add_preserves_values_and_inputs(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
-    runner._defer_shared_submission = release_schedule
     shared = torch.randn(4, 7168, dtype=torch.bfloat16)
     routed = torch.randn_like(shared)
     originals = (shared.clone(), routed.clone())
@@ -3488,4 +3479,4 @@ def test_release_output_add_preserves_values_and_inputs(monkeypatch, release_sch
     torch.testing.assert_close(result, shared + routed, rtol=0, atol=0)
     torch.testing.assert_close(shared, originals[0], rtol=0, atol=0)
     torch.testing.assert_close(routed, originals[1], rtol=0, atol=0)
-    assert foreach.call_count == (0 if release_schedule else 1)
+    foreach.assert_called_once()
