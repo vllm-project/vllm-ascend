@@ -2306,7 +2306,12 @@ class NPUModelRunner(GPUModelRunner):
             if self.cache_config.mamba_cache_mode == "align":
                 with npu_stream_switch(global_stream(), enabled=True):
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
-                torch.npu.current_stream().wait_stream(global_stream())
+                # Use pre-allocated event instead of wait_stream to avoid
+                # per-step event create+destroy overhead (~10us HOST).
+                if not hasattr(self, "_mamba_sync_event"):
+                    self._mamba_sync_event = torch.npu.Event(enable_timing=False)
+                global_stream().record_event(self._mamba_sync_event)
+                torch.npu.current_stream().wait_event(self._mamba_sync_event)
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2400,6 +2405,15 @@ class NPUModelRunner(GPUModelRunner):
                 # to skip the full-vocab all-gather. Communication drops from
                 # O(batch * vocab_size) to O(batch * 2 * tp_size).
                 sampling_md = self.input_batch.sampling_metadata
+                # Extract EOS mask info from MinTokensLogitsProcessor (if active)
+                # so get_top_tokens can handle EOS masking internally, bypassing
+                # the full-vocab all_gather in _get_logits.
+                _eos_mask = None
+                for _proc in (sampling_md.logitsprocs.non_argmax_invariant
+                              if sampling_md is not None else []):
+                    if hasattr(_proc, 'logits_slice') and _proc.logits_slice[0].numel() > 0:
+                        _eos_mask = _proc.logits_slice  # (req_idx, eos_tok_id)
+                _logits_model = getattr(self.get_model(), "language_model", self.get_model())
                 if (
                     sampling_md is not None
                     and sampling_md.all_greedy
@@ -2408,14 +2422,14 @@ class NPUModelRunner(GPUModelRunner):
                     and sampling_md.no_penalties
                     and sampling_md.allowed_token_ids_mask is None
                     and not sampling_md.bad_words_token_ids
-                    and not sampling_md.logitsprocs.non_argmax_invariant
                     and spec_decode_metadata is None
-                    and hasattr(self.model, "logits_processor")
-                    and hasattr(self.model, "lm_head")
-                    and hasattr(self.model.logits_processor, "get_top_tokens")
+                    and hasattr(_logits_model, "logits_processor")
+                    and hasattr(_logits_model, "lm_head")
+                    and hasattr(_logits_model.logits_processor, "get_top_tokens")
                 ):
-                    pre_sampled_tokens = self.model.logits_processor.get_top_tokens(
-                        self.model.lm_head, sample_hidden_states)
+                    pre_sampled_tokens = _logits_model.logits_processor.get_top_tokens(
+                        _logits_model.lm_head, sample_hidden_states,
+                        eos_mask=None)
                     logits = None
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
@@ -2533,13 +2547,13 @@ class NPUModelRunner(GPUModelRunner):
                 if lmhead_tp_enable():
                     pre_sampled_tokens = pre_sampled_tokens[:self.input_batch.num_reqs]
                 sampler_output = SamplerOutput(
-                    sampled_token_ids=pre_sampled_tokens.to(torch.int32).unsqueeze(-1),
+                    sampled_token_ids=pre_sampled_tokens.unsqueeze(-1) if pre_sampled_tokens.dtype == torch.int32 else pre_sampled_tokens.to(torch.int32).unsqueeze(-1),
                     logprobs_tensors=None,
                 )
             else:
                 sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if self.need_accepted_tokens:
+        if self.need_accepted_tokens and self.speculative_config is not None:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
@@ -2629,7 +2643,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._finalize_dump_data()
 
-        if self.need_accepted_tokens:
+        if self.need_accepted_tokens and self.speculative_config is not None:
             assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),

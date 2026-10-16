@@ -60,8 +60,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
             chunked_residual = torch.ops.vllm.maybe_chunk_residual(all_reduce_, residual)
             output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, chunked_residual, rms_norm_weight, None)
             out0 = output[0]
-            out1 = output[2]
-            return out0, out1
+            return out0
 
         return pattern
 
@@ -79,7 +78,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
                 True,
                 False,
             )
-            return out0, out1
+            return out0
 
         return replacement
 
@@ -136,7 +135,8 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="allreduce_rmsnorm_fusion_pass")
 
-        MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
+        # The middle-layer pattern is a duplicate of the last-layer one (both return
+        # out0 only, matching the setitem users); register only the last-layer pattern.
         LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
@@ -152,8 +152,5 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        """
-        Check if the pass is applicable for the current configuration.
-        """
-        applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
-        return applicable
+        """Applicable to all compile ranges, including decode."""
+        return True
