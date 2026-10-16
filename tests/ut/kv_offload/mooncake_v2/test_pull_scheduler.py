@@ -742,3 +742,109 @@ def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
     assert prefix_connector.get_num_new_matched_tokens(request, 512) == (0, False)
     assert request.num_prompt_tokens == 513
     assert len(request.all_token_ids) == 513
+
+
+def test_recving_thread_does_not_requeue_failed_notification() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.add_request("10.0.0.1", 6000, "failed")
+    thread.add_request("10.0.0.2", 6000, "healthy")
+    thread.request_queue.put(None)
+    thread._send_done_recving = MagicMock(side_effect=[RuntimeError("unreachable"), None])
+
+    thread.run()
+
+    assert thread._send_done_recving.call_args_list == [
+        call("10.0.0.1", 6000, "failed"),
+        call("10.0.0.2", 6000, "healthy"),
+    ]
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_wakes_idle_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    socket = MagicMock()
+    context = MagicMock()
+    cleanup_threads = []
+    socket.close.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+    context.destroy.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+
+    def send_done(*args):
+        thread.remote_sockets["tcp://10.0.0.1:6000"].append(socket)
+        thread.zmq_context = context
+        thread.stop_event.set()
+
+    thread._send_done_recving = MagicMock(side_effect=send_done)
+    thread.add_request("10.0.0.1", 6000, "first")
+    thread.add_request("10.0.0.1", 6000, "pending")
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    thread.shutdown()
+
+    socket.close.assert_called_once_with(linger=0)
+    context.destroy.assert_called_once_with(linger=0)
+    assert cleanup_threads == [thread.ident, thread.ident]
+    assert not thread.remote_sockets
+    assert thread.zmq_context is None
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+    assert thread._send_done_recving.call_count == 1
+
+
+def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_sending_thread()
+    socket = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = socket
+    monkeypatch.setattr(pull_scheduler, "zmq_ctx", MagicMock(return_value=context))
+
+    def recv():
+        thread.stop_event.wait(timeout=5)
+        raise zmq.Again()
+
+    socket.recv_multipart.side_effect = recv
+    thread.add_delayed_request("pending", time.time())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    context.__exit__.assert_called_once()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+
+
+def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = MagicMock()
+    scheduler._recving_thread = MagicMock()
+    scheduler._reqs_need_recv["recv"] = MagicMock()
+    scheduler._reqs_need_send["send"] = time.time()
+    scheduler._reqs_in_batch.add("recv")
+    scheduler._reqs_recv_info["recv"] = ("10.0.0.1", 6000, "remote")
+    connector = MooncakePullConnector.__new__(MooncakePullConnector)
+    connector.connector_scheduler = scheduler
+
+    connector.shutdown()
+
+    scheduler._sending_thread.shutdown.assert_called_once()
+    scheduler._recving_thread.shutdown.assert_called_once()
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_need_send
+    assert not scheduler._reqs_in_batch
+    assert not scheduler._reqs_recv_info

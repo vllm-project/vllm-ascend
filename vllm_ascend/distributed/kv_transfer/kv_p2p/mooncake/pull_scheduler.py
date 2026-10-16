@@ -108,6 +108,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             self.use_kv_pp,
         )
         self.ready_event = ready_event
+        self.stop_event = threading.Event()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
@@ -323,11 +324,21 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             except queue.Empty:
                 return finished
 
+    def shutdown(self) -> None:
+        self.stop_event.set()
+        if self.ident is not None:
+            self.join()
+        with self.state_lock:
+            self.delayed_free_requests.clear()
+        while not self.finished_requests.empty():
+            self.finished_requests.get_nowait()
+
     def run(self) -> None:
         path = make_zmq_path("tcp", self.host, self.port)
         try:
             logger.info("Mooncake scheduler sending thread listening on %s", path)
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore[attr-defined]
+                sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
                 sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
                 self.ready_event.set()
                 self._run_busy_loop(sock)
@@ -337,7 +348,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self.stop_event.is_set():
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
@@ -400,7 +411,8 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def __init__(self, ready_event: threading.Event) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerRecvingThread")
         self.ready_event = ready_event
-        self.request_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
+        self.stop_event = threading.Event()
+        self.request_queue: queue.Queue[tuple[str, int, str] | None] = queue.Queue()
         self.encoder = msgspec.msgpack.Encoder()
         self.remote_sockets: dict[str, deque[Any]] = defaultdict(deque)
         self.remote_sockets_lock = threading.Lock()
@@ -409,21 +421,55 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
         self.request_queue.put((remote_host, remote_port, request_id))
 
+    def shutdown(self) -> None:
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            self.request_queue.put(None)
+        if self.ident is not None:
+            self.join()
+        # Also handle shutdown before start and a sentinel enqueued while the
+        # thread was already completing its final cleanup.
+        self._clear_pending_requests()
+
+    def _clear_pending_requests(self) -> None:
+        while True:
+            try:
+                self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.request_queue.task_done()
+
     def run(self) -> None:
         self.ready_event.set()
-        while True:
-            request = self.request_queue.get()
-
-            try:
-                self._send_done_recving(*request)
-            except Exception:
-                logger.exception(
-                    "Failed to send Mooncake scheduler completion for request %s",
-                    request[2],
-                )
-                self.request_queue.put(request)
-            finally:
-                self.request_queue.task_done()
+        try:
+            while not self.stop_event.is_set():
+                request = self.request_queue.get()
+                try:
+                    if request is None or self.stop_event.is_set():
+                        break
+                    self._send_done_recving(*request)
+                except Exception:
+                    # The socket helpers already retry. Let P's delayed-free
+                    # timeout reclaim blocks if this notification cannot arrive.
+                    logger.exception(
+                        "Failed to send Mooncake scheduler completion for request %s; "
+                        "producer cleanup will rely on its delayed-free timeout",
+                        request[2] if request is not None else None,
+                    )
+                finally:
+                    self.request_queue.task_done()
+        finally:
+            self.stop_event.set()
+            # Close sockets in their owning thread, after the last send ends.
+            with self.remote_sockets_lock:
+                for sockets in self.remote_sockets.values():
+                    for sock in sockets:
+                        sock.close(linger=0)
+                self.remote_sockets.clear()
+                if self.zmq_context is not None:
+                    self.zmq_context.destroy(linger=0)
+                    self.zmq_context = None
+            self._clear_pending_requests()
 
     def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
@@ -493,6 +539,16 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
             self._recving_thread.start()
             recving_ready_event.wait()
+
+    def shutdown(self) -> None:
+        if self._sending_thread is not None:
+            self._sending_thread.shutdown()
+        if self._recving_thread is not None:
+            self._recving_thread.shutdown()
+        self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
+        self._reqs_in_batch.clear()
+        self._reqs_recv_info.clear()
 
     def set_xfer_handshake_metadata_from_workers(
         self,
