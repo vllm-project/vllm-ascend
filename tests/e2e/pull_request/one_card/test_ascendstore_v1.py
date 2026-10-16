@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import time
+from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,7 @@ def _exercise_connector(
     *,
     use_layerwise: bool = False,
     worker_extension: str = WORKER_EXTENSION,
+    after_measurements: Callable[[RemoteOpenAIServer], None] | None = None,
 ) -> None:
     _, connector_name, connector_module = connector
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
@@ -158,3 +160,5 @@ def _exercise_connector(
                 row["external_reset"] = reset_local_prefix_cache(server)
                 row["external_load"] = run_benchmark(server, tokenizer, inputs)
                 assert_prompt_sources(row["external_load"], external=True)
+            if after_measurements is not None:
+                after_measurements(server)

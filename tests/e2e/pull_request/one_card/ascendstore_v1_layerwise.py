@@ -1,14 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Out-of-timing Store drain controls for the single-card Layerwise serving benchmark."""
+"""Store drain controls and opt-in v1 host timing for the single-card Layerwise benchmark."""
 
 import time
 from typing import Any
 
+from tests.e2e.pull_request.one_card.ascendstore_v1_layerwise_timing import LayerwiseLoadTiming
 from tests.e2e.pull_request.one_card.ascendstore_v1_performance import AscendStoreBenchmarkWorkerExtension
 
 
 class AscendStoreLayerwiseWorkerExtension(AscendStoreBenchmarkWorkerExtension):
+    def start_ascendstore_layerwise_load_timing(self) -> dict[str, str]:
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
+
+        assert not hasattr(self, "_layerwise_load_timing"), "Layerwise timing is already active"
+        worker, backend, implementation = self._layerwise_resources()
+        assert implementation == "v1", "Load diagnostics must not instrument production"
+        # vLLM mixes this extension into the real Worker, which owns model_runner.
+        timing = LayerwiseLoadTiming(worker, backend, get_kv_transfer_group().lookup_server, self.model_runner)
+        timing.install()
+        self._layerwise_load_timing = timing
+        return {"implementation": implementation, "status": "installed"}
+
+    def stop_ascendstore_layerwise_load_timing(self) -> dict[str, Any]:
+        timing = self._layerwise_load_timing
+        try:
+            # Requests have finished; restore even if the out-of-timing Store drain fails.
+            self._drain_stores()
+        finally:
+            timing.restore()
+            del self._layerwise_load_timing
+        return timing.report()
+
     def _drain_stores(self) -> tuple[Any, Any, float]:
         worker, backend, implementation = self._layerwise_resources()
         start = time.perf_counter()
