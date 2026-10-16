@@ -8,11 +8,11 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800 A3 (BF16) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
+MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (BF16) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
-This document is written based on the vLLM-Ascend v0.27.1 release. This model is supported in this release.
+This document is written based on the vLLM-Ascend v0.30.0 release. This model is supported in this release.
 
 ## 2 Supported Features
 
@@ -26,8 +26,8 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `MiniMax-M3` (BF16) | 2 Atlas 800 A3 nodes (64GB × 16 per node) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
-| `MiniMax-M3-w8a8` (W8A8) | 1 Atlas 800 A3 node (64GB × 16) or 1 Atlas 800 A2 node (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) | / |
+| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
+| `MiniMax-M3-w8a8` (W8A8) | 1 Atlas 800I A3 node (64GB × 16) or 1 Atlas 800 A2 node (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) | / |
 | `MiniMax-M3-MXFP8` (MXFP8) | 1 950DT node (96GB × 8) | [ModelScope](https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache. |
 | `MiniMax-M3-EAGLE3-GQA` | / | [ModelScope](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA) | Draft model for EAGLE3 speculative decoding; uses Grouped Query Attention (GQA). |
 
@@ -153,7 +153,7 @@ The `--speculative-config` examples use single-quoted JSON. The `'"${EAGLE3_WEIG
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800I A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800I A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
 !!! note
 
@@ -446,7 +446,7 @@ The following PD examples cover contexts below 1M tokens and use `--max-model-le
 
 #### 5.3.1 Prefill-Decode Disaggregation
 
-This section deploys MiniMax-M3 PD disaggregation as 1P1D: on Atlas 800 A3 it spans three nodes (one Prefill node and two Decode nodes); on 950DT it runs on two nodes, and the 950DT example below also describes scaling the same 1P1D deployment to three nodes. Here, 1P1D means one Prefill service group and one Decode service group. The Decode group can span two machines while remaining one global DP group.
+This section deploys MiniMax-M3 PD disaggregation as 1P1D: on Atlas 800I A3 it spans three nodes (one Prefill node and two Decode nodes); on 950DT it runs on two nodes, and the 950DT example below also describes scaling the same 1P1D deployment to three nodes. Here, 1P1D means one Prefill service group and one Decode service group. The Decode group can span two machines while remaining one global DP group.
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
@@ -608,7 +608,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 3 Atlas 800 A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
 
     1. Prefill node
@@ -1349,7 +1349,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
     One Prefill node uses `DP1 × TP4 × PP4`; two Decode nodes form a global `DP8 × TP4 × PP1` group, with four local ranks per node. Copy the same Decode template to both D nodes and use the node-specific launch blocks below. Service settings match Section 5.3.1; `MultiConnector` adds the KV pool. The `--language-model-only` option remains in the existing optional guidance rather than the launch commands.
 
@@ -1887,11 +1887,11 @@ Proxy (:8009)
 
 ### 5.4 1M-Token Context Deployment
 
-MiniMax-M3 supports a 1M-token context on a single Atlas 800 A3 node with W8A8 weights or a single 950DT node with MXFP8 weights. The following examples use the previously verified long-context deployment layouts with `FULL_DECODE_ONLY` as the graph mode. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
+MiniMax-M3 supports a 1M-token context on a single Atlas 800I A3 node with W8A8 weights or a single 950DT node with MXFP8 weights. The following examples use the previously verified long-context deployment layouts with `FULL_DECODE_ONLY` as the graph mode. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
 
 | Platform / weights | NPUs per node | TP / PP / DP | `max-model-len` | `max-num-batched-tokens` | KV cache dtype |
 | --- | --- | --- | --- | --- | --- |
-| Atlas 800 A3 / W8A8 | 16 × 64GB | 4 / 4 / 1 | 1049600 | 8192 | `auto` (default) |
+| Atlas 800I A3 / W8A8 | 16 × 64GB | 4 / 4 / 1 | 1049600 | 8192 | `auto` (default) |
 | 950DT / MXFP8 | 8 × 96GB | 8 / 1 / 1 | 1048576 | 2048 | `fp8`, excluding layers 0–2 |
 | 950DT / MXFP8 | 8 × 96GB | 4 / 2 / 1 | 1048576 | 8192 | `fp8`, excluding layers 0–2 |
 
@@ -1899,7 +1899,7 @@ All three configurations use Model Runner V2, `max-num-seqs=1`, `FULL_DECODE_ONL
 
 Prepare the container and weights as described in Sections 3 and 4. Replace `<MODEL_PATH>` (A3) or `<WEIGHT_PATH>` (950DT) with the local weight directory. Replace `<NIC_NAME>` in both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` with the same local communication interface. The commands use the CANN environment-script paths from the deployment configurations; adjust these paths to the installed CANN directory. The 950DT examples also require the matching `experimental_950_transformer` vendor package before sourcing its environment script.
 
-=== "Atlas 800 A3 (W8A8)"
+=== "Atlas 800I A3 (W8A8)"
 
     Use one 16-NPU node with TP4/PP4/DP1. This long-context configuration splits the 60 transformer layers evenly as `15,15,15,15`. The `1049600` context limit leaves room for 1,048,576 input tokens and up to 1024 generated tokens. `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` permits the configured limit when it exceeds the checkpoint's declared maximum.
 
@@ -2398,11 +2398,11 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
 | GSM8K   | 8 H20 (96G × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
-| GSM8K   | 8 Atlas 800 A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
 | AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
-| AIME2025 | 8 Atlas 800 A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
+| AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
 | GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Atlas 800 A3 (64GB × 16)      | 92.42    | 133000 | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 133000 | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
 
