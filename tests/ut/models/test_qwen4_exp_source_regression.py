@@ -85,6 +85,17 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     assert "torch.equal(" not in qsa_sources
 
 
+def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    branch_start = runner.index("isinstance(builder, QSAMetadataBuilder)")
+    branch_end = runner.index("if is_gdn_noop:", branch_start)
+    branch = runner[branch_start:branch_end]
+
+    assert "num_reqs_padded > num_reqs" in branch
+    assert "query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[" in branch
+    assert ": num_reqs + 1" in branch
+
+
 def test_qsa_uses_only_fused_runtime_backends() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
     assert "return qsa_select_paged_tokens_lightning(" in qsa
