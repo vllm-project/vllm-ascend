@@ -8,7 +8,7 @@ msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-08 14:01+0000\n"
-"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-10-16 00:00+0800\n"
 "Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
@@ -47,13 +47,13 @@ msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
 msgid "=== \"A3 series\""
-msgstr "=== \"A3系列\""
+msgstr "=== \"A3 series\""
 
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
 
 msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
+msgstr "=== \"A2 series\""
 
 msgid "**node 0**"
 msgstr "**节点0**"
@@ -174,19 +174,19 @@ msgid ""
 msgstr "我们想展示`GLM-5.2`在多节点环境下使用1P1D的部署指南，以获得更好的性能。"
 
 msgid "## 1 Introduction"
-msgstr "## 1 引言"
+msgstr "## 1 简介 {: #1-introduction}"
 
 msgid "## 2 Supported Features"
-msgstr "## 2 支持的特性"
+msgstr "## 2 支持的特性 {: #2-supported-features}"
 
 msgid "## 4 Installation"
-msgstr "## 4 安装"
+msgstr "## 4 安装 {: #4-installation}"
 
 msgid "## 5 Deployment"
 msgstr "## 5 部署"
 
 msgid "### 5.1 Context Below 1M"
-msgstr "### 5.1 上下文低于1M"
+msgstr "### 5.1 小于 1M 的上下文配置 {: #51-context-below-1m}"
 
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
@@ -227,19 +227,19 @@ msgid "**Decode nodes (1M):**"
 msgstr "**解码节点（1M）：**"
 
 msgid "## 6 Functional Verification"
-msgstr "## 6 功能验证"
+msgstr "## 6 功能验证 {: #6-functional-verification}"
 
 msgid "## 7 Accuracy Evaluation"
-msgstr "## 7 精度评估"
+msgstr "## 7 精度评估 {: #7-accuracy-evaluation}"
 
 msgid "## 8 Performance Evaluation"
-msgstr "## 8 性能评估"
+msgstr "## 8 性能评估 {: #8-performance-evaluation}"
 
 msgid "### 8.1 Using AISBench"
-msgstr "### 8.1 使用AISBench"
+msgstr "### 8.1 使用 AISBench {: #81-using-aisbench}"
 
 msgid "### 8.2 Using vLLM Benchmark"
-msgstr "### 8.2 使用vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark {: #82-using-vllm-benchmark}"
 
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
@@ -248,7 +248,7 @@ msgstr ""
 "更多详细信息请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 msgid "## 9 Performance Tuning"
-msgstr "## 9 性能调优"
+msgstr "## 9 性能调优 {: #9-performance-tuning}"
 
 msgid ""
 "**Notice:**\n"
@@ -258,7 +258,7 @@ msgstr ""
 "`max-model-len`和`max-num-seqs`需要根据实际使用场景进行设置。其他设置请参考**[部署](#5-deployment)**章节。"
 
 msgid "## 10 FAQ"
-msgstr "## 10 常见问题解答"
+msgstr "## 10 常见问题 {: #10-faq}"
 
 msgid ""
 "Refer to [Supported Features "
@@ -291,7 +291,7 @@ msgid ""
 msgstr "- 对于单节点部署，在低延迟场景下，我们建议使用`dp1tp16`并关闭专家并行。"
 
 msgid "#### 5.1.2 Multi-node Deployment"
-msgstr "#### 5.1.2 多节点部署"
+msgstr "#### 5.1.2 多节点部署 {: #512-multi-node-deployment}"
 
 msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-node "
@@ -306,7 +306,7 @@ msgid "- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 32)."
 msgstr "- `GLM-5.2-w4a8c8`：可以部署在2个Atlas 800 A2（64GB × 32）上。"
 
 msgid "#### 5.1.3 Prefill-Decode Disaggregation"
-msgstr "#### 5.1.3 Prefill-Decode分离"
+msgstr "#### 5.1.3 Prefill-Decode 分离部署 {: #513-prefill-decode-disaggregation}"
 
 msgid "##### 5.1.3.1 Deployment on 4 Atlas 800 A3"
 msgstr "##### 5.1.3.1 在4个Atlas 800 A3上部署"
@@ -400,7 +400,7 @@ msgstr ""
 "project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
 
 msgid "### 5.2 1M Context Configuration"
-msgstr "### 5.2 1M上下文配置"
+msgstr "### 5.2 1M 上下文配置 {: #52-1m-context-configuration}"
 
 msgid ""
 "- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB ×"
@@ -565,10 +565,10 @@ msgstr ""
 "decode节点改用decode上下文并行|"
 
 msgid "## 3 Prerequisites"
-msgstr "## 3 前提条件"
+msgstr "## 3 前提条件 {: #3-prerequisites}"
 
 msgid "### 3.1 Model Weight"
-msgstr "### 3.1 模型权重"
+msgstr "### 3.1 模型权重 {: #31-model-weight}"
 
 msgid ""
 "|  Weight Version          | Hardware Requirements"
@@ -623,7 +623,7 @@ msgid ""
 msgstr ">**路径说明**：将模型权重下载到您选择的目录中并记录该路径。确保后续部署命令中的模型路径与该目录一致。"
 
 msgid "### 3.2 Verify Multi-node Communication (Optional)"
-msgstr "### 3.2 验证多节点通信（可选）"
+msgstr "### 3.2 验证多节点通信（可选） {: #32-verify-multi-node-communication-optional}"
 
 msgid "**API server and tokenizer configurations:**"
 msgstr "**API 服务器与 tokenizer 配置：**"
@@ -667,7 +667,7 @@ msgid ""
 "[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml)"
 " |"
 msgstr ""
-"|  `GLM-5.2-w4a4c8`        | Ascend 950PR&950DT系列产品 | 使用 "
+"|  `GLM-5.2-w4a4c8`        | Ascend 950PR&950DT products系列产品 | 使用 "
 "[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml)"
 " 在本地量化 |"
 
@@ -703,7 +703,9 @@ msgstr "### Q: 如何为 GLM-5.2 启用 function calling？"
 
 msgid ""
 "### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?"
-msgstr "### Q: W4A4C8 超低位量化权重如何保持精度？"
+msgstr ""
+"### 问：W4A4C8 超低比特量化权重如何保持精度？ {: #q-how-do-the-w4a4c8-ultra-low-bit-"
+"quantized-weights-preserve-accuracy}"
 
 msgid ""
 "A: For 950PR&950DT Products, the W4A4C8 weights of GLM-5.2 are quantized "
@@ -715,7 +717,7 @@ msgid ""
 "parameter count are quantized to 4 bit, while precision-sensitive modules "
 "fall back to higher precision or are not quantized at all."
 msgstr ""
-"A: 对于 Ascend 950PR&950DT系列产品，GLM-5.2 的 W4A4C8 权重使用 "
+"A: 对于 Ascend 950PR&950DT products系列产品，GLM-5.2 的 W4A4C8 权重使用 "
 "[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml)"
 " 进行量化。量化流程首先应用 QuaRot 旋转和 FlexSmoothQuant "
 "平滑来抑制激活值离群点，然后采用混合精度策略对模型进行量化：仅将占参数数量主导地位的模块量化为 4 "
@@ -748,7 +750,7 @@ msgid ""
 "    - Precision-sensitive modules (the indexer and some attention layers) are configured as C8 fallback layers in the quantization configuration: they are excluded from C8 quantization during inference and run in high precision."
 msgstr ""
 "- **量化算法**：权重和激活值使用 MXFP4/MXFP8 微缩放格式。每个张量被划分为 32 个元素的块，每个块共享一个缩放因子，该因子通过在思维链校准数据集上进行对称 min-max 校准获得。结合 QuaRot/FlexSmoothQuant 离群点抑制，逐块缩放能够适应每个张量的局部动态范围，因此量化误差远低于均匀 INT4 量化。\n"
-"- **C8（FP8 KV cache）**：C8 是推理过程中应用于 KV cache 的动态量化。在 Ascend 950PR&950DT系列产品上，KV cache 被量化为 FP8（而非 INT8）。它与权重 checkpoint 中存储的参数无关，仅由服务配置控制：\n"
+"- **C8（FP8 KV cache）**：C8 是推理过程中应用于 KV cache 的动态量化。在 Ascend 950PR&950DT products系列产品上，KV cache 被量化为 FP8（而非 INT8）。它与权重 checkpoint 中存储的参数无关，仅由服务配置控制：\n"
 "    - **Attention KV cache**（SFA C8，通过 `--kv-cache-dtype fp8` 启用）：压缩后的 KV latent（同时作为 K 和 V）按 128 元素 tile 动态量化为 FP8（E4M3），并带有 per-tile scale；KV cache 的 RoPE 部分保持 BF16，Q 不量化。\n"
 "    - **Indexer cache**（LI C8，通过 `--attention_config.indexer_kv_dtype fp8` 启用）：indexer 的 Q 和 K 首先通过 128 维 Hadamard 矩阵进行旋转以分散离群点，然后按 token 动态量化为 FP8（E4M3），并带有 per-token FP32 scale。\n"
 "    - 精度敏感的模块（indexer 和部分 attention 层）在量化配置中被配置为 C8 回退层：它们在推理过程中被排除在 C8 量化之外，以高精度运行。"
@@ -800,3 +802,78 @@ msgstr ""
 "- `--speculative-config '{\"num_speculative_tokens\": 1, ...}'`：prefill 期间使用最小 MTP 推测（decode 节点使用更高的数量，见下文）。\n"
 "- `fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`：Mul-Add 融合、用于长上下文 prefill 的 DSA 上下文并行、SFA/LI 稀疏注意力优化以及 C8 量化模型的 reshape 优化。\n"
 "- `--kv-cache-dtype turboquant_4bit_nc`：为 SFA 打包的主 KV cache 启用 4-bit TurboQuant 量化，作为 `--kv-cache-dtype int8` 的替代方案。它需要 A2/A3 设备，不能与 C8 cache 组合使用，并且在 Prefill-Decode 分离部署中，Mooncake 选项 `\"use_ascend_direct\"` 必须为 `false`。"
+
+msgid "# GLM-5.2 & GLM-5.3"
+msgstr "# GLM-5.2 & GLM-5.3 {: #glm-52-glm-53}"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment}"
+
+msgid "#### 5.1.1 Single-Node Deployment"
+msgstr "#### 5.1.1 单节点部署 {: #511-single-node-deployment}"
+
+msgid "#### 5.1.4 MemCache KV Cache Pool Deployment"
+msgstr ""
+"#### 5.1.4 MemCache KV 缓存池部署 {: #514-memcache-kv-cache-pool-deployment}"
+
+msgid "#### 5.2.1 1M Prefill-Decode Disaggregation (DCP)"
+msgstr ""
+"#### 5.2.1 1M Prefill-Decode 分离部署（DCP） {: #521-1m-prefill-decode-"
+"disaggregation-dcp}"
+
+msgid "##### 5.2.1.1 Topology and Prerequisites"
+msgstr "##### 5.2.1.1 拓扑与前提条件 {: #5211-topology-and-prerequisites}"
+
+msgid "##### 5.2.1.2 Prepare the Scripts"
+msgstr "##### 5.2.1.2 准备脚本 {: #5212-prepare-the-scripts}"
+
+msgid "##### 5.2.1.3 Start the Engines"
+msgstr "##### 5.2.1.3 启动引擎 {: #5213-start-the-engines}"
+
+msgid "##### 5.2.1.4 Start the Proxy"
+msgstr "##### 5.2.1.4 启动代理 {: #5214-start-the-proxy}"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench {: #71-using-aisbench}"
+
+msgid "### 7.2 GLM-5.3 W8A8C8 PD Reference"
+msgstr "### 7.2 GLM-5.3 W8A8C8 PD 参考结果 {: #72-glm-53-w8a8c8-pd-reference}"
+
+msgid "### 7.3 W4A4C8 950DT products Validation Records"
+msgstr ""
+"### 7.3 W4A4C8 950DT products 验证记录 {: #73-w4a4c8-950dt-products-validation-"
+"records}"
+
+msgid "### 9.1 Detailed Node Configuration"
+msgstr "### 9.1 节点详细配置 {: #91-detailed-node-configuration}"
+
+msgid "### 9.2 Performance Workloads"
+msgstr "### 9.2 性能测试负载 {: #92-performance-workloads}"
+
+msgid "### 9.3 Optimizations Requiring Explicit Enablement"
+msgstr "### 9.3 需要显式启用的优化 {: #93-optimizations-requiring-explicit-enablement}"
+
+msgid "### 9.4 TurboQuant KV Cache for GLM-5.2 and GLM-5.3"
+msgstr ""
+"### 9.4 GLM-5.2 和 GLM-5.3 的 TurboQuant KV 缓存 {: #94-turboquant-kv-cache-for-"
+"glm-52-and-glm-53}"
+
+msgid "### Q: How to enable function calling for GLM-5.2 and GLM-5.3?"
+msgstr ""
+"### 问：如何为 GLM-5.2 和 GLM-5.3 启用函数调用？ {: #q-how-to-enable-function-calling-"
+"for-glm-52-and-glm-53}"
+
+msgid "### Q: Can thinking be disabled for GLM-5.3?"
+msgstr "### 问：GLM-5.3 能否关闭思考？ {: #q-can-thinking-be-disabled-for-glm-53}"
+
+msgid "=== \"950DT products\""
+msgstr "=== \"950DT products\""
+
+msgid "=== \"A3 Series\""
+msgstr "=== \"A3 Series\""
+
+msgid "=== \"Atlas 800I A2 series\""
+msgstr "=== \"Atlas 800I A2 series\""
+
+msgid "=== \"Atlas 800I A3 series\""
+msgstr "=== \"Atlas 800I A3 series\""
