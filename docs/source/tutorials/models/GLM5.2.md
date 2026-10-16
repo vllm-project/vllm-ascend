@@ -499,7 +499,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -562,7 +561,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -623,7 +621,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -684,7 +681,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -781,7 +777,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
 - `"kv_port"`: Port for Mooncake KV transfer communication. Use different port ranges for prefill (`30000`) and decode (`30200`) node groups.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache, reducing latency.
-- `"engine_id"`: Fixed engine id of the Mooncake connector per role group: `0` for the prefill engine (shared by the two PP ranks) and `2` for the decode engines.
 - `"prefill"` / `"decode"` sections: Specify the parallelism of the prefill and decode node groups respectively. These must match the actual deployment topology (`prefill: dp_size 1, pp_size 2, tp_size 16, pp_layer_partition "41,37"`, `decode: dp_size 16, tp_size 2`).
 
 **Request forwarding (proxy):**
@@ -1295,7 +1290,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1359,7 +1353,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1422,7 +1415,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1485,7 +1477,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
