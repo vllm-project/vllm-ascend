@@ -34,6 +34,8 @@ from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, i
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -248,6 +250,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -262,6 +265,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
+        self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -301,6 +305,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+        self.synchronize_device()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -508,9 +513,17 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+                with torch_cuda_wrapper():
+                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
+            else:
+                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+
+                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
@@ -855,6 +868,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+            get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
@@ -1263,6 +1279,9 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        torch.npu.synchronize()
 
     def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
         """Return serializable encoder graph state for diagnostics.

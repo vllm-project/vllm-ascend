@@ -57,7 +57,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -311,15 +310,6 @@ class NPUPlatform(Platform):
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
-
-        # Registration imports vLLM's model config converter and therefore must
-        # happen after the global patch package has finished importing. Keeping
-        # it out of patch module scope also makes multiprocessing spawn safe.
-        from vllm_ascend.patch.platform.patch_deepseek_v4_vision import (
-            register_deepseek_v4_vision_config_convertor,
-        )
-
-        register_deepseek_v4_vision_config_convertor()
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
@@ -1805,8 +1795,6 @@ def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
     connector up. Without this guard a V1 run enables the scheduler-side
     connector and crashes with "auxiliary output worker output is missing".
     """
-    if vllm_version_is("0.30.0"):
-        return
     if getattr(vllm_config, "aux_output_config", None) is None:
         return
     if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:

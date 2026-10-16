@@ -27,6 +27,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         paths = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SharedExpertMLPPath")
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSharedExperts")
         names = {
+            "_apply_output_gate",
             "_can_fuse_w8a8_mxfp_activation",
             "_prepare_w8a8_mxfp_down_input",
             "_prepare_gate_up_input",

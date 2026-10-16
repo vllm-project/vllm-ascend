@@ -8,7 +8,6 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -55,9 +54,7 @@ def initialize_kv_cache(
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
         # vLLM main lets each cache type report whether it is DCP-sharded;
-        # v0.30.0 has no such field and always treats caches as sharded.
-        if not vllm_version_is("0.30.0"):
-            dcp_sharded.append(spec.dcp_sharded)
+        dcp_sharded.append(spec.dcp_sharded)
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
@@ -105,12 +102,10 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
-        **({"attn_cg_support": attn_cg_support} if vllm_version_is("0.30.0") else {}),
     )
 
     block_tables_kwargs = {}
-    if not vllm_version_is("0.30.0"):
-        block_tables_kwargs["dcp_sharded"] = dcp_sharded
+    block_tables_kwargs["dcp_sharded"] = dcp_sharded
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,
@@ -217,8 +212,7 @@ def initialize_kv_cache(
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
-        # v0.30.0 has no aux_output_config and still uses the legacy capturer.
-        if not vllm_version_is("0.30.0") and self.vllm_config.aux_output_config.enabled:
+        if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = upstream.get_aux_output_connector(self.model, self.vllm_config, kv_cache_config)
 
 
