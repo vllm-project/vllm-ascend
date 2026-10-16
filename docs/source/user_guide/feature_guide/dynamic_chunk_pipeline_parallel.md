@@ -37,6 +37,7 @@ In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. Bel
 
 Note:
 
+- It is recommended to use `MooncakeConnectorV1` and `MooncakeConnectorV2` as `kv_connector` options, as they provide more comprehensive support for PP.
 - Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) is recommended for CPP because it supports both synchronous and asynchronous scheduling. Model Runner V1 supports CPP only with synchronous scheduling.
 
 === "P Node (Prefiller — with CPP)"
