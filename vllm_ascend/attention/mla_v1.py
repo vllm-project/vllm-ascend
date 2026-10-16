@@ -1059,16 +1059,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return x
 
+    def _supports_fused_v_up_proj_size(self) -> bool:
+        return 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
         """Keep the DCP result batch-major and fuse both BMM permutations."""
         x = x.view(-1, self.num_heads, self.kv_lora_rank)
         x = x.to(dtype=self.W_UV.dtype)
         # The operator's batch dimension is num_heads, not the token count.
-        if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
+        if self._supports_fused_v_up_proj_size():
             x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
         else:
             x = torch.bmm(x.transpose(0, 1), self.W_UV).transpose(0, 1)
         return x.reshape(-1, self.num_heads * self.v_head_dim)
+
+    def _v_up_proj_fp8_batch_major(self, x: torch.Tensor) -> torch.Tensor:
+        """Project native FP8 output with the existing fusion and fallback gates."""
+        if x.shape[0] > 1 and self.head_padding == 0 and self._supports_fused_v_up_proj_size():
+            return self._v_up_proj_batch_major(x)
+        x = x.transpose(0, 1).contiguous()
+        if self.head_padding > 0:
+            x = x[: self.num_heads]
+        return self._v_up_proj(x)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -2653,18 +2665,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 
-        if (
-            fp8_token_major_output
-            and num_tokens > 1
-            and self.head_padding == 0
-            and 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
-        ):
-            # Fuse the token/head permutation into BMM without a separate copy.
-            return self._v_up_proj_batch_major(attn_output)
         if fp8_token_major_output:
-            # Both FP8 BNSD and TND return tokens before heads. V projection
-            # requires head-major data for the remaining fallback cases.
-            attn_output = attn_output.transpose(0, 1).contiguous()
+            return self._v_up_proj_fp8_batch_major(attn_output)
         if self.head_padding > 0:
             attn_output = attn_output[: self.num_heads]
         return self._v_up_proj(attn_output)
