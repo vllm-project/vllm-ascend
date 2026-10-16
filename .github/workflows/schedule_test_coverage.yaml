@@ -18,16 +18,6 @@
 name: Schedule Test Coverage
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - labeled
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -54,7 +44,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'pull_request' }}
+    if: github.event_name == 'workflow_dispatch'
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -237,7 +227,6 @@ jobs:
       base_sha: ${{ matrix.target.base_sha }}
       test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
-      coverage-upload: artifact
       coverage-obs-prefix: ${{ matrix.target.coverage_obs_prefix }}
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
       timeout-minutes: 180

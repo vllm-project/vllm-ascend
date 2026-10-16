@@ -67,11 +67,6 @@ on:
         required: false
         default: ''
         description: 'Filename suffix for release coverage, such as v0.30.0rc2. Empty keeps coverage.tar.'
-      coverage-upload:
-        type: string
-        required: false
-        default: obs
-        description: 'Publish assembled coverage to obs, or to a workflow artifact for verification.'
       timeout-minutes:
         type: number
         required: false
@@ -608,27 +603,7 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
-        - name: Stage coverage artifact
-          if: ${{ inputs.coverage-upload == 'artifact' }}
-          run: |
-            set -euo pipefail
-            mkdir -p coverage-artifact
-            cp coverage.tar "coverage-artifact/$(basename "${COVERAGE_OBJECT_TAR}")"
-            cp coverage_version.txt "coverage-artifact/$(basename "${COVERAGE_OBJECT_VERSION}")"
-            cp test_case_map.json "coverage-artifact/$(basename "${COVERAGE_OBJECT_MAP}")"
-            ls -lh coverage-artifact
-
-        - name: Upload coverage artifact
-          if: ${{ inputs.coverage-upload == 'artifact' }}
-          uses: actions/upload-artifact@v7
-          with:
-            name: precision-test-coverage${{ inputs.coverage-file-suffix && format('-{0}', inputs.coverage-file-suffix) || '' }}
-            path: coverage-artifact
-            if-no-files-found: error
-            retention-days: 14
-
         - name: Upload coverage to OBS
-          if: ${{ inputs.coverage-upload != 'artifact' }}
           run: |
             pip install esdk-obs-python --quiet
             python3 - <<'EOF'
@@ -668,7 +643,7 @@ jobs:
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
-              echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
+              echo "Unable to download ${COVERAGE_OBJECT_EXTRA} from OBS (HTTP ${http_code}); skip prune"
               exit 0
             fi
             python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
@@ -691,7 +666,7 @@ jobs:
             exit 0
 
         - name: Upload pruned extra_recommended_tests.yaml to OBS
-          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' && inputs.coverage-upload != 'artifact' }}
+          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
           continue-on-error: true
           run: |
             set -euo pipefail

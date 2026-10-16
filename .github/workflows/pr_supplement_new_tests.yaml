@@ -11,7 +11,14 @@ permissions:
 jobs:
   upload-merged-new-tests:
     name: Supplement New Tests
-    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+    if: >-
+      ${{
+        github.event.pull_request.merged == true &&
+        (
+          github.event.pull_request.base.ref == 'main' ||
+          startsWith(github.event.pull_request.base.ref, 'releases/v')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     env:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -23,13 +30,75 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
+      - name: Checkout release resolver from the default branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: workflow-src
+          fetch-depth: 1
+          sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
+          sparse-checkout-cone-mode: false
+
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
+      - name: Resolve supported target branch
+        id: target
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HELPER_SCRIPT: ${{ github.workspace }}/workflow-src/.github/workflows/scripts/resolve_latest_release_branch.py
+        run: |
+          set -euo pipefail
+          if [ "${BASE_REF}" = "main" ]; then
+            {
+              echo "supported=true"
+              echo "obs_object=ci/precision-test/extra_recommended_tests.yaml"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git ls-remote --heads origin 'refs/heads/releases/v*' \
+            | awk '{sub("refs/heads/", "", $2); print $2}' \
+            > release_branches.txt
+          python3 - <<'PY'
+          import importlib.util
+          import os
+
+          helper_path = os.environ["HELPER_SCRIPT"]
+          spec = importlib.util.spec_from_file_location("resolve_latest_release_branch", helper_path)
+          if spec is None or spec.loader is None:
+              raise RuntimeError(f"unable to load {helper_path}")
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+
+          with open("release_branches.txt", encoding="utf-8") as handle:
+              branches = [line.strip() for line in handle if line.strip()]
+          latest = helper.resolve_latest_release_branch(
+              os.environ["GITHUB_REPOSITORY"],
+              branches,
+              os.environ["GITHUB_TOKEN"],
+          )
+          base_ref = os.environ["BASE_REF"]
+          supported = base_ref == latest
+          suffix = helper.coverage_file_suffix(base_ref)
+          obs_object = (
+              f"ci/precision-test/{helper.coverage_object_name('extra_recommended_tests.yaml', suffix)}"
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"supported={str(supported).lower()}", file=output)
+              print(f"obs_object={obs_object}", file=output)
+          if supported:
+              print(f"PR targets latest release branch {latest}")
+          else:
+              print(f"Skip PR targeting {base_ref}; latest release branch is {latest}")
+          PY
+
       - name: Collect new or moved tests
         id: collect
+        if: ${{ steps.target.outputs.supported == 'true' }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -63,18 +132,20 @@ jobs:
       - name: Merge into OBS extra_recommended_tests.yaml
         id: merge
         if: ${{ steps.collect.outputs.has_tests == 'true' }}
+        env:
+          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
         run: |
           set -euo pipefail
-          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${OBS_OBJECT}"
           python3 -m pip install pyyaml --quiet
           http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
           if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.yaml ]; then
-            echo "Downloaded existing extra_recommended_tests.yaml from OBS"
+            echo "Downloaded existing ${OBS_OBJECT} from OBS"
           elif [ "${http_code}" = "404" ]; then
-            echo "No extra_recommended_tests.yaml on OBS yet; starting a new file"
+            echo "No ${OBS_OBJECT} on OBS yet; starting a new file"
             : > extra_recommended_tests.yaml
           else
-            echo "::error::Failed to download extra_recommended_tests.yaml from OBS (HTTP ${http_code})"
+            echo "::error::Failed to download ${OBS_OBJECT} from OBS (HTTP ${http_code})"
             exit 1
           fi
           python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
@@ -93,6 +164,8 @@ jobs:
 
       - name: Upload extra_recommended_tests.yaml to OBS
         if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
+        env:
+          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
         run: |
           set -euo pipefail
           if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
@@ -104,7 +177,7 @@ jobs:
           import os
           from obs import ObsClient
 
-          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          obs_path = os.environ['OBS_OBJECT']
           client = ObsClient(
               access_key_id=os.environ['OBS_ACCESS_KEY'],
               secret_access_key=os.environ['OBS_SECRET_KEY'],
