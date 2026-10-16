@@ -50,9 +50,7 @@ def test_push_backend_submits_async_write_on_given_stream():
 
     backend.write_async("peer", [100], [1000], [16], 123)
 
-    engine.batch_transfer_async_write_submit.assert_called_once_with(
-        "peer", [100], [1000], [16], 123
-    )
+    engine.batch_transfer_async_write_submit.assert_called_once_with("peer", [100], [1000], [16], 123)
 
 
 @pytest.mark.parametrize("use_numpy", [False, True])

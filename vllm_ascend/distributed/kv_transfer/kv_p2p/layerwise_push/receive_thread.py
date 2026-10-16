@@ -186,7 +186,10 @@ class WritePlanner:
         self.backend = backend
         self._state = state
         self.tp_rank = tp_rank
-        self._component_pairs_by_source = {}
+        self._component_pairs_by_source: dict[
+            str | bytes,
+            dict[int, tuple[tuple[ComponentLayout, ComponentLayout], ...]],
+        ] = {}
 
     def _match_components(
         self,
@@ -249,7 +252,7 @@ class WritePlanner:
 
     def plan_batch(
         self,
-        identity: bytes,
+        identity: str | bytes,
         layer_idx: int,
         write_reqs: list[tuple[str, list[list[int]], list[int]]],
         source_layouts: dict[int, tuple[ComponentLayout, ...]],
@@ -339,7 +342,7 @@ class WritePlanner:
 
     def write_batch(
         self,
-        identity: bytes,
+        identity: str | bytes,
         layer_idx: int,
         write_reqs: list[tuple[str, list[list[int]], list[int]]],
         session: str,
@@ -499,13 +502,15 @@ class LayerwisePushReceiveThread(threading.Thread):
         from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 
         path = make_zmq_path("tcp", self._host, self.side_channel_port + self.tp_rank)
-        ctx = zmq.Context()
+        ctx = zmq.Context()  # type: ignore[attr-defined]
         sock = None
         try:
-            sock = make_zmq_socket(ctx=ctx, path=path, socket_type=zmq.ROUTER, bind=True)
-            poller = zmq.Poller()
-            poller.register(sock, zmq.POLLIN)
-            poller.register(self._wake_reader, zmq.POLLIN)
+            sock = make_zmq_socket(
+                ctx=ctx, path=path, socket_type=zmq.ROUTER, bind=True  # type: ignore[attr-defined]
+            )
+            poller = zmq.Poller()  # type: ignore[attr-defined]
+            poller.register(sock, zmq.POLLIN)  # type: ignore[attr-defined]
+            poller.register(self._wake_reader, zmq.POLLIN)  # type: ignore[attr-defined]
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
             encoder = msgspec.msgpack.Encoder()

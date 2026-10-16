@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 is a native multimodal Mixture-of-Experts (MoE) model with 552B backbone
 parameters and a context length of up to one million tokens. It uses a
@@ -21,8 +27,10 @@ guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
-upstream vLLM revision dated September 11, 2026 or later. vLLM v0.30.0 is
-recommended.
+upstream vLLM revision dated September 11, 2026 or later. Development builds
+use the verified main revision recorded in `.github/vllm-main-verified.commit`.
+Release builds use the tag recorded in `.github/vllm-release-tag.commit`
+(currently v0.31.0). These are separate supported upstream revisions.
 
 ## 2 Supported Features
 

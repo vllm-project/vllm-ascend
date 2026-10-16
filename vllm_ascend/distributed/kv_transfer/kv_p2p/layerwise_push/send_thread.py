@@ -142,8 +142,8 @@ class LayerwisePushSendingThread(threading.Thread):
         self._task_reader, self._task_writer = socket.socketpair()
         self._task_reader.setblocking(False)
         self._task_writer.setblocking(False)
-        self._poller = zmq.Poller()
-        self._poller.register(self._task_reader, zmq.POLLIN)
+        self._poller = zmq.Poller()  # type: ignore[attr-defined]
+        self._poller.register(self._task_reader, zmq.POLLIN)  # type: ignore[attr-defined]
         self._persist_ctx = zmq.Context()  # type: ignore[attr-defined]
         self._dealers: dict[str, Any] = {}
         self._stopped = False
@@ -239,7 +239,7 @@ class LayerwisePushSendingThread(threading.Thread):
             dealer.setsockopt(zmq.RCVHWM, 0)  # type: ignore[attr-defined]
             dealer.connect(path)
             self._dealers[path] = dealer
-            self._poller.register(dealer, zmq.POLLIN)
+            self._poller.register(dealer, zmq.POLLIN)  # type: ignore[attr-defined]
         return self._dealers[path]
 
     def _wake(self, _future=None) -> None:
@@ -267,10 +267,7 @@ class LayerwisePushSendingThread(threading.Thread):
                 self._check_handshake_deadlines()
                 self._dispatch_writes(encoder)
                 pending_count = sum(len(tasks) for tasks in self._pending.values()) + len(self._active)
-                if (
-                    self.topology_ready.is_set()
-                    and pending_count < MAX_PENDING_BATCHES
-                ):
+                if self.topology_ready.is_set() and pending_count < MAX_PENDING_BATCHES:
                     try:
                         self._process_send_task(self.send_queue.get_nowait(), encoder)
                         continue
@@ -453,7 +450,7 @@ class LayerwisePushSendingThread(threading.Thread):
         for req_id, rm in send_task.send_request.items():
             if rm.chunk_start_blocks is None:
                 raise RuntimeError(f"Layerwise push request {req_id} is missing its precomputed chunk block range")
-            source_blocks = [[] for _ in self._state.block_sizes]
+            source_blocks: list[list[int]] = [[] for _ in self._state.block_sizes]
             start_blocks = [0 for _ in self._state.block_sizes]
             for group_idx in layer_group_indices:
                 source_blocks[group_idx] = rm.local_block_ids[group_idx]
@@ -586,7 +583,7 @@ class LayerwisePushSendingThread(threading.Thread):
     def _drain_replies(self, decoder: msgspec.msgpack.Decoder) -> None:
         for path, dealer in self._dealers.items():
             while dealer.poll(timeout=0):
-                frames = dealer.recv_multipart(flags=zmq.NOBLOCK)
+                frames = dealer.recv_multipart(flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
                 payload = [frame for frame in frames if frame]
                 if len(payload) != 1:
                     raise ValueError(f"Invalid push reply frame count: frames={len(frames)}, non_empty={len(payload)}")
