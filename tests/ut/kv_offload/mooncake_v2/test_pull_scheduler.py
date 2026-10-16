@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
+    DONE_RECVING_MSG,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
@@ -257,18 +258,61 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
         make_sending_thread({0: metadata, 1: mismatched}, tp_size=2)
 
 
-def test_sending_thread_handles_early_and_normal_completion_once() -> None:
+def test_sending_thread_handles_completion_once() -> None:
     thread = make_sending_thread()
-
-    thread._handle_finished_request("early")
-    assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("early", time.time())
-    assert thread.get_and_clear_finished_requests() == {"early"}
 
     thread.add_delayed_request("normal", time.time())
     thread._handle_finished_request("normal")
     thread._handle_finished_request("normal")
     assert thread.get_and_clear_finished_requests() == {"normal"}
+    assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("normal")
+    assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_sending_thread_ignores_unknown_completion() -> None:
+    thread = make_sending_thread()
+
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == set()
+    thread.add_delayed_request("unknown", time.time())
+    assert thread.get_and_clear_finished_requests() == set()
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == {"unknown"}
+
+
+def test_sending_thread_acks_duplicate_and_unknown_completion() -> None:
+    thread = make_sending_thread()
+    thread.add_delayed_request("normal", time.time())
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = [
+        [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id))]
+        for request_id in ("normal", "normal", "unknown")
+    ] + [KeyboardInterrupt()]
+
+    with pytest.raises(KeyboardInterrupt):
+        thread._run_busy_loop(sock)
+
+    assert sock.send_multipart.call_args_list == [call((b"consumer", b"", ACK_MSG))] * 3
+    assert thread.get_and_clear_finished_requests() == {"normal"}
+
+
+def test_sending_thread_does_not_retain_completed_request_ids() -> None:
+    thread = make_sending_thread()
+
+    for index in range(100):
+        request_id = f"request-{index}"
+        thread.add_delayed_request(request_id, time.time())
+        thread._handle_finished_request(request_id)
+        assert thread.get_and_clear_finished_requests() == {request_id}
+        thread._handle_finished_request(request_id)
+
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+    assert not getattr(thread, "finished_request_ids", set())
+    assert not getattr(thread, "early_finished_requests", set())
 
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,6 +331,9 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     assert thread.get_and_clear_finished_requests() == {"expired"}
     assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("expired")
+    assert thread.get_and_clear_finished_requests() == set()
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
