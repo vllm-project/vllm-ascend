@@ -1,12 +1,111 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pack and restore strided convolution states for KDA."""
+"""Prepare cache indices and stage unsupported KDA convolution state layouts."""
 
 import torch
 from vllm.triton_utils import tl, triton
 
 _CONV_STATE_COPY_BLOCK_SIZE = 256
 _CONV_STATE_COPY_MAX_PROGRAMS = 65535
+_CONV_INDEX_BLOCK_SIZE = 128
+
+
+@triton.jit
+def _prepare_conv_indices_rows(
+    indices, starts, output, index_stride, num_slots, REQUESTS: tl.constexpr, BLOCK: tl.constexpr
+):
+    request = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    in_range = request < REQUESTS
+    slot = tl.load(indices + request * index_stride, mask=in_range, other=-1).to(tl.int64)
+    start = tl.load(starts + request, mask=in_range, other=0)
+    end = tl.load(starts + request + 1, mask=in_range, other=0)
+    active = (slot >= 0) & (slot < num_slots) & (end > start)
+    tl.store(output + request, tl.where(active, slot, num_slots), mask=in_range)
+
+
+@triton.jit
+def _prepare_conv_indices_kernel(
+    indices,
+    starts,
+    output,
+    index_stride,
+    second_indices,
+    second_starts,
+    second_output,
+    second_index_stride,
+    num_slots,
+    REQUESTS: tl.constexpr,
+    SECOND_REQUESTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    if tl.program_id(1) == 0:
+        _prepare_conv_indices_rows(indices, starts, output, index_stride, num_slots, REQUESTS, BLOCK)
+    else:
+        _prepare_conv_indices_rows(
+            second_indices, second_starts, second_output, second_index_stride, num_slots, SECOND_REQUESTS, BLOCK
+        )
+
+
+def prepare_conv_indices(
+    cache_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_slots: int,
+    *,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select the first index column and map inactive rows to a nonnegative null slot."""
+    requests = cache_indices.shape[0]
+    if out is not None and requests > out.numel():
+        raise ValueError("Convolution index count exceeds output buffer capacity")
+    indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device) if out is None else out[:requests]
+    if requests:
+        _prepare_conv_indices_kernel[(triton.cdiv(requests, _CONV_INDEX_BLOCK_SIZE),)](
+            cache_indices,
+            query_start_loc,
+            indices,
+            cache_indices.stride(0),
+            cache_indices,
+            query_start_loc,
+            indices,
+            cache_indices.stride(0),
+            num_slots,
+            requests,
+            0,
+            BLOCK=_CONV_INDEX_BLOCK_SIZE,
+        )
+    return indices
+
+
+def prepare_conv_indices_pair(
+    first_indices: torch.Tensor,
+    first_starts: torch.Tensor,
+    first_out: torch.Tensor,
+    second_indices: torch.Tensor,
+    second_starts: torch.Tensor,
+    second_out: torch.Tensor,
+    num_slots: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Prepare non-spec and spec request indices with one metadata-stage launch."""
+    first_requests, second_requests = first_indices.shape[0], second_indices.shape[0]
+    if first_requests > first_out.numel() or second_requests > second_out.numel():
+        raise ValueError("Convolution index count exceeds output buffer capacity")
+    first, second = first_out[:first_requests], second_out[:second_requests]
+    if first_requests or second_requests:
+        _prepare_conv_indices_kernel[(triton.cdiv(max(first_requests, second_requests), _CONV_INDEX_BLOCK_SIZE), 2)](
+            first_indices,
+            first_starts,
+            first,
+            first_indices.stride(0),
+            second_indices,
+            second_starts,
+            second,
+            second_indices.stride(0),
+            num_slots,
+            first_requests,
+            second_requests,
+            BLOCK=_CONV_INDEX_BLOCK_SIZE,
+        )
+    return first, second
 
 
 @triton.jit
