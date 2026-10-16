@@ -3,7 +3,7 @@
 # ==========================================
 
 test_cases:
-  - name: "GLM-5.2-W4A8C8-DSpark-MRV2-PCP"
+  - name: "glm-5.2-W4A8C8-DSpark-MRV2-PCP"
     model: "Eco-Tech/GLM-5.2-w4a8c8"
     envs:
       VLLM_USE_V2_MODEL_RUNNER: "1"

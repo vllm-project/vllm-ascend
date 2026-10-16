@@ -202,9 +202,9 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: Kimi-K2.6-W4A8-MRV2-PCP-DCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
-      - name: GLM-5.2-W4A8C8-DSpark-MRV2-PCP
+      - name: glm-5.2-W4A8C8-DSpark-MRV2-PCP
         os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W4A8C8-DSpark-MRV2-PCP.yaml
+        config_file_path: glm-5.2-W4A8C8-DSpark-MRV2-PCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
       - name: Qwen3.5-397B-A17B-w8a8-mtp
         os: linux-aarch64-a3-800i-16
