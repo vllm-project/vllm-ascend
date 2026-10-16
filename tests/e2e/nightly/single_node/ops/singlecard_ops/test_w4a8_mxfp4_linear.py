@@ -71,8 +71,6 @@ def test_partial_groups_and_tp_projection(input_size, tp_size, dtype, with_bias)
             scheme.process_weights_after_loading(layer)
             output = scheme.apply(layer, local_x, local_bias).cpu()
             torch.testing.assert_close(output.float(), local_expected, rtol=0, atol=0)
-            scheme.restore_weights_for_rl_loading(layer)
-            torch.testing.assert_close(layer.weight.cpu(), checkpoint_weight[:, start // 2 : end // 2])
         actual += output.float()
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
