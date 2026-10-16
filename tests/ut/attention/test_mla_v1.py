@@ -1121,7 +1121,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         with patch(
             "vllm_ascend.attention.utils.get_ascend_config",
-            return_value=SimpleNamespace(chunked_prefill_workspace_size=None),
+            return_value=SimpleNamespace(chunked_prefill_workspace_size=128 * 1024),
         ):
             result = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(mock_vllm_config)
         # max(8 * max_model_len, 4 * max_num_seqs * block_size) stays below the 128K default cap.
