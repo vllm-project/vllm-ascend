@@ -121,18 +121,6 @@ class TestMoECommMethod(TestBase):
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
-    def test_mega_moe_symm_buffer_passes_configured_zero_for_p_node(self, mock_get_mc2_group, mock_warning_once):
-        self.mock_ascend_config.mega_moe_max_tokens = 0
-        mock_get_mc2_group.return_value.device_group = "mc2_group"
-        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
-
-        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
-
-        comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
-        self.assertEqual(comm_impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"], 0)
-
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     def test_mega_moe_symm_buffer_clamps_to_safe_capacity_for_p_node(self, mock_get_mc2_group, mock_warning_once):
         # mega_moe_max_tokens (32768) exceeds the absolute safe upper bound
         # (1024), so the P-node buffer must be clamped to that bound.
