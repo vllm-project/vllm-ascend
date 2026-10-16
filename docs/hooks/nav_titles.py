@@ -125,7 +125,7 @@ TITLES = {
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
     "tutorials/models/Gemma4.md": {"en": "Gemma4", "zh": "Gemma4"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
-    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2&GLM-5.3", "zh": "GLM-5.2&GLM-5.3"},
+    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2 & GLM-5.3", "zh": "GLM-5.2 & GLM-5.3"},
     "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},

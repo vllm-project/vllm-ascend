@@ -12,7 +12,7 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-This document is based on vLLM-Ascend v0.30.0RC2, which supports GLM-5.3-Flash on Atlas 800I A2 and Atlas 800I A3. Support for 950DT Products is currently experimental; official support will be available in a future release.
+This document is based on vLLM-Ascend v0.30.0RC2, which supports GLM-5.3-Flash on Atlas 800I A2 and Atlas 800I A3. Support for 950DT products is currently experimental; official support will be available in a future release.
 
 ## 2 Supported Features
 
@@ -27,11 +27,11 @@ all Atlas 800I A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ### 3.1 Model Weight
 
-Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and A5 checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and 950DT products checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
 
 | Checkpoint | Hardware | Deployment | Download |
 | --- | --- | --- | --- |
-| `GLM-5.3-Flash-w8a8-mxfp8` | **A5**: 950DT Products | 1 node (96GB × 8) for single-node deployment | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) |
+| `GLM-5.3-Flash-w8a8-mxfp8` | 950DT products | 1 node (96GB × 8) for single-node deployment | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) |
 | `GLM-5.3-Flash-w8a8` | **A3**: Atlas 800I A3 (128GB × 8) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 | `GLM-5.3-Flash-w8a8` | **A2**: Atlas 800I A2 | 2 nodes (64GB × 8 each) for colocated deployment; 4 nodes for PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 
@@ -49,7 +49,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 - You can use our official docker image to run GLM-5.3-Flash directly.
 
-=== "950DT Products"
+=== "950DT products"
 
     Start the docker image on each node.
 
@@ -173,9 +173,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 5.1 Single-Node Online Deployment
 
-=== "950DT Products"
+=== "950DT products"
 
-    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT Products (96GB × 8) .
+    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT products (96GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -248,12 +248,12 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800I A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT products and 16 on Atlas 800I A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800I A3. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT Products, while `enforce_eager: false` enables graph mode for the draft model on Atlas 800I A3. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC2; the forced-eager restriction for other GLM models does not apply to this model.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT products and five on Atlas 800I A3. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT products, while `enforce_eager: false` enables graph mode for the draft model on Atlas 800I A3. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC2; the forced-eager restriction for other GLM models does not apply to this model.
 
 ### 5.2 Multi-Node Colocated Deployment
 
@@ -1469,14 +1469,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
 ### 5.5 Historical Prefill-Decode Self-Test Reference (vLLM 0.29.0)
 
-The following 1P1D configurations come from separate A3 and 950DT self-tests of vLLM 0.29.0. They are not interchangeable with the co-located commands above. Both tests used locally requantized checkpoints; if you substitute the published Modelers weights, revalidate accuracy and performance. The prefill and decode nodes must use the same checkpoint and be connected through their data-plane network. Replace the example IPs, interface names, and local model paths before starting.
+The following 1P1D configurations come from separate A3 and 950DT products self-tests of vLLM 0.29.0. They are not interchangeable with the co-located commands above. Both tests used locally requantized checkpoints; if you substitute the published Modelers weights, revalidate accuracy and performance. The prefill and decode nodes must use the same checkpoint and be connected through their data-plane network. Replace the example IPs, interface names, and local model paths before starting.
 
 | Hardware | Prefill | Decode | Checkpoint used in the self-test |
 | --- | --- | --- | --- |
 | Atlas 800I A3 | DP16/TP1/EP16 | DP16/TP1/EP16 | `GLM-5.3-Flash-w8a8-requant-20260917` |
-| 950DT Products | DP1/TP8/EP8 | DP8/TP1/EP8 | `GLM-5.3-Flash-W8A8-MXFP8-0918` |
+| 950DT products | DP1/TP8/EP8 | DP8/TP1/EP8 | `GLM-5.3-Flash-W8A8-MXFP8-0918` |
 
-The A3 self-test used vllm-ascend commit `a71b766ce6fc0a9669a412e15a5cf53f7f827093` with CANN 9.1.0; the 950DT self-test used commit `47ba29b72b5d0406f9c41e7b1fc6eb30e7a067a5` with CANN 9.2.0. These version-pinned records do not imply that the commands are verified on the current main branch.
+The A3 self-test used vllm-ascend commit `a71b766ce6fc0a9669a412e15a5cf53f7f827093` with CANN 9.1.0; the 950DT products self-test used commit `47ba29b72b5d0406f9c41e7b1fc6eb30e7a067a5` with CANN 9.2.0. These version-pinned records do not imply that the commands are verified on the current main branch.
 
 #### 5.5.1 Atlas 800I A3 (DP16/TP1 on Each Node)
 
@@ -1580,7 +1580,7 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
 
 Send requests to proxy port 8081, not directly to a P or D port.
 
-#### 5.5.2 950DT Products (Prefill TP8, Decode DP8/TP1)
+#### 5.5.2 950DT products (Prefill TP8, Decode DP8/TP1)
 
 The prefill node starts one TP8 service:
 
@@ -1644,7 +1644,7 @@ python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 \
   --vllm-start-port 9900
 ```
 
-The 950DT proxy uses prefill port 9081 and decode ports 9900–9907:
+The 950DT products proxy uses prefill port 9081 and decode ports 9900–9907:
 
 ```bash
 P_DATA_IP="your-prefill-node-data-ip"

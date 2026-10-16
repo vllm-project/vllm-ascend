@@ -22,20 +22,20 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and A5 checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and 950PR&950DT Products checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
 |  `GLM-5.2-w8a8c8`        | **A3**: 2 Atlas 800I A3 (128GB × 8) nodes; **A2**: 4 Atlas 800I A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
-|  `GLM-5.2-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
+|  `GLM-5.2-W8A8C8-mxfp8` | 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
 |  `GLM-5.3-w8a8c8`        | **A3**: Atlas 800I A3 (128GB × 8); **A2**: Atlas 800I A2 | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
-|  `GLM-5.3-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
-|  `GLM-5.3-W4A4C8-mxfp4` | **A5**: 1 950DT Product (96GB × 8) | Locally validated checkpoint; prepare with [msmodelslim](https://gitcode.com/Ascend/msmodelslim) |
-|  `GLM-5.2-w4a4c8-mxfp4` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
+|  `GLM-5.3-W8A8C8-mxfp8` | 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
+|  `GLM-5.3-W4A4C8-mxfp4` | 1 950DT products (96GB × 8) | Locally validated checkpoint; prepare with [msmodelslim](https://gitcode.com/Ascend/msmodelslim) |
+|  `GLM-5.2-w4a4c8-mxfp4` | 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
 
 - `GLM-5.2-w8a8c8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
-- `GLM-5.2-w4a4c8-mxfp4` (A5, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
+- `GLM-5.2-w4a4c8-mxfp4` (950PR&950DT Products, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -53,15 +53,15 @@ snapshot `1bd04a362` (2026-10-16), including its recent A2 corrections.
 Use a build containing those branch updates; an older RC image may require
 the compatibility changes documented in the relevant A2 section.
 The generic container commands below use the RC2 image tags. The earlier
-A5 W4A4C8 self-test keeps its exact image and validation scope in Section 5.1.1.
+950DT products W4A4C8 self-test keeps its exact image and validation scope in Section 5.1.1.
 
 - You can use our official docker image to run GLM-5.2 and GLM-5.3. The hardware-specific container commands below follow the GLM-5.3-Flash guide.
 
 Before launching a container, replace the image tag with a compatible, tested build for your target model and hardware. The documentation-wide image tag is not a model compatibility guarantee. Use the same image digest on all nodes.
 
-For A5 PD deployment, the host must already have the platform-generated HCCL/HIXL configuration in `/etc/hccl_rootinfo.json` and `/etc/hixlep/`, as well as the device and driver paths mounted below. Do not substitute an empty directory for the communication configuration.
+For 950DT products PD deployment, the host must already have the platform-generated HCCL/HIXL configuration in `/etc/hccl_rootinfo.json` and `/etc/hixlep/`, as well as the device and driver paths mounted below. Do not substitute an empty directory for the communication configuration.
 
-=== "950DT Products"
+=== "950DT products"
 
     Start the docker image on each node.
 
@@ -187,37 +187,37 @@ from one model to the other. Keep thinking enabled for GLM-5.3.
 
 | Scenario | Hardware | Configuration |
 | --- | --- | --- |
-| W4A4C8 single node | 950DT | Section 5.1.1; GLM-5.2 and GLM-5.3 startup/short requests validated |
+| W4A4C8 single node | 950DT products | Section 5.1.1; GLM-5.2 and GLM-5.3 startup/short requests validated |
 | W8A8C8 single node, 32K | A3 | Section 5.1.1; reduced-context layout |
-| W8A8C8 colocated | 950DT / A3 / A2 | Section 5.1.2; settings from the 0.30 RC maintenance branch |
-| PD | 950DT / A3 / A2 | Section 5.1.3; A3 uses v0.30.0rc2 |
+| W8A8C8 colocated | 950DT products / A3 / A2 | Section 5.1.2; settings from the 0.30 RC maintenance branch |
+| PD | 950DT products / A3 / A2 | Section 5.1.3; A3 uses v0.30.0rc2 |
 | MemCache KV pool | A3 / A2 | Section 5.1.4; hardware-specific PD topology |
 | 1M DCP PD | Four A3 nodes | Section 5.2.1; Prefill DP2/TP16/DCP16, Decode DP4/TP8/DCP8 |
 
 For the A3 release PD, pooling and 1M examples, use
 `quay.io/ascend/vllm-ascend:v0.30.0rc2-a3` on every node with the mounts
 in Section 4. A2 uses `quay.io/ascend/vllm-ascend:v0.30.0rc2`.
-The A5 W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
+The 950DT products W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
 
 ### 5.1 Context Below 1M
 
 #### 5.1.1 Single-Node Deployment
 
-=== "950DT Products"
+=== "950DT products"
 
     Both GLM-5.3 and GLM-5.2 W4A4C8/MXFP4 checkpoints passed startup and
-    short chat/completion requests on one 950DT Product (96GB × 8) in the
+    short chat/completion requests on one 950DT products (96GB × 8) in the
     2026-10-10 validation. Use W4A4C8 for this single-node example; the
     GLM-5.3 W8A8C8/MXFP8 checkpoint failed during expert-weight allocation
     on that machine and is covered by the PP2 examples instead.
 
-    The tested image was
-    `vllm-ascend:dev-26.2.0.day20261008-A5-py311-openEuler24.03-lts-aarch64`,
+    The tested local image ID was
+    `sha256:cc0062c206978be60a1c4b729a9b4975eecdec498e5569f2406a09d6ab98841e`,
     with vLLM `0.30.0+empty` and vLLM-Ascend commit `a50eb57f1`.
     The local GLM-5.3 checkpoint has 78 layers and 102 indexed shards;
     its identity with a public release revision was not verified.
     Use a validated local checkpoint path. See
-    [W4A4C8 Validation](#73-w4a4c8-a5-validation-records) for the exact scope.
+    [W4A4C8 Validation](#73-w4a4c8-950dt-products-validation-records) for the exact scope.
 
     For GLM-5.2, replace the checkpoint path in `vllm serve` with
     `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4`.
@@ -299,9 +299,9 @@ The A5 W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
 
 If you want to deploy a multi-node environment, first verify the data-plane network by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
-=== "950DT Products"
+=== "950DT products"
 
-    - `GLM-5.3-W8A8C8-mxfp8` (or the matching GLM-5.2 checkpoint): can be deployed on 2 950DT Products (96GB × 8) with PP2/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 8 NPUs to their containers. The default checkpoint below is `GLM-5.3-W8A8C8-mxfp8`; select `GLM-5.2-W8A8C8-mxfp8` on both nodes only when deploying GLM-5.2.
+    - `GLM-5.3-W8A8C8-mxfp8` (or the matching GLM-5.2 checkpoint): can be deployed on 2 950DT products (96GB × 8) with PP2/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 8 NPUs to their containers. The default checkpoint below is `GLM-5.3-W8A8C8-mxfp8`; select `GLM-5.2-W8A8C8-mxfp8` on both nodes only when deploying GLM-5.2.
 
     Run the following scripts on two nodes respectively.
 
@@ -738,9 +738,9 @@ Select the hardware tab below for the prefill and decode topology. Prefill and d
 
 In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) for the Mooncake configuration.
 
-=== "950DT Products"
+=== "950DT products"
 
-    The reference topology uses four 950DT Products (96GB × 8): two prefill nodes with PP2/TP8 and two decode nodes with global DP16/TP1. All nodes must mount the same checkpoint at the same path. Use `GLM-5.3-W8A8C8-mxfp8` by default; select `GLM-5.2-W8A8C8-mxfp8` on all nodes when deploying GLM-5.2.
+    The reference topology uses four 950DT products (96GB × 8): two prefill nodes with PP2/TP8 and two decode nodes with global DP16/TP1. All nodes must mount the same checkpoint at the same path. Use `GLM-5.3-W8A8C8-mxfp8` by default; select `GLM-5.2-W8A8C8-mxfp8` on all nodes when deploying GLM-5.2.
 
     | Node | Role | Parallelism | Service/rank range |
     | ---- | ---- | ----------- | ------------------ |
@@ -3698,9 +3698,9 @@ settings when comparing results. Scores are specific to the model shown.
 | GPQA Diamond | GLM-5.3-w8a8c8 | A3 | PD disaggregation | accuracy | gen | 91.92 |
 | GPQA Diamond | GLM-5.3-w8a8c8 | A2 | PD disaggregation | accuracy | gen | 89.39 |
 
-### 7.3 W4A4C8 A5 Validation Records
+### 7.3 W4A4C8 950DT products Validation Records
 
-Both records below use one 950DT Product (96GB × 8), the 2026-10-08 A5
+Both records below use one 950DT products (96GB × 8), the 2026-10-08 950DT products
 image in Section 5.1.1, TP8/DP1/EP, eager mode, a configured maximum
 context of 135000, 16384 batched tokens, 20 sequences and FP8 KV/indexer
 caches. On 2026-10-10, `/health`, `/v1/chat/completions` and
@@ -3798,7 +3798,7 @@ and cannot be combined with `enable_sparse_sfa_c8: true`.
 In PD deployments, set `"use_ascend_direct": false` on the Mooncake
 connector on both roles, and keep the cache format consistent across
 Prefill and Decode. Revalidate capacity and accuracy after changing it.
-This option does not apply to the A5 FP8 examples or GLM-5.3-Flash.
+This option does not apply to the 950DT products FP8 examples or GLM-5.3-Flash.
 
 ## 10 FAQ
 
