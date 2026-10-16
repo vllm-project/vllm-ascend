@@ -197,10 +197,10 @@ msgid ""
 msgstr "在 PD 分离部署中，**仅在 P（预填充）节点上**启用 CPP。D（解码）节点不启用流水线并行，专注于低延迟的逐令牌解码。"
 
 msgid ""
-"- It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.\n"
+"- It is recommended to use `MooncakeConnectorV1` and `MooncakeConnectorV2` as `kv_connector` options, as they provide more comprehensive support for PP.\n"
 "    - It is recommended **not** to enable `async-scheduling` on P nodes of PP, as it may cause performance degradation in the prefill stage."
 msgstr ""
-"- 建议使用 `MooncakeConnectorV1` 作为 `kv_connector`，因为它对 PP 提供了更全面的支持。\n"
+"- 建议使用 `MooncakeConnectorV1`、`MooncakeConnectorV2` 作为 `kv_connector`，因为它们对 PP 提供了更全面的支持。\n"
 "    - 建议**不要**在 PP 的 P 节点上启用 `async-scheduling`，因为这可能导致预填充阶段性能下降。"
 
 msgid ""

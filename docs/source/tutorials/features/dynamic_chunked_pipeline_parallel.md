@@ -79,7 +79,7 @@ Mooncake is required for PD disaggregation KV cache transfer. Refer to [PD Disag
 
     In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. The D (Decoder) node runs without pipeline parallelism and focuses on low-latency token-by-token decoding.
 
-    - It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.
+    - It is recommended to use `MooncakeConnectorV1` and `MooncakeConnectorV2` as `kv_connector` options, as they provide more comprehensive support for PP.
     - It is recommended **not** to enable `async-scheduling` on P nodes of PP, as it may cause performance degradation in the prefill stage.
 
 Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (decoder 1) and `192.0.0.4` (decoder 2).
