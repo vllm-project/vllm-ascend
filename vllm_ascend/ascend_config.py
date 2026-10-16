@@ -535,7 +535,7 @@ class AscendConfig:
             "sparse_kv_offload_config": {
                 "enabled": false,
                 "topk_buffer_size": -1,
-                "dram_size_per_dp_GB": 128,
+                "dram_size_per_dp_GB": 110,
                 "keep_device_kv_cache": false
             }
         }
@@ -1676,7 +1676,7 @@ class SparseKVOffloadConfig:
     enabled: bool = False
     # -1 resolves to (1 + num_speculative_tokens) * 2048.
     topk_buffer_size: int = -1
-    dram_size_per_dp_GB: int = 128
+    dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
