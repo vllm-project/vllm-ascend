@@ -1586,11 +1586,12 @@ class KVPoolWorker:
             )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            partial_block_index = get_partial_block_index(
+            partial_block_index, _ = self._resolve_layerwise_load_partial(
+                request,
+                group_id,
                 cached_tokens,
                 block_size,
                 len(group_block_hashes),
-                self.layerwise_offload,
             )
             if not self.layerwise_offload or layer_id in self.independent_layers:
                 partial_block_index = None
@@ -1611,6 +1612,20 @@ class KVPoolWorker:
             block_runs = self._masked_block_runs_cached(
                 "load", request, group_id, load_start_block, full_blocks, group_load_mask
             )
+            # A preserved partial snapshot may now sit on a hash boundary
+            # after speculative rollback.  It must be transferred exactly
+            # once through the partial GVA, not also as a full-key block.
+            if partial_block_index is not None and partial_block_index < full_blocks:
+                split_runs = []
+                for run_start, run_end in block_runs:
+                    if partial_block_index < run_start or partial_block_index >= run_end:
+                        split_runs.append((run_start, run_end))
+                        continue
+                    if run_start < partial_block_index:
+                        split_runs.append((run_start, partial_block_index))
+                    if partial_block_index + 1 < run_end:
+                        split_runs.append((partial_block_index + 1, run_end))
+                block_runs = split_runs
             if not block_runs and partial_block_index is None:
                 continue
             for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):
@@ -1653,6 +1668,51 @@ class KVPoolWorker:
         return self.layerwise_keys.make_full_key(
             group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank
         )
+
+    def _resolve_layerwise_load_partial(
+        self,
+        request: ReqMeta,
+        group_id: int,
+        cached_tokens: int,
+        block_size: int,
+        hash_count: int,
+    ) -> tuple[int | None, int]:
+        """Resolve the block and key length of a layerwise partial load.
+
+        Speculative rejection may roll ``cached_tokens`` back after the prior
+        step saved a longer request-scoped snapshot.  Reuse that exact saved
+        identity when it still covers the logical prefix and belongs to its
+        last block.  The override is intentionally limited to the current
+        single-group, non-align-state path; hybrid/Mamba layouts keep their
+        existing behavior.
+        """
+        partial_block_index = get_partial_block_index(
+            cached_tokens,
+            block_size,
+            hash_count,
+            self.layerwise_offload,
+        )
+        partial_end_token = cached_tokens
+        load_spec = request.load_spec
+        if load_spec is None or self.num_kv_cache_groups != 1 or group_id != 0 or self.group_uses_align_state[group_id]:
+            return partial_block_index, partial_end_token
+
+        snapshot_end_token = load_spec.layerwise_snapshot_end_token
+        snapshot_block_index = load_spec.layerwise_snapshot_block_index
+        if snapshot_end_token is None or snapshot_block_index is None or cached_tokens <= 0:
+            return partial_block_index, partial_end_token
+
+        logical_last_block = (cached_tokens - 1) // block_size
+        if snapshot_end_token >= cached_tokens and snapshot_block_index == logical_last_block:
+            logger.debug(
+                "Reqid: %s reusing layerwise snapshot block=%d end_token=%d for logical length=%d",
+                request.req_id,
+                snapshot_block_index,
+                snapshot_end_token,
+                cached_tokens,
+            )
+            return snapshot_block_index, snapshot_end_token
+        return partial_block_index, partial_end_token
 
     def _make_layerwise_partial_key(
         self,
@@ -1945,11 +2005,12 @@ class KVPoolWorker:
                     continue
                 full_len = len(block_ids_by_group)
 
-                partial_block_index = get_partial_block_index(
+                partial_block_index, partial_end_token = self._resolve_layerwise_load_partial(
+                    request,
+                    group_id,
                     cached_tokens,
                     effective_block_size,
                     len(group_block_hashes),
-                    self.layerwise_offload,
                 )
                 if partial_block_index is not None and (
                     partial_block_index < load_start_block or partial_block_index >= full_len
@@ -1968,7 +2029,8 @@ class KVPoolWorker:
                 block_indices = [
                     block_idx
                     for block_idx in range(load_start_block, full_blocks)
-                    if group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx]
+                    if block_idx != partial_block_index
+                    and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
                 ]
                 keys = [
                     self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
@@ -1981,7 +2043,7 @@ class KVPoolWorker:
                             request,
                             group_id,
                             partial_block_index,
-                            cached_tokens,
+                            partial_end_token,
                         )
                     )
                     block_indices.append(partial_block_index)

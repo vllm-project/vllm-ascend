@@ -836,6 +836,17 @@ class LoadSpec:
 
     token_len: int = 0
 
+    # Exact request-scoped partial snapshot saved by the preceding layerwise
+    # step.  This is deliberately separate from kvpool_cached_tokens: a
+    # speculative-token rejection can roll the logical length back while the
+    # reusable snapshot still has the previously scheduled (longer) identity.
+    layerwise_snapshot_end_token: int | None = None
+    layerwise_snapshot_block_index: int | None = None
+    # True when this load consumes KV saved by the immediately preceding
+    # layerwise step of the same running request (as opposed to an external
+    # prefix-cache lookup).
+    layerwise_previous_step: bool = False
+
 
 @dataclass(init=False)
 class RequestTracker:
@@ -862,6 +873,10 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
+    # Identity of the latest request-scoped layerwise partial snapshot.
+    last_layerwise_snapshot_end_token: int | None = None
+    last_layerwise_snapshot_block_index: int | None = None
+
     # Number of speculative scratch blocks for each Mamba cache group.
     num_speculative_blocks_by_group: dict[int, int] | None = None
 
@@ -882,6 +897,8 @@ class RequestTracker:
         last_block_gva: int | None = None,
         num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
+        last_layerwise_snapshot_end_token: int | None = None,
+        last_layerwise_snapshot_block_index: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -898,6 +915,8 @@ class RequestTracker:
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
+        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
+        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1179,6 +1198,14 @@ class ReqMeta:
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
+            if should_save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = target_token_len
+                tracker.last_layerwise_snapshot_block_index = (
+                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
+                )
+            elif save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = None
+                tracker.last_layerwise_snapshot_block_index = None
 
         token_ids = None
         if tracker.token_ids:
