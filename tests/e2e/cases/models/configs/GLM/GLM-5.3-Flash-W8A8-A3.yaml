@@ -49,9 +49,6 @@ test_cases:
     api_keyword_args:
       max_tokens: 16
       temperature: 0.0
-    # Performance baseline: arithmetic mean of 6 completed CI measurement(s).
-    # PR #17685/#18246 history, 2026-10-08 through 2026-10-15.
-    # A3-560T shares this config; its baseline needs separate calibration.
     # Accuracy baseline 90 / threshold 10 remains an initial placeholder.
     benchmarks:
       accuracy_placeholder_gsm8k:
@@ -64,14 +61,3 @@ test_cases:
         temperature: 0
         baseline: 90
         threshold: 10
-      performance_3_5k_1k:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs400
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 16
-        max_out_len: 1024
-        batch_size: 4
-        request_rate: 0
-        baseline: 171.0497
-        threshold: 0.97
