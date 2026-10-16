@@ -217,7 +217,8 @@ def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_ra
 
     def create(rank):
         group = SimpleNamespace(cpu_group=None, rank_in_group=rank, world_size=2)
-        return npu.SharedUvaBuffer((8, 32), torch.int8, "cpu", group)
+        owner = torch.nn.Module()
+        return npu.SharedUvaBuffer(owner, "shared", (8, 32), torch.int8, "cpu", group)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         leader, follower = list(pool.map(create, (0, 1)))

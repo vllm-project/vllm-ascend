@@ -43,11 +43,11 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
-    FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
     generation_signature,
     live_update_serve_args,
+    make_weight_source,
     packed_buffer_size_for,
     pytest_model_cases,
     reference_signature,
@@ -58,7 +58,9 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 CONTROL_TIMEOUT = 60
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
-GPU_MEMORY_UTILIZATION = 0.45
+GPU_MEMORY_UTILIZATION = float(
+    os.environ.get("VLLM_RL_TEST_GPU_MEM_UTIL", "0.45")
+)
 # Card the inference server (and the co-located trainer) runs on, as an absolute
 # device index inside the container: the harness hands the server
 # `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
@@ -85,7 +87,7 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         pytest.skip(f"{case.id}: {case.skip_reason}")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
-    source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
+    source = make_weight_source(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
@@ -158,6 +160,12 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
             _post(server, "wake_up", params={"tags": ["weights"]})
             # send_weights owns the complete START -> LOAD -> FINISH transaction.
             engine.send_weights()
+            # The trainer shares the chip with the rollout engine, and the NPU
+            # caching allocator keeps the transient payload tensors this source
+            # materialised.  Device-wide "still in use" after the next sleep went
+            # 1.10 -> 7.66 GiB across rounds and the engine's wake_up then died in
+            # aclrtMallocPhysical with OOM, so hand the memory back explicitly.
+            torch.npu.empty_cache()
             # The KV cache is re-allocated last, from the updated weights' state.
             # That wake leaves nothing asleep, so the engine resumes scheduling on
             # its own and no explicit `/resume` is needed.

@@ -138,6 +138,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
 
         finalize_layerwise_reload(self.model, self.model_config)
 
+
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
         Initialize HCCL process group with the trainer.
