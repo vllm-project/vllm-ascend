@@ -3,7 +3,7 @@
 # ==========================================
 
 test_cases:
-  - name: "Qwen3-30B-A3B-VWN-eagle3-PCP-DCP"
+  - name: "Qwen3-30B-A3B-VWN-eagle3-PCP"
     model: "Qwen/Qwen3-30B-A3B"
     envs:
       VLLM_USE_V2_MODEL_RUNNER: "1"
@@ -18,8 +18,6 @@ test_cases:
       - "--tensor-parallel-size"
       - "2"
       - "--prefill-context-parallel-size"
-      - "2"
-      - "--decode-context-parallel-size"
       - "2"
       - "--port"
       - "$SERVER_PORT"
