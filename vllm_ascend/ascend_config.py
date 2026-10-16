@@ -654,7 +654,6 @@ class AscendCompilationConfig:
         self.fuse_allreduce_rms = fuse_allreduce_rms
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
-        self.enable_super_kernel = kwargs.get("enable_super_kernel", False)
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
