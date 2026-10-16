@@ -416,6 +416,9 @@ class FixedRandomWeightSource(WeightSource):
 
         # Apply the namespace prefix before expanding fused tensors, then map
         # the resulting checkpoint names (including per-expert w1/w2/w3).
+        # Generate parameters in the test's BF16 model dtype, while buffers below
+        # retain their native dtype (including FP32 router correction bias).
+        # This models a BF16 checkpoint rather than preserving HF parameter dtypes.
         parameters = [
             (
                 mapped_name,
@@ -447,7 +450,12 @@ class FixedRandomWeightSource(WeightSource):
             for mapped_name in (self._apply_name_map(self._checkpoint_name(name, case), case),)
             if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
-        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
+        self._num_experts = int(
+            getattr(meta_config, "n_routed_experts", 0)
+            or getattr(meta_config, "num_local_experts", 0)
+            or getattr(meta_config, "num_experts", 0)
+            or 0
+        )
         del meta_model
 
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
@@ -481,13 +489,13 @@ class FixedRandomWeightSource(WeightSource):
         torch.npu.manual_seed(seed)
         if not dtype.is_floating_point:
             # Token -> expert tables (DeepSeek-V4's hash router). Values must
-            # stay inside [0, n_routed_experts) *and* be unique within a row:
+            # stay inside [0, num_experts) *and* be unique within a row:
             # the MC2 dispatch/combine kernels assume a token never routes to
             # the same expert twice, which is also why the served model
             # initialises this table duplicate-free (#16485). Sampling top-k
             # over per-expert scores guarantees both invariants while still
             # differing from the model's own table.
-            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
+            assert self._num_experts > 0, f"{name}: integer table needs a positive expert count"
             assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)

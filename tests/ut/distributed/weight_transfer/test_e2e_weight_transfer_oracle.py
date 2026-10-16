@@ -31,6 +31,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
@@ -45,17 +46,41 @@ MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMaxAI/
 ORACLE_CASES = (CASE, MINIMAX_M3_CASE)
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+PACKED_BUFFER_FLOOR_BYTES = 2**30
+PACKED_BUFFER_HEADROOM_BYTES = 128 * 2**20
 
 
-def _minimax_metadata(model):
-    config = MagicMock()
-    config.text_config.n_routed_experts = 0
+def _checkpoint_source(model, case):
+    # Only supply num_experts when the case does not override an expert field.
+    # Otherwise an incorrect fallback could pass by reading this default.
+    overrides = (
+        case.hf_overrides.get(case.meta_config_attribute, {}) if case.meta_config_attribute else case.hf_overrides
+    )
+    meta_config = PretrainedConfig()
+    if not any(name in overrides for name in ("n_routed_experts", "num_local_experts", "num_experts")):
+        meta_config.num_experts = 8
+    config = (
+        PretrainedConfig(**{case.meta_config_attribute: meta_config}) if case.meta_config_attribute else meta_config
+    )
     with (
         patch.object(utils.AutoConfig, "from_pretrained", return_value=config),
         patch.object(utils.AutoModelForCausalLM, "from_config", return_value=model),
     ):
-        source = utils.FixedRandomWeightSource(MINIMAX_M3_CASE, torch.device("cpu"))
-    return [(meta.name, meta.shape, meta.dtype) for meta in source.metadata()]
+        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    assert source._num_experts == 8
+    return source
+
+
+def _router_meta_model(layer_index):
+    model = torch.nn.Module()
+    parent = model
+    for component in ("model", "layers", str(layer_index), "mlp"):
+        child = torch.nn.Module()
+        parent.add_module(component, child)
+        parent = child
+    gate = torch.nn.Linear(16, 8, bias=False, device="meta")
+    parent.add_module("gate", gate)
+    return model, gate
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:
@@ -207,22 +232,129 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_wait.call_count == 2
 
 
-def test_minimax_checkpoint_source_includes_router_state():
-    model = MagicMock()
-    model.named_parameters.return_value = [("model.layers.3.mlp.gate.weight", torch.empty((8, 16), device="meta"))]
-    model.named_buffers.return_value = [
-        ("model.layers.3.mlp.gate.e_score_correction_bias", torch.empty(8, device="meta")),
-        ("model.rotary_emb.inv_freq", torch.empty(8, device="meta")),
-    ]
-    model.state_dict.return_value = {
-        "model.layers.3.mlp.gate.weight": MagicMock(),
-        "model.layers.3.mlp.gate.e_score_correction_bias": MagicMock(),
-    }
+@pytest.mark.parametrize(
+    ("model_name", "layer_index", "checkpoint_gate", "buffers", "legacy_buffers", "added_buffers"),
+    [
+        pytest.param(
+            "Qwen/Qwen3.5-35B-A3B",
+            3,
+            "model.language_model.layers.3.mlp.gate",
+            (),
+            {},
+            {},
+            id="qwen3.5-unchanged",
+        ),
+        pytest.param(
+            "zai-org/GLM-5.1",
+            3,
+            "model.layers.3.mlp.gate",
+            (("e_score_correction_bias", (8,), torch.float32, True),),
+            {},
+            {"model.layers.3.mlp.gate.e_score_correction_bias": ((8,), torch.float32)},
+            id="glm-5.1-fp32-router-bias",
+        ),
+        pytest.param(
+            "kylesayrs/DeepSeek-V4-Flash-bf16",
+            0,
+            "model.layers.0.mlp.gate",
+            (("tid2eid", (16, 2), torch.int64, False),),
+            {"model.layers.0.mlp.gate.tid2eid": ((16, 2), torch.int64)},
+            {},
+            id="deepseek-v4-integer-table",
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M3",
+            3,
+            "language_model.model.layers.3.block_sparse_moe.gate",
+            (("e_score_correction_bias", (8,), torch.float32, True),),
+            {},
+            {"language_model.model.layers.3.block_sparse_moe.e_score_correction_bias": ((8,), torch.float32)},
+            id="minimax-m3-fp32-router-bias",
+        ),
+    ],
+)
+def test_checkpoint_source_buffer_metadata(
+    model_name, layer_index, checkpoint_gate, buffers, legacy_buffers, added_buffers
+):
+    """Pin the metadata delta using representative HF state, without downloads.
+
+    Real buffer registration exercises state_dict persistence. The DeepSeek
+    table is deliberately non-persistent to preserve the old integer-buffer
+    contract regardless of how a Transformers version registers it.
+    """
+    case = next(case for case in MODEL_CASES if case.model == model_name)
+    model, gate = _router_meta_model(layer_index)
+    for name, shape, dtype, persistent in buffers:
+        gate.register_buffer(name, torch.empty(shape, dtype=dtype, device="meta"), persistent=persistent)
+    # Runtime-only floating/complex buffers must never enter the payload.
+    model.register_buffer("inv_freq", torch.empty(8, device="meta"), persistent=False)
+    model.register_buffer("complex_runtime", torch.empty(8, dtype=torch.complex64, device="meta"), persistent=False)
+
+    unchanged_baseline_metadata = {f"{checkpoint_gate}.weight": ((8, 16), torch.bfloat16), **legacy_buffers}
+    source = _checkpoint_source(model, case)
+    actual = {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()}
+    assert actual == unchanged_baseline_metadata | added_buffers
+    weights = dict(source)
+    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in weights.items()} == actual
+    # Exercise expert-count resolution even for models without integer buffers.
+    table = source._make_tensor("synthetic.tid2eid", (16, 2), torch.int64)
+    assert torch.all((table >= 0) & (table < source._num_experts))
+    assert torch.all(table[:, 0] != table[:, 1])
+
+
+def test_minimax_checkpoint_source_includes_parameter_router_bias():
+    """Keep the name mapping valid if HF represents the bias as a parameter."""
+    model, gate = _router_meta_model(3)
+    gate.register_parameter(
+        "e_score_correction_bias", torch.nn.Parameter(torch.empty(8, dtype=torch.float32, device="meta"))
+    )
+    source = _checkpoint_source(model, MINIMAX_M3_CASE)
     prefix = "language_model.model.layers.3.block_sparse_moe"
-    assert _minimax_metadata(model) == [
-        (f"{prefix}.gate.weight", (8, 16), torch.bfloat16),
-        (f"{prefix}.e_score_correction_bias", (8,), torch.float32),
+    expected = {
+        f"{prefix}.gate.weight": ((8, 16), torch.bfloat16),
+        f"{prefix}.e_score_correction_bias": ((8,), torch.bfloat16),
+    }
+    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()} == expected
+    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in source} == expected
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
+@pytest.mark.parametrize(
+    ("tensor_bytes", "expected_capacity"),
+    [
+        pytest.param(
+            PACKED_BUFFER_FLOOR_BYTES - PACKED_BUFFER_HEADROOM_BYTES - 4,
+            PACKED_BUFFER_FLOOR_BYTES,
+            id="below-growth-threshold",
+        ),
+        pytest.param(
+            PACKED_BUFFER_FLOOR_BYTES - PACKED_BUFFER_HEADROOM_BYTES,
+            PACKED_BUFFER_FLOOR_BYTES,
+            id="at-growth-threshold",
+        ),
+        pytest.param(
+            PACKED_BUFFER_FLOOR_BYTES - PACKED_BUFFER_HEADROOM_BYTES + 4,
+            PACKED_BUFFER_FLOOR_BYTES + 4,
+            id="above-growth-threshold",
+        ),
+        pytest.param(
+            PACKED_BUFFER_FLOOR_BYTES + 4,
+            PACKED_BUFFER_FLOOR_BYTES + PACKED_BUFFER_HEADROOM_BYTES + 4,
+            id="tensor-exceeds-floor",
+        ),
+    ],
+)
+def test_packed_buffer_size_uses_largest_tensor_bytes(dtype, tensor_bytes, expected_capacity):
+    """Exercise the 1-GiB floor and growth without allocating large tensors."""
+    source = MagicMock(spec=utils.FixedRandomWeightSource)
+    source.metadata.return_value = [
+        utils.ParamMeta("small_before", torch.bfloat16, (8, 16)),
+        utils.ParamMeta("largest", dtype, (1, tensor_bytes // dtype.itemsize)),
+        utils.ParamMeta("small_after", torch.float32, (8,)),
     ]
+    assert utils.packed_buffer_size_for(source) == expected_capacity
+    source.metadata.assert_called_once_with()
+    source.__iter__.assert_not_called()
 
 
 def test_minimax_checkpoint_source_splits_fused_projections():
@@ -234,7 +366,8 @@ def test_minimax_checkpoint_source_splits_fused_projections():
     ]
     model.named_buffers.return_value = []
     model.state_dict.return_value = {}
-    actual = {name: (shape, dtype) for name, shape, dtype in _minimax_metadata(model)}
+    source = _checkpoint_source(model, MINIMAX_M3_CASE)
+    actual = {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()}
     expected_names = {
         "language_model.model.layers.0.mlp.gate_proj.weight",
         "language_model.model.layers.0.mlp.up_proj.weight",
