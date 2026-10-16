@@ -23,8 +23,8 @@
 
 #include "kernel_operator.h"
 
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/resource.hpp"
+#include "catlass/arch/msa_arch.hpp"
+#include "catlass/arch/msa_resource.hpp"
 
 #include "../msa_index_score_common.h"
 #include "msa_index_score_task.h"
@@ -128,23 +128,30 @@ public:
         const uint32_t subM = MsaCeilDiv(task.mActual, subBlockNum);
         mOff_ = subIdx * subM;
         mSub_ = (mOff_ >= task.mActual) ? 0U : MsaMinU32(subM, task.mActual - mOff_);
-        // 暂存区按半个 M-tile 静态分配；若 subcore 数变化导致行数超出则退回逐 pass 直写。
-        stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS);
+        // 暂存区按半个 M-tile 静态分配；行数超出则退回逐 pass 直写。
+        // score 末维超过一窗（如 275 page → stride 288）时也走直写：滑窗 flush 会和
+        // S16 乒乓共用硬件事件，第二窗首个 stile（GM 下标 256）会丢掉变成 -inf。
+        stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS) && (strideOutToken_ <= MSA_STAGE_BLOCKS);
         stageBlkBase_ = 0;
         stageBlkEnd_ = 0;
         rowInReqBase_ = task.mStart + mOff_;
         tokenBase0_ = task.cuQStart;
+        writeLo_ = task.sBlkBegin;
+        writeHi_ = task.writeTailFill ? strideOutToken_ : task.sBlkEnd;
         if constexpr (!IS_QUANT) {
             // 本任务两级 S16 的 V_MTE2 余额；EndTask 对称 Wait，避免跨任务/跨启动泄漏。
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        }
+        if (stageOn_) {
+            OpenStageWindow(0);
         }
     }
 
     /// 任务结束：把暂存窗口里剩余的 score 写回 GM。
     __aicore__ inline void EndTask()
     {
-        FlushStage();
+        FlushStageToStrideEnd();
         if constexpr (!IS_QUANT) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
@@ -166,11 +173,7 @@ public:
         if (mSub_ == 0U) {
             return;
         }
-        if (stageOn_ && (blkBase >= stageBlkBase_ + MSA_STAGE_BLOCKS)) {
-            FlushStage();
-            stageBlkBase_ = blkBase;
-            stageBlkEnd_ = blkBase;
-        }
+        AdvanceStageWindow(blkBase);
     }
 
     __aicore__ inline void FinishSTile(uint32_t blkBase)
@@ -237,6 +240,79 @@ public:
             }
         }
         FinishSTile(blkBase);
+    }
+
+    __aicore__ inline bool ScoreStaged() const
+    {
+        return stageOn_;
+    }
+
+    /// 宽 score（stride > 一窗，stage 关闭）的不可见尾。
+    /// 旧路径对每个 S-tile 走一整遍 ProcessSTile（Duplicate / barrier / 8 列 DataCopy）。
+    /// kv 只有约 520 block、stride 为 2064 时，尾部约 193 个 tile，且 kvChunks 整除 AIC
+    /// 会让每个请求的最后一块落在同一核上，墙钟被这段空写拉到计算量的数倍。
+    /// 这里按 chunk 把 [numComputeSTiles, stride) 切成 32B 对齐的连续 -inf 写回。
+    __aicore__ inline void FillInvalidTail(const MsaTask& task)
+    {
+        if (stageOn_ || mSub_ == 0U) {
+            return;
+        }
+        const uint32_t begin = task.numComputeSTiles * MSA_BLOCKS_PER_STILE;
+        if (begin >= strideOutToken_) {
+            return;
+        }
+        const uint32_t tailBlks = strideOutToken_ - begin;
+        const uint32_t tailStiles = tailBlks / MSA_BLOCKS_PER_STILE;
+        const uint32_t sChunks = (task.sChunks < 1U) ? 1U : task.sChunks;
+        const uint32_t sChunkIdx = task.sChunkIdx;
+        if (sChunkIdx >= sChunks || tailStiles == 0U) {
+            return;
+        }
+        const uint32_t base = tailStiles / sChunks;
+        const uint32_t extra = tailStiles % sChunks;
+        uint32_t st0 = 0U;
+        uint32_t nst = 0U;
+        if (sChunkIdx < extra) {
+            st0 = sChunkIdx * (base + 1U);
+            nst = base + 1U;
+        } else {
+            st0 = extra * (base + 1U) + (sChunkIdx - extra) * base;
+            nst = base;
+        }
+        if (nst == 0U) {
+            return;
+        }
+        const uint32_t col0 = begin + st0 * MSA_BLOCKS_PER_STILE;
+        const uint32_t col1 = begin + (st0 + nst) * MSA_BLOCKS_PER_STILE;
+        // 一次最多写 1024 个 fp32（4KB）。Duplicate 长度补到 64 的倍数，DataCopy 只写真实列。
+        constexpr uint32_t kChunk = 1024U;
+        static_assert(kChunk % 64U == 0U, "tail chunk must cover whole fp32 repeats");
+        static_assert(kChunk <= MSA_STAGE_ROWS * MSA_STAGE_BLOCKS, "tail chunk exceeds stage UB");
+
+        for (uint32_t col = col0; col < col1;) {
+            uint32_t n = col1 - col;
+            if (n > kChunk) {
+                n = kChunk;
+            }
+            const uint32_t dupN = (n + 63U) & ~63U;
+            AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, dupN);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+            uint32_t tOff = rowInReqBase_ / numQHeads_;
+            uint32_t h = rowInReqBase_ - tOff * numQHeads_;
+            uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + col;
+            for (uint32_t r = 0; r < mSub_; ++r) {
+                AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_], ubStage_, n);
+                if (++h == numQHeads_) {
+                    h = 0U;
+                    tokenBase += strideOutToken_;
+                }
+            }
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+            col += n;
+        }
     }
 
 private:
@@ -324,11 +400,11 @@ private:
         if (stageOn_) {
             StageScore(blkBase, rowOff - mOff_, rows);
         } else {
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
             StoreScore(task, blkBase, rowOff, rows);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
         }
     }
 
@@ -344,28 +420,62 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
-    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥1KB 的连续 DataCopy。
+    /// 打开以 base 为起点的 score 暂存窗口，整窗先填 -inf。
+    __aicore__ inline void OpenStageWindow(uint32_t base)
+    {
+        stageBlkBase_ = base;
+        stageBlkEnd_ = MsaMinU32(base + MSA_STAGE_BLOCKS, strideOutToken_);
+        AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, mSub_ * MSA_STAGE_BLOCKS);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    /// blk 越过当前窗时先 flush，再开下一窗。MTE3 用 EVENT_ID2，避开 S16 乒乓的 EVENT_ID0/1。
+    __aicore__ inline void AdvanceStageWindow(uint32_t blk)
+    {
+        if (!stageOn_) {
+            return;
+        }
+        while (blk >= stageBlkBase_ + MSA_STAGE_BLOCKS) {
+            FlushStage();
+            OpenStageWindow(stageBlkBase_ + MSA_STAGE_BLOCKS);
+        }
+    }
+
+    /// 当前窗中本 chunk 负责的列；writeTailFill 时 writeHi_ 延到 score 末维。
+    __aicore__ inline void FlushStageToStrideEnd()
+    {
+        FlushStage();
+    }
+
+    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥32B 对齐的连续 DataCopy。
+    /// MTE3 用 EVENT_ID2，避开 S16 乒乓的 EVENT_ID0/1。
     __aicore__ inline void FlushStage()
     {
         if (!stageOn_ || stageBlkEnd_ <= stageBlkBase_) {
             return;
         }
-        const uint32_t count = stageBlkEnd_ - stageBlkBase_;
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        const uint32_t lo = (writeLo_ > stageBlkBase_) ? writeLo_ : stageBlkBase_;
+        const uint32_t hi = (writeHi_ < stageBlkEnd_) ? writeHi_ : stageBlkEnd_;
+        if (hi <= lo) {
+            return;
+        }
+        const uint32_t count = hi - lo;
+        const uint32_t ubOff = lo - stageBlkBase_;
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
         uint32_t tOff = rowInReqBase_ / numQHeads_;
         uint32_t h = rowInReqBase_ - tOff * numQHeads_;
-        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + stageBlkBase_;
+        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + lo;
         for (uint32_t r = 0; r < mSub_; ++r) {
             AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_],
-                              ubStage_[r * MSA_STAGE_BLOCKS], count);
+                              ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
             if (++h == numQHeads_) {
                 h = 0;
                 tokenBase += strideOutToken_;
             }
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
     }
 
     /// sparse_mode=3：rightDownCausal；否则仅 kv_len 截断。
@@ -687,6 +797,8 @@ private:
     uint32_t tokenBase0_ = 0;
     uint32_t stageBlkBase_ = 0;
     uint32_t stageBlkEnd_ = 0;
+    uint32_t writeLo_ = 0;
+    uint32_t writeHi_ = 0;
     bool stageOn_ = false;
 
     uint32_t numQHeads_ = 1;

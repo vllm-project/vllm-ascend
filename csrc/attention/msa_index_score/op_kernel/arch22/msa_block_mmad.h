@@ -19,16 +19,16 @@
 #ifndef MSA_BLOCK_MMAD_H
 #define MSA_BLOCK_MMAD_H
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/gemm/helper.hpp"
-#include "catlass/gemm/tile/tile_copy.hpp"
-#include "catlass/gemm/tile/tile_mmad.hpp"
+#include "catlass/msa_catlass.hpp"
+#include "catlass/arch/msa_arch.hpp"
+#include "catlass/arch/msa_resource.hpp"
+#include "catlass/msa_coord.hpp"
+#include "catlass/msa_matrix_coord.hpp"
+#include "catlass/msa_gemm_coord.hpp"
+#include "catlass/layout/msa_layout.hpp"
+#include "catlass/gemm/msa_gemm_helper.hpp"
+#include "catlass/gemm/tile/msa_tile_copy.hpp"
+#include "catlass/gemm/tile/msa_tile_mmad.hpp"
 
 #include "../msa_index_score_common.h"
 

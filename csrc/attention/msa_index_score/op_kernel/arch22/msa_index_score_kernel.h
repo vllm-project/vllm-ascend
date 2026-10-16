@@ -23,15 +23,15 @@
 
 #include "kernel_operator.h"
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/arch/cross_core_sync.hpp"
-#include "catlass/coord.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/gemm/gemm_type.hpp"
+#include "catlass/msa_catlass.hpp"
+#include "catlass/arch/msa_arch.hpp"
+#include "catlass/arch/msa_resource.hpp"
+#include "catlass/arch/msa_cross_core_sync.hpp"
+#include "catlass/msa_coord.hpp"
+#include "catlass/msa_gemm_coord.hpp"
+#include "catlass/msa_matrix_coord.hpp"
+#include "catlass/layout/msa_layout.hpp"
+#include "catlass/gemm/msa_gemm_type.hpp"
 
 #include "../msa_index_score_common.h"
 #include "msa_block_mmad.h"
@@ -104,7 +104,7 @@ public:
 
         scheduler_.Init(tiling_->batch, tiling_->numQHeads, tiling_->maxBlocksPerBatch, tiling_->scoreBlockStride,
                         tiling_->sparseMode, tiling_->initBlocks, tiling_->localBlocks, tiling_->keyLayout,
-                        gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
+                        gActualSeqQlen_, gActualSeqKlen_, gStartLoc_, tiling_->kvChunks);
     }
 
     __aicore__ inline void Process()
@@ -139,9 +139,11 @@ private:
         MsaTask task;
         for (uint32_t taskIdx = coreIdx; taskIdx < totalTasks; taskIdx += coreNum) {
             scheduler_.Decode(taskIdx, task);
+            // block_table 按 256B 预取，盖住后续逐页 GetValue 的 HBM 延迟。
+            PreloadBlockTable(task);
             // 只对可见 S-tile 做 QKᵀ + 握手；因果不可见尾由 AIV 直接写 -inf，避免空转同步。
             bool needLoadQ = true;
-            for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+            for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                 const bool needKScratch = StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE);
                 if (needKScratch) {
                     // MIX 1AIC:2AIV：AIV→AIC 的 0x2 flag 需两个 AIV 都 Set 后才放行。
@@ -175,19 +177,19 @@ private:
         if constexpr (IS_QUANT_V) {
             const uint32_t slot = st % MSA_K_SCRATCH_STAGES_A2;
             if (slot == 0U) {
-                Catlass::Arch::CrossCoreWaitFlag(flagK0);
+                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK0);
             } else if (slot == 1U) {
-                Catlass::Arch::CrossCoreWaitFlag(flagK1);
+                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK1);
             } else if (slot == 2U) {
-                Catlass::Arch::CrossCoreWaitFlag(flagK2);
+                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK2);
             } else {
-                Catlass::Arch::CrossCoreWaitFlag(flagK3);
+                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK3);
             }
         } else {
             (void)flagK1;
             (void)flagK2;
             (void)flagK3;
-            Catlass::Arch::CrossCoreWaitFlag(flagK0);
+            Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK0);
         }
     }
 
@@ -230,6 +232,22 @@ private:
         }
         const uint32_t seqRemain = static_cast<uint32_t>(task.kvLen) - seqTok;
         return seqRemain < MSA_BLOCK_SIZE ? seqRemain : MSA_BLOCK_SIZE;
+    }
+
+    /// PA block_table 一行可能有数百个 int32。dc_preload 每次 256B，在 QK 开始前发出。
+    __aicore__ inline void PreloadBlockTable(const MsaTask& task)
+    {
+        if (tiling_->keyLayout == MSA_KEY_LAYOUT_TND || task.sBlkEnd <= task.sBlkBegin) {
+            return;
+        }
+        const uint32_t nBlk = task.sBlkEnd - task.sBlkBegin;
+        const __gm__ int32_t* row = gBlockTable_.GetPhyAddr() +
+                                    static_cast<uint64_t>(task.batchIdx) * tiling_->maxBlocksPerBatch + task.sBlkBegin;
+        const uint32_t bytes = nBlk * static_cast<uint32_t>(sizeof(int32_t));
+        auto* base = reinterpret_cast<__gm__ uint64_t*>(const_cast<__gm__ int32_t*>(row));
+        for (uint32_t off = 0; off < bytes; off += 256U) {
+            dc_preload(base, static_cast<int64_t>(off));
+        }
     }
 
     __aicore__ inline uint64_t KeyBlockGmOffset(const MsaTask &task, uint32_t blk) const
@@ -503,7 +521,7 @@ private:
                     ++tileSeq;
                 }
             } else {
-                for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+                for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                     if (StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE)) {
                         IssueKGatherAndNotify(resource, task, st, coreKScratch, subIdx, subBlockNum, flagK0, flagK1,
                                               flagK2, flagK3);
@@ -515,9 +533,16 @@ private:
                     ++tileSeq;
                 }
             }
-            // 因果不可见尾：不握手，直接写 -inf（与 AIC 跳过这些 tile 对齐）。
-            for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
-                epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+            // 因果不可见尾不握手。窄 score 仍逐 tile 写进暂存窗；宽 score 的 -inf 尾
+            // 按 chunk 连续写回，避免 8 列循环把墙钟拉到可见 KV 计算量的数倍。
+            if (epilogue.ScoreStaged()) {
+                if (task.writeTailFill) {
+                    for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
+                        epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+                    }
+                }
+            } else {
+                epilogue.FillInvalidTail(task);
             }
             epilogue.EndTask();
         }

@@ -17,6 +17,7 @@
 #include "msa_index_score_tiling.h"
 #include "../op_kernel/msa_index_score_common.h"
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include "graph/utils/type_utils.h"
@@ -56,6 +57,184 @@ inline bool IsNonQuantQueryDtype(ge::DataType dt, bool isAscend950)
 inline uint32_t RoundUpU32(uint32_t value, uint32_t align)
 {
     return (value + align - 1) / align * align;
+}
+
+// Bound the number of M tasks without reading device-side per-request lengths.
+// For one request the packed count is exact. For multiple requests add one tile
+// per request to bound the sum of rounded-up tile counts, then cap at all AICs.
+inline uint32_t EstPackedMTasks(const MsaIndexScoreInfo& info, uint32_t aicNum)
+{
+    if (info.totalQ == 0U || aicNum == 0U) {
+        return 1U;
+    }
+    const uint64_t packedRows = static_cast<uint64_t>(info.totalQ) * static_cast<uint64_t>(info.numQHeads);
+    const uint32_t packedM =
+        static_cast<uint32_t>((packedRows + static_cast<uint64_t>(MSA_ROW_TILE_M) - 1U) / MSA_ROW_TILE_M);
+    uint32_t est = packedM;
+    if (info.batch > 1U) {
+        const uint32_t add = packedM + info.batch;
+        est = (add < packedM) ? aicNum : add;
+    }
+    if (est < 1U) {
+        est = 1U;
+    }
+    if (est > aicNum) {
+        est = aicNum;
+    }
+    return est;
+}
+
+// GetData() can return a non-null device address. Only dereference host-visible
+// tensors; otherwise estimate visible pages from the key and block-table shapes.
+inline bool IsHostVisibleTensor(const gert::Tensor* tensor)
+{
+    if (tensor == nullptr) {
+        return false;
+    }
+    const auto placement = tensor->GetPlacement();
+    return (placement == gert::kOnHost) || (placement == gert::kFollowing);
+}
+
+inline uint32_t EstMaxVisibleBlocks(gert::TilingContext* context, const MsaIndexScoreInfo& info)
+{
+    uint32_t vis = info.maxBlocksPerBatch;
+    if (info.keyLayout != MSA_KEY_LAYOUT_TND && info.numPages > 0U && info.numPages < vis) {
+        vis = info.numPages;
+    }
+    auto klenTensor = context->GetOptionalInputTensor(MSA_IDX_ACTUAL_SEQ_KLEN);
+    if (!IsHostVisibleTensor(klenTensor)) {
+        return vis;
+    }
+    const int32_t* data = klenTensor->GetData<int32_t>();
+    if (data == nullptr) {
+        return vis;
+    }
+    uint32_t maxTok = 0U;
+    if (info.keyLayout == MSA_KEY_LAYOUT_TND) {
+        for (uint32_t b = 0; b < info.batch; ++b) {
+            const int32_t delta = data[b + 1U] - data[b];
+            if (delta > 0 && static_cast<uint32_t>(delta) > maxTok) {
+                maxTok = static_cast<uint32_t>(delta);
+            }
+        }
+    } else {
+        for (uint32_t b = 0; b < info.batch; ++b) {
+            if (data[b] > 0 && static_cast<uint32_t>(data[b]) > maxTok) {
+                maxTok = static_cast<uint32_t>(data[b]);
+            }
+        }
+    }
+    const uint32_t fromLen = (maxTok + MSA_BLOCK_SIZE - 1U) / MSA_BLOCK_SIZE;
+    if (fromLen < vis) {
+        vis = fromLen;
+    }
+    return vis;
+}
+
+inline uint32_t GcdU32(uint32_t a, uint32_t b)
+{
+    while (b != 0U) {
+        const uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return (a == 0U) ? 1U : a;
+}
+
+// When M tasks underfill A2/A3, choose KV chunks that distribute across AICs.
+// Split only if the estimated S-tile workload per core decreases.
+inline uint32_t EstKvChunksA2(uint32_t aicNum, uint32_t packedM, uint32_t visBlocks)
+{
+    if (packedM == 0U || aicNum == 0U || packedM >= aicNum) {
+        return 1U;
+    }
+    const uint32_t nStiles = (visBlocks + MSA_BLOCKS_PER_STILE - 1U) / MSA_BLOCKS_PER_STILE;
+    if (nStiles <= 1U) {
+        return 1U;
+    }
+    uint32_t chunks = aicNum / GcdU32(packedM, aicNum);
+    if (chunks > nStiles) {
+        chunks = nStiles;
+    }
+    if (chunks <= 1U) {
+        return 1U;
+    }
+    const uint32_t oldSpan = ((packedM + aicNum - 1U) / aicNum) * nStiles;
+    const uint32_t newTasks = packedM * chunks;
+    const uint32_t tasksPerCore = (newTasks + aicNum - 1U) / aicNum;
+    const uint32_t stilePerChunk = (nStiles + chunks - 1U) / chunks;
+    if (tasksPerCore * stilePerChunk >= oldSpan) {
+        return 1U;
+    }
+    // The packed M count can overestimate variable-length batch tasks. Prefer
+    // fewer tasks per core when a smaller split has the same S-tile span, so
+    // short KV does not pay for extra task initialization without less work.
+    uint32_t bestChunks = chunks;
+    uint32_t bestTasksPerCore = tasksPerCore;
+    uint32_t bestSpan = tasksPerCore * stilePerChunk;
+    for (uint32_t trial = 2U; trial < chunks; ++trial) {
+        const uint32_t trialTasks = (packedM * trial + aicNum - 1U) / aicNum;
+        const uint32_t trialSpan = trialTasks * ((nStiles + trial - 1U) / trial);
+        if (trialTasks < bestTasksPerCore && trialSpan <= bestSpan) {
+            bestChunks = trial;
+            bestTasksPerCore = trialTasks;
+            bestSpan = trialSpan;
+        }
+    }
+    return bestChunks;
+}
+
+// For decode batches larger than the AIC count, finer KV tasks can balance
+// requests with different lengths. The packed-row check limits this heuristic
+// to batches with at most one M tile per request on average.
+inline uint32_t EstKvChunksA2BatchBalance(const MsaIndexScoreInfo& info, uint32_t aicNum, uint32_t visBlocks)
+{
+    if (info.batch <= aicNum || aicNum == 0U) {
+        return 1U;
+    }
+    const uint64_t rows = static_cast<uint64_t>(info.totalQ) * static_cast<uint64_t>(info.numQHeads);
+    if (rows > static_cast<uint64_t>(info.batch) * MSA_ROW_TILE_M) {
+        return 1U;
+    }
+    const uint32_t nStiles = (visBlocks + MSA_BLOCKS_PER_STILE - 1U) / MSA_BLOCKS_PER_STILE;
+    if (nStiles <= 1U) {
+        return 1U;
+    }
+    const uint32_t oldSpan = ((info.batch + aicNum - 1U) / aicNum) * nStiles;
+    uint32_t bestChunks = 1U;
+    uint32_t bestSpan = oldSpan;
+    for (uint32_t chunks = 2U; chunks <= nStiles && chunks <= 16U; chunks *= 2U) {
+        const uint32_t newTasks = info.batch * chunks;
+        const uint32_t tasksPerCore = (newTasks + aicNum - 1U) / aicNum;
+        const uint32_t stilePerChunk = (nStiles + chunks - 1U) / chunks;
+        const uint32_t span = tasksPerCore * stilePerChunk;
+        // Prefer finer chunks on a tie after improving on the unsplit estimate,
+        // to distribute long requests more evenly across cores.
+        if (span < bestSpan || (span == bestSpan && bestChunks > 1U)) {
+            bestSpan = span;
+            bestChunks = chunks;
+        }
+    }
+    return bestChunks;
+}
+
+inline uint32_t EstLaunchAic(uint32_t aicNum, uint32_t packedM, uint32_t kvChunks)
+{
+    if (aicNum == 0U) {
+        return 1U;
+    }
+    uint32_t est = packedM;
+    if (kvChunks > 1U) {
+        const uint32_t prod = packedM * kvChunks;
+        est = (prod / kvChunks != packedM) ? aicNum : prod;
+    }
+    if (est < 1U) {
+        est = 1U;
+    }
+    if (est > aicNum) {
+        est = aicNum;
+    }
+    return est;
 }
 
 inline uint64_t GetDefaultStride0(const gert::Shape &shape)
@@ -432,6 +611,23 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     const uint32_t kScratchBytes = useKScratch ? (aicNum * kScratchElems * scratchElemBytes) : 0U;
     const uint32_t kScratchOffsetElems = sWsBytes / sizeof(float);
 
+    uint32_t launchAic = aicNum;
+    uint32_t kvChunks = 1U;
+    // Keep Ascend 950 and the quantized K-gather pipeline on their existing
+    // full-KV scheduling path. Only non-quantized A2/A3 tasks are split.
+    if (!info.isAscend950 && !info.isQuant) {
+        if (info.totalQ == 0U) {
+            launchAic = 1U;
+        } else {
+            const uint32_t packedM = EstPackedMTasks(info, aicNum);
+            const uint32_t visBlocks = EstMaxVisibleBlocks(context, info);
+            kvChunks = packedM < aicNum
+                ? EstKvChunksA2(aicNum, packedM, visBlocks)
+                : EstKvChunksA2BatchBalance(info, aicNum, visBlocks);
+            launchAic = EstLaunchAic(aicNum, packedM, kvChunks);
+        }
+    }
+
     MsaIndexScoreTilingData tilingData;
     tilingData.set_batch(info.batch);
     tilingData.set_totalQ(info.totalQ);
@@ -442,7 +638,7 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     tilingData.set_blockSize(info.blockSize);
     tilingData.set_maxBlocksPerBatch(info.maxBlocksPerBatch);
     tilingData.set_scoreBlockStride(scoreBlockStride);
-    tilingData.set_usedCoreNum(aicNum);
+    tilingData.set_usedCoreNum(launchAic);
     tilingData.set_isQuant(info.isQuant ? 1U : 0U);
     tilingData.set_sparseMode(info.sparseMode);
     tilingData.set_initBlocks(info.initBlocks);
@@ -450,6 +646,7 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     tilingData.set_numPages(info.numPages);
     tilingData.set_keyLayout(info.keyLayout);
     tilingData.set_totalK(info.totalK);
+    tilingData.set_kvChunks(kvChunks);
 
     tilingData.set_strideQt(info.numQHeads * info.headDim);
     tilingData.set_strideQn(info.headDim);
@@ -489,7 +686,9 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     if (info.totalQ == 0U) {
         context->SetBlockDim(1);
     } else {
-        context->SetBlockDim(ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum));
+        const uint32_t sliceAiv = (info.isAscend950 || info.isQuant)
+            ? aivNum : std::min(launchAic * MSA_AIV_PER_AIC, aivNum);
+        context->SetBlockDim(ascendcPlatform.CalcTschBlockDim(sliceAiv, aicNum, aivNum));
     }
 
     size_t *workspaces = context->GetWorkspaceSizes(1);
@@ -514,8 +713,9 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
         tilingKey = (info.queryDtype == ge::DT_BF16) ? MSA_TILING_KEY_BF16 : MSA_TILING_KEY_FP16;
     }
     context->SetTilingKey(tilingKey);
-    OP_LOGI(context->GetNodeName(), "MsaIndexScore tilingKey=%lu headDim=%u layout=%u strideKvBlock=%u", tilingKey,
-            info.headDim, info.keyLayout, strideKvBlock);
+    OP_LOGI(context->GetNodeName(),
+            "MsaIndexScore tilingKey=%lu headDim=%u layout=%u strideKvBlock=%u launchAic=%u kvChunks=%u",
+            tilingKey, info.headDim, info.keyLayout, strideKvBlock, launchAic, kvChunks);
     return ge::GRAPH_SUCCESS;
 }
 } // namespace
