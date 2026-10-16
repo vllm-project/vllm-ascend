@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from typing import get_args
 
 import vllm.config.speculative as speculative_config
+from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
 
-from vllm_ascend.models.glm5next.config import Glm5NextTextConfig
 from vllm_ascend.models.glm5next.model import (
     Glm5NextForConditionalGeneration,
     get_spec_layer_idx_from_weight_name,

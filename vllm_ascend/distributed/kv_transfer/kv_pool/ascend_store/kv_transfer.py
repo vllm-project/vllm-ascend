@@ -182,8 +182,11 @@ class LayerBatchBuilder:
         )
         rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
+            # Zero GVAs here are expected: blocks already committed in the
+            # pool or excluded by masks are intentionally not allocated.
+            # Real batch_alloc failures are logged as errors by the caller.
             zero_count = int(np.sum(base_gvas_arr <= 0))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_transfer layer=%d detected %d zero/negative base_gvas "
                 "(base_gvas_sample=%s); these blocks will be skipped in batch_copy",
                 layer_id,
@@ -325,8 +328,12 @@ class LayerBatchBuilder:
         block_gvas_slice = block_gvas_arr[:offset]
         valid_mask = block_gvas_slice > 0
         if not np.all(valid_mask):
+            # Zero GVAs are the designed sentinel for blocks that are not
+            # transfer targets this step (already committed in the pool,
+            # hit-prefix blocks, or masked-out blocks). Real batch_alloc
+            # failures are logged as errors by _alloc_gvas_for_save.
             skip_count = int(np.sum(~valid_mask))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_shared skipping %d blocks with invalid gva (gva<=0)",
                 skip_count,
             )

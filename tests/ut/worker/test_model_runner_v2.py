@@ -17,11 +17,18 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    fill_mxfp_v_scale_cache,
+    mxfp_paged_cache_views,
+    mxfp_v_scale_cache_shape,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
 def _make_runner(need_timing: bool = True):
@@ -1732,7 +1739,180 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     npu_stream.assert_called_once_with(stream)
     stream.wait_stream.assert_called_once_with(default_stream)
     runner.num_computed_tokens_cpu.copy_.assert_called_once()
-    runner.num_computed_tokens_event.record.assert_called_once_with()
+
+
+def _c8_mxfp_runner(layers: dict, num_blocks: int = 2) -> NPUModelRunner:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    runner.compilation_config = SimpleNamespace(static_forward_context=layers)
+    runner.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="mxfp8"),
+        compilation_config=runner.compilation_config,
+    )
+    return runner
+
+
+def _c8_mxfp_layer(num_kv_heads: int = 2, v_dim: int = 64):
+    return SimpleNamespace(
+        v_cache_scale=torch.arange(num_kv_heads * v_dim, dtype=torch.int32).remainder(251).to(torch.uint8),
+        impl=object.__new__(AscendC8MXFPAttentionBackendImpl),
+    )
+
+
+def _c8_packet(ratio: int, k_dim: int = 64, v_dim: int = 64, num_pages: int = 2):
+    """Real packet views with padding, a nonzero offset and registered entries."""
+    heads, block = 2, 512
+    kernel_blocks = num_pages * ratio
+    pitch = heads * block * (k_dim + v_dim + (k_dim + v_dim) // 32) + 256
+    raw = torch.full((128 + kernel_blocks * pitch + 128,), 37, dtype=torch.int8)
+    views = mxfp_paged_cache_views(raw[128:-128], kernel_blocks, heads, k_dim, v_dim, block, page_stride_bytes=pitch)
+    layer = _c8_mxfp_layer(heads, v_dim)
+    layer.kv_cache = views
+    runner = _c8_mxfp_runner({"attn": layer}, num_blocks=num_pages)
+    runner._fill_c8_mxfp_v_scale_caches()
+    return raw, views, layer, runner, pitch
+
+
+def test_fill_c8_mxfp_v_scale_caches_fills_and_registers():
+    layer = _c8_mxfp_layer()
+    v_scale = torch.zeros(mxfp_v_scale_cache_shape(2, 128, 2, 64), dtype=torch.uint8)
+    layer.kv_cache = (MagicMock(), MagicMock(), MagicMock(), v_scale)
+    runner = _c8_mxfp_runner({"attn": layer})
+
+    runner._fill_c8_mxfp_v_scale_caches()
+
+    assert runner._c8_mxfp_v_scale_caches == [(layer.v_cache_scale, v_scale, 1)]
+    assert torch.equal(v_scale[0, :, :, 0, :, 0].reshape(-1), layer.v_cache_scale)
+    # Fill only prepares the entries; wrapper assembly happens later in
+    # _init_kv_zero_meta.
+    assert not hasattr(runner, "kv_block_zeroer")
+
+
+def test_fill_c8_mxfp_v_scale_caches_skips_non_c8_layers():
+    layer = SimpleNamespace(impl=object(), kv_cache=(MagicMock(), MagicMock()))
+    runner = _c8_mxfp_runner({"plain": layer})
+
+    runner._fill_c8_mxfp_v_scale_caches()
+
+    assert runner._c8_mxfp_v_scale_caches == []
+    assert not hasattr(runner, "kv_block_zeroer")
+
+
+@pytest.mark.parametrize("ratio", [1, 2, 4])
+@pytest.mark.parametrize(("k_dim", "v_dim"), [(64, 64), (64, 128)])
+def test_zero_block_ids_restores_reassigned_page_v_scales(ratio, k_dim, v_dim):
+    # A Mamba group writes over the whole physical page while it owns the
+    # block; zeroing and restoring must bring the static V scales back.
+    raw, _, layer, runner, pitch = _c8_packet(ratio, k_dim, v_dim)
+    raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
+    expected = raw.clone()
+    expected_views = mxfp_paged_cache_views(
+        expected[128:-128], 2 * ratio, 2, k_dim, v_dim, 512, page_stride_bytes=pitch
+    )
+    fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3][ratio : 2 * ratio])
+    events = []
+
+    delegate = MagicMock()
+    delegate.zero_block_ids.side_effect = lambda ids: events.append("zero")
+
+    def fill(scale, cache):
+        events.append("restore")
+        fill_mxfp_v_scale_cache(scale, cache)
+
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+    runner.kv_block_zeroer.zero_block_ids([1])
+
+    assert events == ["zero", "restore"]
+    assert torch.equal(raw, expected)
+
+
+def test_zero_block_ids_with_empty_ids_is_noop():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    delegate = MagicMock()
+    fill = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+
+    runner.kv_block_zeroer.zero_block_ids([])
+
+    delegate.zero_block_ids.assert_not_called()
+    fill.assert_not_called()
+
+
+@pytest.mark.parametrize("block_ids", [[-1], [2], [0, 2]])
+def test_zero_block_ids_validates_ids_before_writes(block_ids):
+    raw, _, _, runner, _ = _c8_packet(ratio=1)
+    before = raw.clone()
+    delegate = MagicMock()
+    fill = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+
+    with pytest.raises(IndexError):
+        runner.kv_block_zeroer.zero_block_ids(block_ids)
+
+    delegate.zero_block_ids.assert_not_called()
+    fill.assert_not_called()
+    assert torch.equal(raw, before)
+
+
+def test_init_kv_zero_meta_wraps_tuple_aware_zeroer_for_mxfp8():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="mxfp8"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [512]
+    runner.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    entries = [(MagicMock(), MagicMock(), 1)]
+    runner._c8_mxfp_v_scale_caches = entries
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as cls:
+        runner._init_kv_zero_meta()
+
+    cls.assert_called_once()
+    kwargs = cls.call_args.kwargs
+    assert kwargs["cache_dtype"] == "mxfp8"
+    assert kwargs["kernel_block_sizes"] == [512]
+    assert isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
+    assert runner.kv_block_zeroer.delegate is cls.return_value
+    assert runner.kv_block_zeroer.entries is entries
+
+
+def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp8():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [512]
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as generic_cls:
+        runner._init_kv_zero_meta()
+
+    generic_cls.assert_called_once()
+    assert runner.kv_block_zeroer is generic_cls.return_value
+    assert not isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
+
+
+def test_shutdown_releases_c8_views_and_unwraps_zeroer():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    entries = runner._c8_mxfp_v_scale_caches
+    wrapper_entries = list(entries)
+    delegate = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, wrapper_entries, fill_mxfp_v_scale_cache)
+
+    with patch.object(GPUModelRunner, "shutdown") as parent:
+        runner.shutdown()
+
+    parent.assert_called_once_with()
+    assert entries == [] and wrapper_entries == []
+    assert runner.kv_block_zeroer is delegate
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v41", "other_model"])

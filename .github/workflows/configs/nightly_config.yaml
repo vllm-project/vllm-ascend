@@ -269,27 +269,27 @@ a3-560t:
   single_node:
     test_config:
       - name: Qwen3-8B-w8a8sc-310p
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3-8B-w8a8sc-310p.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3-14B-w8a8sc-310p
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3-14B-w8a8sc-310p.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3-32B-w8a8sc-310p
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3.6-27B-W8A8
-        os: linux-aarch64-310p-2
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3.6-35B-A3B-w8a8
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3.6-35B-W8A8-310P-300I-DUO.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3.6-35B-A3B-w8a8-310p-MTP
-        os: linux-aarch64-310p-4
+        os: linux-aarch64-310p-8
         config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
 

@@ -9,6 +9,8 @@ _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
     {
         "dspark speculative decoding",
         "dflash2 drafts",
+        # Ascend V1 has its own PP communication and scheduler adaptations.
+        "pipeline parallelism with async scheduling",
     }
 )
 

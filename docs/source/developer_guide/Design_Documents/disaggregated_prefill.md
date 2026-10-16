@@ -53,6 +53,14 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 5. During processing, the P node's scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
 
+##### Sparse SFA C8 cache transfer
+
+For SFA models, `MooncakeLayerwiseConnector` can transfer the contiguous packed C8 main cache directly. Attention writes the quantized NoPE data, BF16 RoPE data and dynamic scales before recording the cache-write event. The connector waits for that event and copies the bytes without applying the legacy K/V INT8 quantization again. Indexer K and its scale tensor are transferred as separate components of the same physical layer.
+
+For FP8 main and indexer caches, configure both P and D with `--kv-cache-dtype fp8 --attention_config.indexer_kv_dtype fp8`. Both ends must use matching cache layouts. This path requires main and indexer components to share one KV cache group with the same block-size scale. Noncontiguous packed main caches, TurboQuant, and DCP-replicated indexer layouts with different component block-size scales remain unsupported.
+
+This transfer path still requires end-to-end validation on Ascend hardware, including configurations that combine it with `AscendStoreConnector` through `MultiConnector`.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:
