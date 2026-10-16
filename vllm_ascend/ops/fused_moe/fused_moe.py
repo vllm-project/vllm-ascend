@@ -135,8 +135,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
-        # Keep the release/v0.27.1rc submission order for latent W4A8 SP
-        # shared experts. Other paths retain early shared preparation/Gate-Up.
+        # Submit latent W4A8 SP shared experts after routed forward.
+        # Other paths retain early shared preparation/Gate-Up.
         self._defer_shared_submission = (
             self.quant_type is QuantType.W4A8
             and self._can_overlap_sp_shared_with(self.routed_input_transform)
@@ -169,9 +169,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
-        Latent W4A8 SP shared experts use the release/v0.27.1rc ordinary
-        tensor Add. Other paths retain foreach combine. Reduction hooks and
-        router precision are unchanged.
+        Latent W4A8 SP shared experts use ordinary tensor Add. Other paths
+        retain foreach combine. Reduction hooks and router precision are
+        unchanged.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -458,9 +458,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         SubmittedSharedExpertGateUp | None,
     ]:
         if getattr(self, "_defer_shared_submission", False):
-            # Enqueue the complete shared forward after routed forward, as in
-            # release/v0.27.1rc. This is submission order, not a device-wide
-            # barrier: shared execution still overlaps at its milestones.
+            # Enqueue the complete shared forward after routed forward. This
+            # is submission order, not a device-wide barrier: shared execution
+            # still overlaps at its milestones.
             if self.is_internal_router:
                 router_input = self._prepare_router_input(shared_hidden_states, router_logits)
                 shared_input_ready = maybe_record_event()
