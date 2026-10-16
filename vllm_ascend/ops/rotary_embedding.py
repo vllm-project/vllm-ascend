@@ -164,9 +164,20 @@ def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cach
     if _cos_cache is not None or _sin_cache is not None:
         return
     hidden_dim = cos_sin_cache.shape[-1] // 2
+    # ``chunk`` returns strided views of a [max_seq, 2, hidden_dim] staging
+    # copy, so the derived pair is non-contiguous (row stride 2 * hidden_dim
+    # over a 2x oversized base). aclnnIndex cannot gather a strided source in
+    # place: every ``get_cos_and_sin_mla`` lookup first materialises the whole
+    # [max_seq, 2 * hidden_dim] table with a row-major copy before selecting
+    # the ~8 rows it actually needs. With the 1M-row caches GLM-5.3 builds that
+    # is ~366us for each of cos and sin (~740us per call), ~10 calls per
+    # decode round, ~7.6ms/round measured (~7% of the 108ms round) spent
+    # rewriting a table that never changes after load. Materialise the pair
+    # once, here instead: identical values, unchanged peak memory (the staging
+    # copy is released), and every per-step lookup degrades to a small gather.
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
-    _cos_cache = cos_cache.squeeze(1)
-    _sin_cache = sin_cache.squeeze(1)
+    _cos_cache = cos_cache.squeeze(1).contiguous()
+    _sin_cache = sin_cache.squeeze(1).contiguous()
     owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
     owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
 
