@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
@@ -79,3 +79,63 @@ def test_dflash_acceptance(
         print(f"golden: {golden}")
 
     assert match
+
+
+def _get_dflash_query_buffer_state(worker):
+    runner = worker.model_runner
+    runtime_mode, descriptor = runner.cudagraph_dispatcher.dispatch(4, uniform_decode=False)
+    return {
+        "drafter": type(runner.drafter).__name__,
+        "use_graph": runner.drafter.use_cuda_graph,
+        "runtime_mode": runtime_mode.name,
+        "num_tokens": descriptor.num_tokens,
+        "positions": runner.drafter.positions.numel(),
+        "device": runner.drafter.positions.device.type,
+    }
+
+
+def test_dflash_padded_query_buffers():
+    """Exercise an oversized graph bucket with one request and a 32-sequence limit."""
+    sampling_params = SamplingParams(temperature=0, ignore_eos=True, max_tokens=4)
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode="PIECEWISE",
+        cudagraph_capture_sizes=[256],
+    )
+
+    with VllmRunner(
+        DFLASH["dflash"]["main"],
+        dtype="bfloat16",
+        max_model_len=256,
+        max_num_seqs=32,
+        max_num_batched_tokens=256,
+        tensor_parallel_size=1,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        enable_prefix_caching=False,
+        compilation_config=compilation_config,
+        speculative_config={
+            "method": "dflash",
+            "model": DFLASH["dflash"]["spec"],
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 1,
+            "enforce_eager": False,
+        },
+    ) as llm:
+        # The sole bucket pads even a single four-token draft query to 256.
+        # The unpatched allocation is only 32 * (1 + 3) = 128 positions.
+        assert llm.model.collective_rpc(_get_dflash_query_buffer_state, timeout=30) == [
+            {
+                "drafter": "AscendDflashProposer",
+                "use_graph": True,
+                "runtime_mode": "PIECEWISE",
+                "num_tokens": 256,
+                "positions": 256,
+                "device": "npu",
+            }
+        ]
+        prompts = [{"prompt_token_ids": [42]}]
+        outputs = llm.model.generate(prompts, sampling_params)
+
+    assert len(outputs) == 1
+    assert all(len(output.outputs[0].token_ids) == sampling_params.max_tokens for output in outputs)
