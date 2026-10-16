@@ -3,8 +3,7 @@
 
 import importlib.util
 import time
-from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Lock
+from multiprocessing import get_context
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -369,14 +368,15 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 
 
 def test_cann_backend_serializes_concurrent_operator_imports(monkeypatch, tmp_path):
-    barrier = Barrier(2)
-    importing = Lock()
+    context = get_context("fork")
+    barrier = context.Barrier(2)
+    importing = context.Lock()
     monkeypatch.setattr(backend_module, "gettempdir", lambda: str(tmp_path), raising=False)
     monkeypatch.setattr(torch.ops, "cann_ops_transformer", MagicMock())
 
     def load(name):
         if name == "cann_ops_transformer":
-            assert importing.acquire(blocking=False), "Concurrent CANN imports share JIT build locks"
+            assert importing.acquire(block=False), "Concurrent CANN imports share JIT build locks"
             try:
                 time.sleep(0.1)
             finally:
@@ -389,10 +389,18 @@ def test_cann_backend_serializes_concurrent_operator_imports(monkeypatch, tmp_pa
         barrier.wait(timeout=10)
         Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(initialize) for _ in range(2)]
-        for future in futures:
-            future.result(timeout=10)
+    workers = [context.Process(target=initialize) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(timeout=10)
+            assert worker.exitcode == 0
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join()
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
