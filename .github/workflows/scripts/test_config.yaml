@@ -135,10 +135,10 @@ partition:
   # while matrix num_npus retains the runner's allocation.
   ops-a3-1:
     runner_label: linux-aarch64-a3-800i-2
-    count: 2
+    count: 1
   ops-a5-1:
     runner_label: linux-aarch64-a5-4
-    count: 4
+    count: 1
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 1
