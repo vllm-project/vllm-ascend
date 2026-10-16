@@ -1976,6 +1976,29 @@ Key Parameter Descriptions:
   `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be
   combined with the C8 cache, and in Prefill-Decode disaggregation the
   Mooncake option `"use_ascend_direct"` must be `false`.
+- TurboQuant SFA accepts two options in `--additional-config`:
+  `"enable_turboquant_fused_finalize": true` fuses codebook
+  norm correction and scale packing; set it to `false` for comparison with
+  the original packing path. `"enable_turboquant_rotation_fusion": true`
+  folds query and output rotations into the absorbed projection weights
+  during loading, removing those rotations from Prefill and Decode.
+  Both options default to `false`: scale reduction order and BF16 weight
+  rounding can change numerical results. Validate model quality before
+  enabling them in production.
+  Both options retain the packed TQ4 cache layout. When comparing different
+  numerical configurations, isolate external prefix-cache namespaces and
+  validate the selected configuration on both P/D roles.
+- `"turboquant_prefill_workspace_mb": 64` optionally reserves a shared,
+  bounded BF16 workspace for TQ4 Prefill (default `0`, disabled). The packed
+  persistent cache remains TQ4. Eligible layers expand referenced pages into
+  the same workspace and use BF16 sparse attention. The reservation occurs
+  before KV capacity profiling and can reduce the number of persistent KV
+  blocks. This experimental path supports eager BF16 execution with DCP=1,
+  PCP=1, 64 query heads and Top-K 2048, including DSA CP. Decode, mixed
+  batches, small queries and batches exceeding the work or memory budget
+  use the original TQ operator. It reads shared prefix pages without
+  modifying them, and retains the existing cache-written notifications.
+  Validate numerical quality and P/D integration for the intended workload.
 
 ## 6 Functional Verification
 

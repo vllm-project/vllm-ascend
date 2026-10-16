@@ -8,7 +8,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.turboquant_finalize import turboquant_finalize
-from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import CENTROIDS
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import CENTROIDS, TurboQuantLatent
 
 
 @pytest.mark.parametrize("rows", [0, 1, 8, 257])
@@ -68,3 +68,25 @@ def test_finalize_random_codes_match_scale_reference(rows):
     torch.testing.assert_close(result[:, 0, :256].cpu(), packed.cpu(), rtol=0, atol=0)
     actual_scale = result[:, 0, 256:].contiguous().view(torch.float16).flatten()
     torch.testing.assert_close(actual_scale.cpu(), expected_scale.cpu(), rtol=0.001, atol=0)
+
+
+@pytest.mark.parametrize("legacy_hadamard", [False, True])
+@pytest.mark.parametrize("rows", [1, 83, 256])
+def test_compress_fused_finalize_preserves_rotation_and_codes(rows, legacy_hadamard):
+    """Use the real CANN producer and compare the two selectable packing paths."""
+    init_device_properties_triton()
+    torch.manual_seed(73)
+    values = torch.randn(rows, 1, 512, dtype=torch.bfloat16, device="npu")
+    values[0].zero_()
+    reference = TurboQuantLatent(legacy_hadamard=legacy_hadamard, fused_finalize=False)
+    fused = TurboQuantLatent(legacy_hadamard=legacy_hadamard, fused_finalize=True)
+    expected, actual = reference.compress(values), fused.compress(values)
+    # Preserve the original defaults of both callers: GLM reference packing,
+    # historical DeepSeek fused packing. Explicit flags opt into the other path.
+    default = TurboQuantLatent(legacy_hadamard=legacy_hadamard).compress(values)
+    torch.testing.assert_close(default, actual if legacy_hadamard else expected, rtol=0, atol=0)
+    torch.testing.assert_close(reference.rotation, fused.rotation, rtol=0, atol=0)
+    torch.testing.assert_close(actual[:, :, :256], expected[:, :, :256], rtol=0, atol=0)
+    actual_scale = actual[:, :, 256:].contiguous().view(torch.float16)
+    expected_scale = expected[:, :, 256:].contiguous().view(torch.float16)
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0.001, atol=0)

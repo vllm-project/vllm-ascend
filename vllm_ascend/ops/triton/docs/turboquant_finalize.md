@@ -3,7 +3,7 @@
 ## Description
 
 - **Location**: `vllm_ascend/ops/triton/turboquant_finalize.py`.
-- **Function**: Fuse TurboQuant scale correction and compact cache-row packing. The CANN `cann_ops_nn.turbo_quant` operator produces packed 4-bit codes and the original vector norm. This kernel computes the corrected FP16 scale and appends its two bytes to the unchanged codes. It returns rows consumed by the DeepSeek V4 TurboQuant cache path; it does not quantize inputs, rotate vectors, compute attention, or scatter rows into the paged cache.
+- **Function**: Fuse TurboQuant scale correction and compact cache-row packing. The CANN `cann_ops_nn.turbo_quant` operator produces packed 4-bit codes and the original vector norm. This kernel computes the corrected FP16 scale and appends its two bytes to the unchanged codes. It returns rows consumed by the DeepSeek V4 and GLM SFA TurboQuant cache paths; it does not quantize inputs, rotate vectors, compute attention, or scatter rows into the paged cache.
 - **Formula** (independently for each row `r`):
 
   ```text
@@ -45,7 +45,7 @@ All three inputs are required. The Python entry point is `turboquant_finalize(pa
 - Every uint8 code value from 0 through 255 is a valid LUT index. The LUT must correspond to the quantizer's codebook and nibble order. The kernel does not retrain, reorder, or convert the codebook.
 - For finite corrected scales, `norm` must be finite and nonnegative, each row's LUT sum must be positive and finite, and the quotient must fit FP16. The fixed codebook used by the caller supplies positive squared-norm contributions. Zero original norms produce zero scales. No epsilon, clamping, or special NaN/Inf handling is added.
 - The output stores the FP16 bit pattern as low byte then high byte, matching the existing Ascend cache representation. Inputs are read-only; output is newly allocated. Paginated cache writes are handled separately by `write_dsa_cache` in `vllm_ascend/attention/dsa_attn_kv_plan.py`.
-- This path is selected for NPU tensors when `TurboQuantLatent(legacy_hadamard=True)` is used. The default SFA path retains its existing PyTorch postprocessing. Hadamard rotation itself is outside this kernel.
+- This path is selected for NPU tensors produced by `TurboQuantLatent.compress` with `fused_finalize=True`. It remains the default for the historical `legacy_hadamard=True` path. GLM SFA retains reference packing by default; set `additional_config.enable_turboquant_fused_finalize=true` to evaluate fused packing. Reduction ordering can change FP16 scales, so model-level numerical validation is required. Hadamard rotation itself is outside this kernel.
 - `rows` is not value-specialized, allowing different row counts to reuse the compiled kernel. This does not make a captured graph's shape dynamic: replay retains captured buffers, shapes, and launch arguments. Input values may be updated in the captured buffers before replay.
 - Forward inference only; autograd backward support is N/A.
 

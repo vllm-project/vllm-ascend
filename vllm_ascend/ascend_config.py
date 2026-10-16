@@ -446,6 +446,9 @@ class AscendConfig:
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "enable_sparse_li_c4": false,
+            "enable_turboquant_rotation_fusion": false,
+            "enable_turboquant_fused_finalize": false,
+            "turboquant_prefill_workspace_mb": 0,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -576,6 +579,14 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
+    # SFA TQ4: weight folding changes BF16 rounding and remains opt-in until
+    # model-level accuracy is validated. Applies to both prefill and decode.
+    enable_turboquant_rotation_fusion: bool = False
+    # Opt in to fused norm correction/packing after model-level validation;
+    # reduction ordering can change FP16 scales and downstream token choices.
+    enable_turboquant_fused_finalize: bool = False
+    # Opt-in BF16 layer workspace, shared across SFA layers; zero disables it.
+    turboquant_prefill_workspace_mb: int = 0
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
@@ -651,6 +662,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.turboquant_prefill_workspace_mb < 0:
+            raise ValueError("turboquant_prefill_workspace_mb must be non-negative")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

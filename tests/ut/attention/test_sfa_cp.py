@@ -42,6 +42,43 @@ from vllm_ascend.weight_switch import (
 )
 
 
+@pytest.mark.parametrize("folded", [False, True])
+@pytest.mark.parametrize("prefill", [False, True])
+def test_tq_dcp_preserves_rotated_basis_until_projection(folded, prefill):
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl._tq_rotations_folded = folded
+    impl.turboquant = MagicMock()
+    impl.turboquant.forward.side_effect = lambda x: x + 1
+    impl.turboquant.inverse.side_effect = lambda x: x + 2
+    q = torch.randn(2, 2, 512)
+    rope = torch.randn(2, 2, 64)
+    partial = torch.randn_like(q)
+    merged = torch.randn_like(q)
+    cache = (torch.empty(2, 128, 1, 386, dtype=torch.int8),)
+    table = torch.tensor([[0, 1]], dtype=torch.int32)
+    lengths = torch.tensor([2], dtype=torch.int32)
+    context = SimpleNamespace(gather_context=object(), kv_gather_block_table=table, block_table=table, seq_lens=lengths)
+    metadata = SimpleNamespace(dcp_context=context)
+    impl._has_prefill = Mock(return_value=prefill)
+    impl._finish_dcp_gather = Mock(return_value=cache if prefill else (q, rope))
+    impl._remap_sparse_indices = Mock(side_effect=lambda x: x)
+    impl._turboquant_sfa = Mock(return_value=(partial, torch.zeros(2, 2, 1), torch.ones(2, 2, 1)))
+    impl._merge_dcp_outputs = Mock(return_value=merged)
+    result = impl._execute_tq_dcp_sfa(q, rope, cache, torch.zeros(2, 1, 1), metadata, lengths, lengths)
+    expected_q = q if folded else q + 1
+    torch.testing.assert_close(impl._turboquant_sfa.call_args.args[0], torch.cat((expected_q, rope), dim=-1))
+    source = partial if prefill else merged
+    torch.testing.assert_close(result, source if folded else source + 2)
+    if not prefill:
+        assert impl._merge_dcp_outputs.call_args.args[0] is partial
+    if folded:
+        impl.turboquant.forward.assert_not_called()
+        impl.turboquant.inverse.assert_not_called()
+    else:
+        impl.turboquant.forward.assert_called_once_with(q)
+        impl.turboquant.inverse.assert_called_once_with(source)
+
+
 @pytest.mark.parametrize("first_block_id", [0, 3])
 def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)

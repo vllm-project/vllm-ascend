@@ -1830,8 +1830,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 actual_seq_lengths_key,
                 sparse_mode=3,
             )
-            assert self.turboquant is not None
-            return self.turboquant.inverse(attn_out)
+            return self._tq_inverse_output(attn_out)
 
         # Decode attends over this rank's KV shard only, so the partial results
         # are recombined by _merge_dcp_outputs using the LSE.
@@ -1861,9 +1860,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = attn_out.dtype
         output = self._merge_dcp_outputs(attn_out, softmax_lse, dsa_cp_context)
-        # The merge runs in Hadamard space, so rotate back once at the end.
-        assert self.turboquant is not None
-        output = self.turboquant.inverse(output)
+        # Merge in Hadamard space; folded W_UV consumes that basis directly.
+        # Otherwise rotate back once after the merge.
+        output = self._tq_inverse_output(output)
         return output.to(output_dtype)
 
     def _execute_sparse_flash_attention_process(

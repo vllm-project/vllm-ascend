@@ -1532,6 +1532,26 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         return wrapper
 
+    def test_turboquant_optimization_switches_are_typed(self):
+        config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        self.assertFalse(config.enable_turboquant_rotation_fusion)
+        self.assertFalse(config.enable_turboquant_fused_finalize)
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_turboquant_rotation_fusion="true",
+            enable_turboquant_fused_finalize="true",
+        )
+        self.assertTrue(config.enable_turboquant_rotation_fusion)
+        self.assertTrue(config.enable_turboquant_fused_finalize)
+
+    def test_turboquant_workspace_budget_is_typed_and_nonnegative(self):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False), turboquant_prefill_workspace_mb="64"
+        )
+        self.assertEqual(config.turboquant_prefill_workspace_mb, 64)
+        with self.assertRaises(ValueError):
+            AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), turboquant_prefill_workspace_mb=-1)
+
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_cpu_binding_string_false_disables(self, mock_fix):
