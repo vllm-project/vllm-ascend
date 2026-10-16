@@ -190,7 +190,12 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
+        # Omni-EPLB converts MoE weights to list form; V2 model runner keeps
+        # the tensor form.
+        eplb_config = get_ascend_config().eplb_config
+        self.dynamic_eplb = (
+            False if vllm_config.use_v2_model_runner else eplb_config.convert_weight_to_list
+        )
 
     def get_weight(
         self,

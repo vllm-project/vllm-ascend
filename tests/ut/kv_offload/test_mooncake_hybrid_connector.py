@@ -7,9 +7,7 @@ import unittest
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import MagicMock, patch
-
-import torch
+from unittest.mock import MagicMock
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -842,7 +840,7 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
                 types.SimpleNamespace(
                     size=backing_size,
                     layers=[layer_name],
-                    shared_by=[layer_name],
+                    layers=[layer_name],
                     layer_stride=backing_size,
                     block_stride=2 * alignment,
                     offset=layer_idx * alignment,

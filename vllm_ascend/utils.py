@@ -204,6 +204,7 @@ def model_uses_kpool_indexer(model_config: Any | None) -> bool:
 
 
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+    """Return whether a model config uses the traditional SFA sparse path."""
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
     if hf_text_config is None:

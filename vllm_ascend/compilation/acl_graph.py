@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -88,6 +88,11 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    # vLLM's profiling and GPU ubatch wrapper code treats this as a drop-in
+    # CUDAGraphWrapper replacement and uses the registry to swap graph pools
+    # and clear captured graphs.
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = _acl_graph_wrappers
+
     def __init__(
         self,
         runnable: Callable,
@@ -119,9 +124,11 @@ class ACLGraphWrapper:
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
         self.aclgraph_options = cudagraph_options
+        self.cudagraph_options = cudagraph_options
         # the entries for different batch descriptors that we need to capture
         # aclgraphs for.
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
+        self.concrete_cudagraph_entries = self.concrete_aclgraph_entries
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
@@ -366,6 +373,14 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params():
+    """Clear graph parameter state after ACL graph profiling."""
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):

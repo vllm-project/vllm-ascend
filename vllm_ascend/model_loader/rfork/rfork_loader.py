@@ -424,7 +424,11 @@ def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
         return True
 
     eplb_config = get_ascend_config().eplb_config
-    return eplb_config.dynamic_eplb or bool(eplb_config.expert_map_record_path)
+    return (
+        eplb_config.dynamic_eplb
+        or bool(eplb_config.expert_map_record_path)
+        or bool(eplb_config.enable_omni_eplb)
+    )
 
 
 @contextmanager

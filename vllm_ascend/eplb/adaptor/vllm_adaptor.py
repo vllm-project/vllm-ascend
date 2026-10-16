@@ -29,7 +29,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.NONE, False): ("w13_weight", "w2_weight"),
-    (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
+    (QuantType.NONE, True): ("w13_weight", "w2_weight"),
     (QuantType.W8A8, False): (
         "w13_weight_list",
         "w2_weight_list",
@@ -178,11 +178,18 @@ class VllmEplbAdaptor:
                 # unspecced MagicMock from fabricating the optional accessor.
                 # The refactored MoERunner declares the accessor because its
                 # RoutedExperts child owns weights; legacy layers expose them
-                # directly.
+                # directly. Omni-EPLB list-form weights fall back to the
+                # non-list attribute name when the list form is absent.
                 get_parameter = (
                     layer.get_eplb_parameter if getattr_static(layer, "get_eplb_parameter", None) is not None else None
                 )
-                self.param_dict[param_key] = get_parameter(name) if get_parameter is not None else getattr(layer, name)
+                if get_parameter is not None:
+                    self.param_dict[param_key] = get_parameter(name)
+                elif hasattr(layer, name):
+                    self.param_dict[param_key] = getattr(layer, name)
+                else:
+                    fallback_name = name.replace("_list", "")
+                    self.param_dict[param_key] = getattr(layer, fallback_name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:

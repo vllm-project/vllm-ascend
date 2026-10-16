@@ -313,11 +313,14 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+    enable_omni_eplb: bool = False
+    omni_config_file: str | None = None
+    convert_weight_to_list: bool = False
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
     @model_validator(mode="after")
     def _validate_config(self):
-        if self.expert_map_path is not None:
+        if self.expert_map_path is not None and not self.enable_omni_eplb:
             logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
@@ -346,8 +349,17 @@ class EplbConfig:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
+        if self.enable_omni_eplb:
+            if self.omni_config_file is not None and not os.path.exists(self.omni_config_file):
+                raise ValueError(f"omni_config_file does not exist: {self.omni_config_file}")
 
-        logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
+        if self.dynamic_eplb and not self.enable_omni_eplb:
+            self.convert_weight_to_list = True
+
+        logger.info(
+            "Dynamic EPLB is %s and convert moe's weights to list is %s",
+            self.dynamic_eplb, self.convert_weight_to_list,
+        )
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
 

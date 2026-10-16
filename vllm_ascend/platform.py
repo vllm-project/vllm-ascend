@@ -474,6 +474,95 @@ class NPUPlatform(Platform):
                     else:
                         has_topk = True
 
+    @staticmethod
+    def _validate_layerwise_host_offload_config(vllm_config: VllmConfig) -> None:
+        """Validate the frozen first-release DSA offload shape."""
+
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
+        if not bool(extra_config.get("layerwise_host_kv_offload", False)):
+            return
+
+        kv_role = getattr(kv_transfer_config, "kv_role", None)
+        if kv_role not in {"kv_producer", "kv_consumer"}:
+            raise ValueError(
+                "layerwise_host_kv_offload requires a PD-disaggregated "
+                "kv_role ('kv_producer' or 'kv_consumer')"
+            )
+
+        # Frozen first-release shape: GLM-5.2 block size 128, MTP disabled or
+        # MTP3, and index_topk=2048.
+        cache_config = getattr(vllm_config, "cache_config", None)
+        if cache_config is not None and getattr(cache_config, "block_size", 128) != 128:
+            raise ValueError(
+                "layerwise_host_kv_offload requires block_size=128, got "
+                f"block_size={cache_config.block_size}"
+            )
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        num_speculative_tokens = (
+            getattr(speculative_config, "num_speculative_tokens", None)
+            if speculative_config is not None
+            else None
+        )
+        if num_speculative_tokens not in (None, 3):
+            raise ValueError(
+                "layerwise_host_kv_offload supports disabled MTP or MTP3 only, "
+                f"got num_speculative_tokens={num_speculative_tokens}"
+            )
+        hf_text_config = getattr(
+            getattr(vllm_config, "model_config", None), "hf_text_config", None
+        )
+        index_topk = getattr(hf_text_config, "index_topk", None) if hf_text_config is not None else None
+        if index_topk is not None and int(index_topk) != 2048:
+            raise ValueError(
+                "layerwise_host_kv_offload requires index_topk=2048, got "
+                f"index_topk={index_topk}"
+            )
+
+        if kv_role == "kv_producer":
+            connector_name = getattr(kv_transfer_config, "kv_connector", None)
+            if connector_name != "MultiConnector":
+                raise ValueError(
+                    "layerwise_host_kv_offload Prefill requires "
+                    "kv_connector='MultiConnector'"
+                )
+            child_configs = extra_config.get("connectors")
+            if not isinstance(child_configs, (list, tuple)):
+                raise ValueError(
+                    "layerwise_host_kv_offload Prefill requires a connectors list"
+                )
+            store_configs = [
+                child
+                for child in child_configs
+                if isinstance(child, dict)
+                and child.get("kv_connector") == "AscendStoreConnector"
+            ]
+            if len(store_configs) != 1:
+                raise ValueError(
+                    "layerwise_host_kv_offload Prefill requires exactly one "
+                    "AscendStoreConnector child"
+                )
+            for store_config in store_configs:
+                store_extra = store_config.get("kv_connector_extra_config") or {}
+                if not (
+                    bool(store_extra.get("use_layerwise", False))
+                    and bool(store_extra.get("use_layerwise_range", False))
+                ):
+                    raise ValueError(
+                        "layerwise_host_kv_offload Prefill requires every "
+                        "AscendStoreConnector child to set use_layerwise=true "
+                        "and use_layerwise_range=true"
+                    )
+            if not any(
+                isinstance(child, dict)
+                and child.get("kv_connector") == "MooncakeLayerwiseConnector"
+                for child in child_configs
+            ):
+                raise ValueError(
+                    "layerwise_host_kv_offload Prefill requires a "
+                    "MooncakeLayerwiseConnector child"
+                )
+
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Lazy import vllm/vllm-ascend to avoid circular import
@@ -533,6 +622,13 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
+
+        # 8.5.Validate the frozen layerwise host offload shape. Runs after
+        # _setup_worker_and_scheduler because refresh_block_size() raises the
+        # default block size to 128 when chunked prefill or prefix caching is
+        # enabled; validating earlier would reject deployments that omit an
+        # explicit --block_size.
+        cls._validate_layerwise_host_offload_config(vllm_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)

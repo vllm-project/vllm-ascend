@@ -5,6 +5,7 @@ import sys
 import threading
 import types
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,7 @@ fake_torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
 fake_torch_npu.npu.current_device = MagicMock(return_value=0)  # type: ignore[attr-defined]
 fake_torch_npu.npu.Stream = MagicMock  # type: ignore[attr-defined]
 fake_torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
+fake_torch_npu.atb = SimpleNamespace(npu_paged_cache_load=MagicMock())  # type: ignore[attr-defined]
 sys.modules.setdefault("torch_npu", fake_torch_npu)
 torch.npu = fake_torch_npu.npu  # type: ignore[attr-defined]
 fake_uvloop = types.ModuleType("uvloop")
@@ -47,6 +49,8 @@ for _m in _to_remove:
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
+    FailedRequestTask,
+    FullAttentionSpec,
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
     KVConnectorRole,
@@ -64,6 +68,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     ensure_zmq_send,
     group_concurrent_contiguous,
     string_to_int64_hash,
+    validate_existing_layer_metadata,
     zmq_ctx,
 )
 
@@ -78,10 +83,10 @@ DONE_SENDING_MSG = b"done_sending_msg"
 
 def _make_layer_metadata(**overrides):
     defaults = dict(
-        tensor_group_idx=[0],
+        tensor_group_idx=[0, 0],
         kv_caches_base_addr=[1000, 2000],
-        block_len=[1024],
-        block_size_scale=[1],
+        block_len=[1024, 1024],
+        block_size_scale=[1, 1],
     )
     defaults.update(overrides)
     return LayerMetadata(**defaults)
@@ -102,7 +107,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
     def setUp(self):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
-        self.engine.batch_transfer_sync_write.return_value = 1
+        self.engine.batch_transfer_sync_write.return_value = 0
         fake_stream = MagicMock(name="FakeStream")
         fake_stream.synchronize = MagicMock()
 
@@ -116,19 +121,19 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
 
         self.layer_metadata = {
             "layer0": _make_layer_metadata(
-                tensor_group_idx=[0],
+                tensor_group_idx=[0, 0],
                 kv_caches_base_addr=[1000, 2000],
                 block_len=[1024, 2048],
                 block_size_scale=[1, 1],
             ),
             "layer1": _make_layer_metadata(
-                tensor_group_idx=[0],
+                tensor_group_idx=[0, 0],
                 kv_caches_base_addr=[3000, 4000],
                 block_len=[1024, 2048],
                 block_size_scale=[1, 1],
             ),
             "layer2": _make_layer_metadata(
-                tensor_group_idx=[0],
+                tensor_group_idx=[0, 0],
                 kv_caches_base_addr=[5000, 6000],
                 block_len=[1024, 2048],
                 block_size_scale=[1, 1],
@@ -231,7 +236,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
 
         layer_metadata = {
             "layer0": _make_layer_metadata(
-                tensor_group_idx=[0],
+                tensor_group_idx=[0, 0],
                 kv_caches_base_addr=[1111, 2222],
                 block_len=[64, 64],
                 block_size_scale=[1, 1],
@@ -313,6 +318,70 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.assertEqual(dst_list[2] - 8000, expected_offsets[0])
         self.assertEqual(dst_list[3] - 8000, expected_offsets[1])
 
+    def test_resharding_preparation_waits_for_source_in_sending_thread(self):
+        order: list[str] = []
+        wait_event = MagicMock()
+        wait_event.synchronize.side_effect = lambda: order.append("event")
+        wait_event.wait = MagicMock()
+
+        self.thread.pd_head_ratio = 2
+        self.thread.kv_cache_specs = [
+            FullAttentionSpec(
+                block_size=2,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float32,
+            )
+        ]
+        self.thread.k_buffer = torch.empty((4, 2), dtype=torch.float32)
+        self.thread.v_buffer = torch.empty((4, 2), dtype=torch.float32)
+        self.thread.resharding_stream = MagicMock()
+
+        paged_cache_load = fake_torch_npu.atb.npu_paged_cache_load
+        paged_cache_load.reset_mock()
+        paged_cache_load.side_effect = lambda *_args, **_kwargs: order.append(
+            "paged_load"
+        )
+
+        def fake_alltoall(_ratio, key, value):
+            order.append("alltoall")
+            return key, value
+
+        send_task = SendTask(
+            wait_event=wait_event,
+            source_kv_cache=(
+                torch.zeros((1, 2, 1, 2), dtype=torch.float32),
+                torch.zeros((1, 2, 1, 2), dtype=torch.float32),
+            ),
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[0]],
+            group_num_blocks=[1],
+            group_num_tokens=[2],
+            group_block_table=[torch.tensor([[0]], dtype=torch.int32)],
+            group_block_len_tensor=[torch.tensor([2], dtype=torch.int32)],
+            group_seq_start_tensor=[torch.tensor([0], dtype=torch.int32)],
+        )
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p."
+                "mooncake_layerwise_connector.npu_stream_switch",
+                side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p."
+                "mooncake_layerwise_connector.kv_alltoall_and_rearrange",
+                side_effect=fake_alltoall,
+            ),
+        ):
+            self.thread._transfer_kv_cache(send_task)
+
+        self.assertEqual(order, ["event", "paged_load", "alltoall"])
+        wait_event.wait.assert_not_called()
+        self.thread.resharding_stream.synchronize.assert_called_once()
+        self.engine.batch_transfer_sync_write.assert_not_called()
+
     def test_transfer_skips_when_no_local_blocks(self):
         req_meta = self.req_meta_base
         req_meta.local_block_ids = [[]]
@@ -327,6 +396,210 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         )
         self.thread._transfer_kv_cache(send_task)
         self.engine.batch_transfer_sync_write.assert_not_called()
+
+    def test_metadata_validation_rejects_zip_truncation(self):
+        local = _make_layer_metadata()
+        remote = _make_layer_metadata(tensor_group_idx=[0])
+        with self.assertRaisesRegex(ValueError, "equal length"):
+            validate_existing_layer_metadata("layer0", local, remote)
+
+    def test_direct_transfer_rejects_remote_block_stride_mismatch(self):
+        send_task = SendTask(
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[]],
+        )
+
+        with self.assertRaisesRegex(ValueError, "remote block strides"):
+            self.thread.get_transfer_meta(
+                send_task,
+                "req-layout",
+                self.req_meta_base,
+                0,
+            )
+
+    def test_resharded_transfer_rejects_remote_block_overflow(self):
+        self.thread.pd_head_ratio = 2
+        self.thread.tp_rank = 1
+        self.thread.layer_metadata["layer0"] = _make_layer_metadata(
+            block_len=[64, 64]
+        )
+        req_meta = ReqMeta(
+            **{
+                **self.req_meta_base.__dict__,
+                "remote_layer_metadata": {
+                    "layer0": _make_layer_metadata(block_len=[100, 100])
+                },
+            }
+        )
+        send_task = SendTask(
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[5, 8]],
+        )
+
+        with self.assertRaisesRegex(ValueError, "exceeds remote block stride"):
+            self.thread.get_transfer_meta(
+                send_task,
+                "req-reshard-layout",
+                req_meta,
+                0,
+            )
+
+    def test_handle_exception_fails_every_request_once(self):
+        first = self.req_meta_base
+        first.chunk_finish = True
+        first.request_generation = 1
+        second = ReqMeta(**{**first.__dict__})
+        send_task = SendTask(
+            send_request={"req-a": first, "req-b": second},
+            layer_idx=0,
+            layer_name="layer0",
+            source_future=Future(),
+        )
+        self.thread._transfer_kv_cache = MagicMock(
+            side_effect=RuntimeError("metadata failure")
+        )
+
+        self.thread._handle_request(send_task)
+        self.thread._handle_request(send_task)
+
+        self.assertEqual(self.thread.callback_func.call_count, 2)
+        failed_ids = {
+            call.args[0] for call in self.thread.callback_func.call_args_list
+        }
+        self.assertEqual(failed_ids, {"req-a", "req-b"})
+        self.assertTrue(
+            all(
+                call.kwargs["trans_flag"] is False
+                for call in self.thread.callback_func.call_args_list
+            )
+        )
+
+        # A later request generation may reuse the same external request ID.
+        # Its independent ReqMeta must publish its own terminal notification.
+        reused = ReqMeta(
+            **{
+                **first.__dict__,
+                "_terminal_notified": False,
+                "request_generation": 2,
+            }
+        )
+        reused_task = SendTask(
+            send_request={"req-a": reused},
+            layer_idx=0,
+            layer_name="layer0",
+            source_future=Future(),
+        )
+        self.thread._handle_request(reused_task)
+        self.assertEqual(self.thread.callback_func.call_count, 3)
+
+    def test_mark_request_failed_publishes_failed_terminal_once(self):
+        req_meta = self.req_meta_base
+        req_meta.chunk_finish = True
+        req_meta.request_generation = 3
+
+        first_completion = self.thread.mark_request_failed(
+            "req-metadata", req_meta, 0
+        )
+        second_completion = self.thread.mark_request_failed(
+            "req-metadata", req_meta, 0
+        )
+
+        self.thread.callback_func.assert_not_called()
+        first = self.thread.send_queue.get_nowait()
+        second = self.thread.send_queue.get_nowait()
+        self.assertIsInstance(first, FailedRequestTask)
+        self.assertIsInstance(second, FailedRequestTask)
+        self.thread._handle_failed_request(first)
+        self.thread._handle_failed_request(second)
+
+        self.thread.callback_func.assert_called_once_with(
+            "req-metadata",
+            req_meta,
+            0,
+            trans_flag=False,
+        )
+        self.assertIsNone(first_completion.result())
+        self.assertIsNone(second_completion.result())
+        self.assertNotIn(("req-metadata", 3), self.thread.failed_reqs)
+
+    def test_failed_terminal_ack_failure_keeps_state_and_fails_completion(self):
+        req_meta = self.req_meta_base
+        req_meta.chunk_finish = True
+        req_meta.request_generation = 4
+        self.thread.callback_func.side_effect = RuntimeError("ACK failed")
+        completion = Future()
+        task = FailedRequestTask("req-ack", req_meta, 0, completion)
+
+        with self.assertRaisesRegex(RuntimeError, "ACK failed"):
+            self.thread._handle_failed_request(task)
+
+        self.assertIsInstance(completion.exception(), RuntimeError)
+        self.assertIn(("req-ack", 4), self.thread.failed_reqs)
+
+    def test_new_request_generation_drops_reused_id_failure_state(self):
+        old = ReqMeta(
+            **{
+                **self.req_meta_base.__dict__,
+                "request_generation": 1,
+                "chunk_finish": False,
+            }
+        )
+        self.thread._handle_failed_request(
+            FailedRequestTask("same-id", old, 0, Future())
+        )
+        self.assertIn(("same-id", 1), self.thread.failed_reqs)
+
+        new = ReqMeta(
+            **{
+                **old.__dict__,
+                "request_generation": 2,
+                "chunk_finish": True,
+                "_terminal_notified": False,
+            }
+        )
+        send_task = SendTask(
+            send_request={"same-id": new},
+            layer_idx=2,
+            layer_name="layer2",
+            source_future=Future(),
+        )
+        self.thread._transfer_kv_cache = MagicMock(
+            side_effect=lambda _task: (
+                self.thread._discard_older_request_generations("same-id", 2),
+                self.thread._notify_terminal("same-id", new, 0, success=True),
+            )
+        )
+
+        self.thread._handle_request(send_task)
+
+        self.assertNotIn(("same-id", 1), self.thread.failed_reqs)
+        self.thread.callback_func.assert_called_once_with(
+            "same-id", new, 0, trans_flag=True
+        )
+
+    def test_terminal_callback_failure_sets_source_future_exception(self):
+        req_meta = self.req_meta_base
+        req_meta.chunk_finish = True
+        send_task = SendTask(
+            send_request={"req-terminal": req_meta},
+            layer_idx=2,
+            layer_name="layer2",
+            source_future=Future(),
+        )
+        self.thread.callback_func.side_effect = RuntimeError("terminal ACK failed")
+        self.thread._transfer_kv_cache = MagicMock(
+            side_effect=lambda _task: self.thread._notify_terminal(
+                "req-terminal", req_meta, 0, success=True
+            )
+        )
+
+        self.thread._handle_request(send_task)
+
+        self.assertIsInstance(send_task.source_future.exception(), RuntimeError)
+        self.assertEqual(self.thread.callback_func.call_count, 2)
+        self.assertFalse(req_meta._terminal_notified)
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
@@ -511,6 +784,84 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.thread.callback_func.assert_called_once_with("req", req_meta, 0, trans_flag=False)
 
 
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        side_effect=group_concurrent_contiguous,
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
+    def test_nonzero_transfer_status_is_failure(self, _mock_sync, _mock_group):
+        req_meta = self.req_meta_base
+        self.thread.total_layers = 1
+        req_meta.chunk_finish = True
+        req_meta.local_block_ids = [[5, 6]]
+        req_meta.remote_block_ids = [[10, 11]]
+        req_meta.remote_layer_metadata = {
+            "layer0": _make_layer_metadata(
+                kv_caches_base_addr=[7000, 8000],
+                block_len=[1024, 2048],
+                block_size_scale=[1, 1],
+            )
+        }
+        self.engine.batch_transfer_sync_write.return_value = 1
+        send_task = SendTask(
+            send_request={"req-fail": req_meta},
+            wait_event=MagicMock(),
+            k_cache=torch.zeros((1, 8), dtype=torch.float32),
+            v_cache=torch.zeros((1, 8), dtype=torch.float32),
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[]],
+        )
+
+        self.thread._transfer_kv_cache(send_task)
+        self.thread.callback_func.assert_called_once()
+        self.assertFalse(self.thread.callback_func.call_args.kwargs["trans_flag"])
+
+    def test_transfer_failure_is_isolated_by_destination_session(self):
+        failed_req = ReqMeta(
+            **{
+                **self.req_meta_base.__dict__,
+                "chunk_finish": True,
+                "remote_host": "127.0.0.1",
+                "remote_te_rpc_port": 6000,
+                "_terminal_notified": False,
+            }
+        )
+        successful_req = ReqMeta(
+            **{
+                **self.req_meta_base.__dict__,
+                "chunk_finish": True,
+                "remote_host": "127.0.0.2",
+                "remote_te_rpc_port": 7000,
+                "_terminal_notified": False,
+            }
+        )
+        send_task = SendTask(
+            send_request={"req-failed": failed_req, "req-ok": successful_req},
+            wait_event=MagicMock(),
+            k_cache=torch.zeros((1, 8), dtype=torch.float32),
+            v_cache=torch.zeros((1, 8), dtype=torch.float32),
+            layer_idx=2,
+            layer_name="layer2",
+            group_rearrange_block_ids=[[]],
+        )
+        self.thread.get_transfer_meta = MagicMock(
+            return_value=([1000], [2000], [128])
+        )
+        self.engine.batch_transfer_sync_write.side_effect = [1, 0]
+
+        self.thread._transfer_kv_cache(send_task)
+
+        outcomes = {
+            call.args[0]: call.kwargs["trans_flag"]
+            for call in self.thread.callback_func.call_args_list
+        }
+        self.assertEqual(
+            outcomes,
+            {"req-failed": False, "req-ok": True},
+        )
+
+
 class TestKVCacheRecvingLayerThread(unittest.TestCase):
     def setUp(self):
         self.meta = MooncakeAgentMetadata(
@@ -600,6 +951,41 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         with th.lock:
             self.assertNotIn("reqX", th.task_tracker)
             self.assertIn("reqX", th.done_requests)
+
+    def test_terminal_notifications_are_idempotent_until_request_cleanup(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=2,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        th.update_done_task("reqX", 2, "path1")
+        th.update_done_task("reqX", 2, "path2")
+        self.assertEqual(th.get_and_clear_done_requests(), {"reqX"})
+
+        # An ACK retry after Scheduler polling must not recreate a partial
+        # trans_count tracker.
+        th.update_done_task("reqX", 2, "path1")
+        with th.lock:
+            self.assertNotIn("reqX", th.task_tracker)
+            self.assertNotIn("reqX", th.done_requests)
+
+        th.discard_requests({"reqX"})
+        th.update_done_task("reqX", 2, "path1")
+        th.update_failed_task("reqX")
+        th.update_done_task("reqX", 2, "path2")
+        with th.lock:
+            self.assertNotIn("reqX", th.task_tracker)
+            self.assertIn("reqX", th.failed_requests)
+
+        th.discard_requests({"reqX"})
+        with th.lock:
+            self.assertNotIn("reqX", th.failed_requests)
+            self.assertNotIn("reqX", th.terminal_requests)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ip", return_value="127.0.0.1")
@@ -790,6 +1176,10 @@ class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
     def test_add_new_req(self):
         meta = MooncakeLayerwiseConnectorMetadata()
         self.assertEqual(len(meta.requests), 0)
+        # Scheduler metadata is broadcast through vLLM's pickle-based shared
+        # memory queue. Process-local Future objects contain an RLock and must
+        # only be attached to the worker-created layer send task.
+        self.assertIsNone(meta.send_task.source_future)
 
         meta.add_new_req(
             request_id="req1",
@@ -829,6 +1219,33 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
         self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
+
+    def test_fully_local_prefix_preserves_remote_cached_tokens(self):
+        request = MockRequest(
+            "req-local-prefix",
+            prompt_token_ids=list(range(16)),
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "metaserver": "http://meta",
+            },
+        )
+
+        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens=16
+        )
+
+        self.assertEqual(tokens, 0)
+        self.assertFalse(async_flag)
+        self.scheduler.executor.submit = MagicMock()
+        self.scheduler.update_state_after_alloc(
+            request,
+            _MockBlocks(unhashed=[], block_ids_tuple=()),
+            num_external_tokens=0,
+        )
+        _, kwargs = self.scheduler.executor.submit.call_args
+        self.assertEqual(kwargs["message"]["remote_cached_tokens"], 16)
+        self.assertEqual(kwargs["message"]["remote_block_ids"], ())
+        self.assertEqual(self.scheduler._reqs_need_recv[request.request_id][2], [])
 
     def test_get_num_new_matched_tokens_hybrid_excludes_last_token(self):
         self.scheduler.need_truncate = True
@@ -880,6 +1297,8 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
             prompt_token_ids=list(range(17)),
             kv_transfer_params={"do_remote_prefill": True, "metaserver": "http://meta"},
         )
+        self.scheduler.get_num_new_matched_tokens(request, num_computed_tokens=8)
+        request.num_computed_tokens = 0  # Scheduler updates this after allocation.
         blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4, 5],))
         self.scheduler.executor.submit = MagicMock()
 
@@ -887,6 +1306,7 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
 
         _, kwargs = self.scheduler.executor.submit.call_args
         self.assertEqual(kwargs["message"]["remote_block_ids"], ([4],))
+        self.assertEqual(kwargs["message"]["remote_cached_tokens"], 8)
 
 
 class _MockBlocks:
@@ -937,6 +1357,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
 
     def test_update_state_after_alloc_prefill_records_and_resets_flag(self):
         req = MockRequest("req_u1", prompt_token_ids=list(range(24)), kv_transfer_params={"do_remote_prefill": True})
+        self.scheduler.get_num_new_matched_tokens(req, num_computed_tokens=0)
         req.num_computed_tokens = 0
         blocks = _MockBlocks(unhashed=[4, 5, 6], block_ids_tuple=([[4, 5, 6]],))
 
@@ -960,6 +1381,24 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         info = self.scheduler._reqs_need_send_layerwise["req_u2"]
         self.assertEqual(info.local_block_ids, [[[7, 8, 9]]])
         self.assertIs(info.request, req)
+        self.assertEqual(info.request_generation, 1)
+
+        reused = MockRequest(
+            "req_u2",
+            prompt_token_ids=list(range(10)),
+            kv_transfer_params={
+                "do_remote_decode": True,
+                "remote_block_ids": [],
+                "remote_cached_tokens": 0,
+            },
+        )
+        self.scheduler.update_state_after_alloc(
+            reused, blocks, num_external_tokens=0
+        )
+        self.assertEqual(
+            self.scheduler._reqs_need_send_layerwise["req_u2"].request_generation,
+            2,
+        )
 
     def test_build_connector_meta_consumes_reqs_need_recv_and_clears(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
@@ -997,6 +1436,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
                 req_meta.local_transferred_tokens,
                 req_meta.local_computed_tokens,
                 req_meta.request,
+                1,
             )
         )
 
@@ -1034,6 +1474,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
                 send_req_info.local_transferred_tokens,
                 send_req_info.local_computed_tokens,
                 send_req_info.request,
+                1,
             )
         )
 
@@ -1050,9 +1491,18 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         self.assertIn("req_b3", meta.requests)
 
     def test_request_finished_returns_false_none(self):
-        ok, params = self.scheduler.request_finished(MockRequest("req_fin"), [1, 2])
+        request = MockRequest("req_fin")
+        self.scheduler._reqs_need_recv[request.request_id] = MagicMock()
+        self.scheduler._reqs_need_send_layerwise[request.request_id] = MagicMock()
+
+        ok, params = self.scheduler.request_finished(request, [1, 2])
+
         self.assertFalse(ok)
         self.assertIsNone(params)
+        self.assertNotIn(request.request_id, self.scheduler._reqs_need_recv)
+        self.assertNotIn(
+            request.request_id, self.scheduler._reqs_need_send_layerwise
+        )
 
 
 class TestHelperFunctions(unittest.TestCase):
@@ -1404,6 +1854,37 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def test_failed_receive_is_returned_as_finished_and_invalidated(self):
+        internal_req_id = "req-failed123456789"
+        recv_thread = MagicMock()
+        recv_thread.get_and_clear_done_requests.return_value = set()
+        recv_thread.get_and_clear_failed_requests.return_value = {"req-failed"}
+
+        worker = MooncakeLayerwiseConnectorWorker.__new__(
+            MooncakeLayerwiseConnectorWorker
+        )
+        worker.vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True)
+        )
+        worker.kv_send_layer_thread = None
+        worker.kv_recv_layer_thread = recv_thread
+        worker.request_map = {"req-failed": internal_req_id}
+        worker.virtual_request = set()
+        worker._recving_metadata = {
+            internal_req_id: SimpleNamespace(local_block_ids=[[3, 4]])
+        }
+        worker._invalid_block_ids = set()
+
+        done_sending, done_recving = worker.get_finished()
+
+        self.assertEqual(done_sending, set())
+        self.assertEqual(done_recving, {internal_req_id})
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {3, 4})
+        self.assertNotIn("req-failed", worker.request_map)
+
+        worker.get_finished({internal_req_id})
+        recv_thread.discard_requests.assert_called_once_with({"req-failed"})
+
     def test_register_kv_caches_producer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = True
         self.vllm_config.kv_transfer_config.is_kv_consumer = False
@@ -1439,6 +1920,86 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.layer_metadata["encoder.layer.0"].block_len), 2)
 
+    def test_save_kv_layer_delegates_metadata_failure_without_empty_task(self):
+        worker = MooncakeLayerwiseConnectorWorker.__new__(
+            MooncakeLayerwiseConnectorWorker
+        )
+        worker.vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(is_kv_producer=True)
+        )
+        worker.current_layer = 0
+        worker.total_layers = 1
+        worker.use_mla = True
+        worker.index_to_name = {0: ["layer0"]}
+        worker.layer_metadata = {
+            "layer0": _make_layer_metadata(tensor_group_idx=[0, 0])
+        }
+        worker.kv_send_layer_thread = MagicMock()
+        failure_completion = Future()
+        worker.kv_send_layer_thread.mark_request_failed.return_value = (
+            failure_completion
+        )
+        worker.update_decoder_info = MagicMock(
+            side_effect=RuntimeError("metadata handshake failed")
+        )
+        metadata = MooncakeLayerwiseConnectorMetadata()
+        req_meta = ReqMeta(
+            local_block_ids=[[1]],
+            token_ids=[1],
+            remote_block_ids=[[2]],
+            remote_block_size=[[16]],
+            remote_engine_id="remote",
+            remote_host="127.0.0.2",
+            remote_port=9000,
+            remote_te_rpc_port=None,
+            remote_layer_metadata=None,
+            metaserver=None,
+            remote_tp_size=1,
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            chunk_finish=True,
+        )
+        metadata.requests["req-failed"] = req_meta
+
+        source_futures = worker.save_kv_layer(
+            "layer0",
+            [torch.empty(1), torch.empty(1)],
+            MagicMock(),
+            metadata,
+            kv_ready_event=MagicMock(),
+        )
+
+        worker.kv_send_layer_thread.mark_request_failed.assert_called_once_with(
+            "req-failed",
+            req_meta,
+            0,
+        )
+        worker.kv_send_layer_thread.send_queue.put.assert_not_called()
+        self.assertIsInstance(source_futures, list)
+        self.assertEqual(len(source_futures), 2)
+        self.assertTrue(source_futures[0].done())
+        self.assertIsNone(source_futures[0].exception())
+        self.assertIs(source_futures[1], failure_completion)
+        self.assertFalse(failure_completion.done())
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.time.sleep")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.zmq_ctx")
+    def test_send_done_signal_ack_timeout_is_propagated(self, mock_zmq_ctx, _mock_sleep):
+        worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        worker.side_channel_host = "127.0.0.1"
+        worker.handshake_port = 4321
+        worker.timeout = 0.01
+        req_meta = SimpleNamespace(remote_host="127.0.0.2", remote_port=9000, trans_count=[1])
+        socket = MagicMock()
+        socket.poll.return_value = False
+        context = MagicMock()
+        context.__enter__.return_value = socket
+        mock_zmq_ctx.return_value = context
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to receive ACK"):
+            worker.send_done_send_signal("req-ack-timeout", req_meta, 0)
+
+        self.assertEqual(mock_zmq_ctx.call_count, 3)
     def test_register_kv_caches_rejects_sparse_sfa_c8_main_cache(self):
         layer_name = "model.layers.0.self_attn.attn"
         group = MagicMock()

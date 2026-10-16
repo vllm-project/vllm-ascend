@@ -18,15 +18,26 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     MLAAttentionImpl,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.cache_layout import (
+    LayerCacheLayoutDescriptor,
+    LayerCacheViews,
+    bind_layer_cache_views,
+    build_mla_layer_cache_descriptor,
+    resolve_dsa_main_cache_tensors,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
+)
+from vllm_ascend.attention.offload_capability import (
+    DsaOffloadAttentionBackendCapability,
+    DsaOffloadCacheMemory,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
@@ -54,6 +65,11 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
+)
+from vllm_ascend.ops.dsa_offload import (
+    DsaOffloadConfig,
+    get_dsa_config_value,
+    get_dsa_raw_seq,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
@@ -346,8 +362,14 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     return False
 
 
-class AscendSFABackend(AttentionBackend):
+class AscendSFABackend(DsaOffloadAttentionBackendCapability, AttentionBackend):
     accept_output_buffer: bool = True
+
+    @classmethod
+    def supports_dsa_offload(cls) -> bool:
+        """SFA owns the DSA cache tuple and offload runtime contract."""
+
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -386,6 +408,212 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+    @staticmethod
+    def get_dsa_offload_group_specs(num_hidden_layers: int):
+        """Return the DSA cache groups described by SFA metadata.
+
+        DSA offload is orchestrated by the model runner, but the meaning of
+        ``indexer_types`` belongs to the attention backend.  Keeping this
+        translation here prevents the runner from depending on a particular
+        model config layout when another SFA-compatible model is added.
+        """
+
+        from vllm_ascend.attention.dsa_offload_runtime import build_dsa_group_specs
+
+        config = get_current_vllm_config()
+        model_config = config.model_config
+        indexer_types = get_dsa_config_value(model_config, "indexer_types")
+        return build_dsa_group_specs(indexer_types, num_hidden_layers)
+
+    @staticmethod
+    def get_dsa_offload_layer_count() -> int:
+        config = get_current_vllm_config()
+        value = get_dsa_config_value(config.model_config, "num_hidden_layers")
+        if not isinstance(value, int) or value <= 0:
+            raise RuntimeError("DSA Host offload requires num_hidden_layers")
+        return value
+
+    @staticmethod
+    def get_dsa_offload_default_pool_size() -> int:
+        config = get_current_vllm_config()
+        return 16384 if bool(
+            get_dsa_config_value(config.model_config, "enlarge_pool_size", False)
+        ) else 8192
+
+    @staticmethod
+    def get_dsa_offload_layer_id(layer_name: str) -> int | None:
+        """Map a cache layer name to its base-model layer index."""
+
+        try:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            return int(extract_layer_index(layer_name))
+        except (AssertionError, IndexError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def is_dsa_offload_attention_impl(attn_impl: Any) -> bool:
+        """Identify SFA implementations while scanning static context."""
+
+        return isinstance(attn_impl, AscendSFAImpl)
+
+    @staticmethod
+    def get_dsa_offload_topk() -> int | None:
+        """Return the indexer top-k parameter used by DSA offload."""
+
+        config = get_current_vllm_config()
+        model_config = config.model_config
+        topk = get_dsa_config_value(model_config, "index_topk")
+        return int(topk) if topk is not None else None
+
+    @staticmethod
+    def get_dsa_offload_cache_dimensions(attn_impl: Any) -> tuple[int, int]:
+        """Return the Main-KV and rotary dimensions required by workspaces."""
+
+        kv_dim = int(attn_impl.kv_lora_rank)
+        rope_dim = int(attn_impl.qk_rope_head_dim)
+        return kv_dim, rope_dim
+
+    @staticmethod
+    def bind_dsa_offload_runtime(
+        attn_impl: Any,
+        runtime: Any,
+        layer_id: int,
+    ) -> None:
+        """Bind the shared DSA runtime to one SFA implementation."""
+
+        attn_impl.dsa_offload_runtime = runtime
+        attn_impl.dsa_layer_id = layer_id
+
+    @staticmethod
+    def bind_dsa_cache_layout_descriptor(
+        attn_impl: Any, descriptor: LayerCacheLayoutDescriptor
+    ) -> None:
+        attn_impl.bind_cache_layout_descriptor(descriptor)
+
+    @staticmethod
+    def build_layer_cache_descriptor(
+        *,
+        layer_name: str,
+        layer_id: int,
+        group_id: int,
+        cache_family_id: str,
+        kv_cache_spec,
+        is_mtp_layer: bool = False,
+    ) -> LayerCacheLayoutDescriptor:
+        """Describe the physical SFA cache tuple for offload consumers."""
+
+        return build_mla_layer_cache_descriptor(
+            layer_name=layer_name,
+            layer_id=layer_id,
+            group_id=group_id,
+            cache_family_id=cache_family_id,
+            kv_cache_spec=kv_cache_spec,
+            is_mtp_layer=is_mtp_layer,
+        )
+
+    @classmethod
+    def get_dsa_offload_cache_memory(
+        cls,
+        *,
+        layer_name: str,
+        kv_cache_spec,
+    ) -> DsaOffloadCacheMemory:
+        """Return DSA cache memory charges without exposing tuple details.
+
+        The descriptor is deliberately built here.  Cache planners and KV
+        transfer pools consume only the aggregate accounting, while runtime
+        cache binding continues to use ``build_layer_cache_descriptor``.
+        """
+
+        block_size = int(kv_cache_spec.block_size)
+        if not isinstance(kv_cache_spec, MLAAttentionSpec):
+            raise NotImplementedError(
+                "Layerwise DSA Host offload requires MLAAttentionSpec; "
+                f"layer={layer_name}, got {type(kv_cache_spec).__name__}"
+            )
+        if kv_cache_spec.sparse_head_dim is None or kv_cache_spec.cache_sparse_c8:
+            raise NotImplementedError(
+                "Layerwise DSA Host offload requires the non-C8 SFA cache layout; "
+                f"layer={layer_name}"
+            )
+
+        descriptor = cls.build_layer_cache_descriptor(
+            layer_name=layer_name,
+            layer_id=0,
+            group_id=0,
+            cache_family_id="default",
+            kv_cache_spec=kv_cache_spec,
+        )
+        main_bytes_per_token = sum(
+            component.page_bytes // block_size
+            for component in descriptor.main_components
+        )
+        return DsaOffloadCacheMemory(
+            main_bytes_per_token=main_bytes_per_token,
+            device_bytes_per_block=sum(
+                component.page_bytes for component in descriptor.indexer_components
+            ),
+        )
+
+    @classmethod
+    def is_dsa_offload_speculative_layer(
+        cls,
+        *,
+        layer_name: str,
+        kv_cache_spec: Any,
+    ) -> bool:
+        """Resolve whether a cache layer is speculative for DSA offload."""
+
+        from vllm_ascend.attention.offload_capability import is_speculative_cache_layer
+
+        del cls, kv_cache_spec
+        config = get_current_vllm_config()
+        model_config = config.model_config
+        num_hidden_layers = get_dsa_config_value(model_config, "num_hidden_layers")
+        return is_speculative_cache_layer(
+            layer_name,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+    @staticmethod
+    def bind_layer_cache_views(
+        descriptor: LayerCacheLayoutDescriptor,
+        raw_cache_tuple: list[torch.Tensor] | tuple[torch.Tensor, ...],
+    ) -> LayerCacheViews:
+        return bind_layer_cache_views(descriptor, raw_cache_tuple)
+
+
+    @staticmethod
+    def update_host_main_cache(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Write current-step Main KV into the PA cache.
+
+        Decode may pass device-visible Host-backed tensors here. The Ascend PA
+        update operator supports that address space directly, so no landing
+        buffer or Host-to-Device gather is introduced.
+        """
+        if key.numel() == 0:
+            return
+        DeviceOperator.reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+        )
+
+
+@dataclass
+@dataclass(frozen=True)
+class DsaSelectionAttentionMetadata:
+    block_table: torch.Tensor
 
 
 @dataclass
@@ -842,6 +1070,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.local_num_heads = self.num_heads
         self.layer_name = kwargs.get("layer_name")
+        self.dsa_offload_runtime = None
+        self.dsa_layer_id = None
+        self.dsa_cache_layout_descriptor: LayerCacheLayoutDescriptor | None = None
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         config_candidates = (hf_config, hf_text_config)
@@ -916,6 +1147,13 @@ class AscendSFAImpl(MLAAttentionImpl):
     @property
     def runtime_has_indexer(self) -> bool:
         return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
+
+    def bind_cache_layout_descriptor(
+        self, descriptor: LayerCacheLayoutDescriptor
+    ) -> None:
+        """Bind the offload-owned physical cache layout to this attention impl."""
+
+        self.dsa_cache_layout_descriptor = descriptor
 
     @staticmethod
     def update_graph_params(
@@ -1887,6 +2125,141 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return indexer_metadata
 
+    def _dsa_offload_config(self, attn_metadata: M) -> DsaOffloadConfig | None:
+        if self.dsa_offload_runtime is None or self.dsa_layer_id is None:
+            return None
+        if attn_metadata.attn_state not in {
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        }:
+            return None
+        raw_seq = (
+            get_dsa_raw_seq(self.vllm_config.speculative_config)
+            if attn_metadata.attn_state is AscendAttentionState.SpecDecoding
+            else 1
+        )
+        topk = get_dsa_config_value(
+            self.vllm_config.model_config, "index_topk"
+        )
+        if topk is None:
+            raise RuntimeError(
+                "DSA Host offload requires attention backend index_topk metadata"
+            )
+        return DsaOffloadConfig(
+            raw_seq=raw_seq,
+            topk=int(topk),
+            # The implementation has no metadata-builder block_size; use the
+            # cache config that also sizes the fixed runtime workspaces.
+            selection_block_size=int(self.vllm_config.cache_config.block_size),
+        )
+
+    @staticmethod
+    def _reshape_dsa_topk(
+        topk_indices: torch.Tensor,
+        batch: int,
+        raw_seq: int,
+        topk: int,
+    ) -> torch.Tensor:
+        if topk_indices is None:
+            raise ValueError("topk_indices cannot be None")
+        topk_indices = topk_indices.to(dtype=torch.int32)
+        if topk_indices.shape[-1] != topk:
+            raise ValueError(
+                f"DSA top-k width must be {topk}, got {topk_indices.shape[-1]}"
+            )
+        if raw_seq == 1:
+            if topk_indices.ndim == 2:
+                topk_indices = topk_indices.unsqueeze(1)
+            if topk_indices.ndim != 3 or topk_indices.shape[:2] != (batch, 1):
+                raise ValueError(
+                    "Decode DSA top-k must be [batch, 1, topk], got "
+                    f"{tuple(topk_indices.shape)}"
+                )
+            return topk_indices
+        if topk_indices.ndim == 3 and topk_indices.shape[:2] == (batch * raw_seq, 1):
+            return topk_indices.view(batch, raw_seq, 1, topk)
+        if topk_indices.ndim == 4 and topk_indices.shape[:3] == (batch, raw_seq, 1):
+            return topk_indices
+        raise ValueError(
+            "MTP DSA top-k must be [batch*raw_seq, 1, topk] or "
+            f"[batch, raw_seq, 1, topk], got {tuple(topk_indices.shape)}"
+        )
+
+    def _execute_dsa_offload_attention(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        topk_indices: torch.Tensor,
+        attn_metadata: M,
+        config: DsaOffloadConfig,
+    ) -> torch.Tensor:
+        runtime = self.dsa_offload_runtime
+        layer_id = self.dsa_layer_id
+        if runtime is None or layer_id is None:
+            raise RuntimeError("DSA Host offload runtime is not initialized")
+        batch = attn_metadata.block_table.shape[0]
+        topk_for_plan = self._reshape_dsa_topk(
+            topk_indices, batch, config.raw_seq, config.topk
+        )
+        full_actual_seq = attn_metadata.seq_lens[:batch].to(dtype=torch.int32)
+        group = runtime.group_for_layer(layer_id)
+        if layer_id == group.owner_layer:
+            runtime.plan_group(
+                group.group_id,
+                topk_for_plan,
+                full_actual_seq,
+                config=config,
+            )
+        cache_layout = self.dsa_cache_layout_descriptor
+        if cache_layout is None:
+            raise RuntimeError(
+                "DSA Host offload cache layout is not initialized for "
+                f"{self.layer_name}"
+            )
+        full_kv_cache, full_k_rope = resolve_dsa_main_cache_tensors(
+            cache_layout,
+            kv_cache,
+        )
+        workspace, plan_state = runtime.serve_layer(
+            layer_id,
+            full_kv_cache,
+            full_k_rope,
+            attn_metadata.block_table[:batch].to(dtype=torch.int32),
+            full_actual_seq,
+            config=config,
+        )
+
+        rows = config.selection_rows(batch)
+        selected_blocks = config.selection_block_count(batch)
+        if workspace.selection_query_lens is None or workspace.selection_default_indices is None:
+            raise RuntimeError("DSA selection metadata buffers are not initialized")
+        actual_seq = plan_state.selection_kv_actual_seq[:rows].to(dtype=torch.int32)
+        default_indices = workspace.selection_default_indices[:rows]
+        sparse_indices = torch.where(
+            default_indices < actual_seq.view(rows, 1, 1),
+            default_indices,
+            -1,
+        )
+        selection_cache = (
+            workspace.selection_kv_cache[:selected_blocks].unsqueeze(2),
+            workspace.selection_k_rope[:selected_blocks].unsqueeze(2),
+        )
+        selection_metadata = DsaSelectionAttentionMetadata(
+            workspace.selection_block_table[:rows]
+        )
+        attn_output = self._execute_sparse_flash_attention_process(
+            ql_nope,
+            q_pe,
+            selection_cache,
+            sparse_indices,
+            selection_metadata,
+            workspace.selection_query_lens[:rows],
+            actual_seq,
+        )
+        runtime.install_after_layer(layer_id, config=config)
+        return attn_output
+
     def forward(
         self,
         layer_name,
@@ -2096,17 +2469,28 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
+        dsa_config = self._dsa_offload_config(attn_metadata)
         with attention_transfer_window():
             if has_local_query:
-                attn_output = self._execute_sparse_flash_attention_process(
-                    ql_nope,
-                    q_pe,
-                    kv_cache,
-                    topk_indices,
-                    attn_metadata,
-                    actual_seq_lengths_query,
-                    actual_seq_lengths_key,
-                )
+                if dsa_config is None:
+                    attn_output = self._execute_sparse_flash_attention_process(
+                        ql_nope,
+                        q_pe,
+                        kv_cache,
+                        topk_indices,
+                        attn_metadata,
+                        actual_seq_lengths_query,
+                        actual_seq_lengths_key,
+                    )
+                else:
+                    attn_output = self._execute_dsa_offload_attention(
+                        ql_nope,
+                        q_pe,
+                        kv_cache,
+                        topk_indices,
+                        attn_metadata,
+                        dsa_config,
+                    )
 
         if has_local_query:
             attn_output = self._v_up_proj(attn_output)
