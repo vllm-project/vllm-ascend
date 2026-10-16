@@ -1150,7 +1150,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "glm53-flash-prefill-dp'"$4"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1183,7 +1182,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "glm53-flash-decode-dp'"$4"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1209,8 +1207,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
-    unique `engine_id` and `lookup_rpc_port`; the child connectors inherit the
-    outer `engine_id`. The Prefill lookup values are `37000-37001`, and the
+    unique `lookup_rpc_port`. The Prefill lookup values are `37000-37001`, and the
     Decode lookup values are `37100-37107`. Keep the role-specific Mooncake KV
     base ports from Section 5.3; its workers and schedulers derive their own
     ports from the topology.
@@ -1340,7 +1337,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "glm53-flash-prefill-dp'"$4"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1376,7 +1372,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "glm53-flash-decode-dp'"$4"'",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1406,9 +1401,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Both role templates use the launcher DP-rank argument `$4` for the
-    `engine_id` suffix and lookup port. Each engine must have a unique
-    `engine_id` and `lookup_rpc_port`; the child connectors inherit the outer
-    `engine_id`. The Prefill lookup ports are `37000-37001`, and the Decode lookup
+    lookup port. Each engine must have a unique `lookup_rpc_port`. The Prefill lookup ports are `37000-37001`, and the Decode lookup
     ports are `37100-37107`. The `prefill` and `decode` topology declared in the
     `MooncakeConnectorV2` fragment must match the real deployment.
 
