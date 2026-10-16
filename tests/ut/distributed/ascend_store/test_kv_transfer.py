@@ -553,6 +553,32 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
+    def test_save_keeps_checks_for_align_state_slots(self):
+        thread, store = self._make_thread()
+        thread.group_uses_align_state = [True]
+        store.exists = MagicMock(
+            side_effect=lambda keys: [int(any(key in call[0] for call in store.put_calls)) for key in keys]
+        )
+        for token_len, saved_tokens, block_ids in ((32, 0, [0, 2]), (48, 32, [1, 2, 3])):
+            request = ReqMeta(
+                req_id="r1",
+                token_len_chunk=token_len,
+                save_start_token=saved_tokens,
+                block_ids=block_ids,
+                block_hashes=["h0", "h1", "h2"][: token_len // 16],
+                skip_null_blocks_by_group=[True],
+            )
+            thread.add_stored_request(request)
+            thread.request_queue.put(request)
+            thread._handle_request(request)
+
+            self.assertEqual(thread.get_saved_offset("r1"), token_len)
+
+        self.assertEqual(
+            [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
+            [["h1"], ["h0", "h2"]],
+        )
+
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
         for pcp_size in (1, 2, 4):
@@ -1039,8 +1065,12 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(store.put_calls), 1)
 
     def test_handle_request_applies_store_mask(self):
+        class StoreMask(list):
+            def __iter__(self):
+                raise AssertionError("The complete historical mask must not be scanned")
+
         store = FakeStore([0, 0])
-        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        db = MaskedFakeTokenDatabase(masks=(StoreMask([True, True, False]),))
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
@@ -1054,16 +1084,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         req = ReqMeta(
             req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_len_chunk=48,
+            save_start_token=32,
+            block_ids=[1, 2, 3],
+            block_hashes=["h0", "h1", "h2"],
             current_event=None,
         )
         t.add_stored_request(req)
+        t._saved_offsets["r1"] = 16
         t.request_queue.put(req)
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 1)
+        self.assertEqual([key.rsplit("@", 1)[1] for key in keys], ["h1"])
+        self.assertEqual(db.masks[0], [True, True, False])
 
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
         t, store = self._make_thread([0, 0], block_size=64)

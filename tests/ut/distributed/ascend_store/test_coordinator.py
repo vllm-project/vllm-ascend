@@ -196,6 +196,12 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         )
 
         self.assertEqual(hit_length, 0)
+        for local, expected in ((16383, 0), (16384, 16384)):
+            with self.subTest(local=local):
+                self.assertEqual(
+                    coord.find_reachable_hit_tokens(block_hashes, 16384, lambda *args: [], hbm_hit_tokens=local),
+                    expected,
+                )
 
     def test_store_mask_uses_manager_reachability(self):
         coord = AscendStoreCoordinator(
@@ -344,6 +350,29 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(calls, [True, True])
         self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
+
+    def test_reachable_mask_cache_preserves_inputs_and_caller_isolation(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(16, 32))],
+            scheduler_block_size=16,
+            hash_block_size=16,
+            group_block_sizes=[16],
+            group_cache_families=["c1"],
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            side_effect=lambda *args, **kwargs: [True] + [False] * (kwargs["end_block"] - 1),
+        ) as build_mask:
+            coord.store_mask(32, 33)[0][0] = False
+            self.assertEqual(coord.store_mask(32, 33), ([True, False],))
+            coord.lookup_mask(32)[0][0] = False
+            self.assertEqual(coord.lookup_mask(32), ([True, False],))
+            self.assertEqual(build_mask.call_count, 2)
+            coord.retention_interval = 64
+            coord.store_mask(32, 33)
+            coord.store_mask(48, 33)
+            coord.store_mask(32, 65)
+            self.assertEqual(build_mask.call_count, 5)
 
     def test_compressed_masks_use_full_attention_reachability(self):
         coord = AscendStoreCoordinator(

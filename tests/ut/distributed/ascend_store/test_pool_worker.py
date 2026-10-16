@@ -736,11 +736,11 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.m_store = MagicMock()
         worker.token_database = MagicMock()
 
-        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
+        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_mask):
             return [
                 (start, start + 128, f"key{start // 128}", f"h{start // 128}".encode())
                 for start in range(mask_num, token_len, 128)
-                if chunk_filter(start)
+                if chunk_mask is None or (start // 128 < len(chunk_mask) and chunk_mask[start // 128])
             ]
 
         worker.token_database.process_token_key_strings.side_effect = process_token_key_strings
@@ -773,7 +773,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         store_mask.assert_not_called()
         worker.token_database.process_tokens.assert_not_called()
 
-    def test_external_coordinator_lookup_preseeds_hbm_hits(self):
+    def test_external_coordinator_lookup_preserves_hbm_hits(self):
         cls = self._make_worker_class()
         worker = self._make_lookup_worker(cls, self._make_sparse_swa_coordinator())
         worker.m_store.exists.return_value = [1]
@@ -791,7 +791,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 hbm_hit_tokens=128,
             )
 
-        # The locally computed block is preseeded and never queried; only the
+        # The locally computed block is recognized without a query; only the
         # tail block beyond the HBM hit goes to the pool.
         self.assertEqual(hit, 256)
         worker.m_store.exists.assert_called_once_with(["key1"])
