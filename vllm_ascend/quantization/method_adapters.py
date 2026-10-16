@@ -26,6 +26,7 @@ from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorSca
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.quantization.mxfp_utils import get_mxfp_tp_padding
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
@@ -143,7 +144,10 @@ class AscendLinearMethod(LinearMethodBase):
             assert hasattr(self.quant_method, "group_size")
             # A shard can start inside a checkpoint group and cover one more
             # scale than ceil(local K / group_size), depending on its TP rank.
-            pergroup_input_size += (layer.tp_rank * input_size_per_partition) % self.quant_method.group_size
+            prefix_padding, _ = get_mxfp_tp_padding(
+                input_size_per_partition, self.quant_method.group_size, layer.tp_rank
+            )
+            pergroup_input_size += prefix_padding
         pergroup_dict = self.quant_method.get_pergroup_param(
             pergroup_input_size, output_size_per_partition, params_dtype, layer_type=layer_type
         )
