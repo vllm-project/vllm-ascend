@@ -22,9 +22,11 @@ architecture overrides do not fight over the ModelRegistry mapping:
 - MC2: torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) fuses the
   matmul and the all-reduce of row-parallel linears under TP into one kernel:
   the activation crosses the HCCL link once and comm overlaps the matmul
-  tail. Supports BF16 (dense matmul) and quantized weights (W8A8 int8 /
-  MXFP8) via the op's antiquant_scale parameters (W8A16 pattern: BF16
-  activation, weight dequantized in-flight). Ineligible
+  tail. Supports BF16 (dense matmul) and quantized weights with float scales
+  (W8A8 int8 / W8A8FP8 dynamic; float32 scales are cast to bfloat16 in-flight)
+  via the op's antiquant_scale parameters (W8A16 pattern: BF16 activation,
+  weight dequantized in-flight). MXFP8's packed uint8 E8M0 scales are rejected
+  by the op (EZ1001) and keep the stock path. Ineligible
   calls delegate to the stock forward captured at install time; during ACL
   graph capture the op falls back to stock matmul+allreduce (EE1016).
 - VL preprocessing (from qwen3_5_vl): the front-end emits flat raw uint8 and
@@ -133,6 +135,10 @@ def _mm_all_reduce_quant_impl(
     """
     if not _ensure_comm_ready():
         return tensor_model_parallel_all_reduce(torch.matmul(x1, x2.to(x1.dtype) * antiquant_scale.to(x1.dtype)))
+    # aclnnWeightQuantMatmulAllReduce requires FP16/BF16 scales (EZ1001); the
+    # W8A8FP8 dynamic scheme stores them as float32.
+    if antiquant_scale.dtype == torch.float32:
+        antiquant_scale = antiquant_scale.to(torch.bfloat16)
     return torch_npu.npu_mm_all_reduce_base(
         x1,
         x2,
@@ -188,7 +194,10 @@ def _fused_forward_factory(orig_forward):
                 antiquant_offset = getattr(self, "weight_offset", None)
                 if antiquant_offset is None:
                     antiquant_offset = torch.empty(0, device=input_parallel.device)
-                antiquant_group_size = getattr(self.quant_method, "group_size", 0) or 0
+                # group_size lives on the concrete scheme, which may be
+                # wrapped by the AscendLinearMethod delegator.
+                scheme = getattr(self.quant_method, "quant_method", self.quant_method)
+                antiquant_group_size = getattr(scheme, "group_size", 0) or 0
                 output = torch.ops.vllm.ascend_mm_all_reduce_quant(
                     input_parallel,
                     self.weight,
@@ -263,6 +272,21 @@ class _AscendMC2Mixin:
         for name, module in self.named_modules():
             if not isinstance(module, RowParallelLinear) or not module.reduce_results:
                 continue
+            # W8A16 antiquant gate: aclnnWeightQuantMatmulAllReduce only
+            # accepts float scales (EZ1001 rejects DT_UINT8). MXFP8
+            # checkpoints store packed uint8 E8M0 scales — those linears keep
+            # the stock forward. float32 scales (the W8A8FP8 dynamic scheme)
+            # are cast to bfloat16 inside the op impl.
+            if not isinstance(module.quant_method, UnquantizedLinearMethod):
+                scale = getattr(module, "weight_scale", None)
+                if scale is None or scale.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                    logger.warning_once(
+                        "MC2: quantized weight_scale dtype %s is not supported by the fused "
+                        "antiquant op (needs float16/bfloat16; MXFP8 packed uint8 E8M0 scales "
+                        "are rejected) — these linears keep the stock path",
+                        scale.dtype if scale is not None else "missing",
+                    )
+                    continue
             if skip_gdn_layers and gdn_layer_indices:
                 # name looks like "model.layers.N.self_attn.o_proj" — extract N.
                 # Unparseable names keep the fused path: the skip is a perf
