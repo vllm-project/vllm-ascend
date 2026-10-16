@@ -1274,17 +1274,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Use device lengths only for the audited K3/DSpark backends."""
-        from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
-        from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
-        from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-        from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
-
         parallel = self.vllm_config.parallel_config
         if (
             self.model_config.architecture not in {"KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
-            or type(self.model_state) is not AscendMambaHybridModelState
-            or type(self.speculator) is not AscendDSparkSpeculator
-            or not self.speculator._draft_mla_uses_device_lengths
+            or not getattr(self.speculator, "_draft_mla_uses_device_lengths", False)
             # Other parallel/offload paths have not been audited for host readers.
             or parallel.pipeline_parallel_size != 1
             or parallel.prefill_context_parallel_size != 1
@@ -1296,25 +1289,20 @@ class NPUModelRunner(GPUModelRunner):
             return False
 
         has_mla = False
-        has_kda = False
         draft_layer_names = self.speculator.draft_attn_layer_names
         for groups in self.attn_groups:
             for group in groups:
+                # K3's non-MLA attention uses the KDA device-length path.
+                if not issubclass(group.backend, AscendMLABackend):
+                    continue
                 if not any(name not in draft_layer_names for name in group.layer_names):
                     continue
-                if not group.metadata_builders:
+                if not group.metadata_builders or any(
+                    getattr(builder, "flashmla_state", None) is None for builder in group.metadata_builders
+                ):
                     return False
-                for builder in group.metadata_builders:
-                    if type(builder) is AscendGDNHostMetadataBuilder:
-                        has_kda = True
-                    elif (
-                        type(builder) is AscendMLAMetadataBuilder
-                        and getattr(builder, "flashmla_state", None) is not None
-                    ):
-                        has_mla = True
-                    else:
-                        return False
-        return has_mla and has_kda
+                has_mla = True
+        return has_mla
 
     def postprocess_sampled(
         self,
