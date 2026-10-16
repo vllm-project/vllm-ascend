@@ -318,6 +318,7 @@ def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, pp_size, dp_s
 def test_example_patches_both_pipeline_ends_and_experts(fused):
     path = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_sparse_hccl.py"
     spec = importlib.util.spec_from_file_location("sparse_hccl_example", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     model = torch.nn.Module()
