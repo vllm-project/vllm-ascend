@@ -34,6 +34,7 @@ def _make_runner(need_timing: bool = True):
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
+    runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
     runner.use_pp = False
     runner.is_last_pp_rank = False
@@ -189,10 +190,14 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     runner = _make_runner()
     runner.decode_query_len = 1
     batch_state = _make_batch_state([127, 0], [1, 1], [128, 1])
-    batch_state = batch_state._replace(prefill_runs_as_decode_np=np.array([False, prefill_runs_as_decode]))
+    batch_state = batch_state._replace(
+        prefill_runs_as_decode_np=np.array([True, prefill_runs_as_decode]),
+        decode_graph_eligible=prefill_runs_as_decode,
+    )
+    expected_uniform = 1 if prefill_runs_as_decode else None
 
     with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, expected_uniform)),
         patch.object(
             runner.vllm_config,
             "kv_transfer_config",
@@ -201,10 +206,10 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     ):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, True])
     assert gathered.has_prefill is True
     assert gathered.decode_graph_eligible is prefill_runs_as_decode
-    assert uniform == (1 if prefill_runs_as_decode else None)
+    assert uniform == expected_uniform
 
 
 def test_execute_model_records_profiling_time():

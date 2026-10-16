@@ -174,7 +174,10 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.dp_size = 2
         runner.dp_rank = dp_rank
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace())
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(),
+            aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
+        )
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
 
