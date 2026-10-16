@@ -34,6 +34,8 @@ from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, i
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -141,9 +143,16 @@ class NPUWorker(WorkerBase):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # register patch for vllm
+        # Worker processes receive a pickled VllmConfig, so the platform config
+        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
+        # Ascend V2 model runner overrides so the worker resolves the same
+        # runner version as the engine. Idempotent.
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
+        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
+        apply_v2_model_runner_config_patch()
+        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         # Register ops when worker init.
@@ -511,9 +520,17 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+                with torch_cuda_wrapper():
+                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
+            else:
+                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+
+                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
@@ -858,6 +875,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+            get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (

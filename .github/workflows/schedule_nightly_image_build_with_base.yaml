@@ -1,0 +1,157 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This workflow chains the base image build and the nightly image build into a single
+# run, with one independent pipeline per (chip, OS) pair so a slow base image only
+# blocks its own nightly image:
+#   for each (chip, os): build-base-<chip>-<os> -> build-nightly-<chip>-<os>
+# Each pair is a separate invocation of _schedule_nightly_pair_image_build.yaml, which
+# builds the chip-specific base image (via _schedule_image_build.yaml) and then the
+# matching nightly image (via _nightly_image_build.yaml) on top of it.
+#   daily:   atlas_ci/vllm-ascend:nightly-<branch>[-<chip>][-openeuler]-cann<ver>-<date>
+#   release: ascend/vllm-ascend:nightly-<branch>[-<chip>]
+# This is separate from nightly_image_build.yaml, which keeps building only the nightly
+# image (no base image chaining).
+name: Nightly Image Build (with base)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to nightly test'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - releases/v0.30.0
+          - releases/v0.29.0rc
+          - releases/v0.28.0rc
+          - releases/v0.27.1rc
+          - releases/v0.26.0rc
+          - releases/v0.25.1rc
+          - releases/v0.24.0rc
+          - releases/v0.23.0
+          - releases/v0.22.1rc
+          - releases/v0.21.0rc
+          - releases/v0.20.2rc
+          - releases/v0.18.0
+      build_type:
+        description: 'Build type: daily or release'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
+        required: false
+        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
+        type: string
+      chips:
+        description: 'Chips to build (JSON array: ["a2","a3","310p","a5"]). Default builds all.'
+        required: false
+        default: '["a2","a3","310p","a5"]'
+        type: string
+      mem_deps:
+        description: 'Daily base image memcache/memfabric versions (JSON object: {"memcache":["date","version"],"memfabric":["date","version"]})'
+        required: false
+        default: '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}'
+        type: string
+      torch_npu:
+        description: 'Daily base image torch_npu version and date (JSON array: ["date", "version"])'
+        required: false
+        default: '["20261011.6", "26.2.0"]'
+        type: string
+      triton_ascend:
+        description: 'Daily base image triton-ascend version and package version (JSON array: ["version", "package_version"])'
+        required: false
+        default: '["20261007182438", "3.6.0%2Bdev20261007182438"]'
+        type: string
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  setup-matrix:
+    runs-on: linux-amd64-cpu-2-hk
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+      has_matrix: ${{ steps.filter.outputs.has_matrix }}
+    steps:
+      - name: Filter build matrix by chips and build type
+        id: filter
+        run: |
+          CHIPS='${{ inputs.chips || '["a2","a3","310p","a5"]' }}'
+          BT='${{ inputs.build_type || 'release' }}'
+          ALL=$(jq -nc '[
+            {target:"a2",   os:"ubuntu",    soc:"910b", dockerfile:"Dockerfile",               suffix:"",               base_os:"ubuntu22.04",    build_base_os:"ubuntu24.04"},
+            {target:"a3",   os:"ubuntu",    soc:"a3",   dockerfile:"Dockerfile.a3",             suffix:"a3",             base_os:"ubuntu22.04",    build_base_os:"ubuntu24.04"},
+            {target:"310p", os:"ubuntu",    soc:"310p", dockerfile:"Dockerfile.310p",           suffix:"310p",           base_os:"ubuntu22.04",    build_base_os:"ubuntu24.04"},
+            {target:"a5",   os:"ubuntu",    soc:"950",  dockerfile:"Dockerfile.a5",             suffix:"a5",             base_os:"ubuntu22.04",    build_base_os:"ubuntu24.04"},
+            {target:"a2",   os:"openeuler", soc:"910b", dockerfile:"Dockerfile.openEuler",      suffix:"openeuler",      base_os:"openeuler24.03", build_base_os:"openeuler24.03-lts-sp4"},
+            {target:"a3",   os:"openeuler", soc:"a3",   dockerfile:"Dockerfile.a3.openEuler",   suffix:"a3-openeuler",   base_os:"openeuler24.03", build_base_os:"openeuler24.03-lts-sp4"},
+            {target:"310p", os:"openeuler", soc:"310p", dockerfile:"Dockerfile.310p.openEuler", suffix:"310p-openeuler", base_os:"openeuler24.03", build_base_os:"openeuler24.03-lts-sp4"},
+            {target:"a5",   os:"openeuler", soc:"950",  dockerfile:"Dockerfile.a5.openEuler",   suffix:"a5-openeuler",   base_os:"openeuler24.03", build_base_os:"openeuler24.03-lts-sp4"}
+          ]')
+          # Keep entries whose target is selected by `chips`; drop openeuler unless daily.
+          FILTERED=$(echo "$ALL" | jq -c --argjson chips "$CHIPS" --arg bt "$BT" \
+            '[.[] | select(.target as $t | $chips | index($t)) | select($bt == "daily" or .os != "openeuler")]')
+          echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
+          if [ "$FILTERED" = "[]" ]; then
+            echo "has_matrix=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_matrix=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-image:
+    name: Build nightly-${{ matrix.target }} (${{ matrix.os }})
+    needs: setup-matrix
+    if: ${{ needs.setup-matrix.outputs.has_matrix == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
+    with:
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+      soc: ${{ matrix.soc }}
+      dockerfile: ${{ matrix.dockerfile }}
+      suffix: ${{ matrix.suffix }}
+      base_os: ${{ matrix.base_os }}
+      build_base_os: ${{ matrix.build_base_os }}
+      build_type: ${{ inputs.build_type || 'release' }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').base_image_date }}
+      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[1] }}
+      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[0] }}
+      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[1] }}
+      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[0] }}
+      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[1] }}
+      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[0] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[1] }}
+      swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
+    secrets:
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
