@@ -4,9 +4,9 @@
 
 import torch
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state, prepare_conv_indices
+from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
 
 def causal_conv1d(
@@ -19,16 +19,14 @@ def causal_conv1d(
     run_mode: int,
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
-    prepared_cache_indices: torch.Tensor | None = None,
-    prepared_null_block_id: int | None = None,
 ) -> torch.Tensor:
-    """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
-    # Padded requests can be skipped by the kernel; their output must stay zero.
-    output = torch.zeros_like(x)
+    """Update GDN state in place; cache indices use slot zero for padding."""
     if cache_indices.shape[0] == 0:
-        return output
+        return torch.zeros_like(x)
     kernel_state = conv_state
-    kernel_indices = cache_indices
+    # FLA requires 1D indices. ACLNN still copies a strided column internally.
+    kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
+    null_block_id = NULL_BLOCK_ID
     # AscendC reads and updates page-strided SD states in place. Only stage
     # layouts outside its stride contract, such as a transposed DS state whose
     # channel dimension is not contiguous. Copy only this batch's state rows.
@@ -39,20 +37,8 @@ def causal_conv1d(
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-    # GDN uses -1 for padding, but AscendC enables null_block_id only when it
-    # is nonnegative. Use the first slot outside the cache as the sentinel;
-    # this also preserves valid slot zero and the gather kernel's masking.
-    # FLA requires 1D indices; GDN matrices contribute their first column.
-    if not needs_state_copy and prepared_cache_indices is not None:
-        if prepared_null_block_id is None:
-            raise ValueError("Prepared convolution indices require a null_block_id")
-        kernel_indices = prepared_cache_indices
-        null_block_id = prepared_null_block_id
-    else:
-        # Standalone callers and the DS-layout staging path still prepare
-        # indices locally; packed rows have different cache coordinates.
-        null_block_id = kernel_state.shape[0]
-        kernel_indices = prepare_conv_indices(kernel_indices, query_start_loc, null_block_id)
+        # Packed row zero is live; the gather kernel uses requests for padding.
+        null_block_id = requests
     if run_mode == 0:
         result = causal_conv1d_fn(
             x,

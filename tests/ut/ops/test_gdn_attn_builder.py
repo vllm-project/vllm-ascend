@@ -2,14 +2,14 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
@@ -344,7 +344,6 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
     assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.use_prepared_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -807,7 +806,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.non_spec_state_indices_tensor,
         torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
     )
-    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+    assert torch.all(builder.spec_state_indices_tensor[:4] == builder._SPEC_GRAPH_PAD_SLOT_ID)
 
 
 def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):
@@ -1154,7 +1153,7 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
     assert replay_metadata.spec_decode_metadata is None
     assert torch.equal(
         captured_conv1d_metadata.cache_indices,
-        torch.full((4, 4), PAD_SLOT_ID, dtype=torch.int32),
+        torch.full((4, 4), builder._SPEC_GRAPH_PAD_SLOT_ID, dtype=torch.int32),
     )
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) == 0
     assert torch.count_nonzero(captured_conv1d_metadata.num_accepted_tokens) == 0
@@ -1193,7 +1192,7 @@ def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
     assert torch.count_nonzero(attn_metadata.non_spec_query_start_loc) == 0
     assert torch.all(attn_metadata.non_spec_state_indices_tensor == NULL_BLOCK_ID)
     assert torch.count_nonzero(builder.spec_query_start_loc[:5]) == 0
-    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+    assert torch.all(builder.spec_state_indices_tensor[:4] == builder._SPEC_GRAPH_PAD_SLOT_ID)
 
 
 @pytest.mark.parametrize(
@@ -1461,63 +1460,3 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
-
-
-def test_prepared_conv_group_buffers_are_reused_and_spec_inputs_are_cleared(monkeypatch):
-    # NPU tests cover index values. This UT checks the builder's buffer lifetime
-    # and dispatch contract without reproducing the preparation kernel.
-    single = Mock(side_effect=lambda ids, starts, slots, *, out: out[: ids.shape[0]])
-    pair = Mock(
-        side_effect=lambda ids, starts, out, spec_ids, spec_starts, spec_out, slots: (
-            out[: ids.shape[0]],
-            spec_out[: spec_ids.shape[0]],
-        )
-    )
-    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_conv_indices", single)
-    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_conv_indices_pair", pair)
-    builders = []
-    for slots in (8, 16):
-        builder = _make_builder(
-            device=torch.device("cpu"),
-            num_heads=32,
-            num_speculative_tokens=3,
-            builder_cls=AscendGDNHostMetadataBuilder,
-            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-        )
-        builder.compilation_config.static_forward_context["layer0"] = SimpleNamespace(
-            use_prepared_conv_indices=True, kv_cache=(torch.empty(slots, 6, 8),)
-        )
-        builders.append(builder)
-    common = create_common_attn_metadata(BatchSpec([8, 8], [4, 4]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.tensor([[0, 1, 2, 3], [12, 13, 14, 15]], dtype=torch.int32)
-    arguments = (torch.tensor([2, 1]), torch.tensor([3, 3]))
-    captured = [builder.build(0, common, *arguments).spec_decode_metadata.spec_causal_conv1d for builder in builders]
-    assert single.call_count == 2
-    assert [call.args[2] for call in single.call_args_list] == [8, 16]
-    assert [conv.null_block_id for conv in captured] == [8, 16]
-    pointers = [conv.prepared_cache_indices.data_ptr() for conv in captured]
-    assert pointers[0] != pointers[1]
-
-    builder = builders[0]
-    common.block_table_tensor[:, 0] = torch.tensor([4, 9])
-    replayed = builder.build(0, common, *arguments)
-    assert single.call_count == 3
-    assert single.call_args.args[0][:, 0].tolist() == [4, 9]
-    assert replayed.spec_decode_metadata.spec_causal_conv1d.prepared_cache_indices.data_ptr() == pointers[0]
-
-    mixed = create_common_attn_metadata(BatchSpec([8, 3], [4, 3]), 16, torch.device("cpu"))
-    mixed.block_table_tensor = torch.tensor([[0, 1, 2, 3], [8, 9, 10, 11]], dtype=torch.int32)
-    metadata = builder.build(0, mixed, torch.tensor([2, 1]), torch.tensor([3, -1]))
-    assert pair.call_count == 1
-    spec = metadata.spec_decode_metadata.spec_causal_conv1d
-    non_spec = metadata.non_spec_prefill_metadata.causal_conv1d
-    assert spec.prepared_cache_indices.data_ptr() == pointers[0]
-    assert spec.prepared_cache_indices.data_ptr() != non_spec.prepared_cache_indices.data_ptr()
-
-    plain = create_common_attn_metadata(BatchSpec([8, 0], [1, 0]), 16, torch.device("cpu"))
-    builder.build(0, plain, torch.ones(2, dtype=torch.int32), torch.tensor([-1, -1]))
-    assert pair.call_count == 2
-    assert pair.call_args.args[2].data_ptr() == non_spec.prepared_cache_indices.data_ptr()
-    assert pair.call_args.args[4].tolist() == [0, 0, 0]
-    assert pair.call_args.args[5].data_ptr() == pointers[0]
-    assert pair.call_args.args[6] == 8

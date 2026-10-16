@@ -14,7 +14,6 @@ conv_ops = importlib.import_module("vllm_ascend.models.glm5next.ops.causal_conv1
 def test_conv_state_dispatch_reuses_sd_indices_and_stages_ds_state(monkeypatch, dim_first, run_mode):
     state = torch.zeros(4, 8, 3).transpose(1, 2) if dim_first else torch.zeros(8, 3, 8)[::2]
     indices = torch.tensor([[1, 0]], dtype=torch.int32)
-    prepared = torch.tensor([1], dtype=torch.int32)
     starts = torch.tensor([0, 1], dtype=torch.int32)
     x = torch.ones(1, 8)
     calls = []
@@ -29,12 +28,13 @@ def test_conv_state_dispatch_reuses_sd_indices_and_stages_ds_state(monkeypatch, 
 
     def prefill(x, weight, bias, **kwargs):
         assert kwargs["cache_indices"].ndim == 1
-        assert kwargs["null_block_id"] == (1 if dim_first else 4)
+        assert kwargs["null_block_id"] == (1 if dim_first else 0)
         assert kwargs["cache_indices"].item() == (0 if dim_first else 1)
         assert kwargs["cache_indices"].item() != kwargs["null_block_id"]
         if not dim_first:
             assert kwargs["conv_states"] is state
-            assert kwargs["cache_indices"] is prepared
+            assert kwargs["cache_indices"].data_ptr() == indices.data_ptr()
+            assert kwargs["cache_indices"].stride() == indices[:, 0].stride()
         kwargs["conv_states"][0 if dim_first else 1].fill_(5)
         return x + 2
 
@@ -43,13 +43,7 @@ def test_conv_state_dispatch_reuses_sd_indices_and_stages_ds_state(monkeypatch, 
         kwargs["conv_states"] = state
         return prefill(x, weight, **kwargs)
 
-    def prepare_indices(ids, query_starts, num_slots):
-        assert dim_first, "Prepared SD indices must bypass per-layer preparation"
-        assert ids.tolist() == [0]
-        return ids
-
     monkeypatch.setattr(conv_ops, "copy_conv_state", copy_state)
-    monkeypatch.setattr(conv_ops, "prepare_conv_indices", prepare_indices)
     monkeypatch.setattr(conv_ops, "causal_conv1d_fn", prefill)
     monkeypatch.setattr(conv_ops, "causal_conv1d_update", decode)
     result = conv_ops.causal_conv1d(
@@ -59,8 +53,6 @@ def test_conv_state_dispatch_reuses_sd_indices_and_stages_ds_state(monkeypatch, 
         starts,
         indices,
         run_mode=run_mode,
-        prepared_cache_indices=prepared,
-        prepared_null_block_id=4,
     )
     torch.testing.assert_close(result, x + 2)
     assert calls == ([False, True] if dim_first else [])
