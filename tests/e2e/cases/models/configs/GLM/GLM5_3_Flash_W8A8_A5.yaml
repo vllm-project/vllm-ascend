@@ -47,10 +47,11 @@ test_cases:
     api_keyword_args:
       max_tokens: 16
       temperature: 0.0
-    # PLACEHOLDER ONLY: invented values for initial community-resource runs.
-    # These are NOT measured accuracy/performance baselines. Replace per case after
-    # calibration; initial gate failures must not be classified as regressions.
+    # Performance baseline: arithmetic mean of 1 completed CI measurement(s).
+    # PR #17685/#18246 history, 2026-10-08 through 2026-10-15.
+    # A5 currently has one valid measurement; further calibration is needed.
     # Provision these datasets on the shared A5 volume before running offline CI.
+    # Accuracy baseline 90 / threshold 10 remains an initial placeholder.
     benchmarks:
       accuracy_placeholder_gsm8k:
         case_type: accuracy
@@ -62,7 +63,7 @@ test_cases:
         temperature: 0
         baseline: 90
         threshold: 10
-      performance_placeholder_3_5k_1k:
+      performance_3_5k_1k:
         case_type: performance
         dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs400
         request_conf: vllm_api_stream_chat
@@ -71,5 +72,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0
-        baseline: 1000
+        baseline: 260.9143
         threshold: 0.97

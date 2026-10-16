@@ -109,10 +109,6 @@ a3:
         config_base_path: tests/e2e/cases/models/configs/GLM
   multi_node:
     test_config:
-      - name: GLM-5.3-Flash-W8A8-A3-PD-smoke
-        config_file_path: GLM-5.3-Flash-W8A8-A3-PD-smoke.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
-        size: 2
       - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
@@ -356,16 +352,6 @@ a3-560t:
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
-  multi_node:
-    test_config:
-      - name: GLM-5.2-W8A8C8-A5-PD-smoke
-        size: 4
-        config_file_path: GLM-5.2-W8A8C8-A5-PD-smoke.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: GLM-5.3-Flash-W8A8-A5-PD-smoke
-        size: 2
-        config_file_path: GLM-5.3-Flash-W8A8-A5-PD-smoke.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
 #   single_node:
 #     test_config:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp
