@@ -1,5 +1,5 @@
 test_cases:
-  - name: "GLM-5.3-Flash-W8A8-A5-nightly"
+  - name: "GLM-5.3-Flash-W8A8-A5"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
