@@ -3,7 +3,6 @@ from typing import Any
 import torch
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ops.triton.spec_decode.utils import dflash2_greedy_selector_walk_kernel
@@ -48,12 +47,6 @@ def greedy_select_path(candidate_ids: torch.Tensor, scores: torch.Tensor) -> tor
 
 class AscendDflash2Proposer(AscendDflashProposer):
     """DFlash2 v1 proposer: same input layout as DFlash, selector instead of argmax."""
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Use draft causality for backend selection while preserving the target config."""
-        draft_config = super()._create_draft_vllm_config()
-        draft_config.attention_config.use_non_causal = dflash_has_any_non_causal(self.draft_model_config.hf_config)
-        return draft_config
 
     def __init__(
         self,

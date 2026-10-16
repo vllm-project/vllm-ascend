@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-"""Device-length CANN FlashAttn for A5 V1 DFlash2 eager drafts."""
+"""Device-length CANN FlashAttn for A5 V2 DFlash2 eager drafts."""
 
 from dataclasses import dataclass, field
 
@@ -30,15 +30,18 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         """Build from exact device lengths; CPU mirrors may be stale after rejection."""
         num_tokens = common_attn_metadata.num_actual_tokens
+        num_reqs = common_attn_metadata.num_reqs
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         return self.metadata_cls(
             num_actual_tokens=num_tokens,
             num_decode_tokens=num_tokens,
-            num_decodes=common_attn_metadata.num_reqs,
-            block_tables=common_attn_metadata.block_table_tensor,
-            query_start_loc=common_attn_metadata.query_start_loc,
-            query_start_loc_gpu=common_attn_metadata.query_start_loc,
-            seq_lens=common_attn_metadata.seq_lens,
-            seq_lens_gpu=common_attn_metadata.seq_lens,
+            num_decodes=num_reqs,
+            block_tables=common_attn_metadata.block_table_tensor[:num_reqs],
+            query_start_loc=query_start_loc,
+            query_start_loc_gpu=query_start_loc,
+            seq_lens=seq_lens,
+            seq_lens_gpu=seq_lens,
             max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=common_attn_metadata.slot_mapping[:num_tokens],
             causal=common_attn_metadata.causal,

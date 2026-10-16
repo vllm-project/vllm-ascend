@@ -191,65 +191,6 @@ def test_get_spec_decode_method_dispatches_dflash2():
         d2.assert_not_called()
 
 
-@pytest.mark.parametrize("causal", [False, True])
-def test_dflash2_loader_still_selects_device_length_flash_attn(monkeypatch, causal):
-    from vllm.v1.attention.selector import AttentionSelectorConfig
-
-    from vllm_ascend import platform
-    from vllm_ascend.device.hardware_profile import AttentionBackendFamily
-
-    draft_model = SimpleNamespace(
-        runner_type="draft",
-        architectures=["DFlash2DraftModel"],
-        hf_config=SimpleNamespace(num_hidden_layers=6, is_causal=causal),
-    )
-    spec = SimpleNamespace(
-        method="dflash", draft_model_config=draft_model, enforce_eager=True, draft_sample_method="greedy"
-    )
-    target = SimpleNamespace(
-        use_v2_model_runner=False,
-        model_config=SimpleNamespace(runner_type="generate", architectures=["GlmMoeDsaForCausalLM"]),
-        attention_config=SimpleNamespace(use_non_causal=False),
-        speculative_config=spec,
-    )
-    proposer = AscendDflash2Proposer.__new__(AscendDflash2Proposer)
-    proposer.speculative_config = spec
-    proposer.draft_model_config = draft_model
-    # Upstream clones the outer and attention configs, retaining model_config.
-    parent_config = SimpleNamespace(**vars(target))
-    parent_config.attention_config = SimpleNamespace(**vars(target.attention_config))
-    monkeypatch.setattr(
-        "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
-        lambda _: parent_config,
-    )
-    monkeypatch.setattr(
-        platform,
-        "get_current_hardware_profile",
-        lambda: SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD),
-    )
-    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
-    draft = proposer._create_draft_vllm_config()
-    assert draft.model_config.runner_type == "draft"
-    assert draft.attention_config.use_non_causal is not causal
-    selector = AttentionSelectorConfig(
-        head_size=128,
-        block_size=128,
-        dtype=torch.bfloat16,
-        kv_cache_dtype="auto",
-        use_non_causal=draft.attention_config.use_non_causal,
-    )
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: draft)
-    assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == (
-        "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
-    )
-    assert target.model_config.runner_type == "generate"
-    assert not target.attention_config.use_non_causal
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
-    assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == (
-        "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
-    )
-
-
 def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
     device = torch.device("cpu")
     num_reqs, num_steps, top_k, hidden = 2, 3, 4, 8

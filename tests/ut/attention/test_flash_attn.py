@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.compilation.backends import set_model_tag
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl
@@ -15,10 +16,10 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(
-        use_v2_model_runner=False,
-        model_config=SimpleNamespace(runner_type="draft"),
+        model_config=SimpleNamespace(runner_type="generate"),
         speculative_config=SimpleNamespace(
             method="dflash",
+            target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
             draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             draft_sample_method="greedy",
             enforce_eager=True,
@@ -46,29 +47,45 @@ def select_flash_attn(monkeypatch):
 
     def select(config, selector):
         monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
-        backend = platform.NPUPlatform.get_attn_backend_cls(None, selector)
+        with set_model_tag("dflash_head"):
+            backend = platform.NPUPlatform.get_attn_backend_cls(None, selector)
         return backend == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
     return select, profile
 
 
-def test_flash_attn_is_selected_only_for_a5_v1_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
     select, profile = select_flash_attn
     config = dflash2_config
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
-    config.model_config.runner_type = "generate"
-    assert not select(config, selector)
-    config.model_config.runner_type = "draft"
-    config.use_v2_model_runner = True
-    assert not select(config, selector)
-    config.use_v2_model_runner = False
     profile.supports = lambda _: False
     assert not select(config, selector)
     profile.supports = lambda _: True
     config.speculative_config = None
+    config.model_config = None
     assert not select(config, selector)
     assert not select(None, selector)
+
+
+@pytest.mark.parametrize("tag", ["backbone", "eagle_head", "dflash2_candidate_selector"])
+def test_flash_attn_requires_live_dflash_loader_tag(monkeypatch, select_flash_attn, dflash2_config, tag):
+    from vllm.compilation import backends
+
+    from vllm_ascend import platform
+
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: dflash2_config)
+    monkeypatch.setattr(backends, "model_tag", tag)
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert not platform._validate_flash_attn_backend((False, False, False), selector)
+
+
+@pytest.mark.parametrize("sampling", ["greedy", "probabilistic"])
+def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn, dflash2_config, sampling):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.draft_sample_method = sampling
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(dflash2_config, selector)
 
 
 @pytest.mark.parametrize(
@@ -78,7 +95,6 @@ def test_flash_attn_is_selected_only_for_a5_v1_dflash2_eager_drafts(select_flash
         ("method", "mtp"),
         ("enforce_eager", False),
         ("enforce_eager", None),
-        ("draft_sample_method", "probabilistic"),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
@@ -87,6 +103,14 @@ def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, df
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert not select(dflash2_config, selector)
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "glm5_next"])
+def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dflash2_config, model_type):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert not select(dflash2_config, selector)
 
@@ -101,13 +125,11 @@ def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, df
         ("use_compress", True),
         ("use_mm_prefix", True),
         ("use_rswa", True),
-        ("use_adaptive_verification", True),
         ("use_batch_invariant", True),
         ("use_per_head_quant_scales", True),
         ("dtype", torch.float32),
         ("kv_cache_dtype", "fp8"),
         ("kv_cache_dtype", "int8"),
-        ("attn_type", "encoder_decoder"),
     ],
 )
 def test_unsupported_gqa_features_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
@@ -195,10 +217,36 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
         result = builder.build_for_drafting(common, draft_index=0)
-    assert result.seq_lens_gpu is common.seq_lens
-    assert result.query_start_loc_gpu is common.query_start_loc
+    assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
+    assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal
     assert result.flash_attn_mask is builder.attn_mask_builder.get_splitfuse_attn_mask.return_value
+
+
+def test_metadata_builder_slices_request_extent():
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadataBuilder
+
+    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
+    builder.model_config = SimpleNamespace(runner_type="generate")
+    builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=12,
+        query_start_loc=torch.tensor([0, 6, 12, 999, 999], dtype=torch.int32),
+        seq_lens=torch.tensor([100, 200, 999, 999], dtype=torch.int32),
+        block_table_tensor=torch.zeros(4, 8, dtype=torch.int32),
+        slot_mapping=torch.arange(24, dtype=torch.int32),
+        max_query_len=6,
+        causal=False,
+        attn_state=None,
+    )
+    metadata = builder.build(0, common)
+    assert metadata.block_tables.shape == (2, 8)
+    assert metadata.slot_mapping.shape == (12,)
+    torch.testing.assert_close(metadata.query_start_loc_gpu, torch.tensor([0, 6, 12], dtype=torch.int32))
+    torch.testing.assert_close(metadata.seq_lens_gpu, torch.tensor([100, 200], dtype=torch.int32))
+    assert metadata.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
+    assert metadata.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
 
 
 def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
