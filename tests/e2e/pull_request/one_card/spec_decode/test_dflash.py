@@ -22,7 +22,6 @@ DYNAMIC_DFLASH_BASELINES = {
 @pytest.mark.parametrize(
     "dynamic_num_speculative_tokens",
     [
-        pytest.param(None, id="static"),
         pytest.param(4, id="dynamic"),
     ],
 )

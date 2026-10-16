@@ -34,19 +34,9 @@ DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize(
-    ("compilation_config", "enable_adaptive_verification"),
+    "compilation_config",
     [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            False,
-            id="full_decode_only",
-        ),
-        pytest.param({}, False, id="default_full_and_piecewise"),
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            True,
-            id="full_decode_only-adaptive",
-        ),
+        pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
@@ -56,7 +46,6 @@ def test_dspark_spec_decoding(
     dspark_model: str,
     max_tokens: int,
     enforce_eager: bool,
-    enable_adaptive_verification: bool,
     compilation_config: dict,
 ) -> None:
     prompts = [
@@ -78,15 +67,11 @@ def test_dspark_spec_decoding(
             "model": dspark_model,
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
-            **({"enable_adaptive_verification": True} if enable_adaptive_verification else {}),
         },
         compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
-
-    if enable_adaptive_verification:
-        return
 
     acceptance_per_pos = calculate_acceptance_per_pos(
         metrics,

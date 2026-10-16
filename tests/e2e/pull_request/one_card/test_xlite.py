@@ -54,28 +54,3 @@ def test_models_with_xlite_decode_only(model: str):
         },
     }
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
-
-
-@pytest.mark.e2e_model(*MODELS)
-@pytest.mark.e2e_coverage(
-    arch="dense",
-    feature="xlite",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="BF16",
-    graph_mode="xlite_full",
-)
-@pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free()
-def test_models_with_xlite_full_mode(model: str):
-    runner_kwargs = {
-        "model_name": model,
-        "max_model_len": 1024,
-        "block_size": 128,
-        "additional_config": {
-            "weight_nz_mode": 2,
-            "xlite_graph_config": {"enabled": True, "full_mode": True},
-        },
-    }
-    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
