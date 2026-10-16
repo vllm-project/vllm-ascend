@@ -25,8 +25,8 @@ def load(name, path):
     return module
 
 
-@pytest.fixture
-def runtime(monkeypatch):
+@pytest.fixture(name="runtime")
+def runtime_fixture(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = []
     cast(Any, package).envs = NS(VLLM_ASCEND_KV_GUARD=True, VLLM_ASCEND_KV_GUARD_ACTION="log")

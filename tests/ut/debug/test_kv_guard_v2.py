@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from .test_kv_guard_runtime import bind, load, metadata
-from .test_kv_guard_runtime import runtime as runtime
+from .test_kv_guard_runtime import runtime_fixture as runtime_fixture
 
 
 @pytest.fixture
