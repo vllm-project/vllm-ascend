@@ -555,8 +555,6 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
             runtime.events.append(("exchange", runtime.active_stream[0]))
             assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
             expected_output, expected_lse = partials[rank]
-            expected_output = expected_output.masked_fill(~flash.token_live[None, :, None], 0)
-            expected_lse = expected_lse.masked_fill(~flash.token_live[None, :], -torch.inf)
             torch.testing.assert_close(output, expected_output.transpose(0, 1))
             torch.testing.assert_close(lse, expected_lse.transpose(0, 1).unsqueeze(-1))
             return (
@@ -645,8 +643,10 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
             assert runtime.events == [("history", "main"), ("exchange", "main"), ("merge", "main"), ("project", "main")]
             assert not runtime.recorded_streams
         tolerance = 8e-4 if dtype == torch.bfloat16 else 1e-4
-        torch.testing.assert_close(result.double(), expected[:, owned], atol=tolerance, rtol=0.02)
-        assert torch.equal(result[-1], torch.zeros_like(result[-1]))
+        # Unused query outputs are outside the attention result contract.
+        torch.testing.assert_close(
+            result[flash.token_live].double(), expected[flash.token_live, owned], atol=tolerance, rtol=0.02
+        )
         assert torch.equal(backing, snapshot)  # Forward never repacks or writes persistent history.
         cache_call = runtime.attention_op.call_args_list[-2 if split else -1]
         assert cache_call.args[1] is cache

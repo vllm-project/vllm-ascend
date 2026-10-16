@@ -616,8 +616,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             metadata=schedule,
             attn_mask=attn_mask,
         )
-        output.masked_fill_(~flash.token_live[None, :, None], 0)
-        lse.masked_fill_(~flash.token_live[None, :], -torch.inf)
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
 
     def _run_dcp_mtp_split_attention_op(
@@ -920,8 +918,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             local_output=current_output,
             local_lse=current_lse,
         )
-        if flash is not None:
-            attn_output.masked_fill_(~flash.token_live[:, None, None], 0)
         return self._v_up_proj_batch_major(attn_output)
 
     def _forward_decode(
