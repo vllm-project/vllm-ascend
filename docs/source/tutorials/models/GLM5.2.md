@@ -211,11 +211,11 @@ The A5 W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
     Use a validated local checkpoint path. See
     [W4A4C8 Validation](#73-w4a4c8-a5-validation-records) for the exact scope.
 
+    For GLM-5.2, replace the checkpoint path in `vllm serve` with
+    `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4`.
+    The GLM-5.3 path below is an example local directory, not a download source.
+
     ```shell
-    # GLM-5.3 W4A4C8 (locally validated checkpoint):
-    MODEL_PATH="<LOCAL_GLM_5_3_W4A4C8_MXFP4_PATH>"
-    # GLM-5.2 W4A4C8 (use this line instead):
-    # MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4
 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -225,7 +225,7 @@ The A5 W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W4A4C8-mxfp4 \
       --host 0.0.0.0 \
       --port 8000 \
       --api-server-count 1 \
@@ -307,7 +307,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
-    MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8
 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_IF_IP=$local_ip
@@ -322,7 +321,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     export VLLM_PP_LAYER_PARTITION="38,40"
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
       --host 0.0.0.0 \
       --port 30001 \
       --api-server-count 1 \
@@ -365,7 +364,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
-    MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8
 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_IF_IP=$local_ip
@@ -380,7 +378,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     export VLLM_PP_LAYER_PARTITION="38,40"
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
       --host 0.0.0.0 \
       --port 30001 \
       --headless \
@@ -788,7 +786,6 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
         # node 0 is the PP master node
         node0_ip=$local_ip
-        MODEL_PATH=${MODEL_PATH:-/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8}
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
         unset HCCL_INTRA_ROCE_ENABLE
@@ -816,7 +813,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         export VLLM_USE_FASTOKENS=1
 
 
-        vllm serve "$MODEL_PATH" \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
           --host 0.0.0.0 \
           --port 9081 \
           --api-server-count 1 \
@@ -861,7 +858,6 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
         # The value of node0_ip must be consistent with the value of local_ip set in node 0 (PP master node)
         node0_ip="xxxx"
-        MODEL_PATH=${MODEL_PATH:-/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8}
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
         unset HCCL_INTRA_ROCE_ENABLE
@@ -889,7 +885,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         export VLLM_USE_FASTOKENS=1
 
 
-        vllm serve "$MODEL_PATH" \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
           --host 0.0.0.0 \
           --port 9081 \
           --headless \
@@ -938,7 +934,6 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
         local_ip="xxx"
-        MODEL_PATH=${MODEL_PATH:-/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8}
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
         unset HCCL_INTRA_ROCE_ENABLE
@@ -963,7 +958,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
         export VLLM_USE_FASTOKENS=1
 
-        vllm serve "$MODEL_PATH" \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
           --host 0.0.0.0 \
           --port "$PORT" \
           --data-parallel-size "$DP_SIZE" \
@@ -1009,7 +1004,6 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
         local_ip="xxx"
-        MODEL_PATH=${MODEL_PATH:-/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8}
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
         unset HCCL_INTRA_ROCE_ENABLE
@@ -1034,7 +1028,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
         export VLLM_USE_FASTOKENS=1
 
-        vllm serve "$MODEL_PATH" \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8 \
           --host 0.0.0.0 \
           --port "$PORT" \
           --data-parallel-size "$DP_SIZE" \
@@ -1140,7 +1134,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
       -d '{"model":"glm","messages":[{"role":"user","content":"What is 1 + 1?"}],"max_tokens":128,"stream":false}'
     ```
 
-    Initialize the installed CANN environment on every node before launching the scripts. The source PD configuration uses CANN 9.2.0. For GLM-5.3, export `MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8` on all four nodes before starting either script. These adapted commands have been checked for syntax, but have not been revalidated end to end in this documentation update.
+    Initialize the installed CANN environment on every node before launching the scripts. The source PD configuration uses CANN 9.2.0. The commands use the GLM-5.3 checkpoint path directly. For GLM-5.2, replace it with `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-mxfp8` on all four nodes before starting either script. These adapted commands have been checked for syntax, but have not been revalidated end to end in this documentation update.
 
     Profiling and compile-cache debugging are optional. To temporarily disable the compile cache, set `VLLM_DISABLE_COMPILE_CACHE=1`; unset it for normal deployment.
 
