@@ -3030,6 +3030,7 @@ def test_dcp_qli_shared_lengths_refresh_when_tiling_metadata_is_reused():
     for _ in range(2):
         builder = AscendDSADCPMetadataBuilder.__new__(AscendDSADCPMetadataBuilder)
         builder.__dict__.update(_make_builder().__dict__)
+        builder.shard_c4_cache = False
         builder.qli_seqused_k.fill_(-1)
         builder.qli_cmp_residual_k.fill_(-1)
         builders.append(builder)

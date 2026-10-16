@@ -23,7 +23,10 @@ from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4SWACache
 from vllm_ascend.models.layer.attention import layer as attention_layer
 
 
-@pytest.fixture(params=[(1, 1, False), (2, 1, True), (2, 2, False)], ids=["default", "dcp2", "pcp2-dcp2"])
+@pytest.fixture(
+    params=[(1, 1, False), (2, 1, True), (8, 1, True), (2, 2, False)],
+    ids=["default", "dcp2", "dcp8", "pcp2-dcp2"],
+)
 def cache_config(request, monkeypatch):
     dcp_size, pcp_size, replicated = request.param
     profile = get_hardware_profile(AscendDeviceType.A2)
@@ -47,6 +50,7 @@ def test_dsv4_main_cache_shards_only_c4_history(cache_config, compress_ratio):
     cache = attention_layer.DSAAttention.__new__(attention_layer.DSAAttention)
     cache.compress_ratio = compress_ratio
     cache.head_size = 512
+    cache.n_local_heads = 1
     cache.kv_cache_dtype = "auto"
 
     spec = cache.get_kv_cache_spec(config)
@@ -57,11 +61,12 @@ def test_dsv4_main_cache_shards_only_c4_history(cache_config, compress_ratio):
     assert get_storage_block_size(spec) == 32
     assert spec.page_size_bytes == 32768
     if replicated:
-        assert get_dsv4_scheduler_dcp_world_size(spec, 2) == (2 if compress_ratio == 4 else 1)
+        dcp_size = config.parallel_config.decode_context_parallel_size
+        assert get_dsv4_scheduler_dcp_world_size(spec, dcp_size) == (dcp_size if compress_ratio == 4 else 1)
 
 
-def test_dsv4_indexer_history_is_replicated_without_physical_lanes(cache_config):
-    config, replicated = cache_config
+def test_dsv4_indexer_history_shards_without_widening_physical_pages(cache_config):
+    config, _ = cache_config
     cache = indexer.AscendDeepseekV4IndexerCache.__new__(indexer.AscendDeepseekV4IndexerCache)
     cache.head_dim = 128
     cache.dtype = torch.int8
@@ -70,16 +75,16 @@ def test_dsv4_indexer_history_is_replicated_without_physical_lanes(cache_config)
 
     spec = cache.get_kv_cache_spec(config)
 
-    expected_cls = AscendDSAReplicatedFullMLASpec if replicated else AscendMLAAttentionSpec
-    assert type(spec) is expected_cls
+    assert type(spec) is AscendMLAAttentionSpec
     assert spec.block_size == 128
     assert get_storage_block_size(spec) == 32
     # Each A2 row holds 128 int8 K elements and one FP16 scale.
     assert spec.page_size_bytes == 4160
     assert spec.scale_dtype == torch.float16
-    if replicated:
-        assert spec.dcp_scheduler_replication_size == 2
-        assert get_dsv4_scheduler_dcp_world_size(spec, 2) == 1
+    assert not hasattr(spec, "dcp_replicated_size")
+    assert not hasattr(spec, "dcp_scheduler_replication_size")
+    dcp_size = config.parallel_config.decode_context_parallel_size
+    assert get_dsv4_scheduler_dcp_world_size(spec, dcp_size) == dcp_size
 
 
 def test_dsv4_swa_preserves_physical_window_pages_under_dcp(cache_config):
@@ -99,8 +104,9 @@ def test_dsv4_swa_preserves_physical_window_pages_under_dcp(cache_config):
     assert spec.sliding_window == 128
     assert spec.page_size_bytes == 32768
     if replicated:
-        assert spec.dcp_scheduler_replication_size == 2
-        assert get_dsv4_scheduler_dcp_world_size(spec, 2) == 1
+        dcp_size = config.parallel_config.decode_context_parallel_size
+        assert spec.dcp_scheduler_replication_size == dcp_size
+        assert get_dsv4_scheduler_dcp_world_size(spec, dcp_size) == 1
 
 
 @pytest.mark.parametrize(
@@ -128,5 +134,6 @@ def test_dsv4_state_preserves_padded_pages_and_global_ownership(
     assert spec.sliding_window == window_size
     assert spec.page_size_padded == spec.page_size_bytes == page_bytes
     if replicated:
-        assert spec.dcp_scheduler_replication_size == 2
-        assert get_dsv4_scheduler_dcp_world_size(spec, 2) == 1
+        dcp_size = config.parallel_config.decode_context_parallel_size
+        assert spec.dcp_scheduler_replication_size == dcp_size
+        assert get_dsv4_scheduler_dcp_world_size(spec, dcp_size) == 1

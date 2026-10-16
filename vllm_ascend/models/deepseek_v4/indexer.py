@@ -40,6 +40,10 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.context_parallel.dsv4_indexer import (
+    gather_dcp_indexer_cache,
+    gather_dcp_topk,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -137,27 +141,17 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm_ascend.core.kv_cache_interface import (
-            AscendDSAReplicatedFullMLASpec,
-            AscendMLAAttentionSpec,
-            get_dsv4_dcp_replication_size,
-        )
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
         ratio_kwargs = {"tokens_per_state": self.compress_ratio}
-        replication_size = get_dsv4_dcp_replication_size(vllm_config)
-        # The Indexer history is replicated on every rank, but it need not use
-        # the DCP-sharded C4 main cache's block IDs.  A lane-replicated page
-        # would make page_size_bytes DCP times larger; because DSV4 uses one
-        # shared BlockPool, that cost would then be charged to every SWA/state
-        # block as well.  Use a scheduler-replicated full-attention group:
-        # every rank still stores the complete Indexer history, while each
-        # physical page keeps its ordinary size.
-        spec_cls = AscendDSAReplicatedFullMLASpec if replication_size > 1 else AscendMLAAttentionSpec
-        return spec_cls(
+        # C4 Indexer and main KV share the same compressed-page ownership.
+        # Keeping the ordinary spec lets both caches share scheduler block IDs
+        # without enlarging the uniform pool block or adding another group.
+        return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
@@ -168,7 +162,6 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
-            **({"dcp_scheduler_replication_size": replication_size} if replication_size > 1 else {}),
             **ratio_kwargs,
         )
 
@@ -249,8 +242,17 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
+        dcp_size = getattr(metadata, "compressor_dcp_size", 1)
+        dcp_decode = getattr(metadata, "dcp_indexer_decode", False)
+        block_table = metadata.block_table
+        if dcp_size > 1:
+            if dcp_decode:
+                block_table = metadata.dcp_local_block_table
+            else:
+                key_cache, scale_cache = gather_dcp_indexer_cache(key_cache, scale_cache, metadata)
+                block_table = metadata.dcp_prefill_kv_gather_block_table
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        topk_idxs, topk_scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
             weights=self.device_operator.prepare_dsa_indexer_weights(weights),
@@ -261,14 +263,22 @@ class AscendIndexerOps:
             cu_seqlens_q=metadata.qli_cu_seqlens_q,
             seqused_k=metadata.qli_seqused_k,
             cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
+            block_table=block_table,
             metadata=metadata.qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
-            mask_mode=3,
+            mask_mode=0 if dcp_decode else 3,
             cmp_ratio=4,
-            return_value=0,
+            return_value=2 if dcp_decode else 0,
         )
+        if dcp_decode:
+            topk_idxs = gather_dcp_topk(
+                topk_idxs,
+                topk_scores,
+                key_cache.shape[1],
+                dcp_size,
+                metadata.compressor_dcp_rank,
+            )
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(

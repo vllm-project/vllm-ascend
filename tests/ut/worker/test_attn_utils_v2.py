@@ -1401,7 +1401,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert set(discovered_specs) == {layer_name}
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert getattr(spec, "dcp_scheduler_replication_size", 1) == dcp_size
+    assert getattr(spec, "dcp_scheduler_replication_size", 1) == 1
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])

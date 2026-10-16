@@ -254,3 +254,118 @@ def test_quant_lightning_indexer_v2_high_physical_page_scale_offset():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize(
+    ("query_lengths", "key_lengths"),
+    [
+        ([256], [37]),  # Enough S1 tiles for non-LD; pad n<K candidates.
+        ([1], [4096]),  # Split the long key sequence across cores (LD).
+        ([1, 1, 1], [0, 0, 0]),  # Entire local rank empty, TND with B>1.
+        ([1, 1, 1], [0, 37, 65]),  # Per-request empty and partially filled pages.
+    ],
+)
+@torch.inference_mode()
+def test_quant_lightning_indexer_v2_dcp_fp32_candidates(query_lengths, key_lengths):
+    """DCP candidates expose unrounded final scores paired with existing indices."""
+    soc_version = torch_npu.npu.get_soc_version()
+    if not (220 <= soc_version <= 225 or 250 <= soc_version <= 256):
+        pytest.skip("FP32 DCP candidates require the arch22 QLI kernel")
+    num_heads = 64
+    head_dim = 128
+    block_size = 32
+    topk = 512
+    batch_size = len(query_lengths)
+    max_key_length = max(1, max(key_lengths))
+    blocks_per_request = (max_key_length + block_size - 1) // block_size
+    block_num = batch_size * blocks_per_request
+    total_queries = sum(query_lengths)
+
+    # An exactly representable dot product/reduction isolates score extraction
+    # from accumulation tolerances: score(row) == key_scale(row) / 1024.
+    # The factor is the existing A2 QK fixpipe scale, shared by every rank.
+    query = torch.zeros((total_queries, num_heads, head_dim), dtype=torch.int8, device="npu")
+    query[..., 0] = 1
+    weights = torch.ones((total_queries, num_heads), dtype=torch.float16, device="npu")
+    query_scale = torch.full_like(weights, 1 / num_heads)
+    key = torch.zeros((block_num, block_size, 1, head_dim), dtype=torch.int8, device="npu")
+    key[..., 0] = 1
+    key_scale_cpu = (
+        (1 + torch.arange(block_num * block_size, dtype=torch.float32) / 1024)
+        .to(torch.float16)
+        .view(block_num, block_size, 1)
+    )
+    key_scale = key_scale_cpu.npu()
+    cu_seqlens_q = torch.tensor([0, *torch.tensor(query_lengths).cumsum(0).tolist()], dtype=torch.int32, device="npu")
+    seqused_k = torch.tensor(key_lengths, dtype=torch.int32, device="npu")
+    block_table = torch.arange(block_num, dtype=torch.int32, device="npu").view(batch_size, blocks_per_request)
+    cmp_residual_k = torch.zeros(batch_size, dtype=torch.int32, device="npu")
+    metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+        num_heads_q=num_heads,
+        num_heads_k=1,
+        head_dim=head_dim,
+        topk=topk,
+        quant_mode=2,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+        cmp_residual_k=cmp_residual_k,
+        batch_size=batch_size,
+        max_seqlen_q=max(query_lengths),
+        max_seqlen_k=max_key_length * 4,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=0,
+        cmp_ratio=4,
+    )
+    # Metadata carries LD task flags after the 36 AIC rows (8 integers each).
+    # Check the intended score-export branch instead of relying on shape alone.
+    metadata_cpu = metadata.cpu().reshape(-1)
+    ld_enabled = metadata_cpu[36 * 8 : 36 * 8 + 72 * 8].reshape(72, 8)[:, 0].any()
+    if query_lengths == [256]:
+        assert not ld_enabled
+    elif query_lengths == [1]:
+        assert ld_enabled
+    kwargs = dict(
+        query=query,
+        key=key,
+        weights=weights,
+        query_dequant_scale=query_scale,
+        key_dequant_scale=key_scale,
+        topk=topk,
+        quant_mode=2,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+        cmp_residual_k=cmp_residual_k,
+        block_table=block_table,
+        metadata=metadata,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=0,
+        cmp_ratio=4,
+    )
+    indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(**kwargs, return_value=2)
+    assert scores.dtype == torch.float32
+    assert scores.shape == indices.shape == (total_queries, 1, topk)
+    indices_cpu, scores_cpu = indices.cpu().squeeze(1), scores.cpu().squeeze(1)
+    offset = 0
+    for batch_idx, (num_queries, num_keys) in enumerate(zip(query_lengths, key_lengths)):
+        valid_count = min(topk, num_keys)
+        row_scores = key_scale_cpu.view(batch_size, -1)[batch_idx, :num_keys].float() / 1024
+        for query_idx in range(offset, offset + num_queries):
+            row_indices = indices_cpu[query_idx]
+            row_values = scores_cpu[query_idx]
+            assert torch.all(row_indices[:valid_count] >= 0)
+            assert torch.all(row_indices[:valid_count] < num_keys)
+            torch.testing.assert_close(row_values[:valid_count], row_scores[row_indices[:valid_count]], rtol=0, atol=0)
+            torch.testing.assert_close(row_values[:valid_count], row_scores.topk(valid_count).values, rtol=0, atol=0)
+            assert torch.all(row_indices[valid_count:] == -1)
+            assert torch.all(torch.isneginf(row_values[valid_count:]))
+        offset += num_queries
+
+    if any(key_lengths):
+        # Mode 0 is unchanged and returns exactly the same local indices.
+        old_indices, old_scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(**kwargs, return_value=0)
+        torch.testing.assert_close(indices, old_indices, rtol=0, atol=0)
+        assert old_scores.numel() == 0
+        finite_scores = scores_cpu[torch.isfinite(scores_cpu)]
+        assert torch.any(finite_scores != finite_scores.to(torch.bfloat16).float())

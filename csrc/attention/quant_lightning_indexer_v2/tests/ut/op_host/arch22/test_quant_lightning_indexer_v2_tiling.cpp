@@ -63,7 +63,7 @@ TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_
     qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
 }
 
-// return_value only supports false on Ascend910B
+// The original BF16 return_value=1 remains unsupported on Ascend910B
 TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_return_value_failed)
 {
     qliv2_ut::CaseParam p;
@@ -188,4 +188,68 @@ TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_tiling_unsup
     qliv2_ut::CaseParam p;
     p.soc = "Ascend310P";
     qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP mode exposes one unrounded FP32 score per selected local index.
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_dcp_fp32_scores_success)
+{
+    qliv2_ut::CaseParam p;
+    p.returnValue = 2;
+    p.valuesType = ge::DT_FLOAT;
+    p.valuesShape = p.outShape;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_dcp_bf16_scores_failed)
+{
+    qliv2_ut::CaseParam p;
+    p.returnValue = 2;
+    p.valuesShape = p.outShape;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_dcp_scores_shape_failed)
+{
+    qliv2_ut::CaseParam p;
+    p.returnValue = 2;
+    p.valuesType = ge::DT_FLOAT;
+    p.valuesShape = {2, 39, 1, 512};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_dcp_candidate_mode_failed)
+{
+    qliv2_ut::CaseParam p;
+    p.returnValue = 2;
+    p.valuesType = ge::DT_FLOAT;
+    p.valuesShape = p.outShape;
+    p.candidateMode = 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_950_tiling_dcp_fp32_scores_failed)
+{
+    qliv2_ut::CaseParam p;
+    p.soc = "Ascend950";
+    p.returnValue = 2;
+    p.valuesType = ge::DT_FLOAT;
+    p.valuesShape = p.outShape;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch22, QuantLightningIndexerV2_910b_tiling_dcp_tnd_scores_success)
+{
+    qliv2_ut::CaseParam p;
+    p.returnValue = 2;
+    p.valuesType = ge::DT_FLOAT;
+    p.layoutQ = "TND";
+    p.qShape = {3, 64, 128};
+    p.wShape = {3, 64};
+    p.qScaleShape = {3, 64};
+    p.cuSeqQ = {4};
+    p.sequsedK = {3};
+    p.blockTable = {3, 2};
+    p.outShape = {3, 1, 2048};
+    p.valuesShape = p.outShape;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
 }

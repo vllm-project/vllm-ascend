@@ -52,7 +52,7 @@ def get_dsv4_scheduler_dcp_world_size(
       these legacy specs keep the process DCP size.
     * ``dcp_scheduler_replication_size`` means every DCP rank owns the same
       global scheduler block IDs. These specs must be managed with DCP size
-      one. This is the C4 Indexer, C128, SWA and compressor-state layout.
+      one. This is the C128, SWA and compressor-state layout.
 
     vLLM v0.29.0 treats every FullAttentionSpec as DCP-sharded and therefore
     cannot infer this distinction from the upstream spec hierarchy alone.
@@ -367,8 +367,8 @@ class AscendDSAReplicatedMLASpec(AscendMLAAttentionSpec):
 
     The scheduler still allocates rank-local block IDs.  A replicated cache
     uses all DCP lanes of each allocated block to keep its history global.
-    This layout is used by the C4 indexer K/scale cache. The C128 cache
-    instead uses global scheduler blocks; the C4 main cache is DCP-sharded.
+    This legacy layout retains physical lanes inside one scheduler page.
+    C4 main/Indexer now share sharded pages; C128 uses global scheduler blocks.
     """
 
     dcp_replicated_size: int = 1
@@ -396,17 +396,8 @@ class AscendDSAReplicatedMLASpec(AscendMLAAttentionSpec):
 class AscendDSAReplicatedFullMLASpec(AscendMLAAttentionSpec):
     """A full cache addressed by global scheduler blocks on every rank.
 
-    This is used by the C128 main cache and by the C4 Indexer cache.  Both
-    caches keep complete history on every DCP rank, but they do not need to
-    share scheduler block IDs with the DCP-sharded C4 main cache.  Giving
-    them global scheduler blocks keeps the ordinary per-page stride instead
-    of placing ``dcp_world_size`` physical lanes inside every page.
-
-    The distinction matters for DSV4's shared BlockPool.  A lane-replicated
-    C4 Indexer page is DCP times larger and therefore widens every physical
-    pool block, including the many blocks owned by SWA and compressor-state
-    groups.  Scheduler replication stores the same Indexer bytes per rank
-    while avoiding that pool-wide amplification.
+    C128 keeps complete history on every DCP rank. Global scheduler blocks
+    preserve its ordinary per-page stride without physical DCP lanes.
     """
 
     dcp_sharded: bool = False

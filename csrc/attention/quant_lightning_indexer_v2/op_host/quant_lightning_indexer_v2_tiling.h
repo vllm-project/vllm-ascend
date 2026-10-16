@@ -201,7 +201,7 @@ public:
     // Others Flag
     uint32_t sparseCount = 0;
     uint32_t cmpRatio = 1;
-    bool returnValue = false;
+    uint32_t returnValue = 0;
     uint32_t keyStride0 = 0;
     uint32_t keyDequantScaleStride0 = 0;
     std::vector<uint32_t> keyStridesVec;

@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
@@ -110,6 +111,10 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+)
+from vllm_ascend.worker.dsv4_dcp_memory import (
+    plan_dsv4_dcp_memory,
+    profile_dsv4_dcp_topk_memory,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -586,7 +591,16 @@ class NPUWorker(WorkerBase):
         """
         GiB = lambda b: b / GiB_bytes
 
-        maybe_apply_startup_plan(self)
+        # Older plans omit DSV4 DCP workspaces and share the same upstream
+        # fingerprint. Reprofile this path until plans can distinguish them.
+        if (
+            self.cache_config.kv_cache_memory_bytes is not None
+            or not envs.VLLM_ENABLE_STARTUP_PLAN
+            or self.vllm_config.parallel_config.decode_context_parallel_size <= 1
+            or self.vllm_config.parallel_config.prefill_context_parallel_size != 1
+            or self.vllm_config.model_config.hf_text_config.model_type != "deepseek_v4"
+        ):
+            maybe_apply_startup_plan(self)
 
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
@@ -675,7 +689,83 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
+        self.available_kv_cache_memory_bytes = self._apply_dsv4_dcp_workspace_budget(
+            self.available_kv_cache_memory_bytes
+        )
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+
+    def _apply_dsv4_dcp_workspace_budget(self, available_memory: int) -> int:
+        """Reserve DSV4's runtime-only Indexer merge and compact gathers."""
+        model_config = self.vllm_config.model_config
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            model_config.hf_text_config.model_type != "deepseek_v4"
+            or parallel_config.decode_context_parallel_size <= 1
+            or parallel_config.prefill_context_parallel_size != 1
+        ):
+            return available_memory
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        indexer_specs = [
+            spec
+            for spec in kv_cache_spec.values()
+            if getattr(spec, "model_version", None) == "deepseek_v4"
+            and getattr(spec, "tokens_per_state", None) == 4
+            and getattr(spec, "scale_dim", 0) == 1
+            and spec.dtype == torch.int8
+        ]
+        if not indexer_specs:
+            return available_memory
+
+        # Use the packed planner's geometry, including tuple padding, rather
+        # than summing descriptors that alias the same physical backing.
+        from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_pool_bytes_per_block
+
+        groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        pool_bytes_per_block = _ascend_pool_bytes_per_block(groups)
+        indexer_spec = indexer_specs[0]
+        main_page_size = max(
+            spec.page_size_bytes
+            for spec in kv_cache_spec.values()
+            if getattr(spec, "model_version", None) == "deepseek_v4"
+            and getattr(spec, "tokens_per_state", None) == 4
+            and getattr(spec, "scale_dim", 0) == 0
+        )
+        dcp_size = parallel_config.decode_context_parallel_size
+        scheduler = self.vllm_config.scheduler_config
+        num_queries = min(scheduler.max_num_seqs, scheduler.max_num_batched_tokens)
+        storage_block_size = indexer_spec.block_size // indexer_spec.tokens_per_state
+        decode_workspace = profile_dsv4_dcp_topk_memory(
+            num_queries,
+            model_config.hf_text_config.index_topk,
+            dcp_size,
+            storage_block_size,
+            self.device,
+        )
+        # A request references at most ceil(L / (128 * D)) C4 pool IDs.
+        # Compaction can additionally include the shared null block once.
+        scheduler_block_size = indexer_spec.block_size * dcp_size
+        max_blocks_per_request = (model_config.max_model_len + scheduler_block_size - 1) // scheduler_block_size
+        max_gather_blocks = 1 + scheduler.max_num_seqs * max_blocks_per_request
+        # Multistream execution starts main-KV gather before Indexer selection;
+        # both gathers can be live. Count local packing and all-rank outputs.
+        gather_bytes_per_block = (dcp_size + 1) * (main_page_size + indexer_spec.page_size_bytes)
+        pool_memory, workspace = plan_dsv4_dcp_memory(
+            available_memory,
+            pool_bytes_per_block,
+            gather_bytes_per_block,
+            max_gather_blocks,
+            decode_workspace,
+        )
+        logger.info(
+            "DeepSeek-V4 DCP workspace reserve: %.2f GiB "
+            "(decode merge peak %.2f MiB); remaining KV pool budget: %.2f GiB.",
+            workspace / GiB_bytes,
+            decode_workspace / (1024**2),
+            pool_memory / GiB_bytes,
+        )
+        self._dsv4_dcp_kv_cache_memory_bytes = pool_memory
+        return pool_memory
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
@@ -934,6 +1024,14 @@ class NPUWorker(WorkerBase):
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
+            gpu_limit_target = "to fully utilize NPU free memory"
+            dcp_pool_budget = getattr(self, "_dsv4_dcp_kv_cache_memory_bytes", None)
+            if dcp_pool_budget is not None:
+                # The ordinary profile does not measure DCP workspaces; the
+                # manual-memory suggestions must also exclude them.
+                suggested_to_requested = min(suggested_to_requested, dcp_pool_budget)
+                suggested_to_gpu_limit = min(suggested_to_gpu_limit, dcp_pool_budget)
+                gpu_limit_target = "within the profiled DCP pool budget"
             msg = (
                 f"Free memory on device "
                 f"({format_gib(self.init_snapshot.free_memory)}/"
@@ -949,8 +1047,8 @@ class NPUWorker(WorkerBase):
                 f"`--kv-cache-memory={suggested_to_requested}` "
                 f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
                 f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
-                f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
-                f"free memory. Current KV cache memory: "
+                f"({format_gib(suggested_to_gpu_limit)} GiB) {gpu_limit_target}. "
+                f"Current KV cache memory: "
                 f"{format_gib(self.available_kv_cache_memory_bytes)} GiB. "
                 f"After warmup: torch reserved memory {format_gib(torch.npu.memory_reserved())} GiB, "
                 f"torch allocated memory {format_gib(torch.npu.memory_allocated())} GiB."

@@ -3080,15 +3080,16 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
 class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetadataBuilder):
     """Build the local or global DCP address view required by each DSA cache.
 
-    C4 main compressed KV keeps the scheduler's rank-local view and assigns
-    each global compressed physical page to one DCP rank.
-    C4 Indexer and C128 caches expand that local table into global DCP lanes;
-    their QLI lengths remain in the same global C4 compressed-index domain.
+    C4 main and Indexer share the scheduler's rank-local view and assign each
+    global compressed physical page to one DCP rank. Indexer decode uses local
+    lengths; prefill/mixed restores a compact global Indexer view for QLI.
+    C128 retains its globally replicated scheduler blocks.
     SWA and compressor states already have global scheduler block tables, so
     only their rank-local slot mappings are rebuilt in the global token domain.
     """
 
     _QLI_GLOBAL_LENGTH_BUFFERS_KEY = "_dsv4_dcp_qli_global_length_buffers"
+    _QLI_LOCAL_METADATA_KEY = "_dsv4_dcp_qli_local_metadata"
     _C4_LOCAL_SAS_METADATA_KEY = "_dsv4_dcp_c4_local_sas_metadata"
 
     def __init__(
@@ -3118,7 +3119,22 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
                 "DSV4 cache replication size must be one or the DCP world size, "
                 f"got replication_size={replication_size}, dcp_size={self.dcp_size}."
             )
-        self.shard_c4_main = self.dcp_size > 1 and replication_size == 1 and self.compressor_ratio == 4
+        self.shard_c4_cache = self.dcp_size > 1 and replication_size == 1 and self.compressor_ratio == 4
+        self.shard_c4_main = self.shard_c4_cache and getattr(kv_cache_spec, "scale_dim", 0) == 0
+        if self.shard_c4_cache:
+            self.dcp_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+                vllm_config.model_config.max_model_len,
+                self.logical_block_size,
+                self.dcp_size,
+                1,
+            )
+            dcp_group = get_dcp_group()
+            collective_ranks = sorted(dcp_group.ranks)
+            self.dcp_collective_rank_order = torch.tensor(
+                [collective_ranks.index(rank) for rank in dcp_group.ranks],
+                dtype=torch.int32,
+                device=device,
+            )
         if self.shard_c4_main:
             seq_lens_capacity = self.qli_seqused_k.shape[0]
             self.dcp_global_compressed_seq_lens_buf = torch.empty(
@@ -3137,13 +3153,6 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
                 dtype=torch.int32,
                 device=device,
             )
-            self.dcp_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
-                vllm_config.model_config.max_model_len,
-                self.logical_block_size,
-                self.dcp_size,
-                1,
-            )
-
             index_topk = self.model_config.hf_config.index_topk
             remap_block = min(128, 1 << (index_topk - 1).bit_length())
             self.dcp_remap_num_chunks = (index_topk + remap_block - 1) // remap_block
@@ -3166,13 +3175,6 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
             )
             self.dcp_local_remap_chunk_count_buf = torch.empty(
                 (max_topk_rows, self.dcp_remap_num_chunks),
-                dtype=torch.int32,
-                device=device,
-            )
-            dcp_group = get_dcp_group()
-            collective_ranks = sorted(dcp_group.ranks)
-            self.dcp_collective_rank_order = torch.tensor(
-                [collective_ranks.index(rank) for rank in dcp_group.ranks],
                 dtype=torch.int32,
                 device=device,
             )
@@ -3216,7 +3218,7 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
         metadata_cache: dict,
         num_reqs: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Use one global C4 length view for every DCP C4 cache group.
+        """Share the C4 QLI length view across main and Indexer builders.
 
         QLI tiling metadata is already cached once per request across the C4
         main-KV and Indexer cache builders. Its dynamic ``seqused_k`` and
@@ -3240,16 +3242,66 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
             qli_cmp_residual_k[:num_reqs],
         )
 
+    def _build_qli_metadata(
+        self,
+        metadata_cache: dict,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+    ) -> torch.Tensor:
+        if not self.shard_c4_cache or self.num_prefills > 0:
+            return super()._build_qli_metadata(metadata_cache, query_start_loc, seq_lens, max_seqlen_q, max_seqlen_kv)
+
+        num_reqs = seq_lens.shape[0]
+        local_lengths, residuals = self._get_qli_length_buffers(metadata_cache, num_reqs)
+        # Ownership applies to compressed pages, not to raw token positions.
+        global_lengths = torch.div(seq_lens.to(torch.int32), self.compressor_ratio, rounding_mode="floor")
+        local_lengths.copy_(
+            get_dcp_local_seq_lens(
+                global_lengths,
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=self.storage_block_size,
+            )
+        )
+        residuals.zero_()
+        qli_metadata = metadata_cache.get(self._QLI_LOCAL_METADATA_KEY)
+        if qli_metadata is None:
+            # A standard decode query can see every row in its local history.
+            # Keep compressor/state seq_lens in the original global domain.
+            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                num_heads_q=self.model_config.hf_config.index_n_heads,
+                num_heads_k=1,
+                head_dim=self.model_config.hf_config.index_head_dim,
+                topk=self.model_config.hf_config.index_topk,
+                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+                cu_seqlens_q=query_start_loc,
+                seqused_k=local_lengths,
+                cmp_residual_k=residuals,
+                batch_size=num_reqs,
+                max_seqlen_q=max_seqlen_q,
+                # This is a tiling upper bound; actual lengths remain local.
+                max_seqlen_k=max_seqlen_kv // self.compressor_ratio,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=0,
+                cmp_ratio=self.compressor_ratio,
+                device=str(self.seqused_q.device),
+            )
+            metadata_cache[self._QLI_LOCAL_METADATA_KEY] = qli_metadata
+        self.qli_metadata_buffer[: dsa_v1.DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        return self.qli_metadata_buffer
+
     def _populate_c4_local_attention_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         req_metadata: dsa_v1.AscendDSAReqMetadata,
     ) -> None:
-        """Attach the page-sharded C4 view without changing global metadata.
+        """Attach the local attention view without changing compressor lengths.
 
-        Compressor and Indexer consumers keep ``seq_lens`` and ``block_table``
-        in their existing global domains.  Only the C4-only attention branch
-        consumes the fields populated here.
+        The compressor keeps global token positions and rank-local pool IDs.
+        Only C4 attention consumes the local SAS and sparse-index buffers.
         """
         assert self.common_ratio_to_sas_metadata is not None
         assert self.num_actual_tokens is not None
@@ -3374,6 +3426,16 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
             num_reqs,
             self.dcp_local_block_table_cols,
         )
+        # The runner only refreshes allocated columns; the remaining tail may
+        # still contain block IDs from an earlier, longer request.
+        tokens_per_block = self.logical_block_size * self.dcp_size
+        num_blocks_per_req = torch.div(
+            req_metadata.seq_lens + tokens_per_block - 1,
+            tokens_per_block,
+            rounding_mode="floor",
+        )
+        columns = torch.arange(local_block_table.shape[1], dtype=torch.int32, device=local_block_table.device)
+        local_block_table = torch.where(columns < num_blocks_per_req.unsqueeze(1), local_block_table, 0)
         valid_block_ids, compact_local_table = local_block_table.flatten().unique(return_inverse=True)
         compact_local_table = compact_local_table.view_as(local_block_table)
         num_blocks = valid_block_ids.shape[0]
@@ -3393,7 +3455,7 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
     ) -> dsa_v1.AscendDSAMetadata:
         if self.lane_replication_size == 1 and self.scheduler_replication_size == 1:
             metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
-            if self.shard_c4_main:
+            if self.shard_c4_cache:
                 req_metadata = dsa_v1._require_req_metadata(metadata)
                 req_metadata.compressor_dcp_size = self.dcp_size
                 req_metadata.compressor_dcp_rank = self.dcp_rank
@@ -3401,10 +3463,18 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetad
                 # mixed batches still need the page-local compressor write,
                 # but must not pay for unused local-attention metadata.
                 if self.num_prefills == 0:
-                    self._populate_c4_local_attention_metadata(
-                        common_attn_metadata,
-                        req_metadata,
-                    )
+                    req_metadata.dcp_indexer_decode = True
+                    if self.shard_c4_main:
+                        self._populate_c4_local_attention_metadata(
+                            common_attn_metadata,
+                            req_metadata,
+                        )
+                    else:
+                        req_metadata.dcp_local_block_table = get_sfa_dcp_local_block_table(
+                            req_metadata.block_table,
+                            req_metadata.seq_lens.shape[0],
+                            self.dcp_local_block_table_cols,
+                        )
                 else:
                     self._populate_c4_prefill_gather_metadata(req_metadata)
             return metadata
@@ -3642,9 +3712,12 @@ class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
                 common_attn_metadata = layer_metadata.swa
             if common_attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 raise NotImplementedError("DeepSeek-V4 DSA DCP does not support speculative decoding now.")
-            if common_attn_metadata.num_prefills == 0 and (
-                common_attn_metadata.attn_state != AscendAttentionState.DecodeOnly
-            ):
+            # Query-length splitting also counts a one-token initial prefill
+            # as a decode; it can use the same local-history attention path.
+            if common_attn_metadata.num_prefills == 0 and common_attn_metadata.attn_state not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.PrefillNoCache,
+            }:
                 raise NotImplementedError(
                     "DeepSeek-V4 DSA DCP phase one supports ordinary prefill/mixed batches and standard decode only."
                 )

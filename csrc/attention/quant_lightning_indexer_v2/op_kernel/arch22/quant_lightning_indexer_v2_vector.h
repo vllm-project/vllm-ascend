@@ -183,6 +183,20 @@ __aicore__ inline void ExtractIndex(const LocalTensor<uint32_t> &idxULocal, cons
     AscendC::PipeBarrier<PIPE_V>();
 }
 
+__aicore__ inline void ExtractValue(const LocalTensor<float> &valueULocal, const LocalTensor<float> &sortLocal,
+                                    int64_t extractNum)
+{
+    AscendC::GatherMaskParams params;
+    params.repeatTimes = Ceil(extractNum * sizeof(float) * VALUE_AND_INDEX_NUM, VEC_REPEAT_BYTES);
+    params.src0BlockStride = 1;
+    params.src0RepeatStride = B32_VEC_REPEAT_STRIDE;
+    params.src1RepeatStride = 0;
+    uint64_t rsvdCnt = 0;
+    constexpr uint8_t VALUE_PATTERN = 1; // Even lanes hold the original FP32 scores.
+    AscendC::GatherMask(valueULocal, sortLocal, VALUE_PATTERN, false, static_cast<uint32_t>(0), params, rsvdCnt);
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
 /**
   候选路径专用合并: 与 MergeSort 语义相同, 但回拷 mrgDst 用纯向量 Adds (64 分块)。
   MergeSort 尾部的 UB->UB DataCopy 若走 MTE 管道, 其后的 PipeBarrier<PIPE_V> 不构成 fence,

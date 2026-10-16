@@ -4,19 +4,23 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import dsa_cp
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSAImpl,
     AscendDSALayerMetadata,
     AscendDSAMetadata,
+    AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 
 
 def _make_req_metadata(seq_lens, block_table, query_start_loc=None):
@@ -144,15 +148,30 @@ def test_c4_decode_metadata_keeps_global_lengths_and_builds_local_scfa_view(dcp_
     assert kwargs["cu_seqlens_cmp_kv"] is None
 
 
-def test_c4_main_and_indexer_share_global_qli_length_buffers(monkeypatch):
-    builders = [dsa_cp.AscendDSADCPMetadataBuilder.__new__(dsa_cp.AscendDSADCPMetadataBuilder) for _ in range(2)]
-    for builder in builders:
-        builder.model_config = _make_config().model_config
-        builder.qli_seqused_k = torch.full((4,), -9, dtype=torch.int32)
-        builder.qli_cmp_residual_k = torch.full((4,), -9, dtype=torch.int32)
-        builder.qli_metadata_buffer = torch.empty(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
-        builder.seqused_q = torch.ones(3, dtype=torch.int32)
-    seq_lens = torch.tensor([3, 16, 19], dtype=torch.int64)
+def _make_qli_builder(*, num_prefills=0, dcp_rank=0, shard_c4_cache=True):
+    builder = dsa_cp.AscendDSADCPMetadataBuilder.__new__(dsa_cp.AscendDSADCPMetadataBuilder)
+    builder.model_config = _make_config().model_config
+    builder.shard_c4_cache = shard_c4_cache
+    builder.shard_c4_main = shard_c4_cache
+    builder.num_prefills = num_prefills
+    builder.compressor_ratio = 4
+    builder.storage_block_size = 32
+    builder.dcp_size = 8
+    builder.dcp_rank = dcp_rank
+    builder.qli_seqused_k = torch.full((16,), -9, dtype=torch.int32)
+    builder.qli_cmp_residual_k = torch.full((16,), -9, dtype=torch.int32)
+    builder.qli_metadata_buffer = torch.empty(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder.seqused_q = torch.ones(16, dtype=torch.int32)
+    return builder
+
+
+@pytest.mark.parametrize(
+    ("num_prefills", "shard_c4_cache"),
+    [(1, True), (0, False)],
+)
+def test_global_qli_lengths_and_causal_mask_are_preserved(num_prefills, shard_c4_cache, monkeypatch):
+    builders = [_make_qli_builder(num_prefills=num_prefills, shard_c4_cache=shard_c4_cache) for _ in range(2)]
+    seq_lens = torch.tensor([3, 128, 133], dtype=torch.int64)
     query_start_loc = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
     metadata_cache = {}
     metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
@@ -160,26 +179,202 @@ def test_c4_main_and_indexer_share_global_qli_length_buffers(monkeypatch):
     monkeypatch.setattr(dsa_cp.DeviceOperator, "get_dsa_indexer_quant_mode", lambda: 0)
 
     for builder in builders:
-        builder._build_qli_metadata(metadata_cache, query_start_loc, seq_lens, 1, 19)
+        assert (
+            builder._build_qli_metadata(metadata_cache, query_start_loc, seq_lens, 1, 133)
+            is builder.qli_metadata_buffer
+        )
+    assert builders[0].qli_metadata_buffer.data_ptr() != builders[1].qli_metadata_buffer.data_ptr()
     main_lengths, main_residual = builders[0]._get_qli_length_buffers(metadata_cache, 3)
     indexer_lengths, indexer_residual = builders[1]._get_qli_length_buffers(metadata_cache, 3)
 
     metadata_op.assert_called_once()
-    assert main_lengths.tolist() == [0, 4, 4]
-    assert main_residual.tolist() == [3, 0, 3]
+    assert main_lengths.tolist() == [0, 32, 33]
+    assert main_residual.tolist() == [3, 0, 1]
     assert indexer_lengths.data_ptr() == main_lengths.data_ptr()
     assert indexer_residual.data_ptr() == main_residual.data_ptr()
-    assert metadata_op.call_args.kwargs["seqused_k"].data_ptr() == indexer_lengths.data_ptr()
-    assert metadata_op.call_args.kwargs["cmp_residual_k"].data_ptr() == indexer_residual.data_ptr()
-    assert builders[1].qli_seqused_k.tolist() == [-9] * 4
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["seqused_k"].data_ptr() == indexer_lengths.data_ptr()
+    assert kwargs["cmp_residual_k"].data_ptr() == indexer_residual.data_ptr()
+    assert kwargs["mask_mode"] == 3
+    assert kwargs["cmp_ratio"] == 4
+    assert kwargs["max_seqlen_k"] == 33
+    assert builders[1].qli_seqused_k.eq(-9).all()
+    assert builders[1].qli_cmp_residual_k.eq(-9).all()
+
+
+@pytest.mark.parametrize(
+    ("dcp_rank", "expected"),
+    [
+        (0, [0, 0, 1, 31, 32, 32, 32, 32, 32, 33]),
+        (1, [0, 0, 0, 0, 0, 0, 1, 32, 32, 32]),
+        *[(rank, [0, 0, 0, 0, 0, 0, 0, 32, 32, 32]) for rank in range(2, 7)],
+        (7, [0, 0, 0, 0, 0, 0, 0, 31, 32, 32]),
+    ],
+)
+def test_decode_qli_partitions_compressed_pages_and_allows_empty_ranks(dcp_rank, expected, monkeypatch):
+    builder = _make_qli_builder(dcp_rank=dcp_rank)
+    # Raw-token lengths straddle compression, compressed-page, and DCP-stripe boundaries.
+    # Partitioning raw tokens before compression would give different results.
+    seq_lens = torch.tensor([1, 3, 4, 127, 128, 131, 132, 1023, 1024, 1028], dtype=torch.int64)
+    original_lengths = seq_lens.clone()
+    query_start_loc = torch.arange(len(seq_lens) + 1, dtype=torch.int32)
+    global_metadata = torch.full((DSA_METADATA_BUFFER_SIZE,), -1, dtype=torch.int32)
+    metadata_cache = {"qli": global_metadata}
+    local_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=local_metadata)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", metadata_op, raising=False)
+    monkeypatch.setattr(dsa_cp.DeviceOperator, "get_dsa_indexer_quant_mode", lambda: 0)
+
+    result = builder._build_qli_metadata(metadata_cache, query_start_loc, seq_lens, 1, 1028)
+
+    assert builder.qli_seqused_k[: len(seq_lens)].tolist() == expected
+    assert builder.qli_cmp_residual_k[: len(seq_lens)].eq(0).all()
+    assert builder.qli_seqused_k[len(seq_lens) :].eq(-9).all()
+    assert builder.qli_cmp_residual_k[len(seq_lens) :].eq(-9).all()
+    torch.testing.assert_close(seq_lens, original_lengths)
+    torch.testing.assert_close(result, local_metadata)
+    assert metadata_cache["qli"] is global_metadata
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["seqused_k"].tolist() == expected
+    assert kwargs["cmp_residual_k"].eq(0).all()
+    assert kwargs["mask_mode"] == 0
+    assert kwargs["cmp_ratio"] == 4
+    assert kwargs["max_seqlen_q"] == 1
+    assert kwargs["max_seqlen_k"] >= max(expected)
+    assert kwargs["cu_seqlens_q"] is query_start_loc
+
+
+def test_decode_qli_shared_buffers_refresh_with_cached_local_tiling(monkeypatch):
+    main_builder, indexer_builder = (_make_qli_builder(dcp_rank=1) for _ in range(2))
+    metadata_cache = {}
+    metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", metadata_op, raising=False)
+    monkeypatch.setattr(dsa_cp.DeviceOperator, "get_dsa_indexer_quant_mode", lambda: 0)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    main_builder._build_qli_metadata(
+        metadata_cache, query_start_loc, torch.tensor([128, 132], dtype=torch.int32), 1, 132
+    )
+    indexer_builder._build_qli_metadata(
+        metadata_cache, query_start_loc, torch.tensor([132, 256], dtype=torch.int32), 1, 256
+    )
+    main_lengths, main_residual = main_builder._get_qli_length_buffers(metadata_cache, 2)
+    indexer_lengths, indexer_residual = indexer_builder._get_qli_length_buffers(metadata_cache, 2)
+
+    metadata_op.assert_called_once()
+    assert main_lengths.tolist() == [1, 32]
+    assert main_residual.tolist() == [0, 0]
+    assert indexer_lengths.data_ptr() == main_lengths.data_ptr()
+    assert indexer_residual.data_ptr() == main_residual.data_ptr()
+    assert indexer_builder.qli_seqused_k.eq(-9).all()
+    assert indexer_builder.qli_cmp_residual_k.eq(-9).all()
+
+
+@pytest.mark.parametrize("num_prefills", [0, 1])
+@pytest.mark.parametrize("is_indexer", [False, True])
+def test_c4_build_keeps_compressor_global_domain_and_selects_indexer_view(num_prefills, is_indexer, monkeypatch):
+    builder = _make_qli_builder(num_prefills=num_prefills, dcp_rank=7)
+    builder.shard_c4_main = not is_indexer
+    builder.dcp_local_block_table_cols = 1
+    builder.lane_replication_size = builder.scheduler_replication_size = 1
+    builder._populate_c4_local_attention_metadata = MagicMock()
+    builder._populate_c4_prefill_gather_metadata = MagicMock()
+    req = _make_req_metadata([131, 1028], [[3, 7], [9, 11]])
+    original_lengths = req.seq_lens.clone()
+    original_table = req.block_table.clone()
+    metadata = AscendDSAMetadata(2, 2, 2 - num_prefills, num_prefills, req_metadata=req)
+    base_build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(AscendDSAMetadataBuilder, "build", base_build)
+    common_metadata = SimpleNamespace()
+
+    assert builder.build(0, common_metadata) is metadata
+
+    torch.testing.assert_close(req.seq_lens, original_lengths)
+    torch.testing.assert_close(req.block_table, original_table)
+    assert req.compressor_dcp_size == 8
+    assert req.compressor_dcp_rank == 7
+    assert req.dcp_indexer_decode is (num_prefills == 0)
+    if num_prefills:
+        builder._populate_c4_local_attention_metadata.assert_not_called()
+        builder._populate_c4_prefill_gather_metadata.assert_called_once_with(req)
+    elif is_indexer:
+        builder._populate_c4_local_attention_metadata.assert_not_called()
+        builder._populate_c4_prefill_gather_metadata.assert_not_called()
+        assert req.dcp_local_block_table.tolist() == [[3], [9]]
+        assert req.dcp_local_sas_metadata is None
+        assert req.dcp_local_cmp_sparse_indices is None
+    else:
+        builder._populate_c4_local_attention_metadata.assert_called_once_with(common_metadata, req)
+        builder._populate_c4_prefill_gather_metadata.assert_not_called()
+
+
+@pytest.mark.parametrize("is_indexer", [False, True])
+def test_c4_indexer_builder_omits_main_attention_buffers(is_indexer, monkeypatch):
+    config = _make_config()
+    config.model_config.max_model_len = 131072
+    config.scheduler_config = SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=12)
+    config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[])
+
+    def initialize_base(self, *_):
+        self.model_config = config.model_config
+        self.vllm_config = config
+        self.logical_block_size = 128
+        self.compressor_ratio = 4
+        self.dcp_size, self.dcp_rank = 8, 7
+        self.qli_seqused_k = torch.zeros(13, dtype=torch.int32)
+
+    monkeypatch.setattr(dsa_cp.DCPMetadataBuilderMixin, "__init__", initialize_base)
+    monkeypatch.setattr(dsa_cp, "get_dcp_group", lambda: SimpleNamespace(ranks=list(range(8))))
+    spec = SimpleNamespace(scale_dim=1 if is_indexer else 0)
+
+    builder = dsa_cp.AscendDSADCPMetadataBuilder(
+        spec, ["indexer" if is_indexer else "main"], config, torch.device("cpu")
+    )
+
+    assert builder.shard_c4_cache is True
+    assert builder.shard_c4_main is (not is_indexer)
+    assert builder.dcp_local_block_table_cols == 128
+    assert builder.dcp_collective_rank_order.tolist() == list(range(8))
+    for name in (
+        "dcp_global_compressed_seq_lens_buf",
+        "dcp_local_compressed_seq_lens_buf",
+        "dcp_local_seqused_kv_buf",
+        "dcp_local_sas_metadata_buffer",
+        "dcp_local_cmp_sparse_indices_buf",
+        "dcp_local_remap_chunk_out_buf",
+        "dcp_local_remap_chunk_count_buf",
+        "dcp_cmp_only_sinks",
+    ):
+        assert hasattr(builder, name) is (not is_indexer)
+
+
+@pytest.mark.parametrize("compressor_ratio", [1, 128])
+def test_unsharded_metadata_keeps_default_compressor_and_indexer_contract(compressor_ratio, monkeypatch):
+    builder = _make_qli_builder(shard_c4_cache=False)
+    builder.compressor_ratio = compressor_ratio
+    builder.lane_replication_size = builder.scheduler_replication_size = 1
+    builder._populate_c4_local_attention_metadata = MagicMock()
+    builder._populate_c4_prefill_gather_metadata = MagicMock()
+    req = _make_req_metadata([131], [[3, 7]])
+    metadata = AscendDSAMetadata(1, 2, 1, 0, req_metadata=req)
+    monkeypatch.setattr(AscendDSAMetadataBuilder, "build", MagicMock(return_value=metadata))
+
+    assert builder.build(0, SimpleNamespace()) is metadata
+
+    assert req.compressor_dcp_size == 1
+    assert req.compressor_dcp_rank == 0
+    assert req.dcp_indexer_decode is False
+    builder._populate_c4_local_attention_metadata.assert_not_called()
+    builder._populate_c4_prefill_gather_metadata.assert_not_called()
 
 
 def test_prefill_compact_table_restores_global_pages_in_dcp_rank_order():
     builder = dsa_cp.AscendDSADCPMetadataBuilder.__new__(dsa_cp.AscendDSADCPMetadataBuilder)
     builder.dcp_size = 3
+    builder.logical_block_size = 128
     builder.dcp_local_block_table_cols = 2
     builder.dcp_collective_rank_order = torch.tensor([2, 0, 1], dtype=torch.int32)
-    req = _make_req_metadata([32, 32], [[9, 3, 99], [3, 7, 99]])
+    req = _make_req_metadata([385, 768], [[9, 3, 99], [3, 7, 99]], [0, 1, 5])
+    req.storage_block_size = 32
 
     builder._populate_c4_prefill_gather_metadata(req)
 
@@ -192,6 +387,56 @@ def test_prefill_compact_table_restores_global_pages_in_dcp_rank_order():
         [203, 3, 103, 207, 7, 107],
     ]
     assert req.block_table.tolist() == [[9, 3, 99], [3, 7, 99]]
+
+
+@pytest.mark.parametrize(
+    ("seq_lens", "valid_cols"),
+    [
+        ([0], [0]),
+        ([1], [1]),
+        ([3], [1]),
+        ([4], [1]),
+        ([1023], [1]),
+        ([1024], [1]),
+        ([1025], [2]),
+        ([1027], [2]),
+        ([1028], [2]),
+        ([0, 1, 1024, 1025, 1028], [0, 1, 1, 2, 2]),
+    ],
+)
+def test_prefill_gather_ignores_stale_long_request_tail(seq_lens, valid_cols):
+    builder = dsa_cp.AscendDSADCPMetadataBuilder.__new__(dsa_cp.AscendDSADCPMetadataBuilder)
+    builder.dcp_size = 8
+    builder.logical_block_size = 128
+    builder.dcp_local_block_table_cols = 128
+    builder.dcp_collective_rank_order = torch.arange(8, dtype=torch.int32)
+    num_reqs = len(seq_lens)
+    old_table = torch.arange(1, num_reqs * 128 + 1, dtype=torch.int32).reshape(num_reqs, 128)
+    req = _make_req_metadata([131072] * num_reqs, old_table.tolist())
+    req.storage_block_size = 32
+    builder._populate_c4_prefill_gather_metadata(req)
+    assert req.dcp_prefill_kv_gather_block_ids.tolist() == old_table.flatten().tolist()
+
+    # A shorter batch overwrites only its allocated prefix. Each request's
+    # query is short, but all allocated historical columns must be retained.
+    expected_ids = [0]
+    for row, count in enumerate(valid_cols):
+        new_ids = torch.arange(4000 + row * 128, 4000 + row * 128 + count, dtype=torch.int32)
+        req.block_table[row, :count] = new_ids
+        expected_ids.extend(new_ids.tolist())
+    original_table = req.block_table.clone()
+    req.seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
+    req.query_start_loc = torch.tensor([0, *np.cumsum([min(length, 4) for length in seq_lens])], dtype=torch.int32)
+
+    builder._populate_c4_prefill_gather_metadata(req)
+
+    assert req.dcp_prefill_kv_gather_block_ids.tolist() == expected_ids
+    assert torch.equal(req.block_table, original_table)
+    gathered_ids = req.dcp_prefill_kv_gather_block_ids.repeat(8)
+    restored_table = gathered_ids[req.dcp_prefill_kv_gather_block_table].reshape(num_reqs, 128, 8)
+    for row, count in enumerate(valid_cols):
+        assert torch.equal(restored_table[row, :count], original_table[row, :count, None].expand(-1, 8))
+        assert torch.count_nonzero(restored_table[row, count:]) == 0
 
 
 def test_decode_query_gather_restores_token_major_layout_after_collective_completion(monkeypatch):
@@ -217,18 +462,21 @@ def test_decode_query_gather_restores_token_major_layout_after_collective_comple
     assert events == ["work_wait", "event_wait"]
 
 
-def test_c4_local_attention_passes_local_addresses_and_masks_empty_rows(monkeypatch):
+@pytest.mark.parametrize("first_seq_len", [1, 16])
+def test_c4_local_attention_passes_local_addresses_and_masks_empty_rows(first_seq_len, monkeypatch):
     monkeypatch.setattr(dsa_cp, "HAS_TRITON", False)
-    req = _make_req_metadata([16, 16], [[5, 7], [9, 11]])
+    req = _make_req_metadata([first_seq_len, 16], [[5, 7], [9, 11]])
     req.dcp_local_block_table = torch.tensor([[5], [9]], dtype=torch.int32)
-    req.dcp_local_seqused_kv = torch.tensor([8, 8], dtype=torch.int32)
+    req.dcp_local_seqused_kv = torch.tensor([0 if first_seq_len == 1 else 8, 8], dtype=torch.int32)
     req.dcp_local_sas_metadata = torch.ones(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     req.dcp_cmp_only_sinks = torch.full((4,), dsa_cp.DSA_CMP_ONLY_SINK)
     topk = torch.tensor([[[0, 1, -1, 8]], [[2, 3, 6, 7]]], dtype=torch.int32)
+    if first_seq_len == 1:
+        topk[0].fill_(-1)
     req.dcp_local_cmp_sparse_indices = torch.empty_like(topk)
     req.dcp_local_remap_chunk_out = torch.empty((2, 4), dtype=torch.int32)
     req.dcp_local_remap_chunk_count = torch.empty((2, 1), dtype=torch.int32)
-    swa_req = _make_req_metadata([16, 16], [[3, 4], [6, 8]])
+    swa_req = _make_req_metadata([first_seq_len, 16], [[3, 4], [6, 8]])
     q = torch.ones((2, 4, 3))
     c4_kv = torch.ones((12, 2, 3))
     swa_kv = torch.ones((9, 2, 3))
@@ -514,6 +762,63 @@ def test_unsharded_layers_keep_original_attention_contract(compress_ratio, dcp_s
     impl._execute_attention(q, c4_kv, swa_kv, topk, layer_metadata)
 
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+@pytest.mark.parametrize(
+    ("seq_len", "query_len", "expected_state", "expected_num_prefills"),
+    [
+        (1, 1, AscendAttentionState.PrefillNoCache, 0),
+        (2, 1, AscendAttentionState.DecodeOnly, 0),
+        (4, 4, AscendAttentionState.PrefillNoCache, 1),
+        (5, 4, AscendAttentionState.ChunkedPrefill, 1),
+    ],
+)
+def test_forward_accepts_real_prefill_and_decode_classification(
+    compress_ratio, seq_len, query_len, expected_state, expected_num_prefills, monkeypatch
+):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="generate"),
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+    )
+    attn_state = build_attn_state(config, np.array([seq_len]), 1, np.array([query_len]), np.array([1]))
+    common_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        max_query_len=query_len,
+        num_reqs=1,
+        num_actual_tokens=query_len,
+        query_start_loc_cpu=torch.tensor([0, query_len], dtype=torch.int32),
+    )
+    num_decodes, num_prefills, num_decode_tokens, _ = dsa_cp.split_decodes_and_prefills(common_metadata)
+    assert attn_state == expected_state
+    assert num_prefills == expected_num_prefills
+    metadata = AscendDSAMetadata(query_len, num_decodes, num_decode_tokens, num_prefills, attn_state=attn_state)
+    layer_metadata = AscendDSALayerMetadata(metadata if compress_ratio > 1 else None, metadata)
+    impl = dsa_cp.AscendDSADCPImpl.__new__(dsa_cp.AscendDSADCPImpl)
+    impl.compress_ratio, impl.dcp_size = compress_ratio, 8
+    monkeypatch.setattr(impl, "_get_layer_metadata", lambda *_: layer_metadata)
+    output = torch.empty((query_len, 3))
+    base_forward = MagicMock(return_value=output)
+    monkeypatch.setattr(AscendDSAImpl, "forward", base_forward)
+    hidden_states = torch.ones_like(output)
+    attn_metadata = {"layer": metadata}
+
+    assert impl.forward("layer", hidden_states, None, attn_metadata, output) is output
+
+    base_forward.assert_called_once_with("layer", hidden_states, None, attn_metadata, output)
+
+
+def test_forward_still_rejects_speculative_decoding(monkeypatch):
+    metadata = AscendDSAMetadata(1, 1, 1, 0, attn_state=AscendAttentionState.SpecDecoding)
+    impl = dsa_cp.AscendDSADCPImpl.__new__(dsa_cp.AscendDSADCPImpl)
+    monkeypatch.setattr(impl, "_get_layer_metadata", lambda *_: AscendDSALayerMetadata(metadata, metadata))
+    base_forward = MagicMock()
+    monkeypatch.setattr(AscendDSAImpl, "forward", base_forward)
+
+    with pytest.raises(NotImplementedError, match="does not support speculative decoding"):
+        impl.forward("layer", torch.ones((1, 3)), None, {"layer": metadata})
+
+    base_forward.assert_not_called()
 
 
 @pytest.mark.parametrize(

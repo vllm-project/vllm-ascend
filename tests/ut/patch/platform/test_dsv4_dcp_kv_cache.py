@@ -61,7 +61,7 @@ def _make_specs(*, dcp=2, with_mtp=False):
         tokens_per_state=4,
         model_version="deepseek_v4",
     )
-    indexer = full_spec_cls(
+    indexer = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=8,
@@ -70,7 +70,6 @@ def _make_specs(*, dcp=2, with_mtp=False):
         scale_dtype=torch.float16,
         tokens_per_state=4,
         model_version="deepseek_v4",
-        **replicated,
     )
     c128 = full_spec_cls(
         block_size=4096,
@@ -123,6 +122,60 @@ def _make_specs(*, dcp=2, with_mtp=False):
     return specs
 
 
+def _make_flash_specs(*, dcp):
+    """DSV4 Flash on A2: 21 C4, 20 C128 and 43 SWA layers, without MTP."""
+    replicated = {"dcp_scheduler_replication_size": dcp} if dcp > 1 else {}
+    full_spec_cls = AscendDSAReplicatedFullMLASpec if dcp > 1 else AscendMLAAttentionSpec
+    sliding_spec_cls = AscendDSAReplicatedSlidingWindowMLASpec if dcp > 1 else AscendSlidingWindowMLASpec
+    c4 = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+        model_version="deepseek_v4",
+    )
+    indexer = replace(c4, head_size=128, dtype=torch.int8, scale_dim=1, scale_dtype=torch.float16)
+    c128 = full_spec_cls(
+        block_size=4096,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        tokens_per_state=128,
+        model_version="deepseek_v4",
+        **replicated,
+    )
+    swa = sliding_spec_cls(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        model_version="deepseek_v4",
+        **replicated,
+    )
+    c4_state = sliding_spec_cls(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=2048,
+        dtype=torch.float32,
+        sliding_window=8,
+        page_size_padded=32768,
+        **replicated,
+    )
+    indexer_state = replace(c4_state, head_size=512, page_size_padded=4160)
+    c128_state = replace(c4_state, block_size=8, head_size=1024, sliding_window=128)
+    return {
+        **{f"c4_attn.{layer}": replace(c4) for layer in range(21)},
+        **{f"c4_indexer.{layer}": replace(indexer) for layer in range(21)},
+        **{f"c128_attn.{layer}": replace(c128) for layer in range(20)},
+        **{f"swa.{layer}": replace(swa) for layer in range(43)},
+        **{f"c4_state.{layer}": replace(c4_state) for layer in range(21)},
+        **{f"c4_indexer_state.{layer}": replace(indexer_state) for layer in range(21)},
+        **{f"c128_state.{layer}": replace(c128_state) for layer in range(20)},
+    }
+
+
 def _make_groups(specs):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
@@ -130,14 +183,13 @@ def _make_groups(specs):
     return kv_cache_utils_patch._get_kv_cache_groups_uniform_groups(grouped_specs)
 
 
-def test_dcp_groups_separate_c4_indexer_and_preserve_replicated_pages():
+def test_dcp_groups_combine_c4_indexer_and_preserve_replicated_pages():
     specs = _make_specs()
     original_sizes = {name: spec.page_size_bytes for name, spec in specs.items()}
     groups = _make_groups(specs)
 
-    assert [group.layer_names for group in groups[:3]] == [
-        ["c4_attn.0", "c4_attn.1"],
-        ["c4_indexer.0", "c4_indexer.1"],
+    assert [group.layer_names for group in groups[:2]] == [
+        ["c4_attn.0", "c4_attn.1", "c4_indexer.0", "c4_indexer.1"],
         ["c128_attn"],
     ]
     assert {name for group in groups for name in group.layer_names} == set(specs)
@@ -219,10 +271,116 @@ def test_dcp_planner_stride_includes_all_page_buckets_and_mtp(with_mtp):
         last_byte = tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + num_blocks * page_size
         assert last_byte <= tensor.size
 
-    peak_blocks = 32 + 64 + 2 + 69 + 9 + 3
+    peak_blocks = 32 + 2 + 69 + 9 + 3
     assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) == (
         peak_blocks * bytes_per_block
     )
+
+
+@pytest.mark.parametrize("dcp", [1, 8])
+def test_flash_c4_indexer_share_blocks_without_widening_pool(dcp):
+    specs = _make_flash_specs(dcp=dcp)
+    original_pages = {name: spec.page_size_bytes for name, spec in specs.items()}
+    groups = _make_groups(specs)
+    config = _make_config(dcp=dcp, batched_tokens=4096)
+    config.model_config.max_model_len = 131072
+
+    assert len(groups) == 6
+    assert set(groups[0].layer_names) == {name for name in specs if name.startswith(("c4_attn.", "c4_indexer."))}
+    assert {name: spec.page_size_bytes for name, spec in specs.items()} == original_pages
+    page_sizes, _, _, _, tuple_slots = kv_cache_utils_patch._get_deepseek_v4_cache_layout(groups)
+    assert page_sizes == [4160, 32768]
+    assert tuple_slots == 22
+    bytes_per_block = 812416
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block(groups) == bytes_per_block
+
+    planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 4097 * bytes_per_block - 1)
+    assert planned.num_blocks == 4096
+    assert {tensor.size for tensor in planned.kv_cache_tensors} == {4096 * bytes_per_block}
+    assert {tensor.block_stride for tensor in planned.kv_cache_tensors} == {4160, 32768}
+    assert {name for tensor in planned.kv_cache_tensors for name in tensor.layers} == set(specs)
+    for tensor in planned.kv_cache_tensors:
+        end = tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + 4096 * tensor.block_stride
+        assert end <= tensor.size
+
+    # Admission also charges every owned ID at the entire shared-pool stride.
+    # Window bounds include an extra block for an unaligned window start.
+    expected_pages = [1024 // dcp, 32, 133, 133, 2053, 529]
+    assert [group.kv_cache_spec.max_memory_usage_pages(config) for group in groups] == expected_pages
+    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) == (
+        sum(expected_pages) * bytes_per_block
+    )
+
+
+@pytest.mark.parametrize("lengths", [(131072,), (131072, 131073, 35001), (1, 1024, 1025)])
+def test_flash_dcp8_releases_real_pool_ids_with_per_request_rounding(lengths):
+    counts_by_dcp = {}
+    occupied_by_dcp = {}
+    for dcp in (1, 8):
+        groups = _make_groups(_make_flash_specs(dcp=dcp))
+        cache = KVCacheConfig(num_blocks=16384, kv_cache_tensors=[], kv_cache_groups=groups)
+        coordinator = AscendHybridKVCacheCoordinator(
+            cache,
+            max_model_len=max(lengths),
+            use_eagle=False,
+            enable_caching=False,
+            enable_kv_cache_events=False,
+            dcp_world_size=dcp,
+            pcp_world_size=1,
+            hash_block_size=32,
+            scheduler_block_size=4096,
+            max_in_flight_tokens=4096,
+        )
+        managers = coordinator.single_type_managers
+        assert [manager.dcp_world_size for manager in managers] == [dcp, 1, 1, 1, 1, 1]
+        assert [manager.block_size for manager in managers] == [128 * dcp, 4096, 32, 32, 2, 8]
+
+        for req_index, length in enumerate(lengths):
+            request_id = str(req_index)
+            # Process the prefix in chunks, then allocate one decode token.
+            # Real window managers recycle old IDs before each allocation.
+            processed = 0
+            while processed < length:
+                target = min(processed + 4096, length - 1) if processed < length - 1 else length
+                for manager in managers:
+                    manager.remove_skipped_blocks(request_id, processed)
+                    manager.allocate_new_blocks(request_id, target, target)
+                processed = target
+
+        counts = [
+            sum(not block.is_null for blocks in manager.req_to_blocks.values() for block in blocks)
+            for manager in managers
+        ]
+        assert counts[0] == sum((length + 128 * dcp - 1) // (128 * dcp) for length in lengths)
+        assert counts[1] == sum((length + 4095) // 4096 for length in lengths)
+        for count, (block_size, window) in zip(counts[2:], [(32, 128), (32, 128), (2, 8), (8, 128)]):
+            # The final query sees its window ending at raw position L - 1.
+            expected = sum(
+                (length + block_size - 1) // block_size - max(length - window, 0) // block_size for length in lengths
+            )
+            assert count == expected
+        ids = [
+            block.block_id
+            for manager in managers
+            for blocks in manager.req_to_blocks.values()
+            for block in blocks
+            if not block.is_null
+        ]
+        # Main and Indexer use a single manager, while other groups own
+        # disjoint IDs. Charge the group once, rather than once per role.
+        assert len(ids) == len(set(ids)) == sum(counts)
+        occupied = cache.num_blocks - 1 - coordinator.block_pool.get_num_free_blocks()
+        assert occupied == sum(counts)
+        counts_by_dcp[dcp] = counts
+        occupied_by_dcp[dcp] = occupied
+        for req_index in range(len(lengths)):
+            coordinator.free(str(req_index))
+        assert coordinator.block_pool.get_num_free_blocks() == cache.num_blocks - 1
+
+    assert counts_by_dcp[8][1:] == counts_by_dcp[1][1:]
+    saved_ids = counts_by_dcp[1][0] - counts_by_dcp[8][0]
+    assert occupied_by_dcp[1] - occupied_by_dcp[8] == saved_ids
+    assert saved_ids >= 0
 
 
 def test_mixed_dcp_scheduler_alignment_uses_each_group_ownership():
@@ -234,7 +392,7 @@ def test_mixed_dcp_scheduler_alignment_uses_each_group_ownership():
     assert scheduler_size == 4096
     assert hash_size == 4096
     replicated_only = replace(cache, kv_cache_groups=[groups[1]])
-    assert kv_cache_utils_patch._ascend_resolve_kv_cache_block_sizes(replicated_only, config) == (128, 128)
+    assert kv_cache_utils_patch._ascend_resolve_kv_cache_block_sizes(replicated_only, config) == (4096, 4096)
 
 
 def test_mixed_dcp_coordinator_allocates_with_group_ownership_and_frees_blocks():
@@ -254,14 +412,14 @@ def test_mixed_dcp_coordinator_allocates_with_group_ownership_and_frees_blocks()
         max_in_flight_tokens=128,
     )
     managers = coordinator.single_type_managers
-    assert [manager.dcp_world_size for manager in managers] == [2, 1, 1, 1]
-    assert [manager.block_size for manager in managers] == [256, 128, 4096, 32]
+    assert [manager.dcp_world_size for manager in managers] == [2, 1, 1]
+    assert [manager.block_size for manager in managers] == [256, 4096, 32]
     assert coordinator.lcm_block_size == 4096
     request_id = "old"
     for manager in managers:
         manager.allocate_new_blocks(request_id, 4096, 4096)
-    assert [len(manager.req_to_blocks[request_id]) for manager in managers] == [16, 32, 1, 128]
-    assert coordinator.block_pool.get_num_free_blocks() == cache.num_blocks - 1 - sum([16, 32, 1, 128])
+    assert [len(manager.req_to_blocks[request_id]) for manager in managers] == [16, 1, 128]
+    assert coordinator.block_pool.get_num_free_blocks() == cache.num_blocks - 1 - sum([16, 1, 128])
     coordinator.free(request_id)
     assert coordinator.block_pool.get_num_free_blocks() == cache.num_blocks - 1
 
@@ -274,9 +432,9 @@ def test_dcp_preflight_fits_real_peak_reserves_null_block_and_uses_smallest_rank
     specs = _make_specs()
     groups = _make_groups(copy.deepcopy(specs))
     stride = kv_cache_utils_patch._ascend_pool_bytes_per_block(groups)
-    # At 63 in-flight tokens the six groups need 144 block IDs. The 145th
+    # At 63 in-flight tokens the five groups need 80 block IDs. The 81st
     # physical block is reserved by BlockPool, so 64 tokens cannot fit.
-    available_memory = [152 * stride, 145 * stride]
+    available_memory = [88 * stride, 81 * stride]
     workers = [specs, copy.deepcopy(specs)]
     original_workers = copy.deepcopy(workers)
     upstream = MagicMock(return_value=[])
@@ -287,9 +445,9 @@ def test_dcp_preflight_fits_real_peak_reserves_null_block_and_uses_smallest_rank
     assert config.model_config.max_model_len == 8192
     assert workers == original_workers
     upstream.assert_called_once_with(config, workers, available_memory)
-    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) == 144 * stride
+    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) == 80 * stride
     config.scheduler_config.max_num_batched_tokens += 1
-    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) > 144 * stride
+    assert kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(config, groups) > 80 * stride
 
 
 def test_dcp_preflight_keeps_requested_budget_when_minimum_cannot_fit(monkeypatch):

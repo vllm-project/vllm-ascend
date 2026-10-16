@@ -98,8 +98,8 @@ def _ascend_resolve_kv_cache_block_sizes(
     This restriction is correct for CUDA but not for Ascend, which implements
     context parallelism for MLA and SWA-MLA layers independently.
 
-    DSV4 has mixed ownership under DCP: C4-main scheduler blocks are
-    DCP-sharded, while the C4 Indexer, C128, SWA and compressor-state
+    DSV4 has mixed ownership under DCP: C4 main/Indexer scheduler blocks are
+    DCP-sharded, while C128, SWA and compressor-state
     scheduler blocks are replicated globally. Compute each group's effective
     scheduler block size first, then take the LCM.
     """
@@ -277,13 +277,8 @@ def group_and_unify_kv_cache_specs(
         return None
 
     # Full-attention caches may have the same logical block size but different
-    # scheduler ownership.  In particular, DSV4 DCP shards the C4 main cache
-    # while replicating the C4 Indexer globally.  Combining those specs would
-    # force them to share one block table and require DCP physical lanes inside
-    # every Indexer page, which amplifies the shared-pool block size.
-    #
-    # Keep the legacy combined group for DCP=1 (replication width == 1), but
-    # split groups when their scheduler-replication widths differ.
+    # scheduler ownership. C4 main and Indexer share sharded block IDs, while
+    # globally replicated caches must retain independent scheduler ownership.
     logical_block_specs: dict[tuple[int, int], dict[str, KVCacheSpec]] = defaultdict(dict)
     grouped_swa_mla_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     for name, spec in kv_cache_spec.items():
@@ -712,7 +707,7 @@ def _ascend_get_kv_cache_configs(
 ) -> list[KVCacheConfig]:
     """Fit DSV4 DCP's in-flight prefill budget to the real shared pool.
 
-    Tiny compressor-state pages use the same BlockPool as C4 and its global
+    Tiny compressor-state pages use the same BlockPool as sharded C4 main and
     Indexer. During a large prefill the state group can hold an entire batch
     of blocks at once, each consuming a full shared tuple. Find the largest
     batch that fits; changing the admission formula alone would admit more

@@ -905,7 +905,8 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_t
     at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        sparse_values_out = at::empty_symint(output_size, query.options().dtype(at::kBFloat16));
+        sparse_values_out = at::empty_symint(
+            output_size, query.options().dtype(return_value == 2 ? at::kFloat : at::kBFloat16));
     } else {
         sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kBFloat16));
     }

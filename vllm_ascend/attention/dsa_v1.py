@@ -397,15 +397,17 @@ class AscendDSAReqMetadata:
     qli_cmp_residual_k: torch.Tensor = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
-    # C4 main KV is the only DSV4 cache sharded across DCP ranks. Its
-    # compressed physical pages are assigned round-robin; these values remain
-    # at their single-rank defaults for replicated C4 indexer/C128 groups.
+    # C4 main and Indexer share page ownership and scheduler block IDs under
+    # DCP. Replicated C128/SWA/state caches keep the single-rank defaults.
     compressor_dcp_size: int = 1
     compressor_dcp_rank: int = 0
+    # Decode scores all visible local Indexer rows without a causal mask,
+    # then merges local candidates into the global TopK.
+    dcp_indexer_decode: bool = False
     # C4-only DCP attention keeps the compressor/Indexer in the global C4
     # domain while exposing a second, rank-local view to the sparse attention
     # operator.  These fields are populated only for the page-sharded C4 main
-    # cache; replicated SWA/C128/Indexer groups keep their default None values.
+    # caches; replicated SWA/C128 groups keep their default None values.
     dcp_local_block_table: torch.Tensor | None = None
     dcp_local_compressed_seq_lens: torch.Tensor | None = None
     dcp_local_seqused_kv: torch.Tensor | None = None
