@@ -2,8 +2,9 @@
 
 ## Overview
 
-Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language Model) serving is essential for optimal performance. Dynamically rearranging experts during inference can negatively impact TTFT and TPOT because it requires global synchronization pauses that stall all in-flight requests until expert redistribution completes. Our solution aims to minimize the impact of such pauses.
-
+Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language Model) serving is essential for optimal performance.
+Dynamically rearranging experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token), as it requires global synchronization pauses that stall all in-flight requests.
+Our solution aims to minimize the impact of these pauses.
 vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
@@ -34,9 +35,10 @@ initial MRv2 model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous
 EPLB. Validate accuracy and performance with the target model, topology, and
 traffic before production deployment.
 
-> [!IMPORTANT]
-> 950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
-> A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples using a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
+!!!IMPORTANT
+
+    950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
+    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples using a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
 ### Model Runner V2 Weight Formats
 
@@ -69,9 +71,10 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 - P node workloads with input sequences shorter than `1024` tokens.
 - D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
 
-> [!WARNING]
-> Meeting the above conditions may lead to performance degradation.
-> When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
+!!!WARNING
+
+    Meeting the above conditions may lead to performance degradation.
+    When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
 
 ## How to Use EPLB
 
@@ -173,11 +176,12 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
-> [!IMPORTANT]
-> MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous movement.
-> It rejects elastic EP, legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as well as communicators other than Gloo and HIXL.
-> HIXL requires the CANN HIXL runtime and working device connectivity on every EPLB rank.
-> Validate the target model, topology, graph mode, and traffic independently before production use.
+!!!IMPORTANT
+
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous movement.
+    It rejects elastic EP, legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as well as communicators other than Gloo and HIXL.
+    HIXL requires the CANN HIXL runtime and working device connectivity on every EPLB rank.
+    Validate the target model, topology, graph mode, and traffic independently before production use.
 
 ### Model Runner V1: Legacy EPLB
 
@@ -189,8 +193,10 @@ Legacy MRv1 EPLB has three usage modes:
 | **Recording** (generate expert map) | `expert_map_record_path` | `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true` |
 | **Static EPLB** (load pre-recorded map) | `expert_map_path` | none required |
 
-> [!IMPORTANT]
-> For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
+!!!IMPORTANT
+
+    For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`.
+    Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
 
 #### Dynamic EPLB
 
@@ -255,10 +261,10 @@ The `eplb_policy_type` parameter selects the balancing algorithm used during dyn
 
 The `eplb_heat_collection_stage` option is intended for prefill-decode aggregation scenarios. Prefill requests usually process many tokens in one iteration, while decode requests usually process fewer tokens. As a result, the expert workload distribution can differ between the two stages. Collecting heat from both stages may hide the imbalance of the stage whose latency you want to optimize.
 
-> [!IMPORTANT]
-> This section describes the MRv1-only `eplb_heat_collection_stage` field.
-> MRv2 uses `load_collection_phase` as described above; the two fields have
-> different batch-classification semantics and are not interchangeable.
+!!!IMPORTANT
+
+    This section describes the MRv1-only `eplb_heat_collection_stage` field.
+    MRv2 uses `load_collection_phase` as described above; the two fields have different batch-classification semantics and are not interchangeable.
 
 Use `eplb_heat_collection_stage` to select the stage whose expert heat contributes to EPLB:
 
@@ -305,15 +311,17 @@ To collect only decode heat, set:
 }
 ```
 
-> [!NOTE]
-> Stage selection applies to dynamic EPLB heat collection. Internally, vLLM-Ascend classifies each forward iteration by comparing its padded scheduled token count with the maximum expected token count of a decode iteration. An iteration above the threshold is treated as prefill; an iteration at or below the threshold is treated as decode. Classification is therefore performed per forward iteration rather than per individual request.
+!!!NOTE
+
+    Stage selection applies to dynamic EPLB heat collection. Internally, vLLM-Ascend classifies each forward iteration by comparing its padded scheduled token count with the maximum expected token count of a decode iteration. An iteration above the threshold is treated as prefill; an iteration at or below the threshold is treated as decode. Classification is therefore performed per forward iteration rather than per individual request.
 
 When an iteration does not match the selected stage, its expert load is not accumulated and it does not advance the heat-collection interval. Once heat collection is complete, balancing calculation and layer-by-layer expert weight updates continue normally.
 
 #### Static EPLB
 
-> [!WARNING]
-> Static EPLB is scheduled for removal in v0.25.1.
+!!!WARNING
+
+    Static EPLB is scheduled for removal in v0.25.1.
 
 ##### Initial Setup (Record Expert Map)
 
