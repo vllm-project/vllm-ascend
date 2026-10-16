@@ -178,7 +178,6 @@ def test_forward_keeps_backend_state_and_dependency_cleanup(wrapper, runtime, ki
         if state is not None:
             flash = state.build(common([11], [1]), 1, 1, False)
             assert flash.cache_lens[0] == 11
-            assert not state.defer and state.take_tasks() == ()
         if fail:
             raise ValueError("forward failed")
         return "output"
@@ -188,8 +187,6 @@ def test_forward_keeps_backend_state_and_dependency_cleanup(wrapper, runtime, ki
         call_wrapper(obj, kind)
     # Generic execution does not rediscover or temporarily mutate builders.
     obj.attn_groups[0][0].get_metadata_builder.assert_not_called()
-    if state is not None:
-        assert not state.defer and state.take_tasks() == ()
     if kind == "Runner":
         obj.model_state.finish_execution.assert_called_once_with(failed=fail)
         assert wrapper.events == ["dp_enter", "dp_exit"]
@@ -219,7 +216,6 @@ def test_profile_set_attn_capture_propose_keep_target_and_draft_independent(wrap
             )
             seen.append(flash)
             assert flash.cache_lens[0] == 22 + len(seen)
-            assert not draft.defer and draft.take_tasks() == ()
         return "output"
 
     obj.parent_call.side_effect = consume
@@ -244,7 +240,6 @@ def test_target_capture_keeps_dependency_cleanup(wrapper, runtime, fail):
     def capture(*args, **kwargs):
         flash = state.build(common([9], [1]), 1, 1, False, retain_for_graph=True)
         assert flash.cache_lens[0] == 9
-        assert not state.defer and state.take_tasks() == ()
         if fail:
             raise ValueError("capture failed")
 
@@ -337,7 +332,6 @@ def test_public_build_prepares_once_per_group_before_return(metadata_build, capt
         flash = result["layer"].external_flashmla
         pointers = addresses(flash)
         assert flash.cache_lens.tolist() == [11, 7] + [0] * 7
-        assert builder.flashmla_state.take_tasks() == ()
         torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
     else:
         assert result == {"layer": "native"}
@@ -350,7 +344,6 @@ def test_public_build_prepares_once_per_group_before_return(metadata_build, capt
     if external:
         refreshed = latest["layer"].external_flashmla
         assert refreshed.cache_lens.tolist() == [19, 15] + [0] * 7
-        assert builder.flashmla_state.take_tasks() == ()
         if capture:
             assert refreshed is flash and addresses(refreshed) == pointers
     else:

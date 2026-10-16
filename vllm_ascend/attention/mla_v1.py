@@ -368,7 +368,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
         state = self.flashmla_state
         assert state is not None
-        state.tasks = ()
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = split_flashmla_requests(
             common
         )

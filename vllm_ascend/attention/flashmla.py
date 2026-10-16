@@ -4,7 +4,7 @@
 
 Call FlashMLAImpl.load after selecting the worker device. Importing this module
 does not load cann_ops_transformer. FlashMLAImpl wraps the operator contract, while
-FlashMLAMetadataBuilder owns per-batch inputs, stable buffers and refresh tasks.
+FlashMLAMetadataBuilder owns per-batch inputs, stable buffers and per-build refreshes.
 Callers own stream ordering and persistent KV writes. Tensor-content checks belong
 in preflight tests: the decode hot path must not copy lengths or tables to the CPU.
 """
@@ -19,7 +19,6 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
@@ -316,11 +315,6 @@ class FlashMLAMetadataBuilder:
         self.max_num_reqs = max_num_reqs
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
-        # Normal builds enqueue refreshes on the caller's stream before return.
-        # An explicit defer=True caller owns take_tasks(): run those refreshes
-        # before consuming the metadata or reusing the same buffers.
-        self.defer = False
-        self.tasks: tuple[DeviceMetadataTask, ...] = ()
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
@@ -383,7 +377,6 @@ class FlashMLAMetadataBuilder:
     def build(
         self, common, num_decodes: int, num_decode_tokens: int, has_prefill: bool, *, retain_for_graph: bool = False
     ) -> FlashMLADecode:
-        self.tasks = ()
         # Mixed batches run outside FULL graph. Do not retain every prefill
         # shape. Retain only explicitly captured decode capacities: retaining
         # every eager token count grows total query storage quadratically.
@@ -460,12 +453,7 @@ class FlashMLAMetadataBuilder:
                 current.slots.masked_fill_(~flash.token_live, -1)
                 current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
 
-        if self.defer:
-            self.tasks = (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, refresh, id(flash.schedule)),)
-        else:
-            refresh()
+        # Refresh on the caller's stream before return; captured buffer caching
+        # preserves the addresses used by graph replay.
+        refresh()
         return flash
-
-    def take_tasks(self) -> tuple[DeviceMetadataTask, ...]:
-        tasks, self.tasks = self.tasks, ()
-        return tasks

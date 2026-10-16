@@ -143,7 +143,6 @@ def runtime(monkeypatch):
     install(
         "vllm.forward_context", BatchDescriptor=object, get_forward_context=Mock(), is_forward_context_available=Mock()
     )
-    tasks = load("vllm_ascend.worker.device_metadata", "vllm_ascend/worker/device_metadata.py")
 
     def rope(positions):
         values = positions[:, None, None, None].expand(-1, 1, 1, 64).to(torch.bfloat16)
@@ -237,7 +236,6 @@ def runtime(monkeypatch):
         events=events,
         active_stream=active_stream,
         recorded_streams=recorded_streams,
-        tasks=tasks,
     )
 
 
@@ -318,12 +316,11 @@ def test_inline_refreshes_repeated_and_alternating_captured_capacities(runtime):
         assert flash.slots.tolist() == inputs.slot_mapping.tolist() + [-1] * (capacity - 2)
         assert flash.positions.tolist() == inputs.positions.tolist() + [0] * (capacity - 2)
         torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
-        assert builder.take_tasks() == () and not builder.defer
     assert len(builder.buffers) == 2
 
 
 @pytest.mark.parametrize("failed_schedule", [1, 2])
-def test_inline_refresh_failure_leaves_no_deferred_task_and_can_rebuild(runtime, failed_schedule):
+def test_inline_refresh_failure_can_rebuild(runtime, failed_schedule):
     builder = runtime.builder(rank=3, use_rope=True)
     inputs = common([37, 15], [1, 1], tokens=4)
     flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
@@ -340,36 +337,14 @@ def test_inline_refresh_failure_leaves_no_deferred_task_and_can_rebuild(runtime,
     runtime.metadata_op.side_effect = fail
     with pytest.raises(ValueError, match="metadata refresh failed"):
         builder.build(inputs, 2, 2, False)
-    assert not builder.defer and builder.take_tasks() == ()
     runtime.metadata_op.side_effect = schedule
     inputs.seq_lens.add_(8)
     assert builder.build(inputs, 2, 2, False) is flash
     assert addresses(flash) == pointers
+    expected = local_lengths(inputs.seq_lens - 1, dcp_size=8, dcp_rank=3, cp_kv_cache_interleave_size=1)
+    torch.testing.assert_close(flash.cache_lens[:2], expected)
     torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
     torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
-    assert builder.take_tasks() == ()
-
-
-def test_explicit_defer_owner_consumes_each_refresh_once(runtime):
-    builder = runtime.builder(rank=3)
-    inputs = common([37, 15], [1, 1], tokens=4)
-    flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
-    previous = flash.schedule.clone()
-    builder.defer = True
-    inputs.seq_lens.add_(8)
-    assert builder.build(inputs, 2, 2, False) is flash
-    torch.testing.assert_close(flash.schedule, previous)
-    runtime.metadata_op.reset_mock()
-    for _ in range(2):
-        for task in builder.take_tasks():
-            task.run()
-    assert runtime.metadata_op.call_count == 2  # One history and one current schedule.
-    assert not torch.equal(flash.schedule, previous)
-    assert builder.take_tasks() == ()
-    builder.defer = False
-    inputs.seq_lens.add_(8)
-    assert builder.build(inputs, 2, 2, False) is flash
-    assert builder.take_tasks() == ()
 
 
 def test_two_schedules_refresh_after_rejection_without_changing_graph_addresses(runtime, monkeypatch):
@@ -379,14 +354,12 @@ def test_two_schedules_refresh_after_rejection_without_changing_graph_addresses(
     pointers = addresses(flash)
     previous = flash.schedule.clone()
     previous_current = flash.current.schedule.clone()
-    builder.defer = True
-    same = builder.build(inputs, 2, 7, False)
-    assert same is flash
-    (task,) = builder.take_tasks()
-    assert builder.take_tasks() == ()
-    # Simulate device rejection correction after metadata construction.
+    # Simulate device rejection correction before the next metadata build.
     inputs.seq_lens.copy_(torch.tensor([35, 0]))
     inputs.query_start_loc.copy_(torch.tensor([0, 2, 3]))
+    inputs.positions.add_(8)
+    inputs.slot_mapping.copy_(torch.arange(7))
+    runtime.metadata_op.reset_mock()
     torch.testing.assert_close(flash.schedule, previous)
     torch.testing.assert_close(flash.current.schedule, previous_current)
 
@@ -396,10 +369,17 @@ def test_two_schedules_refresh_after_rejection_without_changing_graph_addresses(
     with monkeypatch.context() as patch:
         for method in ("item", "tolist", "cpu", "numpy", "__bool__"):
             patch.setattr(torch.Tensor, method, forbidden)
-        task.run()
-    assert addresses(flash) == pointers
+        same = builder.build(inputs, 2, 7, False)
+    assert same is flash and addresses(flash) == pointers
     assert flash.cache_lens[:2].tolist() == [4, 0]
+    assert flash.slots.tolist() == [0, 1] + [-1] * 14
     assert flash.current.slots.tolist() == [0, 1] + [-1] * 14
+    assert flash.positions.tolist() == list(range(8, 15)) + [0] * 9
+    torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
+    torch.testing.assert_close(flash.sin, -flash.cos)
+    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+    torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
+    assert runtime.metadata_op.call_count == 2
     assert not torch.equal(flash.schedule, previous)
     assert not torch.equal(flash.current.schedule, previous_current)
 
@@ -414,11 +394,9 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     pointers = addresses(flash)
     schedule = flash.schedule.clone()
     runtime.metadata_op.reset_mock()
-    builder.defer = True
-    assert builder.build(inputs, 2, 2, False) is flash
-    (task,) = builder.take_tasks()
     inputs.seq_lens.copy_(torch.tensor([17, 0]))
     inputs.positions.add_(8)
+    inputs.slot_mapping.copy_(torch.arange(2))
     torch.testing.assert_close(flash.schedule, schedule)
 
     def forbidden(*args, **kwargs):
@@ -427,13 +405,21 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     with monkeypatch.context() as patch:
         for method in ("item", "tolist", "cpu", "numpy", "__bool__"):
             patch.setattr(torch.Tensor, method, forbidden)
-        task.run()
+        same = builder.build(inputs, 2, 2, False)
 
+    assert same is flash
     visible = 16 if speculative else 17
     expected_length = sum(token % 8 == rank for token in range(visible))
     assert flash.cache_lens.tolist() == [expected_length, 0, 0, 0, 0]
     assert flash.used_q.tolist() == [1, 0, 0, 0, 0]
     assert flash.token_live.tolist() == [True, False, False, False]
+    assert flash.slots.tolist() == [0, -1, -1, -1]
+    assert flash.positions.tolist() == [8, 9, 0, 0]
+    torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
+    torch.testing.assert_close(flash.sin, -flash.cos)
+    if flash.current is not None:
+        assert flash.current.slots.tolist() == [0, -1, -1, -1]
+        torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
     assert flash.adapter.config.num_heads == 64
     assert flash.adapter.config.mask_mode == 0
     assert flash.adapter.config.return_softmax_lse
