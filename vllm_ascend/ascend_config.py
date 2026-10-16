@@ -435,6 +435,7 @@ class AscendConfig:
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
+            "chunked_prefill_workspace_size": null,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -594,6 +595,14 @@ class AscendConfig:
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
     mega_moe_max_tokens: int = 65536
+    # Token-row capacity C of the MLA chunked-prefill context workspace.
+    # It replaces the default cap in
+    # W = max(min(max(8 * max_model_len, 4 * max_num_seqs * block_size), C),
+    #         max_num_seqs * block_size);
+    # context parallelism may raise W further. ``None`` selects a model
+    # default (512K rows for Kimi K3, 128K otherwise) and is never replaced
+    # by the resolved value. Larger values reserve more device memory.
+    chunked_prefill_workspace_size: int | None = None
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -652,6 +661,17 @@ class AscendConfig:
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+
+    @field_validator("chunked_prefill_workspace_size", mode="before")
+    @classmethod
+    def _validate_chunked_prefill_workspace_size(cls, value: Any) -> Any:
+        # Strict: a bool, float or numeric string is a configuration mistake
+        # rather than a row count.
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"chunked_prefill_workspace_size must be a positive integer or null, got {value!r}")
+        return value
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):

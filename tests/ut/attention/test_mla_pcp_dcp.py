@@ -255,8 +255,15 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
         (2, 16, 32, 256, 262144),
     ],
 )
-def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(pcp_size, dcp_size, max_num_seqs, interleave, expected):
+def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(
+    monkeypatch, pcp_size, dcp_size, max_num_seqs, interleave, expected
+):
+    from vllm_ascend.attention import utils as attention_utils
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+    monkeypatch.setattr(
+        attention_utils, "get_ascend_config", lambda: SimpleNamespace(chunked_prefill_workspace_size=None)
+    )
 
     config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=8192),

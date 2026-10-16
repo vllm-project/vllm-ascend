@@ -69,6 +69,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
+| `chunked_prefill_workspace_size` | int or null | `null` | Capacity cap in token rows for the shared MLA/SFA chunked-prefill workspace. Automatic policy: 524288 for Kimi K3, 131072 otherwise. See below for sizing and memory use. |
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
@@ -116,6 +117,44 @@ vllm serve Qwen/Qwen3-8B --additional-config '{
 ```
 
 Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`.
+
+**chunked_prefill_workspace_size**
+
+Set a positive integer to choose the capacity cap `C`, in token rows. For example:
+
+```bash
+vllm serve /path/to/model --additional-config '{"chunked_prefill_workspace_size":524288}'
+```
+
+Omitting this field or setting it to `null` selects an automatic policy: Kimi K3
+uses `512 * 1024` rows; other models use `128 * 1024` rows. K3 is identified from
+registered architecture names or the Hugging Face model/text configuration.
+These values apply across the supported hardware profiles. An explicit value
+takes precedence over the automatic policy. Booleans, strings, fractional values,
+zero, and negative values are rejected.
+
+With `L = max_model_len`, `N = max_num_seqs`, and `B = cache_config.block_size`,
+the workspace row count is computed as:
+
+```text
+requested = max(8 * L, 4 * N * B)
+W0 = min(requested, C)
+W = max(W0, N * B)
+```
+
+The configured value replaces the cap in this calculation. Smaller workloads
+can allocate fewer rows than `C`. The minimum of one cache block per request
+can raise `W` above `C`; PCP/DCP can further raise the capacity to fit aligned
+local chunks. The shared SFA workspace helper uses the same policy.
+
+A warning reports `requested`, `C`, and its source when `requested > C`,
+including when the minimum capacity protection raises `W` above `C`.
+Repeated identical warnings are suppressed within the process. Larger
+workspaces can reduce the number of context chunks while reserving more device
+memory. For a single 576-wide BF16/FP16 latent workspace, 128K rows occupy
+144 MiB and 512K rows occupy 576 MiB. Up-projection temporaries and additional
+parallel buffers consume further memory, so these figures describe only that
+latent workspace.
 
 **xlite_graph_config**
 
