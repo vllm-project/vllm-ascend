@@ -555,6 +555,63 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                     self.assertEqual(len(saved), 6)
                     self.assertEqual(len(set(saved)), 6)
 
+    def test_sparse_multigroup_save_preserves_tail_ids_and_shards(self):
+        masks = ([True, False, False, True, True, True, False, True], [True, False, True, True])
+        expected = {
+            0: [(0, "h15", [1208], [16]), (1, "h11", [2704], [32])],
+            1: [(1, "h15", [2736], [32])],
+        }
+        for pcp_rank in range(2):
+            for tp_rank in range(2):
+                with self.subTest(pcp_rank=pcp_rank, tp_rank=tp_rank):
+                    thread, store = self._make_thread([0] * 8)
+                    db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)] * 2, [16, 32], None, hash_block_size=8)
+                    db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, group_num_layers={0: 1, 1: 1})
+                    db.store_mask = MagicMock(return_value=masks)
+                    thread.token_database = db
+                    thread.block_size = [16, 32]
+                    thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+                    thread.tp_rank, thread.put_step = tp_rank, 2
+                    thread.group_uses_align_state = [False, False]
+                    req = ReqMeta(
+                        req_id="r1",
+                        token_len_chunk=128,
+                        block_ids_by_group=[[10, 0, 12, 13], [21, 22, 23]],
+                        block_hashes=[f"h{i}" for i in range(16)],
+                        kv_cache_group_ids=[0, 1],
+                        skip_null_blocks_by_group=[True, True],
+                        load_spec=LoadSpec(vllm_cached_tokens=64, kvpool_cached_tokens=80, can_load=True),
+                    )
+                    thread._handle_stored_request(req)
+                    self.assertEqual(
+                        [item for call in store.put_calls for item in zip(*call)],
+                        [(db._get_key_prefix(g) + h, a, s) for g, h, a, s in expected.get(pcp_rank * 2 + tp_rank, [])],
+                    )
+                    self.assertEqual(
+                        masks, ([True, False, False, True, True, True, False, True], [True, False, True, True])
+                    )
+
+    def test_save_does_not_scan_mask_before_addressable_tail(self):
+        class TailMask(list):
+            def __iter__(self):
+                raise AssertionError("The complete historical mask must not be scanned")
+
+        num_blocks = 32
+        thread, store = self._make_thread([0, 0])
+        thread.token_database.store_mask = MagicMock(
+            return_value=(TailMask([False] * (num_blocks - 2) + [True, True]),)
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=num_blocks * 16,
+            block_ids=[11, 12, 13, 14],
+            block_hashes=[f"h{i}" for i in range(num_blocks)],
+        )
+        thread._handle_stored_request(req)
+        self.assertEqual(
+            [key.rsplit("@", 1)[1] for key in store.put_calls[0][0]], [f"h{num_blocks - 2}", f"h{num_blocks - 1}"]
+        )
+
     def test_handle_request_save_decisions(self):
         cases = [
             ([1, 0, 1, 0], "kv_producer", True, 1, 2),
