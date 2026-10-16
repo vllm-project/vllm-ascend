@@ -112,11 +112,11 @@ def test_mla_dcp_component_cache_dim0_stride(layout, heads, kv_lengths):
         torch.testing.assert_close(lse, legacy_lse, rtol=0.001, atol=0.005)
         candidates.append((legacy_output, legacy_lse))
 
-    expected_outputs, expected_lse = [], []
+    expected_outputs, expected_lse_rows = [], []
     for row, kv_length in enumerate(kv_lengths):
         if kv_length == 0:
             expected_outputs.append(torch.zeros(query_length, heads, head_dim))
-            expected_lse.append(torch.full((heads, query_length), torch.inf))
+            expected_lse_rows.append(torch.full((heads, query_length), torch.inf))
             for candidate_output, candidate_lse in candidates:
                 if layout == "TND":
                     empty_output = candidate_output[row * query_length : (row + 1) * query_length]
@@ -133,11 +133,11 @@ def test_mla_dcp_component_cache_dim0_stride(layout, heads, kv_lengths):
         q_rope = query_rope_cpu[row].float().transpose(0, 1)
         scores = (q @ keys.T + q_rope @ ropes.T) * scale
         expected_outputs.append((scores.softmax(-1) @ keys).transpose(0, 1))
-        expected_lse.append(scores.logsumexp(-1))
+        expected_lse_rows.append(scores.logsumexp(-1))
 
     expected_output = format_query(torch.stack(expected_outputs))
     # FIA returns BNS1 LSE for both BNSD and BSND, and TN1 for TND.
-    expected_lse = torch.stack(expected_lse).unsqueeze(-1)
+    expected_lse = torch.stack(expected_lse_rows).unsqueeze(-1)
     if layout == "TND":
         expected_lse = expected_lse.transpose(1, 2).flatten(0, 1)
     for candidate_output, candidate_lse in candidates:
