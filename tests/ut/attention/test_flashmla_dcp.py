@@ -329,7 +329,7 @@ def test_inline_refresh_failure_leaves_no_deferred_task_and_can_rebuild(runtime,
     flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
     pointers = addresses(flash)
     schedule = runtime.metadata_op.side_effect
-    calls = []
+    calls: list[None] = []
 
     def fail(*args, **kwargs):
         calls.append(None)

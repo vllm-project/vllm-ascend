@@ -210,7 +210,7 @@ def test_profile_set_attn_capture_propose_keep_target_and_draft_independent(wrap
     obj.set_attn(None, cache, None, None, None)
     assert obj.attn_groups is cache.groups
     assert wrapper.events == ["config_enter", "parent_set_attn", "config_exit"]
-    seen = []
+    seen: list[Any] = []
 
     def consume(*args, **kwargs):
         if draft is not None:
