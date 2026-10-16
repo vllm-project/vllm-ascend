@@ -71,6 +71,10 @@ def init_speculator(
         )
 
         return AscendMTPSpeculator(vllm_config, device)
+    if speculative_config.method == "pard2":
+        from vllm_ascend.worker.v2.spec_decode.pard2.speculator import AscendPard2Speculator
+
+        return AscendPard2Speculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
