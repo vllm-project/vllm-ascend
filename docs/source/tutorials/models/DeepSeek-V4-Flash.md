@@ -32,7 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
-| `DeepSeek-V4-Flash-0731` | 950DT products (96GB × 8); the example in Section 5.2.3 and 5.2.4 uses four NPUs for Prefill and four NPUs for Decode | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
+| `DeepSeek-V4-Flash-0731` | 950DT products (96GB × 8); examples cover four-NPU PD-colocated and 4-Prefill/4-Decode PD-separated deployments | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -50,7 +50,7 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-**Attention**: DSpark is supported on A2 and A3 in vLLM Ascend `v0.25.0` and later. Use `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2, `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3, and the A5 image shown below for 950DT products.
+**Attention**: DSpark is supported on A2 and A3 in vLLM Ascend `v0.25.0` and later. Use `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2, `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3, and the 950DT image shown below for 950DT products.
 
 === "Ascend 950DT series"
 
@@ -331,7 +331,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
-        --served-model-name dsv4 \
+        --served-model-name dsv \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
@@ -354,7 +354,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
                 "enable_static_kernel": false
             },
             "enable_cpu_binding": true,
-            "enable_dsa_cp": true,
             "multistream_overlap_shared_expert": true
         }'
     ```
@@ -386,7 +385,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
   
     vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
         --port 9999 \
-        --served-model-name dsv \
+        --served-model-name dsv4 \
         --data-parallel-size 2 \
         --prefill-context-parallel-size 2 \
         --distributed-executor-backend mp \
@@ -409,7 +408,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --no-disable-hybrid-kv-cache-manager \
         --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\",\"torch_profiler_with_stack\":false}" \
-        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"enable_dsa_cp":true}' \
+        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}'
     ```
 
@@ -1313,9 +1312,9 @@ Before you start, please:
 
         vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
         --host $local_ip \
-        --port 7200 \
+        --port "${api_port}" \
         --data-parallel-size 4 \
-        --data-parallel-rank 0 \
+        --data-parallel-rank "${dp_rank}" \
         --data-parallel-address $local_ip \
         --data-parallel-rpc-port 12325 \
         --tensor-parallel-size 1 \
@@ -1373,7 +1372,7 @@ Before you start, please:
 
    Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the proxy. Configure the Prefill endpoint as `<prefill_node_ip>:7100`. Because the Decode node uses `DP4` with external DP load balancing, configure all four Decode endpoints as `<decode_node_ip>:7200` through `<decode_node_ip>:7203`.
 
-   Configure the proxy to listen on `<proxy_node_ip>:6666`. Ensure that all Prefill and Decode endpoints are reachable from the proxy. Send inference requests to the proxy endpoint instead of directly accessing the Prefill or Decode endpoints.
+   Configure the proxy to listen on `<proxy_node_ip>:5228`. Ensure that all Prefill and Decode endpoints are reachable from the proxy. Send inference requests to the proxy endpoint instead of directly accessing the Prefill or Decode endpoints.
 
 #### 5.3 Multi-Node PD Separation Deployment with Memcache KV Cache Pool
 
@@ -1396,6 +1395,12 @@ Compared with normal PD in Section 5.2.3, pay attention to these pooling-only re
 | Verification | Confirm P-to-D KV transfer | Also confirm an external KV Cache Pool hit with a repeated prefix |
 
 #### 5.3.1 Prerequisites
+
+INSTALL_PATH="<Location from the output of pip show memcache_hybrid>"
+MEMCACHE_CONFIG_DIR="<directory containing mmc-local.conf>"
+
+export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+export LD_LIBRARY_PATH="${INSTALL_PATH}/memcache_hybrid/lib:${PYTHON_LIB_DIR:-}:${LD_LIBRARY_PATH:-}:/usr/local/lib"
 
 Configure one `mmc-meta.conf` for the MetaService:
 
@@ -1540,12 +1545,10 @@ Prepare `run_decode_memcache.sh` on the Decode node.
 
         unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-        
-        # 自动获取配置
+                
         nic_name="<nic_name>"
         local_ip="<prefill_ip>"
         
-        #池化配置
         export LD_LIBRARY_PATH="/usr/local/openssl-3.4/lib:${LD_LIBRARY_PATH}"
         export MMC_LOCAL_CONFIG_PATH="${memcache_config_dir}/mmc-local.conf"
         
@@ -1572,7 +1575,7 @@ Prepare `run_decode_memcache.sh` on the Decode node.
         --host $local_ip \
         --port 7200 \
         --data-parallel-size 4 \
-        --data-parallel-rank 0 \
+        --data-parallel-rank "${dp_rank}" \
         --data-parallel-address $local_ip  \
         --data-parallel-rpc-port 12325 \
         --tensor-parallel-size 1 \
@@ -1666,11 +1669,17 @@ P-D proxy
 ```
 
 ```bash
-# Decode node
+# Decode node: Start all four Decode ranks first
+bash run_decode_memcache.sh 0 7200 0 1
+bash run_decode_memcache.sh 1 7201 1 2
+bash run_decode_memcache.sh 2 7202 2 3
+bash run_decode_memcache.sh 3 7203 3 4
+
+# Prefill node: Start after all Decode ranks are ready
 bash run_prefill_memcache.sh
 
 # Prefill node, after all Decode ranks are ready
-bash run_decode_memcache.sh
+bash run_prefill_memcache.sh
 ```
 
 Use the same proxy mapping as Section 5.2.3. Send a real generation request to `<proxy_ip>:5228` and confirm that the JSON response contains a non-empty `choices` field. Then send two requests with the same reusable prefix and confirm from Prefill logs or metrics that the second request hits the external KV Cache Pool. An HTTP 200 response alone does not prove that pooling is working.
@@ -1745,7 +1754,7 @@ Record the Prefill metrics before sending the requests:
 
 ```bash
 curl --noproxy '*' -fsS \
-    http://<prefill_node_ip>:7000/metrics \
+    http://<prefill_node_ip>:7100/metrics \
     > /tmp/dsv4_prefill_metrics_before.txt
 
 grep -E \
