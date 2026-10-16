@@ -649,7 +649,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_producer",
     "kv_port": "30100",
-    "engine_id": "1",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {
@@ -725,7 +724,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_consumer",
     "kv_port": "30300",
-    "engine_id": "3",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {
@@ -821,7 +819,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
   --additional-config '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}, "weight_nz_mode":1, "enable_shared_expert_dp":true,"scheduler_config":{"recompute_scheduler_enable":false}}' \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
+  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
 ```
 
 #### 5.6.2 Decode Node
@@ -893,7 +891,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "weight_nz_mode":1, "enable_shared_expert_dp":false, "scheduler_config":{"recompute_scheduler_enable":true}}' \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"56010","engine_id":"2","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
+  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"56010","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
 ```
 
 Common Issues Tip: If the decode node fails to initialize, check that `--tensor-parallel-size` is 8, `--data-parallel-size-local` matches the global decode DP size (1), and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size.
