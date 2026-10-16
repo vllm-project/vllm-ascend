@@ -15,6 +15,8 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, and NPUGraph.
 
+- **[MLA Chunked Prefill Merging](Design_Documents/mla_prefill_merge.md)** — Bounded attention updates and relative LSE state
+
 ## Evaluation
 
 - **[Using EvalScope](evaluation/using_evalscope.md)** — Model evaluation with EvalScope
