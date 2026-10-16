@@ -596,12 +596,13 @@ class KVPoolWorker:
                     if entry not in existing:
                         existing.append(entry)
 
-                logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers",
-                    group_id,
-                    len(group_spec.layer_names),
-                    len(phys_to_layer_idx),
-                )
+                if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
+                    logger.info(
+                        "layerwise group %d: %d layer_names, %d unique physical layers",
+                        group_id,
+                        len(group_spec.layer_names),
+                        len(phys_to_layer_idx),
+                    )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
