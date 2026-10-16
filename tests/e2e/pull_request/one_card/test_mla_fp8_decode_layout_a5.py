@@ -31,6 +31,7 @@ ROPE_DIM = 64
 VALUE_DIM = 128
 BLOCK_SIZE = 128
 TOKEN_COUNTS = (1, 2, 4, 8, 16, 32)
+FP8_MAX_QUERY_TOKENS_PER_SEQ = 16
 # Keep speculative query lengths valid, including the 32-token case, and
 # leave room for different per-sequence lengths inside one cache block.
 INITIAL_KV_LEN = 47
@@ -80,20 +81,26 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     impl.support_fp8_attention = True
     impl.fa_quant_layer = fp8
     impl.fak_descale_float = torch.ones(1, device="npu")
+    query_tokens_per_seq = num_tokens if speculative else 1
+    if speculative and fp8:
+        # The tested CANN 9.2 FP8 path supports at most 16 queries per sequence.
+        query_tokens_per_seq = min(query_tokens_per_seq, FP8_MAX_QUERY_TOKENS_PER_SEQ)
+    num_seqs = num_tokens // query_tokens_per_seq
     impl.speculative_config = (
-        SimpleNamespace(use_eagle=lambda: True, num_speculative_tokens=num_tokens - 1) if speculative else None
+        SimpleNamespace(use_eagle=lambda: True, num_speculative_tokens=query_tokens_per_seq - 1)
+        if speculative
+        else None
     )
     generator = torch.Generator(device="cpu").manual_seed(19)
     impl.W_UV = (torch.randn(NUM_HEADS, LATENT_DIM, VALUE_DIM, generator=generator) / LATENT_DIM**0.5).bfloat16().npu()
 
-    num_seqs = 1 if speculative else num_tokens
     metadata = SimpleNamespace(
         attn_state=AscendAttentionState.SpecDecoding if speculative else AscendAttentionState.DecodeOnly,
         causal=True,
         decode=SimpleNamespace(
             block_table=torch.arange(num_seqs, dtype=torch.int32, device="npu").view(num_seqs, 1),
             seq_lens_list=[INITIAL_KV_LEN + i for i in range(num_seqs)],
-            actual_seq_lengths_q=[num_tokens] if speculative else None,
+            actual_seq_lengths_q=[query_tokens_per_seq * (i + 1) for i in range(num_seqs)] if speculative else None,
             attn_mask=(
                 torch.triu(torch.ones(2048, 2048, dtype=torch.bool, device="npu"), diagonal=1) if speculative else None
             ),
@@ -226,12 +233,20 @@ def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, spec
     else:
         expected_layout = "BNSD" if fp8 else "BNSD_NBSD"
     assert saved_layout == expected_layout
+    update_stream = torch.npu.Stream()
+    # The captured FIA task waits for its ExternalEvent on the first replay too.
+    AscendMLAImpl.update_graph_params(
+        update_stream,
+        SimpleNamespace(attn_metadata={"attn": metadata}),
+        num_tokens,
+        speculative_config=impl.speculative_config,
+    )
+    torch.npu.current_stream().wait_stream(update_stream)
     graph.replay()
     _assert_output(actual, expected)
     _assert_output(explicit_copy, expected)
     _assert_output(actual, explicit_copy.cpu())
 
-    update_stream = torch.npu.Stream()
     for update_index, seed in enumerate((73, 109)):
         fresh = _inputs(num_tokens, fp8, seed)
         for persistent, replacement in zip(inputs, fresh):
