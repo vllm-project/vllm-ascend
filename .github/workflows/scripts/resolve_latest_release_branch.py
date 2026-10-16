@@ -13,12 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import regex as re
 
 RELEASE_BRANCH_RE = re.compile(r"^releases/v[0-9][0-9A-Za-z._-]*$")
 COVERAGE_SUFFIX_RE = re.compile(r"^v[0-9][0-9A-Za-z._-]*$")
@@ -80,9 +81,8 @@ def earliest_pr_created_at(repo: str, branch: str, token: str) -> str | None:
     if RELEASE_BRANCH_RE.fullmatch(branch) is None:
         raise ValueError(f"refusing to query unexpected branch name: {branch}")
     query = f'repo:{repo} is:pr base:"{branch}"'
-    url = SEARCH_URL + "?" + urllib.parse.urlencode(
-        {"q": query, "sort": "created", "order": "asc", "per_page": "1"}
-    )
+    query_params = {"q": query, "sort": "created", "order": "asc", "per_page": "1"}
+    url = SEARCH_URL + "?" + urllib.parse.urlencode(query_params)
     request = urllib.request.Request(
         url,
         headers={
@@ -132,7 +132,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--branches-file", default="")
-    parser.add_argument("--suffix-for", default="", help="Print only the coverage filename suffix for this branch and exit.")
+    parser.add_argument(
+        "--suffix-for",
+        default="",
+        help="Print only the coverage filename suffix for this branch and exit.",
+    )
     args = parser.parse_args()
 
     if args.suffix_for:

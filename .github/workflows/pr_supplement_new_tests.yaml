@@ -63,6 +63,7 @@ jobs:
           git ls-remote --heads origin 'refs/heads/releases/v*' \
             | awk '{sub("refs/heads/", "", $2); print $2}' \
             > release_branches.txt
+          python3 -m pip install regex --quiet
           python3 - <<'PY'
           import importlib.util
           import os
