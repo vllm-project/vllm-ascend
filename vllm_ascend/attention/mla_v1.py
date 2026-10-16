@@ -35,8 +35,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
-from vllm_ascend.attention.mla_prefill import ATTENTION_UPDATE_MAX_INPUTS, merge_prefill_chunks
 from vllm_ascend.attention.utils import (
+    ATTENTION_UPDATE_MAX_INPUTS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
     PreprocessType,
@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     enable_dcp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
+    merge_prefill_chunks,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     supports_strided_mla_cache,
@@ -1472,7 +1473,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return current_attn_result
         if len(out_list) == 1:
             # Exact flush boundaries (16, 31, 46, ...) already hold the result.
-            output_final = out_list[0].masked_fill(torch.isinf(lse_list[0])[:, None], torch.nan)
+            output_final = out_list[0]
         else:
             output_final, _, _ = merge_prefill_chunks(out_list, lse_list, lse_anchor, return_lse=False)
         return output_final.view(num_tokens, H, D), None

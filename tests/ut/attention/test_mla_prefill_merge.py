@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import torch
 
-from vllm_ascend.attention import mla_prefill, mla_v1
+from vllm_ascend.attention import mla_v1
+from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 
 GROUP_COUNTS = (1, 2, 15, 16, 17, 30, 31, 32, 33, 46, 64, 65)
@@ -38,6 +39,19 @@ def _cpu_update(lses, outputs, update_type):
     output /= total[:, None]
     lse = (maximum + total.log()) if update_type else None
     return output, lse
+
+
+def _prepare_update(lses, previous_anchor):
+    # CPU mock of the fused device operation, not the numerical oracle.
+    candidates = list(lses)
+    if previous_anchor is not None:
+        candidates[0] = previous_anchor
+    candidates = torch.stack(candidates)
+    anchor = candidates.masked_fill(~torch.isfinite(candidates), -torch.inf).amax(0)
+    relative = [lse - anchor for lse in lses]
+    if previous_anchor is not None:
+        relative[0] = lses[0] + (previous_anchor - anchor)
+    return tuple(relative), anchor
 
 
 class TestMLAPrefillMerge(unittest.TestCase):
@@ -92,7 +106,8 @@ class TestMLAPrefillMerge(unittest.TestCase):
         prefix_lse = lse_layout(lses[0])
         with (
             patch.object(mla_v1, "torch_npu", SimpleNamespace(npu_fused_infer_attention_score=attention)),
-            patch.object(mla_prefill, "torch_npu", SimpleNamespace(npu_attention_update=update)),
+            patch.object(attention_utils, "torch_npu", SimpleNamespace(npu_attention_update=update)),
+            patch.object(attention_utils, "prepare_attention_update", _prepare_update),
             patch.object(mla_v1.DeviceOperator, "kv_cache_load"),
         ):
             result, result_lse = impl._compute_prefill_context(
@@ -127,8 +142,8 @@ class TestMLAPrefillMerge(unittest.TestCase):
                             atol, rtol = TOLERANCES[dtype]
                             torch.testing.assert_close(result.double(), _reference(outputs, lses), atol=atol, rtol=rtol)
 
-    def test_extreme_and_nonfinite_rows(self):
-        for case in ("equal", "dominant", "late_anchor", "invalid", "late_valid", "late_valid_finite", "all_infinite"):
+    def test_extreme_and_history_sentinel_rows(self):
+        for case in ("equal", "dominant", "late_anchor", "history_sentinels", "nan_history"):
             for count in (16, 17, 31, 46, 65):
                 with self.subTest(case=case, groups=count):
                     generator = torch.Generator().manual_seed(count)
@@ -140,25 +155,40 @@ class TestMLAPrefillMerge(unittest.TestCase):
                     elif case == "late_anchor":
                         for index, lse in enumerate(lses):
                             lse.fill_(-10000 + index * 1000)
-                    elif case in ("invalid", "late_valid", "late_valid_finite", "all_infinite"):
-                        for index, (output, lse) in enumerate(zip(outputs, lses)):
+                    elif case in ("history_sentinels", "nan_history"):
+                        # Production always starts with finite current-chunk LSE.
+                        for index, (output, lse) in enumerate(zip(outputs[1:], lses[1:]), 1):
                             lse[0] = -torch.inf
                             lse[1] = torch.inf
-                            lse[2] = torch.nan
-                            output[:3] = torch.nan
-                            if index % 3 == 0:
-                                lse[3] = -torch.inf
-                                output[3] = torch.nan
-                            if case in ("late_valid", "late_valid_finite"):
-                                lse[4] = -torch.inf if index < 16 else -10000.0 + index / 8
-                                if case == "late_valid" and index < 16:
-                                    output[4] = torch.nan
-                            elif case == "all_infinite":
-                                lse[4] = -torch.inf
+                            output[:2] = 0
+                            lse[2] = -torch.inf if index < 16 else 1000.25
+                            output[2] = 0 if index < 16 else output[2]
+                            if case == "nan_history":
+                                lse[3] = torch.nan
+                                output[4] = torch.nan
                     result = self._run(outputs, lses, 3)
                     torch.testing.assert_close(
                         result.double(), _reference(outputs, lses), atol=2e-5, rtol=1e-4, equal_nan=True
                     )
+
+    def test_signed_infinity_and_nan_masks(self):
+        for count in (2, 15, 16, 17, 31, 46, 65):
+            for layout in ("HT", "TH1"):
+                with self.subTest(groups=count, layout=layout):
+                    outputs = [torch.ones(5, 3, 8) for _ in range(count)]
+                    lses = [torch.full((5, 3), 1000.0) for _ in range(count)]
+                    outputs[0][0] = torch.inf
+                    outputs[0][1] = -torch.inf
+                    outputs[0][2] = torch.inf
+                    outputs[1][2] = -torch.inf
+                    outputs[1][3] = torch.inf
+                    lses[1][3] = -torch.inf
+                    lses[1][4] = torch.nan
+                    result = self._run(outputs, lses, 3, layout=layout)
+                    expected = _reference(outputs, lses)
+                    self.assertTrue(torch.isposinf(expected[0]).all())
+                    self.assertTrue(torch.isneginf(expected[1]).all())
+                    torch.testing.assert_close(result.double(), expected, atol=2e-5, rtol=1e-4, equal_nan=True)
 
     def test_empty_and_no_context_preserve_objects(self):
         outputs = [torch.ones(5, 1, 8, dtype=torch.bfloat16)]

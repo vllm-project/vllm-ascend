@@ -63,7 +63,7 @@ def _install_fakes(monkeypatch, captured):
         ),
     )
     monkeypatch.setattr("vllm_ascend.attention.mla_v1.torch_npu", fake_torch_npu)
-    monkeypatch.setattr("vllm_ascend.attention.mla_prefill.torch_npu", fake_torch_npu)
+    monkeypatch.setattr("vllm_ascend.attention.utils.torch_npu", fake_torch_npu)
 
 
 def _run(impl, rope_dim, cache_k_pe):
