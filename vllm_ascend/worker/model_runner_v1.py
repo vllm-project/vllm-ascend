@@ -216,6 +216,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     global_stream,
     is_c8_mxfp_kv_quant,
+    is_deepseek_v41,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_packed_sfa_main_cache,
@@ -551,7 +552,11 @@ class NPUModelRunner(GPUModelRunner):
         # AscendMLABackend, and DSV4 compressed attention metadata) need
         # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
         # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
+        # V4.1 uses exact device lengths and only needs a CPU upper bound,
+        # matching the exemption in model runner v2.
+        self._needs_seq_lens_cpu_sync = (
+            self.use_compress and not is_deepseek_v41(self.model_config.hf_config)
+        ) or issubclass(
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
 
