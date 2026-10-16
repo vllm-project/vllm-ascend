@@ -11,8 +11,8 @@ import torch
 
 import vllm_ascend.ops  # noqa: F401  # Register ops before importing attention/device modules.
 from vllm_ascend.attention import mla_v1
-from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, split_flashmla_requests
-from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.flashmla import split_flashmla_requests
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl, AscendMLAMetadataBuilder
 from vllm_ascend.device.hardware_profile import HardwareCapability
 
 
@@ -43,6 +43,10 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
 
     assert AscendMLAImpl._can_use_flashmla(impl)
+
+    impl.dtype = torch.float16
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+    impl.dtype = torch.bfloat16
 
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: None)
     assert not AscendMLAImpl._can_use_flashmla(impl)
@@ -94,7 +98,9 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
         fields += ["num_draft_tokens_np", "prefill_runs_as_decode_np", "max_seq_len_np", "decode_graph_eligible"]
         values += [np.array([0, 1, 0]), np.array(prefilling), np.array([100, 200, 300]), graph_eligible]
     state = cast(Any, namedtuple("BatchReqState", fields))(*values)
-    result, uniform = prepare_flashmla_batch_req_state(state, 1)
+    builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.flashmla_state = object()
+    result, uniform = builder.prepare_batch_req_state(state, 1)
     order = [1, 0, 2] if state.has_prefill else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
     for field in state._fields:
@@ -115,6 +121,9 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
     )
     # A one-token prompt stays FIA prefill; trailing empty graph rows are ignored.
     assert split_flashmla_requests(common) == ((1, 2, 1, 2) if state.has_prefill else (3, 0, 3, 0))
+    builder.flashmla_state = None
+    unchanged, original_uniform = builder.prepare_batch_req_state(state, 1)
+    assert unchanged is state and original_uniform == 1
 
 
 def test_request_split_rejects_decode_after_real_prefill():

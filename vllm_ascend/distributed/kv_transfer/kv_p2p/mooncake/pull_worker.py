@@ -1196,12 +1196,15 @@ class MooncakePullRecvingThread(threading.Thread):
                 for cache_index, (local_base_addr, remote_base_addr) in enumerate(
                     zip(local_base_addrs, remote_base_addrs)
                 ):
-                    if is_circular_kv_cache_spec(spec):
+                    # Equal byte lengths can hide component-major/token-fused
+                    # MLA mismatches. Strides may differ, but layouts must agree.
+                    if is_circular_kv_cache_spec(spec) or isinstance(spec, MLAAttentionSpec):
                         local_shape = self.block_shapes[local_layer_index][cache_index]
                         remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
                         if local_shape != remote_shape:
+                            cache_kind = "circular" if is_circular_kv_cache_spec(spec) else "MLA"
                             raise ValueError(
-                                f"Mooncake circular cache layout mismatch for layer "
+                                f"Mooncake {cache_kind} cache layout mismatch for layer "
                                 f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                                 f"local={local_shape}, remote={remote_shape}"
                             )

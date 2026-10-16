@@ -3,6 +3,7 @@
 import queue
 import threading
 from concurrent.futures import Future
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1243,6 +1244,46 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert src == [1256, 1512]
     assert dst == [6536, 7048]
     assert lengths == [128, 128]
+
+
+@pytest.mark.parametrize(
+    "local_shape,remote_shape",
+    [
+        ((73728,), (128, 1, 576)),
+        ((128, 1, 576), (73728,)),
+        ((73728,), (73728,)),
+        ((128, 1, 576), (128, 1, 576)),
+    ],
+)
+def test_mla_whole_block_transfer_requires_matching_layout(local_shape, remote_shape) -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
+    block_bytes = spec.page_size_bytes
+    thread = make_thread(
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[local_shape]],
+        block_strides=[[block_bytes + 32]],
+        block_lens=[[block_bytes]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[remote_shape]],
+        block_strides=[[block_bytes + 64]],
+        block_lens=[[block_bytes]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src, dst, lengths = list[int](), list[int](), list[int]()
+    mismatch = local_shape != remote_shape
+    check = pytest.raises(ValueError, match="MLA cache layout mismatch") if mismatch else nullcontext()
+    with check:
+        thread._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 1, {(0, 0): [("request", [1], [3])]}, remote, src, dst, lengths
+        )
+    if mismatch:
+        assert not src and not dst and not lengths
+    else:
+        assert src == [1000 + block_bytes + 32]
+        assert dst == [5000 + 3 * (block_bytes + 64)]
+        assert lengths == [block_bytes]
 
 
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
