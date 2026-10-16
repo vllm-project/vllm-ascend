@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 import vllm.envs as envs_vllm
+from pydantic import TypeAdapter
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -32,9 +33,10 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
-_MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_FUSED_MC2_MODE_ADAPTER = TypeAdapter(int)
 
-_CANN_MEGAMOE_A3_SUPPORTED_EP_SIZES = frozenset({2, 4, 8, 16, 32, 64, 128})
+
+_MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
@@ -88,26 +90,20 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
-    # The draft model can initialize a second AscendConfig after the target
-    # prepared MegaMoE weights. Use the target's explicit request instead of
-    # the process-global capability flag that the draft can reset.
-    requested_by_model = (getattr(vllm_config, "additional_config", None) or {}).get("enable_fused_mc2") == 2
-    if not requested_by_model or importlib.util.find_spec("cann_ops_transformer") is None:
+    # Draft config initialization can reset the process-global support flag.
+    # Use the current model request for both communicator init and forward.
+    requested = (getattr(vllm_config, "additional_config", None) or {}).get("enable_fused_mc2", 0)
+    if _FUSED_MC2_MODE_ADAPTER.validate_python(requested) != 2:
         return False
-    hardware_profile = get_current_hardware_profile()
-    if not (
-        hardware_profile.supports(HardwareCapability.CANN_MEGAMOE)
+    return (
+        importlib.util.find_spec("cann_ops_transformer") is not None
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
+        and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
-    ):
-        return False
-
-    ep_world_size = get_ep_group().world_size
-    if hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP):
-        return 1 < ep_world_size <= 64
-    return ep_world_size in _CANN_MEGAMOE_A3_SUPPORTED_EP_SIZES
+    )
 
 
 @contextmanager

@@ -479,9 +479,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def get_fused_mc2_weights(self, layer):
         """Normalized weight payload for the FUSED_MC2 comm path."""
-        # A draft config may reset the process-global flag after target weights
-        # were converted to per-expert CANN lists.
-        use_mega_moe = _EXTRA_CTX.use_mega_moe or hasattr(layer, "cann_mega_moe_w13_weight_list")
+        use_mega_moe = _EXTRA_CTX.use_mega_moe
 
         if self.use_expert_weight_list:
             if use_mega_moe:
