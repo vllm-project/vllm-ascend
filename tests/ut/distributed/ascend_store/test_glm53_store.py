@@ -157,6 +157,7 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(worker.cache_transfer_granularity, 512)
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
+                    scheduler.client.closed = False
                     scheduler.client.lookup.return_value = hit
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
@@ -177,7 +178,7 @@ class TestGLM53Store(unittest.TestCase):
                 def put(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
                         stored[key] = [ctypes.string_at(address, length) for address, length in zip(row, lengths)]
-                    return [0] * len(keys)
+                    return [True] * len(keys)
 
                 def get(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
@@ -295,6 +296,7 @@ class TestGLM53Store(unittest.TestCase):
                 extra_config={"backend": "memcache"},
             )
             worker.m_store.batch_alloc.side_effect = alloc
+            worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
             worker.m_store.batch_get_key_info.side_effect = infos
             worker.m_store.batch_write_finish.side_effect = finish
             worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -434,6 +436,7 @@ class TestGLM53Store(unittest.TestCase):
         )
         worker.register_kv_caches(make_glm53_caches(plan))
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]
         metadata = self.make_metadata(blocks, hashes, req_id="null-kda-slots")
@@ -444,7 +447,7 @@ class TestGLM53Store(unittest.TestCase):
             self.assertEqual(request.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in worker._allocated_gvas, valid)
+                self.assertEqual(key in request.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:

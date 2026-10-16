@@ -267,10 +267,7 @@ class LayerwisePushSendingThread(threading.Thread):
                 self._check_handshake_deadlines()
                 self._dispatch_writes(encoder)
                 pending_count = sum(len(tasks) for tasks in self._pending.values()) + len(self._active)
-                if (
-                    self.topology_ready.is_set()
-                    and pending_count < MAX_PENDING_BATCHES
-                ):
+                if self.topology_ready.is_set() and pending_count < MAX_PENDING_BATCHES:
                     try:
                         self._process_send_task(self.send_queue.get_nowait(), encoder)
                         continue

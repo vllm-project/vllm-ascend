@@ -162,3 +162,118 @@ def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_mla_preprocess_whole_batch_matches_split_mm2_tiles():
+    """A 257-token call (MM2 with m_loop > 1) must match a 256-token run.
+
+    With more tokens than the MM2 tile size (256) the Cube core picks tile
+    indices from the tiling-selected swizzle direction. If the Cube traversal
+    order diverges from the Vector core's, the dequantized MM2 outputs
+    (q_nope / q_rope) are paired with the wrong tile: q_nope and q_rope are
+    corrupted while q_c, which bypasses that pairing, stays correct. A
+    256-token call avoids
+    the multi-tile traversal, so it serves as the reference for the first 256
+    tokens. The weights and per-token inputs are identical across calls, so
+    the outputs must match bit-exactly.
+    """
+    torch.manual_seed(0)
+    # The int8 weights must keep their FRACTAL_NZ layout for the support
+    # check to pass, which requires allowing internal formats.
+    torch.npu.config.allow_internal_format = True
+    token_num = 257
+    head_num = 64
+    hidden_size = 7168
+    mm1_out = 2112
+    q_lora_rank = 1536
+    kv_lora_rank = 512
+    rope_dim = 64
+    block_num = 4
+    block_size = 128
+    dtype = torch.bfloat16
+
+    # Small, well-conditioned magnitudes (same spirit as the MM2 accuracy
+    # reproducer): large activations would blow up the dequantized outputs to
+    # ~1e5 where a single bf16 ULP is ~1e3, drowning the comparison signal.
+    hidden_states = torch.randn((token_num, hidden_size), dtype=dtype, device="npu") * 0.1
+    quant_scale0 = torch.full((1,), 0.25, dtype=dtype, device="npu")
+    quant_offset0 = torch.zeros((1,), dtype=torch.int8, device="npu")
+    wdqkv = torch.randint(-3, 4, (1, hidden_size // 32, mm1_out, 32), dtype=torch.int8, device="npu")
+    wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
+    de_scale0 = torch.full((mm1_out,), 0.005, dtype=torch.float32, device="npu")
+    bias0 = torch.zeros((mm1_out,), dtype=torch.int32, device="npu")
+    gamma1 = torch.ones((q_lora_rank,), dtype=dtype, device="npu")
+    beta1 = torch.zeros((q_lora_rank,), dtype=dtype, device="npu")
+    quant_scale1 = torch.full((1,), 0.25, dtype=dtype, device="npu")
+    quant_offset1 = torch.zeros((1,), dtype=torch.int8, device="npu")
+    wuq = torch.randint(-3, 4, (1, q_lora_rank // 32, head_num * 192, 32), dtype=torch.int8, device="npu")
+    wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
+    de_scale1 = torch.full((head_num * 192,), 0.005, dtype=torch.float32, device="npu")
+    bias1 = torch.zeros((head_num * 192,), dtype=torch.int32, device="npu")
+    gamma2 = torch.ones((kv_lora_rank,), dtype=dtype, device="npu")
+    cos = torch.ones((token_num, rope_dim), dtype=dtype, device="npu")
+    sin = torch.zeros((token_num, rope_dim), dtype=dtype, device="npu")
+    wuk = torch.randn((head_num, 128, kv_lora_rank), dtype=dtype, device="npu") * 0.01
+    ctkv_scale = torch.ones((1,), dtype=dtype, device="npu")
+    qnope_scale = torch.ones((head_num,), dtype=dtype, device="npu")
+
+    def run(num_tokens: int, slot_start: int):
+        kv_cache = torch.full((block_num, block_size, kv_lora_rank), float("nan"), dtype=dtype, device="npu")
+        kv_cache_rope = torch.full((block_num, block_size, rope_dim), float("nan"), dtype=dtype, device="npu")
+        q_nope_out = torch.full((num_tokens, head_num, kv_lora_rank), float("nan"), dtype=dtype, device="npu")
+        q_rope_out = torch.full((num_tokens, head_num, rope_dim), float("nan"), dtype=dtype, device="npu")
+        q_down = torch.empty((num_tokens, q_lora_rank), dtype=dtype, device="npu")
+        slotmapping = torch.arange(slot_start, slot_start + num_tokens, dtype=torch.int32, device="npu")
+
+        torch.ops._C_ascend.mla_preprocess(
+            hidden_states[:num_tokens],
+            wdqkv,
+            de_scale0,
+            gamma1,
+            beta1,
+            wuq,
+            de_scale1,
+            gamma2,
+            cos[:num_tokens],
+            sin[:num_tokens],
+            wuk,
+            kv_cache,
+            kv_cache_rope,
+            slotmapping,
+            quant_scale0=quant_scale0,
+            quant_offset0=quant_offset0,
+            bias0=bias0,
+            quant_scale1=quant_scale1,
+            quant_offset1=quant_offset1,
+            bias1=bias1,
+            ctkv_scale=ctkv_scale,
+            q_nope_scale=qnope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=True,
+            q_out0=q_nope_out,
+            kv_cache_out0=kv_cache,
+            q_out1=q_rope_out,
+            kv_cache_out1=kv_cache_rope,
+            inner_out=q_down,
+        )
+        torch.npu.synchronize()
+        return q_nope_out, q_rope_out, q_down
+
+    whole = run(token_num, 0)
+    part0 = run(256, 0)
+
+    # The regression signal: the first 256 tokens of the whole-batch run use
+    # the multi-tile (m_loop > 1) MM2 traversal, the 256-token run does not.
+    # With the Cube/Vector pairing bug they diverge; with the fix they are
+    # bit-identical (same per-token tiling path, deterministic). The pairing
+    # error corrupts every tile from the second traversal step on, so the
+    # first 256 tokens are enough to detect it.
+    for name, whole_out, expected in zip(("q_nope", "q_rope", "q_c"), whole[:3], part0):
+        assert not torch.isnan(whole_out).any(), f"{name} has unwritten slots"
+        torch.testing.assert_close(whole_out[:256], expected, rtol=0, atol=0, msg=name)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

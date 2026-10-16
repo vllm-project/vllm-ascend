@@ -232,9 +232,7 @@ class LayerwisePushConsumerWorker:
             self.offload_manager = get_sparse_kv_offload_manager()
             main_names = set(getattr(self.offload_manager, "offload_layer_names", ()))
             if not main_names:
-                raise RuntimeError(
-                    "SparseKVOffloadManager.register_kv_caches must run before LayerwisePushConnector"
-                )
+                raise RuntimeError("SparseKVOffloadManager.register_kv_caches must run before LayerwisePushConnector")
             hbm_destinations = {name: value for name, value in kv_caches.items() if name not in main_names}
 
         layouts = self._build_hbm_layouts(self.kv_cache_config, hbm_destinations, self.total_base_layers)

@@ -34,6 +34,7 @@ from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCap
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
 
 
@@ -83,11 +84,19 @@ class KVPPConfig:
         if parallel_config.decode_context_parallel_size != 1:
             raise ValueError("KVPP and DCP cannot be enabled at the same time.")
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.kv_connector != "AscendStoreConnector":
-            if kv_transfer_config.kv_connector != "MooncakeConnectorV2":
-                raise ValueError("KVPP PD disaggregation requires MooncakeConnectorV2.")
-            if kv_transfer_config.kv_role == "kv_consumer":
-                raise ValueError("KVPP must be disabled on the decode-only node.")
+        if kv_transfer_config is not None:
+            if kv_transfer_config.kv_connector == "MultiConnector":
+                connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+                if not connectors:
+                    raise ValueError("KVPP MultiConnector requires a non-empty connectors list.")
+            else:
+                connectors = [{"kv_connector": kv_transfer_config.kv_connector, "kv_role": kv_transfer_config.kv_role}]
+            for connector in connectors:
+                name = connector.get("kv_connector")
+                if name not in _KVPP_SUPPORTED_CONNECTORS:
+                    raise ValueError(f"KVPP does not support kv connector {name!r}.")
+                if name == "MooncakeConnectorV2" and connector.get("kv_role") == "kv_consumer":
+                    raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
@@ -525,7 +534,7 @@ class AscendConfig:
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
-                "topk_buffer_size": 4096,
+                "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 128,
                 "keep_device_kv_cache": false
             }
@@ -1664,27 +1673,22 @@ class SparseKVOffloadConfig:
     """
 
     enabled: bool = False
-    topk_buffer_size: int = 4096
+    # -1 resolves to (1 + num_speculative_tokens) * 2048.
+    topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
-    # Generalized Q1/MTP LIM + copy-SFA. The C8 operator is built separately
-    # but is not selected by this serving path.
-    fused_op_type: str = "none"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
-        return self.fused_op_type == "fused_copy_sfa"
+        """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
+        return self.enabled and not self.use_fused_overlap
 
     @model_validator(mode="after")
     def _validate_values(self):
-        if self.fused_op_type not in ("none", "fused_copy_sfa"):
-            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
-        if self.use_fused_copy_sfa and self.use_fused_overlap:
-            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
-        if self.topk_buffer_size <= 0:
-            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size != -1 and self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         return self
@@ -1696,6 +1700,10 @@ class SparseKVOffloadConfig:
                 f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
             )
         config = cls(**user_config)  # type: ignore[call-arg]
+        if config.topk_buffer_size == -1:
+            speculative = getattr(vllm_config, "speculative_config", None)
+            num_speculative_tokens = speculative.num_speculative_tokens if speculative is not None else 0
+            config.topk_buffer_size = (1 + num_speculative_tokens) * 2048
         config._validate_preconditions(vllm_config)
         return config
 

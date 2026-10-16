@@ -78,7 +78,11 @@ env:
 
   # L1: persistent fine-grained build cache. L0 remains the exact final-artifact
   # cache consumed by test jobs.
-  INCREMENTAL_BUILD_CACHE_DIR: /tmp/vllm-ascend-incremental-build-cache
+  # runs-on/cache includes the literal path in its remote namespace. Every
+  # L1 caller must use this workspace-relative path, not runner.temp or /tmp.
+  # Restore exports its absolute equivalent for compilation. Save must use
+  # restore's original cache-dir output, not this subsequently updated env.
+  VLLM_ASCEND_BUILD_CACHE_DIR: csrc/build_cache
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -186,7 +190,7 @@ jobs:
         id: incremental-cache-restore
         uses: $/.github/actions/csrc-l1-restore
         with:
-          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          cache-dir: ${{ env.VLLM_ASCEND_BUILD_CACHE_DIR }}
           architecture: ${{ fromJSON(inputs.target).cache_arch }}
           soc-version: ${{ fromJSON(inputs.target).soc_version }}
           csrc-hash: ${{ inputs.csrc_hash }}
@@ -195,7 +199,6 @@ jobs:
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
-          VLLM_ASCEND_BUILD_CACHE_DIR: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
         run: |
           mkdir -p "$VLLM_ASCEND_BUILD_CACHE_DIR"
           rm -f "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
@@ -229,7 +232,7 @@ jobs:
       - name: Save incremental build cache
         uses: $/.github/actions/csrc-l1-save
         with:
-          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          cache-dir: ${{ steps.incremental-cache-restore.outputs.cache-dir }}
           primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}
           access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
           secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}

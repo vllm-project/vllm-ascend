@@ -6,7 +6,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
-from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 

@@ -581,6 +581,7 @@ class NPUModelRunner310(NPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         skip_gdn_state_update: bool = False,
+        randomize_inputs: bool = False,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.
@@ -608,6 +609,7 @@ class NPUModelRunner310(NPUModelRunner):
                     num_active_loras=num_active_loras,
                     profile_seq_lens=profile_seq_lens,
                     skip_gdn_state_update=skip_gdn_state_update,
+                    randomize_inputs=randomize_inputs,
                 )
             finally:
                 self._spec_dummy_capture = False
