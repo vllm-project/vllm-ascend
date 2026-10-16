@@ -1457,6 +1457,21 @@ class TestUpstreamConfigCompatibility(TestBase):
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
+    def test_megamoe_uses_kimi_routed_expert_hidden_size(self):
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=896,
+                    routed_expert_hidden_size=3584,
+                    moe_intermediate_size=3072,
+                    moe_quantize="w4a8",
+                )
+            )
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(config))
+        config.model_config.hf_text_config.routed_expert_hidden_size = 896
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(config))
+
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A2),
