@@ -457,11 +457,6 @@ msgid "## Persistent transport and trust"
 msgstr "## 持久化传输与信任"
 
 msgid ""
-"The restore and save composite actions own the fixed Huawei OBS transport\n"
-"configuration. The cache engine has no storage API or credential knowledge."
-msgstr "恢复和保存复合操作负责固定的华为 OBS 传输配置。缓存引擎不具备存储 API 或凭据信息。"
-
-msgid ""
 "Read access follows the runner's existing OBS authorization. Shared writes\n"
 "require both `HW_OBS_AK` and `HW_OBS_SK`; possession of those secrets is the\n"
 "only write-authorization boundary. The save action receives the credentials\n"
@@ -697,3 +692,8 @@ msgstr "| 持久化变更快照发布 | `.github/actions/csrc-l1-save/action.yam
 
 msgid "| Central producer | `.github/workflows/_build_csrc_cache.yaml` |"
 msgstr "| 中央生产者 | `.github/workflows/_build_csrc_cache.yaml` |"
+
+msgid ""
+"The restore and save composite actions own the fixed OBS transport\n"
+"configuration. The cache engine has no storage API or credential knowledge."
+msgstr "恢复和保存复合操作负责固定的 OBS 传输配置。缓存引擎不具备存储 API 或凭据相关知识。"
