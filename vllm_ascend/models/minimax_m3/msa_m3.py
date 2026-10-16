@@ -53,10 +53,11 @@ from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
-# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
+# The bundled MsaIndexScore includes the Ascend 950 arch35 kernel, so prefill
+# and decode both use the AscendC path on every device, keeping A5 aligned
+# with A3. A5's Triton decode kernel stays compiled in as a rollback path.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
+_USE_ASCENDC_INDEX_SCORE_DECODE = True
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
