@@ -159,7 +159,10 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
         assert cast.call_count == (0 if uses_fused_weights else 2)
         source_ptrs = [layer.weight.data_ptr() for layer in projections]
         cast.reset_mock()
-        with patch.object(impl, "_load_fa_quant_scales"):
+        with (
+            patch.object(impl, "_load_fa_quant_scales"),
+            patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
+        ):
             impl.process_weights_after_loading(torch.bfloat16)
         assert [layer.weight.data_ptr() for layer in projections] == source_ptrs
         if not uses_fused_weights:
@@ -239,6 +242,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
         patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
         patch.object(impl, "_process_weights_for_fused") as fused,
+        patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
     ):
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo == enable_mlapo
@@ -272,6 +276,7 @@ def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_en
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
         patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
         patch.object(impl, "_process_weights_for_fused") as fused,
+        patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
     ):
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo is expected_enabled

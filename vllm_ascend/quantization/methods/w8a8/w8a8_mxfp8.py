@@ -32,7 +32,13 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor, maybe_trans_nz
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    FP8_METHOD,
+    dispose_tensor,
+    maybe_trans_nz,
+    maybe_trans_nz_with_scale,
+)
 
 from ..base import (
     AscendLinearScheme,
@@ -291,6 +297,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
 
     @staticmethod
     def get_weight(
@@ -338,7 +347,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
+                dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -364,11 +373,20 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=None,
                 w2_scale_bias=None,
             )
+        if self.use_expert_weight_list:
+            return MoEWeights(
+                w1=layer.w13_weight_list,
+                w2=layer.w2_weight_list,
+                w1_scale=layer.w13_weight_scale_list,
+                w2_scale=layer.w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
         return MoEWeights(
-            w1=layer.w13_weight_list,
-            w2=layer.w2_weight_list,
-            w1_scale=layer.w13_weight_scale_list,
-            w2_scale=layer.w2_weight_scale_list,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
             w1_scale_bias=None,
             w2_scale_bias=None,
         )
@@ -418,6 +436,30 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
 
+        use_mega_moe = use_cann_megamoe(get_current_vllm_config())
+        if not self.use_expert_weight_list and not use_mega_moe:
+            if not hasattr(layer, "_mxfp8_moe_buffers"):
+                layer._mxfp8_moe_buffers = {}
+            for weight_name in ("w13_weight", "w2_weight"):
+                weight = getattr(layer, weight_name)
+                scale = getattr(layer, f"{weight_name}_scale")
+                g_num, n_size, k_size = scale.shape
+                target_scale = scale.data.reshape(g_num, n_size, k_size // 2, 2)
+                if weight_name not in layer._mxfp8_moe_buffers:
+                    layer._mxfp8_moe_buffers[weight_name] = maybe_trans_nz_with_scale(
+                        weight.data,
+                        target_scale,
+                        transpose_dims=(1, 2),
+                        customize_dtype=torch.float8_e4m3fn,
+                    )
+                else:
+                    weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
+                    weight_buffer.copy_(weight.data.transpose(1, 2).contiguous())
+                    scale_buffer.copy_(target_scale.transpose(1, 2).contiguous())
+                weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
+            layer._mxfp8_transformed = True
+            return
+
         if not hasattr(layer, "_mxfp8_moe_parameters"):
             layer._mxfp8_moe_parameters = {
                 name: getattr(layer, name)
@@ -429,7 +471,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 )
             }
 
-        use_mega_moe = use_cann_megamoe(get_current_vllm_config())
         for weight_name in ("w13_weight", "w2_weight"):
             scale_name = f"{weight_name}_scale"
             weight = getattr(layer, weight_name)
@@ -522,9 +563,27 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             raise RuntimeError(err_msg)
 
         orig_shapes = layer._mxfp8_original_shapes
+        use_mega_moe = hasattr(layer, "cann_mega_moe_w13_weight_list")
+        if not self.use_expert_weight_list and not use_mega_moe:
+
+            def restore(weight_name: str, scale_name: str) -> None:
+                weight = getattr(layer, weight_name)
+                restored_weight = weight.data.transpose(1, 2).contiguous()
+                weight.data = weight.data.transpose(1, 2)
+                weight.data.copy_(restored_weight)
+
+                scale = getattr(layer, scale_name)
+                restored_scale = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name]).contiguous()
+                scale.data = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name])
+                scale.data.copy_(restored_scale)
+
+            restore("w13_weight", "w13_weight_scale")
+            restore("w2_weight", "w2_weight_scale")
+            layer._mxfp8_transformed = False
+            return
+
         parameters = layer._mxfp8_moe_parameters
 
-        use_mega_moe = hasattr(layer, "cann_mega_moe_w13_weight_list")
         list_prefix = "cann_mega_moe_" if use_mega_moe else ""
         for weight_name in ("w13_weight", "w2_weight"):
             scale_name = f"{weight_name}_scale"
@@ -556,8 +615,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer._mxfp8_transformed = False
 
     def _get_weights(self, layer, name):
-        """Return the unified per-expert weight or scale list."""
-        return getattr(layer, f"{name}_list")
+        """Return the weight or scale payload expected by grouped matmul."""
+        if self.use_expert_weight_list:
+            return getattr(layer, f"{name}_list")
+        return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states

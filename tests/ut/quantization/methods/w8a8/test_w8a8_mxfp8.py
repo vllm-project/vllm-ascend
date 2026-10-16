@@ -242,7 +242,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
     def setUp(self, mock_ascend, mock_vllm):
-        mock_vllm.return_value = create_mock_vllm_config()
+        vllm_config = create_mock_vllm_config(parallel_config=Mock(enable_expert_parallel=True, enable_eplb=True))
+        vllm_config.use_v2_model_runner = True
+        mock_vllm.return_value = vllm_config
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
@@ -344,6 +346,51 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertTrue(all(weight.is_contiguous() for weight in layer.w2_weight_list))
         self.assertTrue(all(scale.is_contiguous() for scale in layer.w13_weight_scale_list))
         self.assertTrue(all(scale.is_contiguous() for scale in layer.w2_weight_scale_list))
+
+    def test_non_eplb_uses_single_nz_weight_tensor(self):
+        vllm_config = create_mock_vllm_config(parallel_config=Mock(enable_expert_parallel=True, enable_eplb=False))
+        vllm_config.use_v2_model_runner = True
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+        original_w13_shape = layer.w13_weight.shape
+
+        def transform(weight, scale, **_kwargs):
+            return weight.transpose(1, 2).contiguous(), scale.transpose(1, 2).contiguous()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
+                return_value=create_mock_ascend_config(),
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz_with_scale",
+                side_effect=transform,
+            ) as transform_nz,
+        ):
+            scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+            scheme.process_weights_after_loading(layer)
+
+        self.assertFalse(scheme.use_expert_weight_list)
+        self.assertEqual(transform_nz.call_count, 2)
+        self.assertTrue(hasattr(layer, "w13_weight"))
+        self.assertFalse(hasattr(layer, "w13_weight_list"))
+        self.assertEqual(
+            layer.w13_weight.shape,
+            (self.num_experts, self.hidden_size, 2 * self.intermediate_size),
+        )
+        self.assertEqual(len(scheme._get_weights(layer, "w13_weight")), 1)
+        self.assertIs(scheme._get_weights(layer, "w13_weight")[0], layer.w13_weight)
+        self.assertIs(scheme.get_fused_mc2_weights(layer).w1, layer.w13_weight)
+
+        scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def test_weight_accessors_use_unified_expert_lists(self, mock_vllm):

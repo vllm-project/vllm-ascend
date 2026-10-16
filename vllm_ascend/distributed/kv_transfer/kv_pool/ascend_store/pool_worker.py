@@ -82,6 +82,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    SharedBlockData,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -592,12 +593,13 @@ class KVPoolWorker:
                     if entry not in existing:
                         existing.append(entry)
 
-                logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers",
-                    group_id,
-                    len(group_spec.layer_names),
-                    len(phys_to_layer_idx),
-                )
+                if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
+                    logger.info(
+                        "layerwise group %d: %d layer_names, %d unique physical layers",
+                        group_id,
+                        len(group_spec.layer_names),
+                        len(phys_to_layer_idx),
+                    )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -766,6 +768,7 @@ class KVPoolWorker:
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
+                    raise_on_transfer_failure=self.layerwise_offload,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -814,6 +817,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -2530,30 +2534,56 @@ class KVPoolWorker:
                         task.cached_process_tokens = cached
 
     def _build_shared_load_data(self) -> None:
-        """Build shared block data once and attach to all layer load tasks.
-
-        In multi-group mode, shared data is built per-group because each
-        group has different block_ranges (different effective_block_size).
-        """
+        """Share load metadata, preserving layer-specific selections for reuse."""
         if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             return
-        for group_id in range(self.num_kv_cache_groups):
-            first_task = None
-            for layer_id in range(self.num_layers):
-                for task in self.layer_load_tasks[layer_id]:
-                    if task.group_id == group_id:
-                        first_task = task
-                        break
-                if first_task:
-                    break
-            if first_task is None:
-                continue
-            shared = self.kv_recv_thread.build_shared_data(first_task)
-            if shared is not None:
+        if not self.layerwise_offload:
+            # Ordinary layerwise storage has the same load range per group.
+            # Preserve its single-build path without selection snapshots.
+            for group_id in range(self.num_kv_cache_groups):
+                first_task = None
                 for layer_id in range(self.num_layers):
                     for task in self.layer_load_tasks[layer_id]:
                         if task.group_id == group_id:
-                            task.shared_block_data = shared
+                            first_task = task
+                            break
+                    if first_task:
+                        break
+                if first_task is None:
+                    continue
+                shared = self.kv_recv_thread.build_shared_data(first_task)
+                if shared is not None:
+                    for layer_id in range(self.num_layers):
+                        for task in self.layer_load_tasks[layer_id]:
+                            if task.group_id == group_id:
+                                task.shared_block_data = shared
+            return
+        for group_id in range(self.num_kv_cache_groups):
+            shared_by_ranges: dict[
+                tuple[bool, tuple[tuple[int, int, int, int | None], ...]], SharedBlockData | None
+            ] = {}
+            for layer_id in range(self.num_layers):
+                for task in self.layer_load_tasks[layer_id]:
+                    if task.group_id != group_id:
+                        continue
+                    # Independent layers retain local prefix KV, while reused
+                    # layers must restore it, including any partial block.
+                    # Request identity also matters: different requests can
+                    # select the same logical range but different blocks/GVAs.
+                    ranges = tuple(
+                        (id(r.request), r.start_block, r.end_block, r.partial_block_index) for r in task.block_ranges
+                    )
+                    key = (task.use_key_major_ranges, ranges)
+                    if key not in shared_by_ranges:
+                        shared = self.kv_recv_thread.build_shared_data(task)
+                        if shared is not None:
+                            # The builder reuses scratch arrays on the next
+                            # call; retain each selection's own snapshot.
+                            shared.block_ids_arr = shared.block_ids_arr.copy()
+                            if shared.block_gvas_arr is not None:
+                                shared.block_gvas_arr = shared.block_gvas_arr.copy()
+                        shared_by_ranges[key] = shared
+                    task.shared_block_data = shared_by_ranges[key]
 
     def _compute_reachable_store_masks(
         self,
@@ -3522,19 +3552,7 @@ class KVPoolWorker:
         ) -> list[BlockHash | str]:
             group_block_size = coordinator.group_effective_block_sizes[group_id]
             present: list[BlockHash | str] = []
-            if hbm_hit_tokens:
-                # Blocks already computed locally are present by construction;
-                # the pool only has to confirm the blocks beyond them.
-                present.extend(group_block_hashes[: hbm_hit_tokens // group_block_size])
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
-
-            def chunk_filter(
-                start: int,
-                group_block_size=group_block_size,
-                lookup_mask=lookup_mask,
-            ) -> bool:
-                chunk_idx = start // group_block_size
-                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
 
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
@@ -3544,7 +3562,7 @@ class KVPoolWorker:
                 block_hashes,
                 mask_num=lookup_start,
                 kv_cache_group_id=group_id,
-                chunk_filter=chunk_filter,
+                chunk_mask=lookup_mask,
             ):
                 variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
@@ -3575,6 +3593,7 @@ class KVPoolWorker:
             token_len,
             query_group_hits,
             log_context="KV pool coordinator lookup",
+            hbm_hit_tokens=hbm_hit_tokens,
         )
 
     def lookup_scheduler(

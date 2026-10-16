@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
+from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
@@ -130,6 +131,22 @@ def _configure_backend(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
                 scope="global",
             )
+
+            # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
+            incompatible_ops = [
+                "TopKV2",  # minimax-m3 910C
+                "GenericBlockSparseAttn",  # minimax-m3 910C
+                "QuantBatchMatmulV3",  # glm5.2 910C
+                "TransposeQuantBatchMatMul",  # dsv4 950
+                "QuantLightningIndexer",  # glm5.2 950
+            ]
+            logger.info_once(
+                "Skipping static kernel compilation for incompatible ops: %s.",
+                ",".join(incompatible_ops),
+                scope="global",
+            )
+            _set_static_kernel_blacklist(incompatible_ops)
+
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
