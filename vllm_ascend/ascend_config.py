@@ -595,13 +595,8 @@ class AscendConfig:
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
     mega_moe_max_tokens: int = 65536
-    # Token-row capacity C of the MLA chunked-prefill context workspace.
-    # It replaces the default cap in
-    # W = max(min(max(8 * max_model_len, 4 * max_num_seqs * block_size), C),
-    #         max_num_seqs * block_size);
-    # context parallelism may raise W further. ``None`` selects a model
-    # default (512K rows for Kimi K3, 128K otherwise) and is never replaced
-    # by the resolved value. Larger values reserve more device memory.
+    # Chunked-prefill workspace cap in token rows. None selects 512K for
+    # Kimi K3 and 128K otherwise; minimum allocation requirements still apply.
     chunked_prefill_workspace_size: int | None = None
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
