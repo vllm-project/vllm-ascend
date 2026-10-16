@@ -11,7 +11,6 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
-from vllm_ascend.weight_switch import WeightLoadPartition, WeightSwitchConfig
 
 
 class TestAscendW4A8MXFP4LinearMethod(TestBase):
@@ -44,7 +43,7 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         self.assertEqual(result["weight_scale"].shape, (128, 135))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_partial_scale_group_round_trip(self, mock_npu):
+    def test_partial_scale_group_padding(self, mock_npu):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.zeros(8, 2152, dtype=torch.uint8), requires_grad=False)
@@ -55,9 +54,6 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
             unpacked = layer.weight_scale.transpose(-3, -2).reshape(8, 136)
             self.assertTrue(torch.equal(unpacked[:, :135], scales))
             self.assertTrue(torch.equal(unpacked[:, 135], torch.zeros(8, dtype=torch.uint8)))
-            self.scheme.restore_weights_for_rl_loading(layer)
-            self.assertTrue(torch.equal(layer.weight_scale, scales))
-            self.assertTrue(layer.weight_scale.is_contiguous())
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_apply_restores_activation_shape_and_expands_bias(self, mock_npu):
@@ -107,7 +103,7 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         return values[codes] * expanded_scales[:, : codes.shape[-1]]
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_checkpoint_tp_shards_preserve_dequantized_projection_and_restore(self, mock_npu):
+    def test_checkpoint_tp_shards_preserve_dequantized_projection(self, mock_npu):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         input_size = 4304
         checkpoint_weight = torch.randint(0, 256, (8, input_size // 2), dtype=torch.uint8)
@@ -121,7 +117,6 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
                     layer = self._make_row_layer(input_size, tp_size, tp_rank)
                     layer.weight.weight_loader(layer.weight, checkpoint_weight)
                     layer.weight_scale.weight_loader(layer.weight_scale, checkpoint_scales)
-                    local_weight = layer.weight.clone()
                     local_scales = layer.weight_scale.clone()
                     start = tp_rank * layer.input_size_per_partition
                     end = start + layer.input_size_per_partition
@@ -133,10 +128,6 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
                         weight = layer.weight.T
                         scales = layer.weight_scale.transpose(0, 1).reshape(8, -1)
                         projection = padded_x @ self._dequantize_weight(weight, scales).T
-                        self.scheme.restore_weights_for_rl_loading(layer)
-                        torch.testing.assert_close(layer.weight, local_weight)
-                        torch.testing.assert_close(layer.weight_scale, local_scales)
-                        self.assertTrue(layer.weight.is_contiguous())
                     actual += projection
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -197,44 +188,6 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
             self.scheme.apply(wrapped, (torch.zeros(2, 1076, dtype=torch.float8_e4m3fn), scale))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_weight_switch_rejects_padded_input_shards(self, mock_npu):
-        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
-        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
-        for input_size in (8640, 4304):
-            layer = self._make_row_layer(input_size, 2, 0)
-            self.scheme.process_weights_after_loading(layer)
-            with self.assertRaisesRegex(ValueError, "input-axis weight switching"):
-                self.scheme.enable_weight_switch(layer, config)
-
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_weight_switch_accepts_aligned_input_and_partial_output_shards(self, mock_npu):
-        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
-        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
-        layer = self._make_row_layer(8704, 2, 0)
-        self.scheme.process_weights_after_loading(layer)
-        state = self.scheme.enable_weight_switch(layer, config)
-        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (136, 8, 2))
-        layer = nn.Module()
-        layer.input_size = layer.input_size_per_partition = 4304
-        layer.output_size, layer.output_size_per_partition = 16, 8
-        layer.weight = nn.Parameter(torch.zeros(8, 2152, dtype=torch.uint8), requires_grad=False)
-        layer.weight_scale = nn.Parameter(torch.zeros(8, 135, dtype=torch.uint8), requires_grad=False)
-        self.scheme.process_weights_after_loading(layer)
-        state = self.scheme.enable_weight_switch(layer, config)
-        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (68, 16, 2))
-
-    def test_nested_weight_load_rejects_padding_before_resizing(self):
-        layer = self._make_row_layer(8640, 1, 0)
-        original_weight = layer.weight
-        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
-        partition = WeightLoadPartition(world_size=2, rank=0)
-        with self.assertRaisesRegex(ValueError, "input-axis weight switching"):
-            self.scheme.prepare_layer_for_parallel_weight_load(layer, config, partition)
-        self.assertIs(layer.weight, original_weight)
-        self.assertEqual(layer.weight.shape, (8, 4320))
-        self.assertEqual(layer.input_size_per_partition, 8640)
-
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_weights_after_loading_transposes(self, mock_npu):
         # npu_format_cast returns the input tensor (mocked as identity)
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
@@ -253,67 +206,24 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         return layer
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_process_records_original_shapes_and_marks_transformed(self, mock_npu):
+    def test_process_marks_transformed(self, mock_npu):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = self._make_linear_layer()
         self.scheme.process_weights_after_loading(layer)
-        self.assertTrue(hasattr(layer, "_mxfp4_original_shapes"))
-        self.assertEqual(layer._mxfp4_original_shapes["weight"], (128, 128))
-        self.assertEqual(layer._mxfp4_original_shapes["weight_scale"], (128, 8))
         self.assertTrue(layer._mxfp4_transformed)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_is_idempotent(self, mock_npu):
         # The transform is not idempotent (a second transpose/reshape corrupts
-        # it), so a repeated call must be a no-op. veRL calls process again
-        # after load_weights(), which is exactly this path.
+        # it), so a repeated call must be a no-op.
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = self._make_linear_layer()
         self.scheme.process_weights_after_loading(layer)
         weight_shape = layer.weight.shape
         scale_shape = layer.weight_scale.shape
-        recorded = dict(layer._mxfp4_original_shapes)
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.weight.shape, weight_shape)
         self.assertEqual(layer.weight_scale.shape, scale_shape)
-        self.assertEqual(layer._mxfp4_original_shapes, recorded)
-
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_restore_after_process_returns_original_shape(self, mock_npu):
-        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
-        layer = self._make_linear_layer()
-        original_weight_shape = layer.weight.shape
-        original_scale_shape = layer.weight_scale.shape
-        self.scheme.process_weights_after_loading(layer)
-        self.scheme.restore_weights_for_rl_loading(layer)
-        self.assertEqual(layer.weight.shape, original_weight_shape)
-        self.assertEqual(layer.weight_scale.shape, original_scale_shape)
-        self.assertEqual(layer.weight.dtype, torch.uint8)
-        self.assertFalse(layer._mxfp4_transformed)
-
-    def test_restore_without_process_is_noop(self):
-        layer = self._make_linear_layer()
-        original_weight_shape = layer.weight.shape
-        original_scale_shape = layer.weight_scale.shape
-        self.scheme.restore_weights_for_rl_loading(layer)
-        self.assertEqual(layer.weight.shape, original_weight_shape)
-        self.assertEqual(layer.weight_scale.shape, original_scale_shape)
-        self.assertFalse(hasattr(layer, "_mxfp4_transformed"))
-
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_refit_cycle_restore_then_process_round_trips(self, mock_npu):
-        # restore -> load_weights -> process must land back in the inference
-        # layout, and the recorded shapes must survive the cycle.
-        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
-        layer = self._make_linear_layer()
-        self.scheme.process_weights_after_loading(layer)
-        inference_weight_shape = layer.weight.shape
-        inference_scale_shape = layer.weight_scale.shape
-        self.scheme.restore_weights_for_rl_loading(layer)
-        self.scheme.process_weights_after_loading(layer)
-        self.assertEqual(layer.weight.shape, inference_weight_shape)
-        self.assertEqual(layer.weight_scale.shape, inference_scale_shape)
-        self.assertTrue(layer._mxfp4_transformed)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_apply_with_prequantized_input(self, mock_npu):

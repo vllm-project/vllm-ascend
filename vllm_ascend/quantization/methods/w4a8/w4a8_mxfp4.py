@@ -40,8 +40,6 @@ from ..base import (
     AscendMoEScheme,
     PreparedLinearInput,
     QuantType,
-    WeightLoadPartition,
-    WeightSwitchConfig,
     WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
@@ -89,32 +87,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         if prefix_padding or suffix_padding:
             x = F.pad(x, (prefix_padding, suffix_padding))
         return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
-
-    def _get_weight_switch_specs(self, layer: torch.nn.Module, config: WeightSwitchConfig):
-        """Validate input-axis gathers requested by enable_weight_switch()."""
-        specs = super()._get_weight_switch_specs(layer, config)
-        if specs[2] == "input" and config.world_size > 1:
-            self._validate_weight_switch_input_size(layer.input_size_per_partition)
-        return specs
-
-    def _validate_weight_switch_input_size(self, input_size: int) -> None:
-        # Input-axis gather concatenates paired scales. A local padding byte
-        # would become an interior scale and shift the next shard's groups.
-        scale_pair_size = 2 * self.group_size
-        if input_size % scale_pair_size:
-            raise ValueError(
-                f"MXFP4 input-axis weight switching requires each shard's input size to be divisible by "
-                f"{scale_pair_size}; got {input_size}. Disable weight switching for this layer."
-            )
-
-    def prepare_layer_for_parallel_weight_load(
-        self, layer: torch.nn.Module, config: WeightSwitchConfig, load_partition: WeightLoadPartition
-    ):
-        """Validate nested input shards loaded by the SFA/DSA PCP backends."""
-        if config.world_size > 1:
-            # Validate before the generic loader resizes or slices parameters.
-            self._validate_weight_switch_input_size(layer.input_size_per_partition // config.world_size)
-        return super().prepare_layer_for_parallel_weight_load(layer, config, load_partition)
 
     def prepare_input_for_overlap(
         self,
@@ -181,18 +153,9 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
-        """Cast the weight to NZ format and reshape its scale for NPU inference.
-
-        Records the original shapes and marks the layer transformed so
-        ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
-        """
+        """Cast the weight to NZ format and reshape its scale for NPU inference."""
         if getattr(layer, "_mxfp4_transformed", False):
             return
-        if not hasattr(layer, "_mxfp4_original_shapes"):
-            layer._mxfp4_original_shapes = {
-                "weight": tuple(layer.weight.data.shape),
-                "weight_scale": tuple(layer.weight_scale.data.shape),
-            }
         prefix_padding = suffix_padding = 0
         if isinstance(layer, RowParallelLinear) and layer.tp_size > 1:
             prefix_padding, suffix_padding = get_mxfp_tp_padding(
@@ -212,29 +175,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         layer.weight_scale.data = pair_mxfp_scales(layer.weight_scale.data).transpose(-3, -2)
         layer._mxfp4_transformed = True
-
-    def restore_weights_for_rl_loading(self, layer):
-        """Undo the NZ/scale transform so the weight loader can reload ND weights.
-
-        Reverses the transpose, casts the weight back to ND (format 2), and
-        restores the scale's original shape.
-        """
-        if not getattr(layer, "_mxfp4_transformed", False):
-            return
-        layer.weight.data = layer.weight.data.transpose(-1, -2)
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
-        prefix_padding, suffix_padding = layer.mxfp4_tp_padding
-        if prefix_padding or suffix_padding:
-            packed_start = prefix_padding // 2
-            packed_size = layer._mxfp4_original_shapes["weight"][1]
-            layer.weight.data = layer.weight.data[:, packed_start : packed_start + packed_size].contiguous()
-        orig_scale_shape = layer._mxfp4_original_shapes["weight_scale"]
-        layer.weight_scale.data = (
-            layer.weight_scale.data.transpose(-3, -2)
-            .reshape(orig_scale_shape[0], -1)[:, : orig_scale_shape[1]]
-            .contiguous()
-        )
-        layer._mxfp4_transformed = False
 
 
 @register_scheme("W4A8_MXFP", "moe")
