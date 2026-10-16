@@ -141,6 +141,7 @@ Before starting the service:
         --max-model-len 135168 \
         --max-num-seqs 8 \
         --max-num-batched-tokens 4096 \
+        --no-async-scheduling \
         --gpu-memory-utilization 0.93 \
         --enable-prefix-caching \
         --mamba-cache-mode align \
@@ -162,8 +163,25 @@ Before starting the service:
     - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
     - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
+    - `--no-async-scheduling` is required when PLE is combined with MTP, pipeline parallelism, or context parallelism.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
+
+The v1 runner maintains real device-side PLE token history when asynchronous
+scheduling is enabled. This path currently supports PP=1, CP=1, and no
+speculative decoding. Unsupported asynchronous combinations fail at startup.
+Synchronous scheduling keeps the existing CPU history path.
+
+Without speculative decoding, PLE also accepts multi-token decode chunks.
+These requests use a separate variable-length convolution group that retains
+their existing state and restores outputs to the original token order. Real
+prefills keep their own packing buffers, so a long prefill does not enlarge
+the workspace of short decode chunks.
+
+The additional token-history storage uses approximately
+`4 * max_num_seqs * max_model_len` bytes per worker. For eight sequences and
+135,168 tokens, the history itself is 4.13 MiB. Validate real-weight accuracy
+and throughput after applying the history fix.
 
 ## 6 Functional Verification
 

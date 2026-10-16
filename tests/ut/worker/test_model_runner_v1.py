@@ -124,6 +124,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         runner.max_num_reqs = 2
         runner.device = torch.device("cpu")
         runner._qwen4_exp_ngram_context_buffer = None
+        runner._qwen4_exp_ple_inputs = None
         runner._qwen4_exp_query_start_loc_buffer = None
         runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1, 1], dtype=torch.int32))
         runner.input_batch = SimpleNamespace(

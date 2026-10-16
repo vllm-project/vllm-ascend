@@ -181,6 +181,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.qwen4_exp.ple_inputs import Qwen4ExpPLEInputs
+from vllm_ascend.models.qwen4_exp.short_conv_attn import (
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
@@ -718,6 +722,7 @@ class NPUModelRunner(GPUModelRunner):
         # capture; each step only refreshes their contents.
         self._qwen4_exp_ngram_context_buffer: torch.Tensor | None = None
         self._qwen4_exp_query_start_loc_buffer: torch.Tensor | None = None
+        self._qwen4_exp_ple_inputs = Qwen4ExpPLEInputs.from_runner(self)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -1094,6 +1099,8 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_block_copies=[],
             )
         sampling_metadata = super()._update_states(scheduler_output)
+        if self._qwen4_exp_ple_inputs is not None:
+            self._qwen4_exp_ple_inputs.update_requests(self.input_batch, scheduler_output, self.requests)
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
@@ -1864,6 +1871,15 @@ class NPUModelRunner(GPUModelRunner):
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+
+        if self._qwen4_exp_ple_inputs is not None:
+            self._qwen4_exp_ple_inputs.prepare_inputs(
+                self.input_batch,
+                num_scheduled_tokens,
+                self.input_ids.gpu,
+                self.positions,
+                self.query_start_loc.gpu,
+            )
 
         return (
             logits_indices,
@@ -3484,6 +3500,8 @@ class NPUModelRunner(GPUModelRunner):
         runtime_query_start_loc = runtime_query_start_loc[: num_reqs_padded + 1]
 
         runtime_context = model_kwargs.get("ngram_context")
+        if runtime_context is None and not is_dummy and self._qwen4_exp_ple_inputs is not None:
+            runtime_context = self._qwen4_exp_ple_inputs.ngram_context(num_reqs_padded)
         if runtime_context is None:
             eos_token_id = int(text_config.eos_token_id)
             context_cpu = np.full(
@@ -4056,6 +4074,14 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args["num_actual_reqs"] = num_reqs
+                if use_spec_decode:
+                    extra_attn_metadata_args.update(
+                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
+                    )
+
+            if isinstance(builder, PleShortConvAttentionMetadataBuilder):
+                extra_attn_metadata_args["num_reqs_actual"] = num_reqs
                 if use_spec_decode:
                     extra_attn_metadata_args.update(
                         num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],

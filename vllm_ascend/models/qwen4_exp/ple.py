@@ -81,10 +81,16 @@ def patch_upstream_ple_short_conv() -> None:
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
+    from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
 
+    from vllm_ascend.models.qwen4_exp.ple_short_conv import patch_ple_chunk_execution
+    from vllm_ascend.models.qwen4_exp.short_conv_attn import PleShortConvAttentionMetadataBuilder
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
+
+    PleShortConvAttentionBackend.get_builder_cls = staticmethod(lambda: PleShortConvAttentionMetadataBuilder)
+    patch_ple_chunk_execution(Qwen4ExpPLELayer)
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
@@ -114,9 +120,7 @@ def patch_upstream_ple_short_conv() -> None:
                 embedding_dtype,
             )
 
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(
-            from_quant_config
-        )
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(from_quant_config)
 
 
 __all__ = ["patch_upstream_ple_short_conv"]
