@@ -241,8 +241,7 @@ You can run tests with `pytest` as well. Typical examples:
 
     Ascend C/native tests live under `singlecard_ops/ascendc/{a2a3,a5}/`.
     PR CI routes A3-only files within `a2a3` to A3; select a supported file for
-    local runs. See the [single-card test layout](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/README.md)
-    for the routing rules and legacy 310P tests.
+    local runs. The existing flat 310P tests continue to use the 310P runner.
 
 === "Multi-card"
 
