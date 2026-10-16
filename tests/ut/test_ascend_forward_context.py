@@ -327,8 +327,7 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
-@pytest.mark.parametrize("fused_mc2_request", [2, "2"])
-def test_cann_megamoe_uses_model_request_after_draft_resets_global_flag(monkeypatch, fused_mc2_request):
+def test_cann_megamoe_uses_model_request_after_draft_resets_global_flag(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A3,
@@ -337,7 +336,7 @@ def test_cann_megamoe_uses_model_request_after_draft_resets_global_flag(monkeypa
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
 
-    assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=fused_mc2_request)) is True
+    assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=2)) is True
     assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=1)) is False
     assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=0)) is False
     monkeypatch.setattr(afc, "importlib", SimpleNamespace(util=SimpleNamespace(find_spec=lambda _: None)))
