@@ -9,7 +9,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
@@ -805,7 +805,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.non_spec_state_indices_tensor,
         torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
     )
-    assert torch.all(builder.spec_state_indices_tensor[:4] == builder._SPEC_GRAPH_PAD_SLOT_ID)
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
 
 
 def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):
@@ -1152,7 +1152,7 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
     assert replay_metadata.spec_decode_metadata is None
     assert torch.equal(
         captured_conv1d_metadata.cache_indices,
-        torch.full((4, 4), builder._SPEC_GRAPH_PAD_SLOT_ID, dtype=torch.int32),
+        torch.full((4, 4), PAD_SLOT_ID, dtype=torch.int32),
     )
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) == 0
     assert torch.count_nonzero(captured_conv1d_metadata.num_accepted_tokens) == 0
@@ -1191,7 +1191,7 @@ def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
     assert torch.count_nonzero(attn_metadata.non_spec_query_start_loc) == 0
     assert torch.all(attn_metadata.non_spec_state_indices_tensor == NULL_BLOCK_ID)
     assert torch.count_nonzero(builder.spec_query_start_loc[:5]) == 0
-    assert torch.all(builder.spec_state_indices_tensor[:4] == builder._SPEC_GRAPH_PAD_SLOT_ID)
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
 
 
 @pytest.mark.parametrize(

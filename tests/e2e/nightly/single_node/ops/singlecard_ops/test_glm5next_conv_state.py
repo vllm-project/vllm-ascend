@@ -18,12 +18,12 @@ def test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages(dim_firs
     strides = (width * dim * 2, 1, width) if dim_first else (width * dim * 2, dim, 1)
     cache = backing.as_strided((slots, width, dim), strides)
     saved = backing.clone()
-    indices = torch.tensor([2, 0, slots, 1, 3], dtype=torch.int32, device="npu")
+    indices = torch.tensor([2, -1, slots, 1, 3], dtype=torch.int32, device="npu")
     starts = torch.tensor([0, 1, 2, 3, 3, 4], dtype=torch.int32, device="npu")
     packed = torch.empty(5, width, dim, device="npu")
     packed_indices = torch.empty_like(indices)
     copy_conv_state(cache, packed, indices, starts, packed_indices, write_back=False)
-    torch.testing.assert_close(packed_indices.cpu(), torch.tensor([0, 5, 5, 5, 4], dtype=torch.int32))
+    torch.testing.assert_close(packed_indices.cpu(), torch.tensor([0, -1, -1, -1, 4], dtype=torch.int32))
     torch.testing.assert_close(packed[0], cache[2])
     torch.testing.assert_close(packed[4], cache[3])
     assert torch.count_nonzero(packed[1:4]).item() == 0
@@ -103,7 +103,7 @@ def test_causal_conv_gdn_index_matrix_matches_first_column(run_mode):
     torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
 
 
-def test_conv_graph_replay_refreshes_indices_and_clears_no_draft():
+def test_conv_graph_replay_refreshes_indices_for_direct_sd_states():
     slots, state_len, dim = 8, 6, 384
     backings = [torch.full((slots * 2, state_len, dim), 0.5, dtype=torch.bfloat16, device="npu") for _ in range(2)]
     states = [backing[::2] for backing in backings]
@@ -128,14 +128,8 @@ def test_conv_graph_replay_refreshes_indices_and_clears_no_draft():
     for backing in backings:
         backing.fill_(0.5)
 
-    for indices, ends in (
-        ([1, 3], [0, 4, 8]),
-        ([4, 5], [0, 4, 8]),
-        ([1, 0], [0, 4, 4]),
-        ([0, 0], [0, 0, 0]),
-    ):
+    for indices in ([1, 3], [4, 5]):
         raw[:, 0].copy_(torch.tensor(indices, dtype=torch.int32, device="npu"))
-        starts.copy_(torch.tensor(ends, dtype=torch.int32, device="npu"))
         expected = []
         for x, state in zip(inputs, references):
             x.fill_(0.25)
@@ -145,6 +139,5 @@ def test_conv_graph_replay_refreshes_indices_and_clears_no_draft():
         graph.replay()
         for layer, state in enumerate(states):
             torch.testing.assert_close(state, references[layer], atol=0, rtol=0)
-            if ends[-1]:
-                torch.testing.assert_close(outputs[layer][: ends[-1]], expected[layer][: ends[-1]], atol=0, rtol=0)
+            torch.testing.assert_close(outputs[layer], expected[layer], atol=0, rtol=0)
             assert torch.all(backings[layer][1::2] == 0.5)

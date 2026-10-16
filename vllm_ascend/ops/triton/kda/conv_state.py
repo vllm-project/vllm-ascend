@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stage unsupported KDA convolution state layouts."""
+"""Pack and restore strided convolution states for KDA."""
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -36,8 +36,7 @@ def _copy_conv_state_kernel(
         state_row = row_tile // channel_tiles
         channels = row_tile % channel_tiles * BLOCK + tl.arange(0, BLOCK)
         slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
-        # GDN reserves physical slot zero for padding.
-        active = (slot > 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
+        active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
         in_range = channels < DIM
         safe_slot = tl.where(active, slot, 0)
         # Keep the potentially large page address scalar. Within-page offsets
@@ -52,7 +51,7 @@ def _copy_conv_state_kernel(
             values = tl.load(cache_row + cache_offsets, mask=active & in_range, other=0)
             tl.store(packed + packed_offsets, values, mask=in_range)
             if row_tile == 0:
-                tl.store(packed_indices + request, tl.where(active, request, REQUESTS))
+                tl.store(packed_indices + request, tl.where(active, request, -1))
 
 
 def copy_conv_state(

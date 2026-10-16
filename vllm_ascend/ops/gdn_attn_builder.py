@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
+    PAD_SLOT_ID,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
@@ -439,7 +440,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
     def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
         """Make a captured speculative branch a no-op for this replay."""
-        self.spec_state_indices_tensor[:graph_batch_size].fill_(self._SPEC_GRAPH_PAD_SLOT_ID)
+        self.spec_state_indices_tensor[:graph_batch_size].fill_(PAD_SLOT_ID)
         self.spec_query_start_loc[: graph_batch_size + 1].zero_()
         self.num_accepted_tokens[:graph_batch_size].zero_()
         if self.spec_actual_seq_lengths is not None:

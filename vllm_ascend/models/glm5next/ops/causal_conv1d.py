@@ -4,7 +4,7 @@
 
 import torch
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
@@ -20,16 +20,17 @@ def causal_conv1d(
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Update GDN state in place; cache indices use slot zero for padding."""
+    """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
+    # Padded requests can be skipped by the kernel; their output must stay zero.
+    output = torch.zeros_like(x)
     if cache_indices.shape[0] == 0:
-        return torch.zeros_like(x)
+        return output
     kernel_state = conv_state
     # Match Kimi K3: pass one contiguous cache index per request to AscendC.
     kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
-    null_block_id = NULL_BLOCK_ID
-    # AscendC reads and updates page-strided SD states in place. Only stage
-    # layouts outside its stride contract, such as a transposed DS state whose
-    # channel dimension is not contiguous. Copy only this batch's state rows.
+    null_block_id = 0
+    # AscendC updates page- and row-strided SD states in place. Keep staging
+    # for unsupported layouts, such as DS views with strided channels.
     needs_state_copy = conv_state.stride(0) <= 0 or conv_state.stride(1) <= 0 or conv_state.stride(2) != 1
     if needs_state_copy:
         requests = cache_indices.shape[0]
@@ -37,8 +38,9 @@ def causal_conv1d(
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-        # Packed row zero is live; the gather kernel uses requests for padding.
-        null_block_id = requests
+        # Packed rows start at zero, so zero is now a valid cache slot. Invalid
+        # requests were mapped to PAD_SLOT_ID by the gather kernel.
+        null_block_id = PAD_SLOT_ID
     kernel_indices = kernel_indices.contiguous()
     if run_mode == 0:
         result = causal_conv1d_fn(

@@ -35,7 +35,7 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
     def prefill(x, weight, bias, **kwargs):
         kernel_indices = kwargs["cache_indices"]
         assert kernel_indices.ndim == 1 and kernel_indices.stride() == (1,)
-        assert kwargs["null_block_id"] == (2 if dim_first else 0)
+        assert kwargs["null_block_id"] == (-1 if dim_first else 0)
         expected = torch.tensor([0, 1] if dim_first else [1, 2], dtype=torch.int32)
         torch.testing.assert_close(kernel_indices, expected)
         assert torch.all(kernel_indices != kwargs["null_block_id"])
