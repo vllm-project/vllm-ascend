@@ -1,9 +1,12 @@
 """Unit tests for lmhead-TP row alignment at the LM-head layer.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the pad/trim contract of
-``AscendLogitsProcessor._get_logits_lmheadtp`` when the LM head carries a
-``lmhead_tp_capacity`` (the DSpark draft LMHead), and verify that heads
-without the attribute keep the original passthrough behavior. Collective
+``AscendLogitsProcessor._get_logits_lmheadtp`` — the single alignment
+choke point for every vocab-sharded draft head (DSpark / MTP / EAGLE /
+DFlash). The head resolves its row capacity per call: the per-step
+dynamic value published by the speculator (``_lmhead_tp_dynamic_capacity``)
+wins over the static constructor capacity (``lmhead_tp_capacity``), and
+heads without either keep the original passthrough behavior. Collective
 behavior itself is validated on real hardware.
 """
 
@@ -59,10 +62,6 @@ def test_lmhead_tp_capacity_pads_then_trims():
             return_value=MagicMock(all_gather=_gather_comm),
         ),
         patch(
-            "vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config",
-            return_value=MagicMock(enable_reduce_sample=False),
-        ),
-        patch(
             "vllm_ascend.ops.vocab_parallel_embedding.lmhead_all_to_all",
             side_effect=_all_to_all,
         ),
@@ -91,10 +90,6 @@ def test_lmhead_tp_capacity_exact_passthrough():
             return_value=MagicMock(all_gather=_gather_comm),
         ),
         patch(
-            "vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config",
-            return_value=MagicMock(enable_reduce_sample=False),
-        ),
-        patch(
             "vllm_ascend.ops.vocab_parallel_embedding.lmhead_all_to_all",
             side_effect=_all_to_all,
         ),
@@ -106,8 +101,8 @@ def test_lmhead_tp_capacity_exact_passthrough():
 
 
 def test_lmhead_tp_no_capacity_is_passthrough():
-    """Heads without lmhead_tp_capacity (target / MTP / DFlash LMHeads) keep
-    the original behavior: no padding, no trimming."""
+    """Heads without any capacity (the target LM head) keep the original
+    behavior: no padding, no trimming."""
     proc = _make_processor(vocab=8)
     head = _make_head(capacity=None)
     hidden_states = torch.randn(3, 5)
@@ -117,10 +112,6 @@ def test_lmhead_tp_no_capacity_is_passthrough():
         patch(
             "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group",
             return_value=MagicMock(all_gather=_gather_comm),
-        ),
-        patch(
-            "vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config",
-            return_value=MagicMock(enable_reduce_sample=False),
         ),
         patch(
             "vllm_ascend.ops.vocab_parallel_embedding.lmhead_all_to_all",
@@ -133,6 +124,62 @@ def test_lmhead_tp_no_capacity_is_passthrough():
     assert logits.shape[0] == 3
 
 
+def test_lmhead_tp_dynamic_capacity_takes_priority():
+    """The per-step dynamic capacity published by the speculator
+    (``_lmhead_tp_dynamic_capacity``) must win over the static constructor
+    capacity: this is what lets every draft family pad to the DP-synced
+    batch maximum instead of the config maximum."""
+    proc = _make_processor(vocab=8)
+    head = _make_head(capacity=16)
+    head._lmhead_tp_dynamic_capacity = 6
+    hidden_states = torch.randn(3, 5)
+    proc._apply_head = MagicMock(side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8))
+
+    with (
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group",
+            return_value=MagicMock(all_gather=_gather_comm),
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.lmhead_all_to_all",
+            side_effect=_all_to_all,
+        ),
+    ):
+        logits = proc._get_logits_lmheadtp(hidden_states, head, None)
+
+    # padded to the dynamic 6, not the static 16
+    padded = proc._apply_head.call_args.args[1]
+    assert padded.shape == (6, 5)
+    torch.testing.assert_close(padded[:3], hidden_states)
+    assert torch.all(padded[3:] == 0)
+    assert logits.shape[0] == 3
+
+
+def test_lmhead_tp_dynamic_capacity_without_static():
+    """A dynamic capacity alone (no constructor capacity) still pads: the
+    static value is only a fallback, never a requirement."""
+    proc = _make_processor(vocab=8)
+    head = _make_head(capacity=None)
+    head._lmhead_tp_dynamic_capacity = 4
+    hidden_states = torch.randn(3, 5)
+    proc._apply_head = MagicMock(side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8))
+
+    with (
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group",
+            return_value=MagicMock(all_gather=_gather_comm),
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.lmhead_all_to_all",
+            side_effect=_all_to_all,
+        ),
+    ):
+        logits = proc._get_logits_lmheadtp(hidden_states, head, None)
+
+    assert proc._apply_head.call_args.args[1].shape == (4, 5)
+    assert logits.shape[0] == 3
+
+
 def test_lmhead_tp_capacity_raises_when_rows_exceed():
     proc = _make_processor(vocab=8)
     head = _make_head(capacity=8)
@@ -142,8 +189,8 @@ def test_lmhead_tp_capacity_raises_when_rows_exceed():
 
 
 def test_lmhead_tp_capacity_attribute_default_none():
-    """The new constructor kwarg must default to None so existing callers
-    (target / MTP / DFlash) construct heads without any behavior change."""
+    """The constructor kwarg must default to None so heads built without it
+    (the target LM head) construct without any behavior change."""
     from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead
 
     head = object.__new__(AscendParallelLMHead)
