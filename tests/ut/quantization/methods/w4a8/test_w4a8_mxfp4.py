@@ -207,24 +207,30 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         return layer
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_process_marks_transformed(self, mock_npu):
+    def test_process_records_original_shapes_and_marks_transformed(self, mock_npu):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = self._make_linear_layer()
         self.scheme.process_weights_after_loading(layer)
+        self.assertTrue(hasattr(layer, "_mxfp4_original_shapes"))
+        self.assertEqual(layer._mxfp4_original_shapes["weight"], (128, 128))
+        self.assertEqual(layer._mxfp4_original_shapes["weight_scale"], (128, 8))
         self.assertTrue(layer._mxfp4_transformed)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_is_idempotent(self, mock_npu):
         # The transform is not idempotent (a second transpose/reshape corrupts
-        # it), so a repeated call must be a no-op.
+        # it), so a repeated call must be a no-op. veRL calls process again
+        # after load_weights(), which is exactly this path.
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = self._make_linear_layer()
         self.scheme.process_weights_after_loading(layer)
         weight_shape = layer.weight.shape
         scale_shape = layer.weight_scale.shape
+        recorded = dict(layer._mxfp4_original_shapes)
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.weight.shape, weight_shape)
         self.assertEqual(layer.weight_scale.shape, scale_shape)
+        self.assertEqual(layer._mxfp4_original_shapes, recorded)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_apply_with_prequantized_input(self, mock_npu):
@@ -255,6 +261,43 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         with patch.object(self.scheme, "group_size", 32):
             output = self.scheme.apply(layer, x)
         self.assertEqual(output.shape[0], 32)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_restore_after_process_returns_original_shape(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_linear_layer()
+        original_weight_shape = layer.weight.shape
+        original_scale_shape = layer.weight_scale.shape
+        self.scheme.process_weights_after_loading(layer)
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.weight.shape, original_weight_shape)
+        self.assertEqual(layer.weight_scale.shape, original_scale_shape)
+        self.assertEqual(layer.weight.dtype, torch.uint8)
+        self.assertFalse(layer._mxfp4_transformed)
+
+    def test_restore_without_process_is_noop(self):
+        layer = self._make_linear_layer()
+        original_weight_shape = layer.weight.shape
+        original_scale_shape = layer.weight_scale.shape
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.weight.shape, original_weight_shape)
+        self.assertEqual(layer.weight_scale.shape, original_scale_shape)
+        self.assertFalse(hasattr(layer, "_mxfp4_transformed"))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_refit_cycle_restore_then_process_round_trips(self, mock_npu):
+        # restore -> load_weights -> process must land back in the inference
+        # layout, and the recorded shapes must survive the cycle.
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_linear_layer()
+        self.scheme.process_weights_after_loading(layer)
+        inference_weight_shape = layer.weight.shape
+        inference_scale_shape = layer.weight_scale.shape
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.weight.shape, inference_weight_shape)
+        self.assertEqual(layer.weight_scale.shape, inference_scale_shape)
+        self.assertTrue(layer._mxfp4_transformed)
 
 
 class TestAscendW4A8MXFP4MoEMethod(TestBase):
