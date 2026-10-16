@@ -657,7 +657,36 @@ def build_attn_metadata(
                 )
 
             for variant_names, variant_common in metadata_variants:
-                if for_cudagraph_capture:
+                metadata_plan = getattr(attn_metadata_builder, "_pcp_metadata_plan", None)
+                use_plan = (
+                    metadata_plan is not None
+                    and model_specific_attn_metadata is None
+                    and metadata_plan.enable()
+                    and (
+                        (metadata_plan.is_draft and pcp_context is None)
+                        or (not metadata_plan.is_draft and pcp_context is not None and causal is True)
+                    )
+                )
+                if use_plan:
+                    if metadata_plan.is_draft:
+                        metadata = metadata_plan.build_draft(
+                            attn_metadata_builder,
+                            variant_common,
+                            num_actual_reqs,
+                            common_ratio_to_sas_metadata,
+                            full_graph_mode or for_cudagraph_capture,
+                        )
+                    else:
+                        metadata = metadata_plan.build(
+                            attn_metadata_builder,
+                            variant_common,
+                            pcp_context,
+                            i,
+                            num_actual_reqs,
+                            common_ratio_to_sas_metadata,
+                            full_graph_mode or for_cudagraph_capture,
+                        )
+                elif for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
                         variant_common,
                         **attn_metadata_extra_kwargs,
