@@ -601,21 +601,22 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread._handle_finished_request.assert_called_once_with("request-p")
 
 
-def test_recving_run_requeues_failed_completion() -> None:
+def test_recving_run_discards_failed_completion_and_cleans_queue() -> None:
     ready_event = threading.Event()
     thread = MooncakeSchedulerRecvingThread(ready_event)
     request = ("10.0.0.1", 6000, "request-p")
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [request, _StopLoop()]
-    thread.request_queue = request_queue
+    thread.request_queue.put(request)
+    thread.request_queue.put(None)
+    # Pending work after the stop sentinel must also be cleared on exit.
+    thread.request_queue.put(("10.0.0.2", 6000, "pending"))
     thread._send_done_recving = MagicMock(side_effect=RuntimeError("network error"))  # type: ignore[method-assign]
 
-    with pytest.raises(_StopLoop):
-        thread.run()
+    thread.run()
 
     assert ready_event.is_set()
-    request_queue.put.assert_called_once_with(request)
-    request_queue.task_done.assert_called_once_with()
+    thread._send_done_recving.assert_called_once_with(*request)
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
 
 
 def test_set_worker_metadata_starts_only_one_producer_sending_thread(
