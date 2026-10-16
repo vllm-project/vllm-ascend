@@ -156,7 +156,7 @@ void check_msa_index_score_params(
     const c10::optional<at::Tensor>& atten_mask,
     const c10::optional<at::Tensor>& actual_seq_qlen,
     const c10::optional<at::Tensor>& actual_seq_klen,
-    const std::string& layout_key, int64_t sparse_mode,
+    c10::string_view layout_key, int64_t sparse_mode,
     int64_t init_blocks, int64_t local_blocks)
 {
     TORCH_CHECK(query.dim() == QUERY_DIM_NUM,
@@ -227,10 +227,9 @@ at::Tensor npu_msa_index_score(
     c10::string_view layout_key, int64_t sparse_mode,
     int64_t init_blocks, int64_t local_blocks)
 {
-    std::string layout_key_str(layout_key);
     msa_index_score_detail::check_msa_index_score_params(
         query, key, block_table, start_loc, scale, atten_mask,
-        actual_seq_qlen, actual_seq_klen, layout_key_str, sparse_mode,
+        actual_seq_qlen, actual_seq_klen, layout_key, sparse_mode,
         init_blocks, local_blocks);
 
     at::Tensor normalized_key = key.dim() ==
