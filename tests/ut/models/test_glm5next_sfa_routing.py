@@ -37,7 +37,7 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
     assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
 
 
-@pytest.mark.parametrize("mode", ["310p", "pcp", "dcp"])
+@pytest.mark.parametrize("mode", ["310p", "dcp", "pcp_dcp"])
 def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     monkeypatch.setattr(
         backend_module,
@@ -51,12 +51,12 @@ def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=2 if mode == "pcp" else 1,
-                decode_context_parallel_size=2 if mode == "dcp" else 1,
+                prefill_context_parallel_size=2 if mode == "pcp_dcp" else 1,
+                decode_context_parallel_size=2 if mode in {"dcp", "pcp_dcp"} else 1,
             )
         )
     )
-    with pytest.raises(NotImplementedError, match="requires Ascend|PCP or DCP"):
+    with pytest.raises(NotImplementedError, match="requires Ascend|does not support DCP"):
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 
