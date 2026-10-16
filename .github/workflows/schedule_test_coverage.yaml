@@ -18,6 +18,16 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -44,7 +54,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -58,10 +68,10 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
-      - name: Checkout coverage helper from main
+      - name: Checkout coverage helper from this workflow
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.sha }}
           path: workflow-src
           fetch-depth: 1
           sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
@@ -224,6 +234,7 @@ jobs:
       base_sha: ${{ matrix.target.base_sha }}
       test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
+      coverage-upload: artifact
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
       timeout-minutes: 180
     secrets:
