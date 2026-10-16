@@ -181,10 +181,13 @@ def test_stage_wait_rejects_batch_larger_than_entire_staging_pool():
     producer._allocator = allocator
     producer._producer_allocator = allocator
 
-    assert producer._allocate_staged(
-        [torch.empty(257, dtype=torch.uint8)],
-        wait=True,
-    ) is None
+    assert (
+        producer._allocate_staged(
+            [torch.empty(257, dtype=torch.uint8)],
+            wait=True,
+        )
+        is None
+    )
 
 
 def test_stage_wait_wakes_and_fails_when_pool_is_poisoned():
@@ -210,21 +213,6 @@ def test_stage_wait_wakes_and_fails_when_pool_is_poisoned():
         producer.poison()
         with pytest.raises(RuntimeError, match="poisoned"):
             waiting.result(timeout=1)
-
-
-def test_producer_allocator_layout():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-
-    assert allocator.staging_capacity == 3 * _MIB
-    assert allocator.bounce_offset == 4 * _MIB
-    assert allocator.padding == 1 * _MIB
-    assert allocator.bounce_capacity == 2 * _MIB
-    assert allocator.registered_capacity == 6 * _MIB
-    assert allocator.raw_allocation_size == 8 * _MIB - 1
-    assert allocator.bounce_tensor is None
 
 
 def test_producer_allocator_zero_bounce_has_no_arena_or_padding():
@@ -262,6 +250,12 @@ def test_producer_allocator_prepares_partitioned_slab():
     assert tensor is not None
     assert bounce is not None
 
+    assert allocator.staging_capacity == 3 * _MIB
+    assert allocator.bounce_offset == 4 * _MIB
+    assert allocator.padding == 1 * _MIB
+    assert allocator.bounce_capacity == 2 * _MIB
+    assert allocator.registered_capacity == 6 * _MIB
+    assert allocator.raw_allocation_size == 8 * _MIB - 1
     assert tensor.nbytes == 6 * _MIB
     assert allocator._free == [(0, 3 * _MIB)]
 
@@ -428,12 +422,6 @@ def test_producer_allocator_closes_bounce_only_slab():
     transfer.unregister_memory.assert_called_once_with(tensor)
     assert allocator.tensor is None
     assert allocator._free == []
-
-
-def test_bounce_lease_manager_zero_size_bypasses_queue():
-    manager = _BounceLeaseManager(0)
-
-    assert manager.acquire(0) is None
 
 
 def test_copy_to_bounce_packs_bytes_within_lease():

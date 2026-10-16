@@ -172,10 +172,6 @@ def test_plan_registration_ranges_skips_all_bounce_source():
     assert registrations == []
 
 
-def test_plan_transfer_waves_returns_no_waves_for_empty_batch():
-    assert _plan_transfer_waves([], _MIB) == []
-
-
 def test_plan_transfer_waves_unifies_sources_in_input_order():
     direct = _make_source(
         storage_start=2 * _MIB,

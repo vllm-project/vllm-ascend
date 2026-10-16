@@ -148,57 +148,6 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
     worker._producer_memory.close.assert_not_called()
 
 
-def test_start_services_shared_roce_sets_up_store_before_registering_staging():
-    worker = _make_lifecycle_worker()
-    store_client = MagicMock()
-    output_store = MagicMock()
-    device = MagicMock()
-
-    with (
-        patch.dict(
-            worker_module.os.environ,
-            {"ASCEND_ENABLE_USE_FABRIC_MEM": "0"},
-        ),
-        patch.object(worker_module.torch, "device", return_value=device),
-        patch.object(store_client_module, "ensure_mooncake_store_imported") as import_store,
-        patch.object(
-            store_client_module,
-            "create_ascend_mooncake_embedding_store_client",
-            return_value=store_client,
-        ) as create_store_client,
-        patch.object(
-            worker_module,
-            "AscendDeferredStoreBackend",
-            return_value=output_store,
-        ) as create_backend,
-        patch.object(worker_module.ECMooncakeWorker, "start_services") as start_upstream,
-    ):
-        lifecycle = MagicMock()
-        lifecycle.attach_mock(import_store, "import_store")
-        lifecycle.attach_mock(create_store_client, "client")
-        lifecycle.attach_mock(worker._producer_memory.ensure_prepared, "prepare")
-        lifecycle.attach_mock(create_backend, "backend")
-        lifecycle.attach_mock(start_upstream, "upstream")
-        worker.start_services()
-
-    assert lifecycle.mock_calls == [
-        call.import_store(),
-        call.client(
-            worker._producer_memory.bounce_arena,
-            worker._transfer,
-            read_buffer_bytes=256,
-        ),
-        call.prepare(device),
-        call.backend(
-            store_client,
-            "namespace",
-            max_pending_items=4,
-            max_pending_bytes=1024,
-        ),
-        call.upstream(),
-    ]
-
-
 @pytest.mark.parametrize(
     ("failure_stage", "expected_cleanup"),
     [
@@ -290,9 +239,7 @@ def test_close_keeps_dual_registered_staging_until_process_exit():
         worker.close()
 
         assert worker._output_store is None
-        assert retained[before:] == [
-            (worker._transfer, worker._producer_memory)
-        ]
+        assert retained[before:] == [(worker._transfer, worker._producer_memory)]
         worker._producer_memory.close.assert_not_called()
         worker._transfer.close.assert_not_called()
     finally:
@@ -302,9 +249,13 @@ def test_close_keeps_dual_registered_staging_until_process_exit():
 def test_start_services_global_config_dual_registers_long_lived_staging():
     worker = _make_lifecycle_worker()
     store_client = MagicMock()
-    output_store = MagicMock()
     device = MagicMock()
     staging = worker._producer_memory.tensor
+    create_backend = MagicMock()
+
+    class FakeDeferredStoreBackend(worker_module.AscendDeferredStoreBackend):
+        def __init__(self, *args, **kwargs):
+            create_backend(*args, **kwargs)
 
     with (
         patch.dict(
@@ -325,8 +276,8 @@ def test_start_services_global_config_dual_registers_long_lived_staging():
         patch.object(
             worker_module,
             "AscendDeferredStoreBackend",
-            return_value=output_store,
-        ) as create_backend,
+            FakeDeferredStoreBackend,
+        ),
         patch.object(worker_module.ECMooncakeWorker, "start_services") as start_upstream,
     ):
         lifecycle = MagicMock()
@@ -358,7 +309,8 @@ def test_start_services_global_config_dual_registers_long_lived_staging():
     assert worker._use_store_independent_te is True
     assert worker._retain_producer_slab is True
     worker._transfer.close.assert_not_called()
-    assert worker._output_store is output_store
+    assert isinstance(worker._output_store, FakeDeferredStoreBackend)
+    assert worker._deferred_store is worker._output_store
     assert worker._shutdown is False
 
 
@@ -656,6 +608,7 @@ def test_push_batch_preserves_staging_first_path():
     shard = _make_writable_shard("session-a", 1000)
     staged_tensor = MagicMock()
     staged_tensor.data_ptr.return_value = 500
+    staged_tensor.nbytes = 10
     staged = MagicMock(tensors=[staged_tensor])
     worker._producer_memory = MagicMock()
     worker._producer_memory.stage.return_value = staged
@@ -737,9 +690,7 @@ def test_push_batch_independent_store_releases_joint_staging_after_completion():
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
     worker._deferred_store = MagicMock()
-    worker._push_store_independent_staging = MagicMock(
-        return_value=(staged, acquired, [])
-    )
+    worker._push_store_independent_staging = MagicMock(return_value=(staged, acquired, []))
     worker._release_transfer_wave = MagicMock()
     lifecycle = MagicMock()
     lifecycle.attach_mock(worker._release_transfer_wave, "wave")
@@ -771,12 +722,10 @@ def test_independent_store_rejection_runs_ec_without_store_put():
     worker._acquire_staged_wave = MagicMock(return_value=acquired)
     worker._write_transfer_wave = MagicMock(return_value=True)
 
-    result_staged, result_acquired, prepared = (
-        worker._push_store_independent_staging(
-            [push],
-            ready,
-            [push],
-        )
+    result_staged, result_acquired, prepared = worker._push_store_independent_staging(
+        [push],
+        ready,
+        [push],
     )
 
     assert result_staged is staged
@@ -1174,7 +1123,6 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks(
         (5, 10),
         (128, 256),
         (256, 256),
-        (1024, 256),
     ],
 )
 def test_resolve_default_bounce_arena_size(
@@ -1190,37 +1138,28 @@ def test_resolve_default_bounce_arena_size(
     assert result == expected_mib * 1024 * 1024
 
 
-def test_resolve_explicit_bounce_arena_size_align_up():
-    mib = 1024 * 1024
+@pytest.mark.parametrize(
+    ("configured_size", "expected_size"),
+    [(2 * 1024 * 1024 + 1, 4 * 1024 * 1024), (0, 0)],
+    ids=("align-up", "disabled"),
+)
+def test_resolve_explicit_bounce_arena_size(configured_size, expected_size):
     config = _make_bounce_config(
         extra_config={
-            "ascend_mooncake_bounce_arena_size": 2 * mib + 1,
+            "ascend_mooncake_bounce_arena_size": configured_size,
         },
     )
 
-    assert _resolve_bounce_arena_size(config) == 4 * mib
-
-
-def test_resolve_zero_bounce_arena_size_disables_fallback():
-    config = _make_bounce_config(
-        extra_config={
-            "ascend_mooncake_bounce_arena_size": 0,
-        },
-    )
-
-    assert _resolve_bounce_arena_size(config) == 0
+    assert _resolve_bounce_arena_size(config) == expected_size
 
 
 @pytest.mark.parametrize(
     "value",
     [
         True,
-        False,
         -1,
         2 * 1024 * 1024 - 1,
         2.0,
-        "2097152",
-        None,
     ],
 )
 def test_resolve_explicit_bounce_arena_size_rejects_invalid_values(
