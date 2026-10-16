@@ -258,14 +258,14 @@ def test_fp8_pool_writes_preserve_shared_key_scale_pages_under_replay():
     metadata = SimpleNamespace(pooled_slot_mapping=torch.tensor([0, 33, -1, 64], device="npu"))
     inputs = SimpleNamespace(
         write_indices=torch.empty((0, 4), dtype=torch.int64, device="npu"),
-        state_indices=None,
+        state_indices=torch.empty((0, 4), dtype=torch.int64, device="npu"),
         page_rows=4,
     )
     tail = torch.empty((1, 4, 2 * dim), device="npu")
 
     def run():
         adapters.write_keypool_caches(
-            tail, cache, None, None, pooled, metadata, SimpleNamespace(cann_inputs=inputs), None, scale_cache=scale
+            tail, cache, None, None, pooled, metadata, SimpleNamespace(cann_inputs=inputs), tail, scale_cache=scale
         )
 
     for _ in range(3):

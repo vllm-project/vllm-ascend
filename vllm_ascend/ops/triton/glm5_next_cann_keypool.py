@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from vllm.triton_utils import tl, triton
 
-FP8_E4M3_MAX: tl.constexpr = 448.0
+FP8_E4M3_MAX = tl.constexpr(448.0)
 
 
 @triton.jit(do_not_specialize=["tokens", "requests"])
