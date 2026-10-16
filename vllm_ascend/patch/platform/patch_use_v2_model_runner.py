@@ -16,17 +16,22 @@ _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
 
 
 def _patched_use_v2_model_runner(self) -> bool:
-    """Return VLLM_USE_V2_MODEL_RUNNER env directly.
+    """Honor the runner override and select V2 for LiLiCorr drafts.
 
     The upstream use_v2_model_runner gate-keeps the v2 runner with
     per-model architecture whitelists, Triton availability checks, and
     feature-support inspections. On Ascend the v2 runner is controlled
-    purely by the VLLM_USE_V2_MODEL_RUNNER environment variable;
-    model-compatibility decisions are deferred to the NPU runner itself.
+    by VLLM_USE_V2_MODEL_RUNNER, except that LiLiCorr requires V2 and
+    selects it automatically when the environment variable is unset.
     """
     use_v2 = envs.VLLM_USE_V2_MODEL_RUNNER
     if use_v2 is not None:
         return use_v2
+    spec = self.speculative_config
+    if spec is not None and spec.use_dflash():
+        architectures = spec.draft_model_config.architectures or []
+        if "LiLiCorrDraftModel" in architectures:
+            return True
     return False
 
 
@@ -47,6 +52,12 @@ _original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_ru
 
 def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
     unsupported = _original_get_v1_model_runner_unsupported_features(self)
+    spec = self.speculative_config
+    if spec is not None and spec.use_dflash():
+        if "LiLiCorrDraftModel" in (spec.draft_model_config.architectures or []):
+            # An explicit V1 override must fail before the ordinary DFlash
+            # proposer can silently bypass the trained correlator.
+            return [*unsupported, "LiLiCorr drafts"]
     return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
 
 
