@@ -329,6 +329,40 @@ def test_legacy_trainer_init_supplies_the_required_rank():
     assert init.call_args.kwargs["rank"] == 0
 
 
+def test_stateful_trainer_init_builds_the_worker_payload():
+    """Regression for the full-layer Qwen3-30B-A3B e2e.
+
+    `HCCLTrainerInitInfo` inherits upstream's `NCCLTrainerInitInfo`, which has no
+    `rank_offset` field: the engine has to fix the worker rank offset itself (the
+    single sender is rank 0, workers start after it) instead of reading it off
+    the init info. Reading it raised `AttributeError` on every real rendezvous.
+    """
+    init_info = HCCLTrainerInitInfo(rank=0, master_address="127.0.0.1", master_port=12345, world_size=2, packed=True)
+    client = MagicMock()
+
+    with (
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(
+            "vllm_ascend.distributed.weight_transfer.hccl_common.trainer_init",
+            return_value=MagicMock(),
+        ) as open_endpoint,
+    ):
+        engine = HCCLTrainerWeightTransferEngine.trainer_init(
+            init_info,
+            client=client,
+            source=MagicMock(),
+        )
+
+    payload = client.init_weight_transfer_engine.call_args.args[0]
+    assert payload["master_address"] == "127.0.0.1"
+    assert payload["master_port"] == 12345
+    assert payload["world_size"] == 2
+    assert payload["rank_offset"] == 1
+    assert payload["packed"] is True
+    assert open_endpoint.call_args.kwargs["rank"] == 0
+    assert engine.model_update_group is open_endpoint.return_value
+
+
 def _make_worker_with_wire_params(*, explicit: bool):
     engine = object.__new__(HCCLWeightTransferEngine)
     engine.packed = bool(explicit)

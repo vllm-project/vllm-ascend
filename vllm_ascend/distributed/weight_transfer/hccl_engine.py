@@ -478,10 +478,12 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         if device_index is None:
             raise ValueError("HCCL trainer requires an explicit current NPU device")
         device = torch.device("npu", device_index)
+        # Upstream's `NCCLTrainerInitInfo` has no `rank_offset`: the single
+        # trainer sender is always rank 0, so the workers start at rank 1.
         worker_init_info = HCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
-            rank_offset=init_info.rank_offset,
+            rank_offset=1,
             world_size=init_info.world_size,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
