@@ -683,6 +683,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         num_nodes: int,
     ) -> bool:
         """Check source feasibility for ``(destination rank, expert)`` demands."""
+        if rank_transfer_limit == -1 and cross_node_transfer_limit == -1:
+            return all(source_candidates[dst_rank][expert] for dst_rank, expert in demands)
         if rank_transfer_limit == -1:
             rank_transfer_limit = len(demands)
         if cross_node_transfer_limit == -1:
@@ -753,6 +755,24 @@ class StairEplbPolicy(AbstractEplbPolicy):
             (int(dst_rank), int(slot), int(target_placement[dst_rank, slot]))
             for dst_rank, slot in np.argwhere(incoming_mask)
         ]
+        if rank_transfer_limit == -1 and cross_node_transfer_limit == -1:
+            source_usage = np.zeros(len(compact_node_ids), dtype=np.int64)
+            for dst_rank, slot, expert in demands:
+                dst_node = compact_node_ids[dst_rank]
+                candidates = expert_sources[expert]
+                if not candidates:
+                    return None
+                src_rank = min(
+                    candidates,
+                    key=lambda src_rank: (
+                        compact_node_ids[src_rank] != dst_node,
+                        source_usage[src_rank],
+                        src_rank,
+                    ),
+                )
+                source_rank_ids[dst_rank, slot] = src_rank
+                source_usage[src_rank] += 1
+            return source_rank_ids
         if rank_transfer_limit == -1:
             rank_transfer_limit = len(demands)
         if cross_node_transfer_limit == -1:
@@ -1128,11 +1148,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
         scored_candidates = []
         migration_feasibility_cache: dict[tuple[tuple[int, int], ...], bool] = {(): True}
 
+        max_replica_changes = current_placement.size - len(risks)
+        if config.rank_transfer_limit != -1:
+            max_replica_changes = min(max_replica_changes, num_ranks * config.rank_transfer_limit)
         replica_candidates = cls.incremental_replica_candidates(
             risks,
             current_placement,
             num_ranks,
-            current_placement.size if config.rank_transfer_limit == -1 else num_ranks * config.rank_transfer_limit,
+            max_replica_changes,
             num_stages=config.replica_search_num_stages,
             budget_radius=config.replica_search_radius,
             beam_size=config.replica_search_beam_size,

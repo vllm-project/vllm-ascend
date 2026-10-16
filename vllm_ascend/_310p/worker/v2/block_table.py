@@ -30,6 +30,7 @@ class Ascend310PBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
     ) -> None:
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -52,6 +53,13 @@ class Ascend310PBlockTables(BlockTables):
         if len(slot_mapping_enabled) != self.num_kv_cache_groups:
             raise ValueError("slot_mapping_enabled must match the number of KV cache groups.")
         self._slot_mapping_enabled = slot_mapping_enabled
+        # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
+        # expose it for upstream readers when the caller supplies it. 310P
+        # never passes it (it builds the tables directly), so this is a guard.
+        if dcp_sharded is not None:
+            if len(dcp_sharded) != self.num_kv_cache_groups:
+                raise ValueError("dcp_sharded must match the number of KV cache groups.")
+            self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
         self.blocks_per_kv_block = [
             block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]
@@ -174,6 +182,10 @@ class Ascend310PBlockTables(BlockTables):
             if not self._slot_mapping_enabled[group_id]:
                 continue
             for batch_idx, req_idx in enumerate(idx_mapping_np):
+                # vLLM #56734: dummy draft decode runs use idx_mapping == -1.
+                # Leave the pre-filled PAD for rows that own no blocks.
+                if req_idx < 0:
+                    continue
                 start = int(query_start_loc_np[batch_idx])
                 end = int(query_start_loc_np[batch_idx + 1])
                 token_positions = positions_np[start:end]

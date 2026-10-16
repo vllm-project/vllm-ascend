@@ -79,6 +79,11 @@ on:
         required: false
         default: '{}'
         type: string
+      download_path:
+        description: 'File or directory in the test container to upload as a GitHub artifact'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: read
   pull-requests: read
@@ -228,6 +233,7 @@ jobs:
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -296,9 +302,11 @@ jobs:
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -309,7 +317,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ''
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -377,6 +385,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
@@ -388,6 +397,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       upload: false
 
@@ -407,6 +417,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
@@ -417,6 +428,7 @@ jobs:
           contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       upload: false
 

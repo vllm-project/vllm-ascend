@@ -61,20 +61,9 @@ This operator cannot reconstruct an uninitialized historical tail itself.
 
 C=R guarantees retention for monotonic non-MTP prefill/decode: each incomplete
 pool needs at most R-1 earlier rows, and all complete pools in a long query read
-the current input before seeding. MTP target verification writes its committed
+the current input before seeding. During MTP, the target model writes its committed
 first row plus up to `num_speculative_tokens` candidate rows before acceptance
 is known. `C=R+num_speculative_tokens` prevents those candidates from wrapping
 onto the committed open pool. Rejection then needs only the normal logical
 length rollback: replacement tokens overwrite the rejected positions while the
 historical rows required to recompute a boundary pool remain intact.
-
-## Verification
-
-Independent tests should compare pooled outputs with an uncompressed FP32
-reference for every chunk-boundary residue modulo R, long multi-request
-prefills, decode and C>R. Use nonadjacent block IDs and padded block/plane/token
-strides with guard values to detect accidental compact-layout addressing.
-Verify final tail slot contents, incomplete-pool writes, empty batches,
-negative sentinels, positive stale graph padding and repeated graph replay.
-Kernel and model results must be recorded on the target NPU; CPU reference or
-syntax checks alone do not establish device correctness or performance.

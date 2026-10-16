@@ -8,9 +8,18 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.triton_utils import tl, triton
 
+from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
+    mixed_quant_sparse_flash_mla_fp8,
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+    mixed_quant_sparse_flash_mla_turboquant,
+)
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
 
@@ -52,9 +61,77 @@ DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 
+@triton.jit(do_not_specialize=["tokens", "width"])
+def _write_dsa_cache(
+    cache,
+    updates,
+    slots,
+    tokens,
+    width,
+    pages: tl.constexpr,
+    page_size: tl.constexpr,
+    page_stride: tl.constexpr,
+    row_stride: tl.constexpr,
+    update_stride: tl.constexpr,
+    slot_stride: tl.constexpr,
+    slot_column_stride: tl.constexpr,
+    paired: tl.constexpr,
+    columns: tl.constexpr,
+):
+    columns_idx = tl.arange(0, columns)
+    for token in range(tl.program_id(0), tokens, tl.num_programs(0)):
+        first = tl.load(slots + token * slot_stride).to(tl.int64)
+        if paired:
+            block = first
+            offset = tl.load(slots + token * slot_stride + slot_column_stride).to(tl.int64)
+        else:
+            block = first // page_size
+            offset = first % page_size
+        if (first >= 0) & (block < pages) & (offset >= 0) & (offset < page_size):
+            value = tl.load(updates + token * update_stride + columns_idx, columns_idx < width, other=0)
+            address = block * page_stride + offset * row_stride + columns_idx
+            tl.store(cache + address, value, columns_idx < width)
+
+
+def write_dsa_cache(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor) -> None:
+    """Write valid DSA slots while preserving packed physical-page strides."""
+    if cache.ndim != 4 or cache.shape[2] != 1 or cache.stride(-1) != 1:
+        raise ValueError("Cache must be [pages, page_size, 1, width] with contiguous rows")
+    if updates.ndim not in (2, 3) or (updates.ndim == 3 and updates.shape[1] != 1):
+        raise ValueError("Updates must be [tokens, width] or [tokens, 1, width]")
+    if updates.shape[-1] != cache.shape[-1] or updates.stride(-1) != 1 or updates.dtype != cache.dtype:
+        raise ValueError("Update rows must match the cache width and dtype")
+    if slots.ndim not in (1, 2) or (slots.ndim == 2 and slots.shape[1] != 2):
+        raise ValueError("Slots must be flat or [tokens, 2] block/offset pairs")
+    if slots.shape[0] != updates.shape[0] or slots.dtype not in (torch.int32, torch.int64):
+        raise ValueError("Slots must have one int32/int64 entry per update row")
+    if not (cache.device == updates.device == slots.device):
+        raise ValueError("Cache, updates and slots must be on the same device")
+    tokens = updates.shape[0]
+    if tokens == 0:
+        return
+    _write_dsa_cache[(min(get_vectorcore_num(), tokens),)](
+        cache,
+        updates,
+        slots,
+        tokens,
+        cache.shape[-1],
+        cache.shape[0],
+        cache.shape[1],
+        cache.stride(0),
+        cache.stride(1),
+        updates.stride(0),
+        slots.stride(0),
+        slots.stride(1) if slots.ndim == 2 else 0,
+        slots.ndim == 2,
+        triton.next_power_of_2(cache.shape[-1]),
+        multibuffer=False,
+    )
+
+
 @dataclass(frozen=True)
 class DsaAttnKvPlan:
-    """The attention-KV plan only; indexer KV remains independently FP8."""
+    """The attention-KV plan only; indexer KV remains independently quantized."""
 
     uses_sparse_flash_mla: bool
     uses_kv_compress_epilog: bool
@@ -90,7 +167,7 @@ class DsaAttnKvPlan:
     def get_dsa_compressor_slot_mapping_format(self) -> int:
         return self.compressor_slot_mapping_format
 
-    def format_dsa_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int) -> torch.Tensor:
+    def format_dsa_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int | torch.Tensor) -> torch.Tensor:
         if not self.requires_block_offset_slots:
             return slot_mapping
         valid = slot_mapping >= 0
@@ -117,19 +194,40 @@ class DsaAttnKvPlan:
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
             return
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
+        # cann_ops_transformer.kv_compress_epilog writes the PA_BBND
+        # quantMode=1 (608 B/token) layout directly:
+        #   [rope(64 bf16=128B) | nope(448 fp8) | scale(7 bf16=14B) | pad(18B)]
+        # The op only accepts UINT8 caches, so reinterpret the FP8 cache view
+        # (same 8-bit storage; the in-place update lands in the original
+        # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
+        # bf16 scale, rope kept bf16.
+        torch.ops.cann_ops_transformer.kv_compress_epilog(
+            cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,
             quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
+            quant_mode="fp8_bf16",
+            round_scale=True,
+            x_scale=1.0,
         )
 
 
-def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
-    """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
+def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
+    """Select a cache plan by hardware, dtype and the layer compression ratio."""
+    if is_turboquant(vllm_config) and compress_ratio == 4:
+        return DsaAttnKvPlan(
+            uses_sparse_flash_mla=False,
+            uses_kv_compress_epilog=False,
+            layout_kv="PA_BBND",
+            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
+            requires_block_offset_slots=True,
+            sparse_attn_op=mixed_quant_sparse_flash_mla_turboquant,
+            sparse_attn_metadata_op=mixed_quant_sparse_flash_mla_metadata_turboquant,
+            sparse_attn_base_kwargs={},
+            sparse_attn_metadata_kwargs={},
+            include_metadata_device=False,
+            applies_sparse_attn_runtime_kwargs=True,
+        )
     if not _supports_dsv4_compressed_cache():
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
@@ -166,10 +264,10 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
         layout_kv="PA_ND",
         compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
         requires_block_offset_slots=False,
-        sparse_attn_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv,
-        sparse_attn_metadata_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata,
-        sparse_attn_base_kwargs={"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64},
-        sparse_attn_metadata_kwargs={"kv_quant_mode": 1},
+        sparse_attn_op=mixed_quant_sparse_flash_mla_fp8,
+        sparse_attn_metadata_op=mixed_quant_sparse_flash_mla_metadata_fp8,
+        sparse_attn_base_kwargs={},
+        sparse_attn_metadata_kwargs={},
         include_metadata_device=False,
         applies_sparse_attn_runtime_kwargs=False,
     )

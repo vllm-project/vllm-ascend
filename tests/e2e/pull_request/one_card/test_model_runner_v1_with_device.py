@@ -475,6 +475,8 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    # vLLM #45635 moved enable_return_routed_experts onto AuxOutputConfig.
+    runner.vllm_config.aux_output_config = SimpleNamespace(enable_return_routed_experts=False)
     runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(

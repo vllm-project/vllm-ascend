@@ -654,6 +654,48 @@ def test_same_seed_and_position_are_deterministic():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("rejection_step", [0, 1])
+@torch.inference_mode()
+def test_rejection_sample_residual_is_independent_of_acceptance_draw(has_draft_logits, rejection_step):
+    """Reusing the acceptance draw would select only token 2 after rejection."""
+    num_spec_steps = rejection_step + 1
+    num_logits_per_req = num_spec_steps + 1
+    lengths = [num_logits_per_req] * STAT_TRIALS
+    target_probs = torch.tensor([0.5, 0.25, 0.25], dtype=torch.float32, device=DEVICE)
+    draft_probs = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
+    target_rows = draft_probs.log().repeat(num_logits_per_req, 1)
+    target_rows[rejection_step] = target_probs.log()
+    target_logits = target_rows.repeat(STAT_TRIALS, 1)
+    draft_logits = draft_probs.log().repeat(STAT_TRIALS, num_spec_steps, 1) if has_draft_logits else None
+    total_logits = sum(lengths)
+
+    sampled, num_sampled = rejection_sample(
+        target_logits,
+        draft_logits,
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        _cu_num_logits(lengths),
+        _position_tensor(total_logits),
+        torch.arange(STAT_TRIALS, dtype=torch.int32, device=DEVICE),
+        _expanded_mapping(lengths),
+        torch.arange(num_logits_per_req, dtype=torch.int32, device=DEVICE).repeat(STAT_TRIALS),
+        torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 4001,
+        num_spec_steps,
+    )
+    torch.npu.synchronize()
+
+    rejected = num_sampled == rejection_step + 1
+    assert bool(((num_sampled == num_logits_per_req) | rejected).all())
+    torch.testing.assert_close(rejected.float().mean(), torch.tensor(0.5, device=DEVICE), rtol=0.0, atol=STAT_ATOL)
+    if rejection_step:
+        assert bool((sampled[:, :rejection_step] == 0).all())
+    _assert_distribution(sampled[:, rejection_step], target_probs.cpu())
+    # The recovered token has equal residual mass on tokens 1 and 2,
+    # even though rejection conditions the acceptance draw to be above 0.5.
+    _assert_distribution(sampled[rejected, rejection_step] - 1, torch.tensor([0.5, 0.5]))
+
+
 @torch.inference_mode()
 def test_rejection_sample_greedy_end_to_end():
     """The upper rejection path and categorical resample preserve greedy semantics."""

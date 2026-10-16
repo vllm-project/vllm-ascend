@@ -456,6 +456,21 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 
 Adaptive verification takes effect only with model runner V2.
 
+> **Performance note (Ascend):** The benefits of adaptive verification depend on
+> the workload.
+>
+> - **In low-latency scenarios**, enabling adaptive verification may degrade performance.
+>
+> - **In high-throughput scenarios (host)**, performance may degrade when the proxy or API server is the bottleneck.
+>
+> - **In high-throughput scenarios (device)**, workloads with very high draft token acceptance rates may see no
+>   additional benefit.
+>
+> **Performance troubleshooting (Ascend):**
+>
+> - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
+>   In such cases, start by investigating the cause at the actual serving concurrency.
+
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
 
@@ -538,7 +553,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 - Offline inference
 
-  ```python
+    ```python
     from vllm import LLM, SamplingParams
 
     prompts = [

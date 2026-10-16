@@ -122,6 +122,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 kwargs["max_query_len"] = max_query_len
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers_arg, **kwargs)
             if num_reqs > 0 and (num_tokens // num_reqs) > 1:
+                # TODO: Migrate 310P draft-prefill capture before dropping SpecDecoding.
                 batch.attn_state = AscendAttentionState.SpecDecoding
             return batch
 
@@ -190,6 +191,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                     num_tokens_padded=num_tokens,
                     seq_lens_cpu_upper_bound=seq_ub,
                     step=1,
+                    cg_mode=desc.cg_mode,
                 )
                 # Move capture-stable attn tensors to NPU before graph begin
                 # (pageable H2D inside capture is banned).

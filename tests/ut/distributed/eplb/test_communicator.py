@@ -10,7 +10,7 @@ from vllm.distributed.eplb.eplb_communicator import (
     TorchDistGlooStagedEplbCommunicator,
 )
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendGlooEplbCommunicator
 
 
 @pytest.fixture
@@ -36,9 +36,9 @@ def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
         MagicMock(side_effect=staging_tensors),
     )
     p2p_op = MagicMock(side_effect=lambda *args, **kwargs: (args, kwargs))
-    monkeypatch.setattr("vllm_ascend.distributed.eplb.communicator.P2POp", p2p_op)
+    monkeypatch.setattr("vllm_ascend.distributed.eplb.eplb_communicator.P2POp", p2p_op)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        "vllm_ascend.distributed.eplb.eplb_communicator.batch_isend_irecv",
         lambda _ops: [],
     )
     current_stream = MagicMock()
@@ -73,11 +73,11 @@ def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, m
     communicator._ops.append(("send", tensor, 0))
     monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: tensor)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.P2POp",
+        "vllm_ascend.distributed.eplb.eplb_communicator.P2POp",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        "vllm_ascend.distributed.eplb.eplb_communicator.batch_isend_irecv",
         lambda _ops: [],
     )
     current_stream = MagicMock()

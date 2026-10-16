@@ -211,6 +211,13 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
+    from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3Model
+
+    # TODO: Remove this patch after MiniMax-M2.7 is sunset.
+    # MiniMax-M3 already propagates auxiliary hidden states across PP stages.
+    if isinstance(inner_model, MiniMaxM3Model):
+        return False
+
     if isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
     elif isinstance(inner_model, EagleModelMixin):
