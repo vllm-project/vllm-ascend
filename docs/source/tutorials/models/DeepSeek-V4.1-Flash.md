@@ -1206,7 +1206,6 @@ vllm serve "$MODEL_PATH" \
                     "kv_connector":"MooncakeHybridConnector",
                     "kv_role":"kv_producer",
                     "kv_port":"30000",
-                    "engine_id":"0",
                     "kv_connector_extra_config":{
                         "prefill":{"dp_size":4,"tp_size":4},
                         "decode":{"dp_size":8,"tp_size":2}
@@ -1299,7 +1298,6 @@ vllm serve "$MODEL_PATH" \
                     "kv_connector":"MooncakeHybridConnector",
                     "kv_role":"kv_consumer",
                     "kv_port":"30100",
-                    "engine_id":"1",
                     "kv_connector_extra_config":{
                         "prefill":{"dp_size":4,"tp_size":4},
                         "decode":{"dp_size":8,"tp_size":2}
