@@ -1435,13 +1435,16 @@
 #       Make logits contiguous only when the vocabulary dimension is strided,
 #       cast the keep mask to int32 before reducing it, and use a 4096-element
 #       tile to keep the corrected reduction within the NPU UB limit. Support
-#       both the release three-field bitmask API and the verified-main
-#       four-field compact-ID plus bitmask API with the same packing kernel.
-#       For the four-field API, return a zero-width `token_ids` tensor so its
-#       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
-#       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
-#       weights, and reducing the contiguous 8-row axis so the backend emits
-#       vector transpose, multiply, and reduction instructions.
+#       the release four-field compact-ID plus bitmask API and the verified-main
+#       five-field slot API with the same packing kernel. The release entry point
+#       keeps one output row per request; the main entry point assigns each output
+#       row to a request-major slot of width `rows_per_request` and resolves its
+#       source logits row from `cu_num_logits`, so speculative decoding returns one
+#       support per committed token. For both compact-ID APIs, return a zero-width
+#       `token_ids` tensor so `tolists()` uses the exact bitmask fallback. Pack bits
+#       by transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
+#       weights, and reducing the contiguous 8-row axis so the backend emits vector
+#       transpose, multiply, and reduction instructions.
 #    Test:
 #       Regression coverage is in
 #       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.

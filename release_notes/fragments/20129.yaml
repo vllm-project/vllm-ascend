@@ -1,0 +1,8 @@
+pr: 20129
+entries:
+  - category: bugfix
+    text: >-
+      Restored sampling-mask replay on vLLM 0.32 and newer. The Ascend sampling-mask
+      packing kernel now maps each output row to its request-major slot and resolves the
+      source logits row through cu_num_logits, so `--return-sampling-mask` returns masks
+      instead of raising a TypeError.

@@ -21,22 +21,43 @@ def _pack_sampling_mask_kernel_ascend(
     logits_ptr,
     logits_row_stride,
     logits_col_stride,
+    cu_num_logits_ptr,
     num_sampled_tokens_ptr,
     packed_mask_ptr,
     packed_mask_row_stride,
     counts_ptr,
     vocab_size,
+    SLOT_LAYOUT: tl.constexpr,
+    ROWS_PER_REQUEST: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
-    is_active = tl.load(num_sampled_tokens_ptr + req_idx) > 0
+    output_row = tl.program_id(0)
+    if SLOT_LAYOUT:
+        # Main layout: fixed request-major slots, one per committed token.
+        req_idx = output_row // ROWS_PER_REQUEST
+        slot_idx = output_row % ROWS_PER_REQUEST
+    else:
+        # Release layout: one output row per request.
+        req_idx = output_row
+        slot_idx = 0
+
+    is_active = slot_idx < tl.load(num_sampled_tokens_ptr + req_idx)
+
+    if SLOT_LAYOUT:
+        source_row = tl.load(cu_num_logits_ptr + req_idx) + slot_idx
+    else:
+        source_row = req_idx
+    # An inactive slot has no committed logits row. Point it at row 0 so the
+    # load below stays in bounds, and let `is_active` zero its count and mask.
+    source_row = tl.where(is_active, source_row, 0)
+
     count = tl.zeros((), dtype=tl.int32)
 
     for start_idx in range(0, vocab_size, BLOCK_SIZE):
         offsets = start_idx + tl.arange(0, BLOCK_SIZE)
         valid = offsets < vocab_size
         logits = tl.load(
-            logits_ptr + req_idx * logits_row_stride + offsets * logits_col_stride,
+            logits_ptr + source_row * logits_row_stride + offsets * logits_col_stride,
             mask=valid,
             other=-float("inf"),
         )
@@ -51,12 +72,81 @@ def _pack_sampling_mask_kernel_ascend(
         packed = tl.sum(keep * bit_weights, axis=0).to(tl.uint8)
         byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
         tl.store(
-            packed_mask_ptr + req_idx * packed_mask_row_stride + byte_offsets,
+            packed_mask_ptr + output_row * packed_mask_row_stride + byte_offsets,
             packed,
             mask=byte_offsets < tl.cdiv(vocab_size, 8),
         )
 
-    tl.store(counts_ptr + req_idx, count)
+    tl.store(counts_ptr + output_row, count)
+
+
+def _pack_sampling_mask(
+    cls: type[SamplingMaskTensors],
+    logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    *,
+    cu_num_logits: torch.Tensor | None,
+    rows_per_request: int,
+) -> SamplingMaskTensors:
+    """Pack the retained support of every output row into the bitmask.
+
+    ``max_num_kept`` is accepted by both public entry points for upstream
+    signature compatibility but is not forwarded here: the compact ``token_ids``
+    column is always emitted zero-width, so its capacity does not change the
+    result.
+    """
+    slot_layout = cu_num_logits is not None
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
+
+    num_reqs = num_sampled_tokens.shape[0]
+    vocab_size = logits.shape[1]
+    num_output_rows = num_reqs * rows_per_request
+    packed_mask = torch.empty(
+        (num_output_rows, (vocab_size + 7) // 8),
+        dtype=torch.uint8,
+        device=logits.device,
+    )
+    counts = torch.empty(num_output_rows, dtype=torch.int32, device=logits.device)
+    _pack_sampling_mask_kernel_ascend[(num_output_rows,)](
+        logits,
+        logits.stride(0),
+        logits.stride(1),
+        # Unused unless SLOT_LAYOUT is set, where the constexpr folds the load
+        # away; pass a live tensor so every pointer argument stays valid.
+        cu_num_logits if slot_layout else num_sampled_tokens,
+        num_sampled_tokens,
+        packed_mask,
+        packed_mask.stride(0),
+        counts,
+        vocab_size,
+        SLOT_LAYOUT=slot_layout,
+        ROWS_PER_REQUEST=rows_per_request,
+        BLOCK_SIZE=_BLOCK_SIZE,
+    )
+
+    # Every SamplingMaskTensors revision carries the compact `token_ids` field:
+    # four fields on v0.31.0, five from v0.32.0 on. So this always constructs at
+    # least four fields, and `max_num_kept` only affects how many compact ids
+    # upstream would have room for, not the shape of the result.
+    #
+    # The compact column is intentionally left zero-width. Upstream `tolists()`
+    # then falls back to the exact packed mask for every non-empty row, which
+    # avoids the cumsum-based dynamic scatter that hangs on TA 3.2.2.
+    logger.warning_once(
+        "The SamplingMaskTensors compact token-ID path is temporarily "
+        "unsupported on Ascend; falling back to packed-mask decoding. Sampling "
+        "results remain unchanged, but CPU decoding may be slower.",
+        scope="process",
+    )
+    token_ids = torch.empty(
+        (num_output_rows, 0),
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    if slot_layout:
+        return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
+    return cls(token_ids, packed_mask, counts, vocab_size)
 
 
 def sampling_mask_from_logits_npu(
@@ -65,47 +155,29 @@ def sampling_mask_from_logits_npu(
     num_sampled_tokens: torch.Tensor,
     max_num_kept: int | None = None,
 ) -> SamplingMaskTensors:
-    """Pack sampling masks after making strided vocab loads NPU-friendly."""
-    if logits.stride(1) != 1:
-        logits = logits.contiguous()
-
-    num_reqs, vocab_size = logits.shape
-    packed_width = (vocab_size + 7) // 8
-    packed_mask = torch.empty(
-        (num_reqs, packed_width),
-        dtype=torch.uint8,
-        device=logits.device,
-    )
-    counts = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
-    _pack_sampling_mask_kernel_ascend[(num_reqs,)](
+    """Release API: one output row per request, no slot indirection."""
+    return _pack_sampling_mask(
+        cls,
         logits,
-        logits.stride(0),
-        logits.stride(1),
         num_sampled_tokens,
-        packed_mask,
-        packed_mask.stride(0),
-        counts,
-        vocab_size,
-        BLOCK_SIZE=_BLOCK_SIZE,
+        cu_num_logits=None,
+        rows_per_request=1,
     )
 
-    if max_num_kept is not None:
-        # The four-field API normally returns compact token IDs in addition to
-        # the packed mask. Keep token_ids zero-width so upstream tolists()
-        # falls back to the exact packed mask for every non-empty row. This
-        # avoids the cumsum-based dynamic scatter that hangs on TA 3.2.2.
-        logger.warning_once(
-            "The four-field SamplingMaskTensors compact token-ID path is "
-            "temporarily unsupported on Ascend; falling back to packed-mask "
-            "decoding. Sampling results remain unchanged, but CPU decoding "
-            "may be slower.",
-            scope="process",
-        )
-        token_ids = torch.empty(
-            (num_reqs, 0),
-            dtype=torch.int32,
-            device=logits.device,
-        )
-        return cls(token_ids, packed_mask, counts, vocab_size)
 
-    return cls(packed_mask, counts, vocab_size)
+def sampling_mask_from_logits_npu_main(
+    cls: type[SamplingMaskTensors],
+    logits: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    max_num_kept: int,
+    rows_per_request: int = 1,
+) -> SamplingMaskTensors:
+    """Main API: fixed request-major slots of width ``rows_per_request``."""
+    return _pack_sampling_mask(
+        cls,
+        logits,
+        num_sampled_tokens,
+        cu_num_logits=cu_num_logits,
+        rows_per_request=rows_per_request,
+    )

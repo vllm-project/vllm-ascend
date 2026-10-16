@@ -23,7 +23,10 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
-from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
+from vllm_ascend.ops.triton.v2.sample.sampling_mask import (
+    sampling_mask_from_logits_npu,
+    sampling_mask_from_logits_npu_main,
+)
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
@@ -71,8 +74,16 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 # For now, use the Ascend-specific implementation.
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
-# Avoid excessive UB allocation for strided vocab-dimension loads.
-output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
+# Avoid excessive UB allocation for strided vocab-dimension loads. Main keys
+# each output row to a request-major slot and resolves the source logits row
+# through `cu_num_logits`, so the wrapper has to match that signature. Detect it
+# from the named tuple's fields rather than a version string: the question is
+# which signature is installed, and a version comparison only answers it for the
+# exact release it names.
+if "rows_per_request" in output.SamplingMaskTensors._fields:
+    output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu_main)
+else:
+    output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
 # TODO: Remove after the new Q4 Triton-Ascend release is available.
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
