@@ -1001,16 +1001,6 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
     build_device_chunk_metadata = False
 
-
-class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
-    @staticmethod
-    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
-        return AscendGDNHostMetadataBuilder
-
-
-class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
-    """Prepare one contiguous convolution index vector per cache group."""
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -1019,7 +1009,20 @@ class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._conv_layer_name = layer_names[0] if layer_names else None
+        self._spec_conv_indices: torch.Tensor | None = None
+        self._non_spec_conv_indices: torch.Tensor | None = None
+
+    def _ensure_conv_index_buffers(self) -> None:
+        if self._spec_conv_indices is not None:
+            return
+        # Resolve the group's representative layer when building metadata.
+        # Only opted-in models allocate the additional convolution buffers.
+        layers = getattr(self.compilation_config, "static_forward_context", {})
+        if not getattr(layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False):
+            return
         # Each group owns its buffers, with fixed addresses for graph replay.
+        device = self.spec_sequence_masks.device
         self._spec_conv_indices = torch.empty(self.spec_sequence_masks.numel(), dtype=torch.int32, device=device)
         self._non_spec_conv_indices = torch.empty_like(self._spec_conv_indices)
 
@@ -1039,7 +1042,8 @@ class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
 
     def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
         super()._reset_spec_decode_graph_inputs(graph_batch_size)
-        self._spec_conv_indices[:graph_batch_size].fill_(PAD_SLOT_ID)
+        if self._spec_conv_indices is not None:
+            self._spec_conv_indices[:graph_batch_size].fill_(PAD_SLOT_ID)
 
     def build(
         self,
@@ -1050,6 +1054,7 @@ class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         fast_build: bool = False,
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
+        self._ensure_conv_index_buffers()
         metadata = super().build(
             common_prefix_len,
             common_attn_metadata,
@@ -1058,6 +1063,9 @@ class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
+        if self._spec_conv_indices is None:
+            return metadata
+        assert self._non_spec_conv_indices is not None
         # Parent build has finalized request counts and graph padding. Keep
         # recurrent indices intact and only replace the convolution view.
         if metadata.spec_decode_metadata is not None:
@@ -1074,10 +1082,10 @@ class AscendGDNContiguousConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         return metadata
 
 
-class AscendGDNContiguousConvMetadataBackend(AscendGDNHostMetadataBackend):
+class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type[AscendGDNContiguousConvMetadataBuilder]:
-        return AscendGDNContiguousConvMetadataBuilder
+    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+        return AscendGDNHostMetadataBuilder
 
 
 class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):

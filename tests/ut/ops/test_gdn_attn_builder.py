@@ -20,8 +20,6 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
-    AscendGDNContiguousConvMetadataBackend,
-    AscendGDNContiguousConvMetadataBuilder,
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
@@ -344,8 +342,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNContiguousConvMetadataBackend
-    assert AscendGDNContiguousConvMetadataBackend.get_builder_cls() is AscendGDNContiguousConvMetadataBuilder
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.use_contiguous_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -1471,13 +1469,21 @@ def test_contiguous_conv_indices_are_shared_by_prefill_and_decode_within_each_gr
             device=torch.device("cpu"),
             num_heads=32,
             num_speculative_tokens=0,
-            builder_cls=AscendGDNContiguousConvMetadataBuilder,
+            builder_cls=AscendGDNHostMetadataBuilder,
         )
         for _ in range(2)
     ]
     common = create_common_attn_metadata(BatchSpec([5, 12], [1, 8]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    unmarked = builders[0].build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
+    assert unmarked.shape == common.block_table_tensor.shape
+    assert unmarked.data_ptr() == common.block_table_tensor.data_ptr()
+    assert builders[0]._spec_conv_indices is None and builders[0]._non_spec_conv_indices is None
     indices_by_group = []
     for builder, slots in zip(builders, ([10, 20], [100, 200])):
+        builder.vllm_config.compilation_config.static_forward_context = {
+            "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+        }
         common.block_table_tensor = torch.tensor([[slot, slot + 1] for slot in slots], dtype=torch.int32)
         metadata = builder.build(0, common)
         prefill_indices = metadata.non_spec_prefill_metadata.causal_conv1d.cache_indices
@@ -1503,9 +1509,12 @@ def test_contiguous_spec_conv_indices_reuse_graph_buffer_and_clear_without_draft
         device=torch.device("cpu"),
         num_heads=32,
         num_speculative_tokens=3,
-        builder_cls=AscendGDNContiguousConvMetadataBuilder,
+        builder_cls=AscendGDNHostMetadataBuilder,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
+    builder.vllm_config.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+    }
     common = create_common_attn_metadata(BatchSpec([4, 4, 0, 0], [4, 4, 0, 0]), 16, torch.device("cpu"))
     captured_conv = None
     for offset in (10, 30):
