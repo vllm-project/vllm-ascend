@@ -59,6 +59,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.offloader.base import get_offloader, set_offloader
+from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.import_utils import LazyLoader
@@ -4017,6 +4018,22 @@ class NPUModelRunner(GPUModelRunner):
                 builder,
                 GDNAttentionMetadataBuilder,
             )
+            if (
+                isinstance(builder, QSAMetadataBuilder)
+                and num_reqs_padded > num_reqs
+            ):
+                # FULL graph padding appends dummy request boundaries to the
+                # shared query_start_loc. QSA's metadata builder uses the CPU
+                # tail as its mapped-token count, but its output buffers are
+                # sliced to num_actual_tokens. Expose only the live request
+                # boundaries so a 31 x 4 decode padded from 124 to 128 tokens
+                # cannot produce mismatched 128- and 124-element tensors.
+                common_attn_metadata = replace(
+                    common_attn_metadata,
+                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[
+                        : num_reqs + 1
+                    ],
+                )
             if is_gdn_noop:
                 # Dummy-run callers coalesce this; fall back to the unpadded
                 # batch size instead of asserting in the execute path.
