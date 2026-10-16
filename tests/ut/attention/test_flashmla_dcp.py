@@ -92,6 +92,19 @@ def runtime(monkeypatch):
     events: list[tuple[str, ...]] = []
     recorded_streams = []
     active_stream = ["main"]
+    current_query_storages = set()
+    original_copy = torch.Tensor.copy_
+
+    def copy_tensor(destination, *args, **kwargs):
+        if destination.untyped_storage().data_ptr() in current_query_storages:
+            events.append(("query_copy", active_stream[0]))
+        return original_copy(destination, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", copy_tensor)
+
+    def scatter(**kwargs):
+        events.append(("scatter", active_stream[0]))
+        return scatter_current(**kwargs)
 
     class Stream:
         def __init__(self, name):
@@ -192,7 +205,7 @@ def runtime(monkeypatch):
     context = SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False)
     scope = {
         "torch": torch,
-        "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter_current),
+        "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter),
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
         "AscendMLAMetadata": object,
@@ -207,7 +220,12 @@ def runtime(monkeypatch):
     )
     methods = {
         name: load_method("vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", name, scope)
-        for name in ("_forward_external_flashmla", "_run_dcp_flashmla_attention", "_forward_decode_split_attention")
+        for name in (
+            "_forward_external_flashmla",
+            "_prepare_dcp_flashmla_current",
+            "_run_dcp_flashmla_attention",
+            "_forward_decode_split_attention",
+        )
     }
 
     methods.update(
@@ -236,6 +254,7 @@ def runtime(monkeypatch):
         events=events,
         active_stream=active_stream,
         recorded_streams=recorded_streams,
+        current_query_storages=current_query_storages,
     )
 
 
@@ -602,6 +621,9 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         runtime.events.clear()
         runtime.recorded_streams.clear()
         runtime.attention_op.reset_mock()
+        runtime.current_query_storages.clear()
+        if split:
+            runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
         # Production external metadata has no FIA CPU length mirrors.
         decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
         result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
@@ -613,6 +635,9 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         if split:
             assert runtime.events == [
                 ("history", "main"),
+                ("scatter", "main"),
+                ("query_copy", "main"),
+                ("query_copy", "main"),
                 ("record", "main"),
                 ("wait", "attn", "main"),
                 ("current", "attn"),

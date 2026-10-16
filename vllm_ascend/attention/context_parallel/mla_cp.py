@@ -583,29 +583,36 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             metadata,
         )
 
+    def _prepare_dcp_flashmla_current(self, flash, q_nope, q_pe, k_nope, k_pe):
+        """Stage current KV and Q on the main stream before history packing."""
+        current = flash.current
+        assert current is not None
+        assert k_nope is not None and k_pe is not None
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
+            value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
+            key_cache=current.cache[..., : self.kv_lora_rank],
+            value_cache=current.cache[..., self.kv_lora_rank :],
+            slot_mapping=current.slots,
+            cache_mode="Norm",
+        )
+        current.query[..., : self.kv_lora_rank].copy_(q_nope)
+        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+
     def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind):
-        """Adapt one local FlashMLA call to the framework's TND/TN1 contract."""
+        """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
         if attention_kind is CPKVScope.CURRENT:
             current = flash.current
             assert current is not None
-            assert k_nope is not None and k_pe is not None
             query, cache = current.query, current.cache
             adapter, schedule = current.adapter, current.schedule
             block_table, cache_lens, attn_mask = current.block_table, flash.used_q, current.attn_mask
-            torch_npu.npu_scatter_pa_kv_cache(
-                key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
-                value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
-                key_cache=current.cache[..., : self.kv_lora_rank],
-                value_cache=current.cache[..., self.kv_lora_rank :],
-                slot_mapping=current.slots,
-                cache_mode="Norm",
-            )
         else:
             query, cache = flash.query, k_nope
             adapter, schedule = flash.adapter, flash.schedule
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
-        query[..., : self.kv_lora_rank].copy_(q_nope)
-        query[..., self.kv_lora_rank :].copy_(q_pe)
+            query[..., : self.kv_lora_rank].copy_(q_nope)
+            query[..., self.kv_lora_rank :].copy_(q_pe)
         output, lse = adapter.attention(
             query,
             cache,
@@ -836,14 +843,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 flash, q_nope, q_pe, history_k_nope, history_k_pe, attention_kind=CPKVScope.HISTORY
             )
 
-        # Run current-token attention on the side stream while the main
-        # stream packs and exchanges history. The ready event also orders
-        # current attention after the history FIA's shared workspace use.
+        # Stage FlashMLA's current KV and Q on the main stream so its AIV
+        # scatter/copies cannot contend with history output packing. Only
+        # current attention overlaps packing and exchange on the side stream.
+        # The ready event also protects the history FIA's shared workspace.
         main_stream = torch.npu.current_stream()
         current_output = current_lse = None
         if has_current:
+            if flash is not None:
+                self._prepare_dcp_flashmla_current(flash, current_q_nope, current_q_pe, current_k_nope, current_k_pe)
             attn_stream = cp_decode_comm_stream()
-            history_ready = main_stream.record_event()
+            current_inputs_ready = main_stream.record_event()
             current_tensors: tuple[torch.Tensor | None, ...] = (
                 current_q_nope,
                 current_q_pe,
@@ -871,7 +881,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 if tensor is not None:
                     tensor.record_stream(attn_stream)
             with torch.npu.stream(attn_stream):
-                attn_stream.wait_event(history_ready)
+                attn_stream.wait_event(current_inputs_ready)
                 # Replicated current KV contributes once for this rank's heads.
                 if flash is None:
                     assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
