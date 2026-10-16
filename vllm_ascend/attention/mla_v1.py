@@ -87,6 +87,8 @@ BUILD_METADATA_STEP_DECODE = 1
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
+PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+
 
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -874,6 +876,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     ):
         self.vllm_config = get_current_vllm_config()
         self.layerwise_kv_cache_hook: Any = None
+        self._strided_kv_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1184,12 +1187,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._refresh_prolog_v3_weights()
         elif not getattr(self, "dcp_enabled", False):
             self._prepare_prolog_v3_weights_after_loading()
+        self._prepare_strided_kv_workspace()
 
     def _prepare_prolog_v3_weights_after_loading(self) -> None:
         """Create persistent writer projections inside the loader memory profile."""
         # Offloaded projections may alias staging buffers outside their onload
         # context. Preserve their existing lazy preparation contract.
-        if not isinstance(get_offloader(), NoopOffloader):
+        if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
         if enable_sfa(config):
@@ -1594,6 +1598,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         return_current_kv: bool = False,
     ):
+        if self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
+            current_k_pe, current_k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
+            if return_current_kv:
+                return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
+            return kv_cache[1], kv_cache[0]
         if not self.use_mla_rope:
             current_k_pe, current_k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
             if return_current_kv:
@@ -1674,13 +1683,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         """
         return self.dtype == torch.bfloat16
 
-    def supports_prolog_v3_writer(self) -> bool:
-        """Whether this layer can use PROLOG_V3 for a strided MLA cache.
-
-        This checks the static writer contract only.  Cache geometry and stride
-        validation remain in :meth:`_cache_requires_prolog_v3_writer` because a
-        concrete cache is needed for those checks.
-        """
+    def _supports_strided_mla_projection(self) -> bool:
+        """Shared projection, dtype and quantization requirements for MLA writers."""
         return (
             self.use_mla_rope
             and self.qk_rope_head_dim > 0
@@ -1692,6 +1696,91 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.supports_prolog_v3_quantization()
             and not getattr(self.q_proj, "_chunk_size", 0)
         )
+
+    def supports_prolog_v3_writer(self) -> bool:
+        """Check the actual A-projection width, including Eagle3's concatenation."""
+        return self._supports_strided_mla_projection() and (
+            getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
+        )
+
+    def _uses_strided_kv_adapter(self) -> bool:
+        """A5 drafts with unsupported He retain their strided cache via scatter.
+
+        Keep CP and non-A5 admission unchanged. A5 scatter supports the
+        token-fused views as well as caches with only a padded block stride.
+        """
+        input_size = getattr(getattr(self, "fused_qkv_a_proj", None), "input_size", None)
+        return (
+            isinstance(input_size, int)
+            and input_size not in PROLOG_V3_SUPPORTED_INPUT_SIZES
+            and self.support_fp8_attention
+            and self.is_draft_model
+            and not self.pcp_enabled
+            and not self.dcp_enabled
+            and self.num_kv_heads == 1
+            and self._supports_strided_mla_projection()
+        )
+
+    def supports_strided_mla_writer(self) -> bool:
+        """Allocation requires either PROLOG_V3 or a prepared writer adapter."""
+        return self.supports_prolog_v3_writer() or (
+            self._uses_strided_kv_adapter() and getattr(self, "_strided_kv_workspace", None) is not None
+        )
+
+    def _prepare_strided_kv_workspace(self) -> None:
+        """Allocate during weight loading, before KV sizing, and retain graph addresses."""
+        if not self._uses_strided_kv_adapter() or getattr(self, "_strided_kv_workspace", None) is not None:
+            return
+        assert self.fused_qkv_a_proj is not None
+        capacity = max(
+            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            max(self.vllm_config.compilation_config.cudagraph_capture_sizes or [0]),
+        )
+        block_size = self.vllm_config.cache_config.block_size
+        shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
+        device = self.fused_qkv_a_proj.weight.device
+        self._strided_kv_workspace = (
+            torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=device),
+            torch.empty((*shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
+            torch.arange(capacity, dtype=torch.int64, device=device),
+        )
+
+    def _exec_strided_kv_writer(self, kv_no_split, cos, sin, kv_cache, slots):
+        """Normalize/rotate only current rows, then scatter into the original views."""
+        workspace = self._strided_kv_workspace
+        if workspace is None:
+            raise RuntimeError("Strided MLA KV workspace must be prepared before KV cache sizing.")
+        nope, rope, indices = workspace
+        num_tokens = kv_no_split.shape[0]
+        if num_tokens > indices.numel():
+            raise RuntimeError("Strided MLA KV input exceeds the profiled workspace capacity.")
+        if num_tokens == 0:
+            return rope.flatten(0, 1)[:0], nope.flatten(0, 1)[:0]
+        self._validate_prolog_v3_cache(kv_cache)
+        assert self.kv_a_layernorm is not None
+        blocks = cdiv(num_tokens, nope.shape[1])
+        torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_no_split.view(num_tokens, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim),
+            self.kv_a_layernorm.weight,
+            cos,
+            sin,
+            indices[:num_tokens],
+            rope[:blocks],
+            nope[:blocks],
+            epsilon=self.kv_a_layernorm.variance_epsilon,
+            cache_mode="PA",
+            is_output_kv=False,
+        )
+        current_nope = nope.flatten(0, 1)[:num_tokens]
+        current_rope = rope.flatten(0, 1)[:num_tokens]
+        DeviceOperator.reshape_and_cache(
+            key=current_nope,
+            value=current_rope,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots,
+        )
+        return current_rope, current_nope
 
     def _prepare_prolog_v3_weights(self) -> dict[str, Any]:
         """Return the cached private PROLOG_V3 projection weights.
@@ -2352,6 +2441,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+        elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
+            k_pe, k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
         else:
             assert self.kv_a_layernorm is not None
             B = kv_no_split.shape[0]
@@ -3042,6 +3133,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if use_prolog_v3_strided_cache:
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_prolog_v3(
                 hidden_states, kv_cache, attn_metadata
+            )
+        elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
+            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+                layer_name, hidden_states, kv_cache, attn_metadata
             )
         elif (
             (self.fa_quant_layer or self.enable_mlapo)
