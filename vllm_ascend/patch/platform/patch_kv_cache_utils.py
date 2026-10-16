@@ -462,6 +462,29 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
+def _get_replicated_draft_pools(
+    groups: list[KVCacheGroupSpec],
+) -> list[list[KVCacheGroupSpec]] | None:
+    """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
+        return None
+    target_groups = []
+    draft_pools = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if all(
+            isinstance(s, FullAttentionSpec) and not isinstance(s, MLAAttentionSpec) and not s.dcp_sharded
+            for s in specs
+        ):
+            draft_pools.append([group])
+        else:
+            target_groups.append(group)
+    if target_groups and draft_pools:
+        return [target_groups, *draft_pools]
+    return None
+
+
 def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -476,6 +499,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     """
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_pool_bytes(kv_cache_groups)
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
