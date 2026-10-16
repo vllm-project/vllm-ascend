@@ -20,9 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-MAIN_COVERAGE_PREFIX = "ci/precision-test"
 RELEASE_BRANCH_RE = re.compile(r"^releases/v[0-9][0-9A-Za-z._-]*$")
-COVERAGE_PREFIX_RE = re.compile(rf"^{re.escape(MAIN_COVERAGE_PREFIX)}$")
 COVERAGE_SUFFIX_RE = re.compile(r"^v[0-9][0-9A-Za-z._-]*$")
 SEARCH_URL = "https://api.github.com/search/issues"
 RETRY_STATUS = {403, 429}
@@ -45,13 +43,6 @@ def select_latest(created_at_by_branch: dict[str, str]) -> str:
     return max(created_at_by_branch.items(), key=lambda item: (item[1], item[0]))[0]
 
 
-def coverage_obs_prefix(branch: str) -> str:
-    """OBS directory for coverage objects. Release branches stay in this directory."""
-    if branch == "main" or RELEASE_BRANCH_RE.fullmatch(branch):
-        return MAIN_COVERAGE_PREFIX
-    raise ValueError(f"unsupported coverage branch: {branch}")
-
-
 def coverage_file_suffix(branch: str) -> str:
     """Filename suffix for a release branch, such as ``v0.30.0rc2``.
 
@@ -72,10 +63,6 @@ def coverage_object_name(filename: str, suffix: str) -> str:
         return filename
     stem, extension = filename.rsplit(".", 1)
     return f"{stem}-{suffix}.{extension}"
-
-
-def is_allowed_coverage_prefix(prefix: str) -> bool:
-    return COVERAGE_PREFIX_RE.fullmatch(prefix) is not None
 
 
 def created_at_from_search(payload: dict) -> str | None:
@@ -145,14 +132,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--branches-file", default="")
-    parser.add_argument("--prefix-for", default="", help="Print only the OBS prefix for this branch and exit.")
     parser.add_argument("--suffix-for", default="", help="Print only the coverage filename suffix for this branch and exit.")
     args = parser.parse_args()
 
-    if args.prefix_for or args.suffix_for:
-        branch = args.prefix_for or args.suffix_for
+    if args.suffix_for:
         try:
-            value = coverage_obs_prefix(branch) if args.prefix_for else coverage_file_suffix(branch)
+            value = coverage_file_suffix(args.suffix_for)
         except ValueError as exc:
             print(exc, file=sys.stderr)
             raise SystemExit(2) from exc
@@ -168,11 +153,9 @@ def main() -> None:
         raise SystemExit("missing GITHUB_TOKEN")
 
     branch = resolve_latest_release_branch(args.repo, _read_branch_names(args.branches_file), token)
-    prefix = coverage_obs_prefix(branch)
     suffix = coverage_file_suffix(branch)
-    # Shell-safe: both values are constrained by RELEASE_BRANCH_RE / coverage_obs_prefix.
+    # Shell-safe: both values are constrained by RELEASE_BRANCH_RE.
     print(f"TARGET_BRANCH={branch}")
-    print(f"COVERAGE_OBS_PREFIX={prefix}")
     print(f"COVERAGE_FILE_SUFFIX={suffix}")
 
 

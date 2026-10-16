@@ -138,13 +138,11 @@ jobs:
               if release_branch.fullmatch(branch_name):
                   base_ref = branch_name
                   base_sha = git(root, "rev-parse", "HEAD")
-                  prefix = helper.coverage_obs_prefix(branch_name)
                   suffix = helper.coverage_file_suffix(branch_name)
               else:
                   git(root, "fetch", "origin", "main")
                   base_ref = "main"
                   base_sha = git(root, "rev-parse", "FETCH_HEAD")
-                  prefix = "ci/precision-test"
                   suffix = ""
               main_commit, release_tag = read_pin(root)
               selected = select_tests(root)
@@ -153,7 +151,6 @@ jobs:
                   "base_ref": base_ref,
                   "base_sha": base_sha,
                   "vllm_ascend_ref": git(root, "rev-parse", "HEAD"),
-                  "coverage_obs_prefix": prefix,
                   "coverage_file_suffix": suffix,
                   "main_commit": main_commit,
                   "release_tag": release_tag,
@@ -227,7 +224,6 @@ jobs:
       base_sha: ${{ matrix.target.base_sha }}
       test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
-      coverage-obs-prefix: ${{ matrix.target.coverage_obs_prefix }}
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
       timeout-minutes: 180
     secrets:
