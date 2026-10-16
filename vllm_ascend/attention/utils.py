@@ -615,6 +615,7 @@ def maybe_save_kv_layer_to_connector(
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
+# TODO(lf): Move save_kv_layer to the KV-write point and remove this hook.
 def notify_kv_cache_written(layer_name: str = ""):
     """Notify the connector that the paged KV cache for ``layer_name`` has been
     written for the current step.
@@ -623,7 +624,7 @@ def notify_kv_cache_written(layer_name: str = ""):
     it needs to record a synchronization primitive (e.g. a compute-stream event
     later waited on by the resharding stream to overlap the outgoing KV copy).
     The AscendStore pool and SFA-PD connectors implement
-    ``on_kv_cache_written`` to dispatch a layerwise save or PD-pull
+    ``on_kv_cache_written`` to dispatch a layerwise save or PD transfer
     notification at scatter time. Other connectors can omit the hook.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():

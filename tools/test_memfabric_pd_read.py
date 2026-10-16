@@ -4,8 +4,9 @@
 This script starts no vLLM service. The Prefill process owns a deterministic
 NPU buffer and publishes only its MemFabric session and address over a tiny TCP
 control channel. The Decode process creates a local destination, pulls the bytes
-with ``batch_transfer_sync_read``, and verifies them exactly. Only the remote
-Prefill source is registered, matching the production pull-read path.
+with ``batch_transfer_sync_read``, and verifies them exactly. Both the remote
+Prefill source and local Decode destination are registered, matching the
+production RDMA-capable pull-read path.
 
 Run Prefill first::
 
@@ -333,9 +334,11 @@ def _run_decode(args: argparse.Namespace) -> None:
                 torch.npu.synchronize()
 
             # Match the production D-side order: SparseKVOffloadManager owns
-            # the CPU pool before the connector initializes its transfer
-            # engine. A pull destination is local and is not registered.
-            _, engine = _new_transfer_engine("decode", args.local_ip, args.device_id)
+            # the destination before the connector initializes its transfer
+            # engine, then the connector registers the local read destination
+            # so both RDMA and SDMA paths can use it.
+            manager, engine = _new_transfer_engine("decode", args.local_ip, args.device_id)
+            manager.register_buffer([destination.data_ptr()], [num_bytes])
             print(
                 f"[D] read: peer_session={metadata['session']}, "
                 f"local_dst_{args.dst_memory}={hex(destination.data_ptr())}, "

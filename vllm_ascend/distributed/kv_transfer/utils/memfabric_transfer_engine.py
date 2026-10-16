@@ -25,7 +25,7 @@ _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL = "sdma"
 
 
 class MemfabricBackend:
-    """Normalize the MemFabric API used by the SFA PD connector."""
+    """Normalize the MemFabric API used by layerwise KV transfer."""
 
     def __init__(self, engine: Any, advertised_rpc_port: int):
         self._engine = engine
@@ -59,6 +59,67 @@ class MemfabricBackend:
             return -1
         return 0
 
+    def batch_transfer_sync_write(
+        self,
+        session_id: str,
+        local_buffers: list[int],
+        peer_buffers: list[int],
+        length_list: list[int],
+    ) -> int:
+        """Push mode: write local buffers into the peer's registered memory.
+
+        Bare-link validated (memfabric_hybrid 1.2.0): a zero return means the
+        payload has left the local buffer (source reuse is safe) and is visible
+        at the destination. Requires the peer (Decode) to be the store server.
+        """
+        ret = self._engine.batch_transfer_sync_write(
+            session_id,
+            local_buffers,
+            peer_buffers,
+            length_list,
+        )
+        if ret != 0:
+            logger.error(
+                "MemFabric batch_transfer_sync_write failed (ret=%s) for session %s",
+                ret,
+                session_id,
+            )
+            return -1
+        return 0
+
+    def batch_transfer_async_write_submit(
+        self,
+        session_id: str,
+        local_buffers: list[int],
+        peer_buffers: list[int],
+        length_list: list[int],
+        stream: int,
+    ) -> int:
+        """Push mode: submit writes onto ``stream`` without blocking the caller.
+
+        The transfer is stream-ordered: a ``torch.npu.Event`` recorded on the
+        same stream after this call fires once the payload has left the local
+        buffers (source reuse) — mirroring the sync write's return semantics.
+        Completion granularity on the wire (left-source vs remote-visible) is
+        pending bare-link verification before production enablement. Requires
+        the peer (Decode) to be the store server.
+        """
+        ret = self._engine.batch_transfer_async_write_submit(
+            session_id,
+            local_buffers,
+            peer_buffers,
+            length_list,
+            stream,
+        )
+        if ret != 0:
+            logger.error(
+                "MemFabric batch_transfer_async_write_submit failed (ret=%s) for session %s",
+                ret,
+                session_id,
+            )
+            return -1
+        return 0
+
 
 class GlobalMemfabricTE:
     """Lazily create one role-bound MemFabric engine per process."""
@@ -67,6 +128,7 @@ class GlobalMemfabricTE:
         self._engine: MemfabricBackend | None = None
         self._role: str | None = None
         self._device_id: int | None = None
+        self._store_server_role: str = MEMFABRIC_ROLE_PREFILL
         self._transfer_protocol: str | None = None
         self._hostname: str | None = None
         self._unique_id: str | None = None
@@ -85,9 +147,13 @@ class GlobalMemfabricTE:
         *,
         role: str,
         device_id: int,
+        store_server_role: str = MEMFABRIC_ROLE_PREFILL,
         transfer_protocol: str | None = None,
     ) -> None:
         """Bind this process singleton to one MemFabric role, device and protocol.
+
+        ``store_server_role`` selects which side serves memory: pull uses
+        "Prefill" (D reads from P); push requires "Decode" (P writes into D).
 
         ``transfer_protocol`` comes from
         ``kv_connector_extra_config["memfabric_transfer_protocol"]`` and selects
@@ -100,6 +166,10 @@ class GlobalMemfabricTE:
             raise ValueError(f"Invalid MemFabric role {role!r}; expected one of {_VALID_MEMFABRIC_ROLES}")
         if device_id < 0:
             raise ValueError(f"MemFabric device_id must be non-negative, got {device_id}")
+        if store_server_role not in _VALID_MEMFABRIC_ROLES:
+            raise ValueError(
+                f"Invalid MemFabric store_server_role {store_server_role!r}; expected one of {_VALID_MEMFABRIC_ROLES}"
+            )
         protocol = (transfer_protocol or _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL).strip().lower()
         if protocol not in _VALID_MEMFABRIC_TRANSFER_PROTOCOLS:
             raise ValueError(
@@ -109,20 +179,23 @@ class GlobalMemfabricTE:
 
         with self._engine_lock:
             configured = self._role is not None
-            if configured and (role, device_id, protocol) != (
+            if configured and (role, device_id, store_server_role, protocol) != (
                 self._role,
                 self._device_id,
+                self._store_server_role,
                 self._transfer_protocol,
             ):
                 raise RuntimeError(
                     "MemFabric transfer engine is already configured for "
                     f"role={self._role}, device_id={self._device_id}, "
+                    f"store_server_role={self._store_server_role}, "
                     f"transfer_protocol={self._transfer_protocol}; cannot "
                     f"reconfigure it for role={role}, device_id={device_id}, "
-                    f"transfer_protocol={protocol}"
+                    f"store_server_role={store_server_role}, transfer_protocol={protocol}"
                 )
             self._role = role
             self._device_id = device_id
+            self._store_server_role = store_server_role
             self._transfer_protocol = protocol
 
     def get_transfer_engine(self, hostname: str) -> MemfabricBackend:
@@ -167,7 +240,8 @@ class GlobalMemfabricTE:
             )
         except ImportError as exc:
             raise ImportError(
-                "Please install memfabric_hybrid (memfabric-hybrid) to use SfaRemoteD2HConnector."
+                "Please install memfabric_hybrid (memfabric-hybrid) to use "
+                "LayerwisePushConnector with transfer_backend=memfabric."
             ) from exc
 
         # Match the MemFabric initialization sequence used by its examples.
@@ -190,7 +264,7 @@ class GlobalMemfabricTE:
             hostname,
             self._role,
             self._device_id,
-            store_server_role=MEMFABRIC_ROLE_PREFILL,
+            store_server_role=self._store_server_role,
             data_op_type=data_op_type,
         )
         if ret != 0:

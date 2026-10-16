@@ -1,5 +1,9 @@
 # Layerwise and Sparse KV Cache Offloading Design
 
+> **Compatibility notice:** `LayerwisePushConnector` supports ordinary HBM
+> destinations with MemFabric or Mooncake, and Sparse Decode Offload with
+> MemFabric. Sparse Decode Offload still requires Decode PP=1.
+
 This document explains why Prefill and Decode use different KV cache offload
 strategies, how the two strategies work, and how they preserve correctness when
 used together.
@@ -60,15 +64,15 @@ flowchart LR
     DNPU["Decode NPU<br/>indexer + per-layer hot top-k buffers"]
 
     PHost <-->|"Layerwise load / save"| PNPU
-    PNPU -->|"Remote D2H pull<br/>main KV"| DHost
-    PNPU -->|"Remote pull<br/>indexer / LIC8 scale"| DNPU
+    PNPU -->|"Remote WRITE<br/>main KV"| DHost
+    PNPU -->|"Remote WRITE<br/>indexer / LIC8 scale"| DNPU
     DNPU -->|"New-token D2H"| DHost
     DHost -->|"Top-k miss H2D"| DNPU
 ```
 
 `AscendStoreConnector` manages Layerwise Prefill Offload through Memcache.
-`SfaRemoteD2HConnector` exposes Prefill NPU buffers and lets Decode pull main KV
-into Decode-owned host memory and indexer data into rank-local NPU memory
+`LayerwisePushConnector` writes main KV from Prefill NPU buffers into
+Decode-owned host memory and writes indexer data into rank-local NPU memory
 through MemFabric. Optional LIC8 scale data follows the indexer destination.
 
 The MemFabric data path is selected at launch through
@@ -195,13 +199,13 @@ offload practical for the low-compute Decode stage.
 
 ### Connector composition
 
-Prefill uses `MultiConnector` to compose the Remote D2H completion provider and
-`AscendStoreConnector`. `AscendMultiConnector` invokes the completion provider
+Prefill uses `MultiConnector` to compose `LayerwisePushConnector` and
+`AscendStoreConnector` when both transfer paths are required. `AscendMultiConnector` invokes the completion provider
 first regardless of their order in the connector configuration. For every
 layer buffer:
 
 - AscendStore saves the layer to the Prefill host KV pool; and
-- Remote D2H publishes source metadata and waits for Decode acknowledgements.
+- LayerwisePush writes the required components to Decode destinations and tracks local WRITE completion.
 
 The buffer-reuse gate opens only after both paths finish. This prevents Prefill
 from overwriting a shared physical buffer while Decode is still reading it.
@@ -213,9 +217,9 @@ from overwriting a shared physical buffer while Decode is still reading it.
 2. Decode advertises its endpoint and parallel topology through the proxy
    metaserver.
 3. Prefill computes the request layer by layer.
-4. After each layer's KV write completes, Prefill starts the Memcache save and
-   publishes Remote D2H readiness.
-5. Decode pulls the layer into its destinations and acknowledges completion.
+4. After each layer's source event is ready, Prefill starts the Memcache save
+   when configured and pushes the required components to Decode.
+5. Decode validates the layout and destination ranges while receiving the writes.
 6. Prefill releases the physical buffer for reuse after all required
    completions arrive.
 7. Decode schedules the request only after the full request reaches a terminal
@@ -254,15 +258,15 @@ The Prefill ranks mapped to one Decode rank form a contributor group.
 
 ## 7. Validation and Failure Handling
 
-Before a Remote D2H read, Decode validates main tensor count and sizes, indexer
-presence and sizes, optional LIC8 scale layout, and destination block ranges.
+Before accepting layout and target-block messages, Decode validates main tensor
+count and sizes, indexer presence and sizes, optional LIC8 scale layout, and
+destination block ranges.
 A mismatch fails the layer instead of leaving partially valid destination
 data.
 
-After Decode processes a readiness notification, it replies with `READ_DONE` or
-`READ_FAILED`. A reported MemFabric read failure invalidates the Decode
-destination and releases the Prefill-side waiter with an error, preventing
-silent corruption. A lost acknowledgement or stopped Decode process is not
+After all required writes complete, each Prefill source sends `REQUEST_DONE`.
+A reported MemFabric write failure is reported as `WRITE_FAILED` and stops the
+affected engine, preventing silent corruption or unsafe buffer reuse. A lost acknowledgement or stopped Decode process is not
 treated as a terminal state, so Prefill may continue waiting.
 
 ## 8. Current Boundaries
@@ -275,8 +279,9 @@ treated as a terminal state, so Prefill may continue waiting.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - Joint deployment requires Prefill TP to be greater than or equal to, and
   divisible by, Decode TP.
-- MemFabric is the only supported Remote D2H transfer backend.
-- Layerwise buffer reuse cannot currently be combined with
-  `MooncakeLayerwiseConnector` because it does not provide a per-buffer transfer
-  completion gate. Support is planned in a follow-up update.
-- Connector-level data-read retry is not implemented.
+- `LayerwisePushConnector` supports MemFabric and Mooncake with the same
+  per-buffer completion gate when Sparse Decode Offload is disabled. Sparse
+  Decode Offload currently requires `kv_connector_extra_config.transfer_backend`
+  to be `"memfabric"`. The consumer rejects Mooncake before cache registration
+  because it cannot currently use the MemFabric offload memory pool.
+- Connector-level data-write retry is not implemented.

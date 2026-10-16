@@ -1551,11 +1551,6 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
     return total_num_attention_heads != total_num_kv_heads
 
 
-def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
-    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
-    return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
-
-
 def _collect_kv_connector_names(value: Any) -> set[str]:
     connector_names: set[str] = set()
     if isinstance(value, dict):
@@ -1575,6 +1570,36 @@ def _collect_kv_connector_names(value: Any) -> set[str]:
         if isinstance(extra_config, (dict, list, tuple)):
             connector_names.update(_collect_kv_connector_names(extra_config))
     return connector_names
+
+
+def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
+    if _collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names:
+        return True
+    # LayerwisePushConnector can also ride the mooncake backend; detect it via
+    # kv_connector_extra_config["transfer_backend"] (incl. MultiConnector nests).
+    pending = [kv_transfer_config]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            connector = value.get("kv_connector")
+            extra_config = value.get("kv_connector_extra_config") or {}
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+            continue
+        else:
+            connector = getattr(value, "kv_connector", None)
+            extra_config = getattr(value, "kv_connector_extra_config", None) or {}
+            if isinstance(extra_config, (dict, list, tuple)):
+                pending.append(extra_config)
+        if (
+            connector == "LayerwisePushConnector"
+            and isinstance(extra_config, dict)
+            and str(extra_config.get("transfer_backend", "")).lower() == "mooncake"
+        ):
+            return True
+    return False
 
 
 def singleton(cls):
