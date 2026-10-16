@@ -96,6 +96,26 @@ def map_to_physical_for_ascend(
     return map_to_physical(topk_ids, expert_replica_routing_table)
 
 
+def count_valid_expert_tokens(
+    physical_ids: torch.Tensor,
+    valid_tokens: torch.Tensor,
+    local_expert_start: int,
+    local_expert_count: int,
+) -> torch.Tensor:
+    """Count real-token assignments without changing the MoE group list."""
+    counts = torch.zeros(local_expert_count, dtype=torch.int64, device=physical_ids.device)
+    if local_expert_count == 0 or physical_ids.numel() == 0:
+        return counts
+    local_ids = physical_ids.to(torch.int64) - local_expert_start
+    valid = valid_tokens[:, None] & (local_ids >= 0) & (local_ids < local_expert_count)
+    counts.scatter_add_(
+        0,
+        local_ids.clamp(0, local_expert_count - 1).reshape(-1),
+        valid.to(torch.int64).reshape(-1),
+    )
+    return counts
+
+
 def record_expert_tokens(
     expert_tokens: torch.Tensor,
     expert_load_view: torch.Tensor,
