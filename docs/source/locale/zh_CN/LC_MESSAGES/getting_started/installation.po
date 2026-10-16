@@ -449,3 +449,17 @@ msgstr ""
 
 msgid "=== \"950DT Products\""
 msgstr "=== \"Ascend 950DT系列产品\""
+
+msgid "!!! danger \"v0.30.0rc2 installation support\""
+msgstr "!!! danger \"v0.30.0rc2 安装支持\""
+
+msgid ""
+"v0.30.0rc2 currently supports only the [official vLLM Ascend "
+"images](#installation-prebuilt-image-selection) or [building an image with "
+"`docker build`](#installation-prebuilt-image-build). Installation in a CANN "
+"image or a manually prepared CANN environment, including pip/uv wheel and "
+"direct source installation, is not yet supported for rc2."
+msgstr ""
+"v0.30.0rc2 目前仅支持 [官方 vLLM Ascend 镜像](#installation-prebuilt-image-selection)"
+" 或 [使用 `docker build` 构建镜像](#installation-prebuilt-image-build)。在 CANN "
+"镜像或手动准备的 CANN 环境中安装（包括 pip/uv wheel 和直接源码安装）在 rc2 中尚不支持。"

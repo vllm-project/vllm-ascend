@@ -706,6 +706,17 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     Save the following script as `run_p.sh` on P0 and P1. The node wrappers
     below provide `LOCAL_IP` and the API/headless role.
 
+    Prefill uses internal DP load balancing: P0 infers global DP rank 0
+    and exposes the only Prefill API; P1 uses
+    `--headless --data-parallel-start-rank 1`. Keep
+    `--data-parallel-size-local 1` in this template. Although the launcher
+    passes the DP rank as `$4`, do not forward it as
+    `--data-parallel-rank "$4"` on Prefill: v0.30.0rc1 infers external DP
+    load balancing from that option and rejects the remote headless
+    engine with `Remote engine must not use --headless in external or hybrid dp lb mode`.
+    Decode uses explicit DP ranks and API-serving engines, so its
+    `--data-parallel-rank "$4"` configuration is intentional.
+
     ```shell
     #!/usr/bin/env bash
     # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
@@ -751,6 +762,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --quantization ascend \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --async-scheduling \
       --enforce-eager \
@@ -1266,6 +1278,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Section 5.3. Atlas 800I A2 nodes do not have the Atlas 800I A3 HCCS fabric: the
     pool runs over the Atlas 800I A2 RoCE network with the `P2PHANDSHAKE` metadata server
     and the `ascend` protocol, and the Atlas 800I A3 fabric-memory exports do not apply.
+
+    Retain the Prefill internal-LB settings from Section 5.3, including
+    P1's `--headless --data-parallel-start-rank 1` wrapper and the P0-only
+    proxy endpoint. The pool fragments use `$4` for unique engine IDs and
+    lookup ports; this does not require adding `--data-parallel-rank`
+    to the Prefill serving command.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
     to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
