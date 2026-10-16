@@ -6,7 +6,8 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+# Batch size varies across prefill steps; reuse the compiled kernel.
+@triton.jit(do_not_specialize=["ROWS"])
 def _prepare_attention_update_kernel(
     L0,
     L1,
@@ -28,7 +29,7 @@ def _prepare_attention_update_kernel(
     PreviousAnchor,
     Relative,
     Anchor,
-    ROWS: tl.constexpr,
+    ROWS,
     COUNT: tl.constexpr,
     HAS_ANCHOR: tl.constexpr,
     BLOCK: tl.constexpr,
