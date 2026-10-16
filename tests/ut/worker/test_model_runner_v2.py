@@ -53,7 +53,6 @@ def _make_runner(need_timing: bool = True):
     runner.debugger = None
     runner._debugger_started = False
     runner.attn_groups = []
-    runner._uses_flashmla = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
@@ -171,6 +170,29 @@ def _make_batch_state(
         prefill_runs_as_decode_np=prefill_runs_as_decode,
         decode_graph_eligible=bool((prefill_runs_as_decode | ~is_prefilling).all()),
     )
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_gather_request_state_delegates_to_backend_before_derived_inputs(dummy):
+    runner = _make_runner()
+    state = None if dummy else _make_batch_state([127, 64], [1, 1], [128, 64])
+    prepared = (object(), None)
+    prepare = Mock(return_value=prepared)
+    builder = SimpleNamespace(prepare_batch_req_state=prepare)
+    group = SimpleNamespace(get_metadata_builder=Mock(return_value=builder))
+    runner.attn_groups = [[group]]
+    if dummy:
+        del runner.attn_groups  # Initial memory profiling precedes attention setup.
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(state, 1)):
+        result = runner.gather_batch_req_state(SimpleNamespace(), dummy)
+    if dummy:
+        prepare.assert_not_called()
+        group.get_metadata_builder.assert_not_called()
+        assert result == (None, 1)
+    else:
+        group.get_metadata_builder.assert_called_once_with(0)
+        prepare.assert_called_once_with(state, 1)
+        assert result == prepared
 
 
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
