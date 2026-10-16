@@ -367,27 +367,45 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
     assert missing in [call.args[0] for call in loader.call_args_list]
 
 
-def test_cann_backend_serializes_concurrent_operator_imports(monkeypatch, tmp_path):
+def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch, tmp_path):
     context = get_context("fork")
     barrier = context.Barrier(2)
-    importing = context.Lock()
+    building = context.Lock()
+    loaded = set()
     monkeypatch.setattr(backend_module, "_get_build_directory", lambda *args, **kwargs: str(tmp_path), raising=False)
-    monkeypatch.setattr(torch.ops, "cann_ops_transformer", MagicMock())
+
+    def build(name):
+        if name in loaded:
+            return
+        assert building.acquire(block=False), f"Concurrent CANN JIT builds: {name}"
+        try:
+            time.sleep(0.1)
+            loaded.add(name)
+        finally:
+            building.release()
 
     def load(name):
         if name == "cann_ops_transformer":
-            assert importing.acquire(block=False), "Concurrent CANN imports share JIT build locks"
-            try:
-                time.sleep(0.1)
-            finally:
-                importing.release()
+            build("import")
+        elif name.startswith("cann_ops_transformer.ops.attention."):
+            op_name = name.rsplit(".", 1)[1]
+            return SimpleNamespace(**{f"{op_name}_op_builder": SimpleNamespace(load=lambda: build(op_name))})
         return MagicMock()
 
     monkeypatch.setattr(backend_module, "import_module", load)
+    monkeypatch.setattr(
+        torch.ops,
+        "cann_ops_transformer",
+        SimpleNamespace(key_pool=lambda: build("key_pool"), pool_key_indexer=lambda: build("pool_key_indexer")),
+    )
 
     def initialize():
         barrier.wait(timeout=10)
-        Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
+        backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+        backend._init_cann_ops()
+        barrier.wait(timeout=10)
+        backend._key_pool()
+        backend._pool_key_indexer()
 
     workers = [context.Process(target=initialize) for _ in range(2)]
     for worker in workers:
