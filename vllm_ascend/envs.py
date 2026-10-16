@@ -36,6 +36,18 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental internal router: BF16 operands with FP32 output. Non-sensitive.
+    # Valid values: 0 (default, retain gate behavior), 1 (force BF16).
+    # Requires BF16 model weights and a bias-free 2D gate; restart/recapture to apply.
+    # Experimental early shared-output marker for W4A8 SP multistream.
+    # 0 (default): original wait_stream; 1: record before routed output
+    # transform and wait afterwards. Valid values: 0/1; not sensitive.
+    # Requires an independent output transform and NPU graph validation.
+    "VLLM_ASCEND_EARLY_SHARED_OUTPUT_EVENT": lambda: _strict_binary_env("VLLM_ASCEND_EARLY_SHARED_OUTPUT_EVENT"),
+    # Disable only fused GMM + dequant + SiTU + quant; retain the split SiTU path.
+    "VLLM_ASCEND_DISABLE_GMM_DEQUANT_SITU_QUANT": lambda: os.getenv(
+        "VLLM_ASCEND_DISABLE_GMM_DEQUANT_SITU_QUANT", "0"
+    ) == "1",
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

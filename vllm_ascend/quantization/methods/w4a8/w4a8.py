@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 import torch
+
+from vllm_ascend import envs
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -40,6 +42,10 @@ from vllm_ascend.utils import (
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+# Keep these limits in sync with gmm_dequant_situ_quant_torch_adpt.h.
+_GMM_DEQUANT_SITU_QUANT_M_BLOCK_SIZE = 128
+_GMM_DEQUANT_SITU_QUANT_MAX_M_BLOCKS = 256
 
 
 def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
@@ -80,6 +86,8 @@ def _gmm_dequant_situ_quant_fusion_supported(
     x_scale: torch.Tensor,
 ) -> bool:
     """Select the A3 W4A8 SiTU fused kernel whenever the inputs are supported."""
+    if envs.VLLM_ASCEND_DISABLE_GMM_DEQUANT_SITU_QUANT:
+        return False
     if (
         not get_current_hardware_profile().supports(HardwareCapability.GMM_DEQUANT_SITU_QUANT)
         or group_list_type not in (0, 1)
@@ -95,6 +103,13 @@ def _gmm_dequant_situ_quant_fusion_supported(
     expert_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
     num_experts = len(expert_weights)
     if not expert_weights or group_list.numel() < num_experts:
+        return False
+    capacity = hidden_states.shape[0]
+    active_upper_bound = min(num_experts, capacity)
+    padded_block_upper_bound = (
+        active_upper_bound + (capacity - active_upper_bound) // _GMM_DEQUANT_SITU_QUANT_M_BLOCK_SIZE
+    )
+    if padded_block_upper_bound > _GMM_DEQUANT_SITU_QUANT_MAX_M_BLOCKS:
         return False
     expert_scales = w1_scale if isinstance(w1_scale, list) else [w1_scale]
     if len(expert_scales) == 1 and expert_scales[0].dim() >= 2 and expert_scales[0].shape[0] == num_experts:
@@ -196,8 +211,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_size = vllm_config.quant_config.quant_description.get("group_size", 0)
         if group_size > 0:
             raise ValueError(
-                "The current weights use Per‑Group quantization, which is no longer supported. Please "
-                "switch to Per‑Channel quantized weights."
+                "The current weights use Per鈥慓roup quantization, which is no longer supported. Please "
+                "switch to Per鈥慍hannel quantized weights."
             )
 
         # Only per-channel W4A8 is supported, this parameter will be removed soon.
@@ -226,7 +241,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
-        # Note: compressed‑tensors: one int4 per int8; modelslim: packs two int4 into one int8
+        # Note: compressed鈥憈ensors: one int4 per int8; modelslim: packs two int4 into one int8
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             w13_output_size = 2 * intermediate_size_per_partition
             w2_output_size = hidden_sizes
