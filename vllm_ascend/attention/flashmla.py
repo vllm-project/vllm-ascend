@@ -71,8 +71,11 @@ def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     prefill; query length alone must never opt a request into FlashMLA.
     """
     flags = common.is_prefilling
-    offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
-    if flags is None or flags.device.type != "cpu" or offsets.device.type != "cpu":
+    query_start = common.query_start_loc_cpu
+    if flags is None or query_start is None:
+        raise RuntimeError("FlashMLA requires CPU is_prefilling and query boundaries from the runner")
+    offsets = query_start[: common.num_reqs + 1]
+    if flags.device.type != "cpu" or offsets.device.type != "cpu":
         raise RuntimeError("FlashMLA requires CPU is_prefilling and query boundaries from the runner")
     boundaries = offsets.clamp_max(common.num_actual_tokens).tolist()
     stages = flags[: common.num_reqs].tolist()
