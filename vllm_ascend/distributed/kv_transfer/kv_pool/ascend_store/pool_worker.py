@@ -1714,6 +1714,7 @@ class KVPoolWorker:
         if snapshot_start is None:
             return partial_block_index, partial_end_token
 
+        assert snapshot_end_token is not None
         logical_last_block = (cached_tokens - 1) // block_size
         if snapshot_start <= logical_last_block:
             logger.debug(
@@ -2097,14 +2098,15 @@ class KVPoolWorker:
                     if block_idx != partial_block_index
                     and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
                 ]
-                keys = [
-                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
-                    if snapshot_start is None or block_idx < snapshot_start
-                    else self._make_layerwise_partial_key(
-                        request, group_id, block_idx, request.load_spec.layerwise_snapshot_end_token
-                    )
-                    for block_idx in block_indices
-                ]
+                keys = []
+                for block_idx in block_indices:
+                    if snapshot_start is None or block_idx < snapshot_start:
+                        key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
+                    else:
+                        snapshot_end_token = request.load_spec.layerwise_snapshot_end_token
+                        assert snapshot_end_token is not None
+                        key = self._make_layerwise_partial_key(request, group_id, block_idx, snapshot_end_token)
+                    keys.append(key)
                 has_partial_key = False
                 if partial_block_index is not None:
                     keys.append(
