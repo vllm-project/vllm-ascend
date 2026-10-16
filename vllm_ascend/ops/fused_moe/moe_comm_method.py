@@ -20,11 +20,12 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
@@ -300,7 +301,7 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if self.enable_fused_mc2 == 1 and use_cann_megamoe(get_current_vllm_config()):
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # Resolve the Python ABI once, before the first collective/capture.
@@ -495,8 +496,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = moe_utils.normalize_mega_moe_weight_scales(weights.w1_scale)
-        weight_scales2 = moe_utils.normalize_mega_moe_weight_scales(weights.w2_scale)
+        weight_scales1 = weights.w1_scale
+        weight_scales2 = weights.w2_scale
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
@@ -577,14 +578,8 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
-        prepared_mega_moe = hasattr(fused_experts_input.layer, "cann_mega_moe_w13_weight_list")
         if self.enable_fused_mc2 == 1:
-            if _EXTRA_CTX.use_mega_moe or prepared_mega_moe:
-                if not hasattr(self, "mega_moe"):
-                    # Load lazily if the draft reset the process-global flag
-                    # after the target prepared MegaMoE weights.
-                    self.mega_moe_symm_buffer = None
-                    self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+            if _EXTRA_CTX.use_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(
                     fused_experts_input, weights, is_decode_only_node=_EXTRA_CTX.is_decode_only_node
                 )

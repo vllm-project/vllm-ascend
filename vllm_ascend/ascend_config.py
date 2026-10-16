@@ -567,9 +567,8 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: (
-            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        )
+        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
+        == DeviceAdaptorFamily.FP8_OPTIMIZED
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -1040,9 +1039,6 @@ class AscendConfig:
             logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
             return mega_moe_supported_by_config
         hf_text_config = vllm_config.model_config.hf_text_config
-        # Latent-MoE models such as Kimi K3 project tokens before dispatch, so
-        # MegaMoe sees the routed-expert width rather than the residual-stream
-        # hidden size.
         hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
         if hidden_size is None:
             hidden_size = getattr(hf_text_config, "hidden_size", None)
@@ -1054,8 +1050,6 @@ class AscendConfig:
         if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
             return False
 
-        # Current main passes moe_intermediate_size to Kimi K3's FusedMoEFactory;
-        # use that same effective operator dimension for capability checks.
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)

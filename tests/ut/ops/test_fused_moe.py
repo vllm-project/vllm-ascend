@@ -2999,7 +2999,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None, alltoall_comm=None):
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -3007,7 +3007,6 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         quant_method=object(),
         return_with_event=False,
         router=None,
-        register_buffer=MagicMock(),
     )
 
     def init_base_runner(
@@ -3042,11 +3041,15 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
 
-    def lookup_comm(kind, config):
+    def get_comm_method(kind, config):
         assert config is moe_config
-        return fused_mc2_comm if kind == MoECommType.FUSED_MC2 else alltoall_comm
+        return fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None
 
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(side_effect=lookup_comm))
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_moe_comm_method",
+        get_comm_method,
+    )
 
     return AscendMoERunner(
         "model.layers.0.mlp",
@@ -3067,24 +3070,6 @@ def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
     )
     assert first.routed_experts.mega_moe_activation_kwargs is first_kwargs
     assert second.routed_experts.mega_moe_activation_kwargs is second_kwargs
-
-
-def test_runner_looks_up_communicators_with_layer_config(monkeypatch):
-    activation_kwargs = {"activation": "situglu", "activation_params": {"beta": 4.0, "linear_beta": 25.0}}
-    expert_ids = object()
-    runner = _stub_moe_runner_init(
-        monkeypatch,
-        fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=activation_kwargs),
-        alltoall_comm=SimpleNamespace(token_dispatcher=SimpleNamespace(expert_ids_per_ep_rank=expert_ids)),
-    )
-    lookup = fused_moe_module.get_moe_comm_method
-    assert lookup.call_count == 2
-    assert lookup.call_args_list[0].args == (MoECommType.FUSED_MC2, runner.moe_config)
-    assert lookup.call_args_list[1].args == (MoECommType.ALLTOALL, runner.moe_config)
-    assert runner.routed_experts.mega_moe_activation_kwargs is activation_kwargs
-    runner.routed_experts.register_buffer.assert_called_once_with(
-        "expert_ids_per_ep_rank", expert_ids, persistent=False
-    )
 
 
 def test_runner_preserves_gate_weight_dtype(monkeypatch):

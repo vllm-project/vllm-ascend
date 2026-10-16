@@ -77,30 +77,6 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config_module.stop()
         self._patch_get_ascend_config_forward_context.stop()
 
-    def test_prepared_megamoe_weights_select_operator_after_flag_reset(self):
-        comm_impl = object.__new__(FusedMC2CommImpl)
-        comm_impl.enable_fused_mc2 = 1
-        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
-        comm_impl._apply_cann_mega_moe = MagicMock(return_value=("output", "expert_tokens"))
-        fused_input = SimpleNamespace(layer=SimpleNamespace(cann_mega_moe_w13_weight_list=["w1"]))
-        quant_method = MagicMock()
-        with (
-            patch(
-                "vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX",
-                SimpleNamespace(use_mega_moe=False, is_decode_only_node=False),
-            ),
-            patch(
-                "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops",
-                return_value=("buffer_op", "mega_moe_op"),
-            ) as load_ops,
-        ):
-            result = comm_impl.fused_experts(fused_input, quant_method)
-
-        load_ops.assert_called_once_with()
-        comm_impl._apply_cann_mega_moe.assert_called_once()
-        self.assertEqual(result.routed_out, "output")
-        self.assertEqual(result.expert_tokens, "expert_tokens")
-
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     def test_mega_moe_symm_buffer_uses_mega_moe_max_tokens(self, mock_warning_once, mock_get_mc2_group):
@@ -228,7 +204,7 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(captured["glu_bias"], 0.0)
         self.assertIsNone(captured["activation_clamp"])
 
-    def test_situ_activation_is_bound_at_initialization(self):
+    def test_situ_activation_is_bound_after_draft_resets_global_flag(self):
         self.mock_ascend_config.enable_fused_mc2 = 1
         self.moe_config.activation = "situ"
         self.moe_config.activation_situ_beta = 4.0
@@ -242,10 +218,22 @@ class TestMoECommMethod(TestBase):
             calls.append((activation, activation_params, kwargs))
             return torch.empty(2, 8), torch.empty(2)
 
+        vllm_config = SimpleNamespace(
+            additional_config={"enable_fused_mc2": 2},
+            parallel_config=SimpleNamespace(enable_expert_parallel=True),
+        )
         with (
             patch.object(FusedMC2CommImpl, "_get_token_dispatcher"),
             patch.object(FusedMC2CommImpl, "_get_prepare_finalize"),
-            patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config", return_value=vllm_config),
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
+            patch("vllm_ascend.ascend_forward_context.importlib.util.find_spec", return_value=object()),
+            patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True),
+            patch("vllm_ascend.ascend_forward_context.get_ep_group", return_value=SimpleNamespace(world_size=64)),
+            patch(
+                "vllm_ascend.ascend_forward_context.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A3),
+            ),
             patch("vllm_ascend.ops.fused_moe.moe_utils.load_cann_mega_moe_ops", return_value=(MagicMock(), op)),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros"),
         ):
