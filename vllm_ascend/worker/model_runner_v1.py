@@ -161,6 +161,7 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_li_c8,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    npu_stream_switch,
     oproj_tp_enable,
     set_potential_max_tokens,
     set_weight_prefetch_method,
@@ -834,6 +835,7 @@ class NPUModelRunner(GPUModelRunner):
         # avoid corner case of cudagraph config mode FULL to enter the first padding logic
         # e.g. 1 request with 1 token when num_spec > 1 (num_spec = 3 and cudagraph_batch_size = 4 for example)
         # will cause tokens are padded but requests are not
+        modified = False
         if (
             num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
@@ -845,6 +847,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
+            modified = True
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
             assert num_reqs == num_reqs_padded
@@ -854,8 +857,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Insert a dummy request instead of change the last value directly
                 query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
+                modified = True
 
-        copy_snapshot_to_gpu(query_start_loc)
+        if modified:
+            copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
 
@@ -880,9 +885,23 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        # OPTIMIZATION: Start copying the block table first.
-        # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit_block_table(num_reqs)
+        # iter53: lazy-init tracking vars for redundant-op skipping
+        if not hasattr(self, "_prev_num_reqs"):
+            self._prev_num_reqs = None
+            self._prev_total_tokens = None
+            self._prev_bt_checksum = None
+
+        # iter53: skip commit_block_table when block table unchanged (c=1)
+        bt = self.input_batch.block_table
+        if num_reqs == 1 and self._prev_num_reqs == 1:
+            first_bt = bt.block_tables[0] if hasattr(bt, "block_tables") else bt
+            current_checksum = int(first_bt.block_table.np[0].sum())
+            if current_checksum != self._prev_bt_checksum:
+                bt.commit_block_table(num_reqs)
+            self._prev_bt_checksum = current_checksum
+        else:
+            bt.commit_block_table(num_reqs)
+            self._prev_bt_checksum = None
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -1087,10 +1106,12 @@ class NPUModelRunner(GPUModelRunner):
             torch.from_numpy(num_scheduled_tokens),
             out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
-        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+        if self._prev_num_reqs is None or num_reqs < self._prev_num_reqs:
+            self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
-        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+        if self._prev_num_reqs is None or num_reqs < self._prev_num_reqs:
+            self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
@@ -1141,10 +1162,12 @@ class NPUModelRunner(GPUModelRunner):
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
-        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        if self._prev_num_reqs is None or self.num_discarded_requests > 0:
+            self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
         
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
-        self.discard_request_mask.copy_to_gpu(num_reqs)
+        if self._prev_num_reqs is None or num_reqs != self._prev_num_reqs:
+            self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -1191,12 +1214,15 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
-        self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+        if self._prev_num_reqs is None or total_num_scheduled_tokens != self._prev_total_tokens:
+            self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
-        self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+        if self._prev_num_reqs is None or total_num_scheduled_tokens != self._prev_total_tokens:
+            self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
-        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        if self._prev_num_reqs is None or num_reqs != self._prev_num_reqs:
+            self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
         pcp_manager = getattr(self, "pcp_manager", None)
@@ -1253,15 +1279,19 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
         else:
-            self.positions[:total_num_scheduled_tokens] = (
-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + self.query_pos.gpu[:total_num_scheduled_tokens]
+            # iter53: positions_np already computed on CPU into the pinned
+            # _positions_cpu_buf.  Copy directly instead of recomputing on
+            # GPU (saves index+cast+add kernel launches).
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self._positions_cpu_buf[:total_num_scheduled_tokens],
+                non_blocking=True,
             )
 
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
-        self.seq_lens[num_reqs:].fill_(0)
+        if self._prev_num_reqs is None or num_reqs < self._prev_num_reqs:
+            self.seq_lens[num_reqs:].fill_(0)
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
@@ -1284,6 +1314,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
+                positions_cpu=positions_np[:total_num_scheduled_tokens],
+                query_start_loc_cpu=self.query_start_loc.np[: num_reqs + 1],
             )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
@@ -1366,6 +1398,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs=base_num_reqs,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
+
+        self._prev_num_reqs = num_reqs
+        self._prev_total_tokens = total_num_scheduled_tokens
 
         return (
             logits_indices,
@@ -2264,6 +2299,13 @@ class NPUModelRunner(GPUModelRunner):
 
             # update global cos, sin
             update_cos_sin(positions)
+            # Run do_mamba_copy_block on global_stream concurrently with
+            # update_cos_sin to overlap DMA copies with the index_select.
+            # The default stream waits for global_stream before graph replay.
+            if self.cache_config.mamba_cache_mode == "align":
+                with npu_stream_switch(global_stream(), enabled=True):
+                    mamba_utils.do_mamba_copy_block(preprocess_bufs)
+                torch.npu.current_stream().wait_stream(global_stream())
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2315,8 +2357,6 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            if self.cache_config.mamba_cache_mode == "align":
-                mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
