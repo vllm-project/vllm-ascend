@@ -814,7 +814,7 @@ def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPa
 
     def recv():
         thread.stop_event.wait(timeout=5)
-        raise zmq.Again()
+        raise zmq.Again()  # type: ignore[attr-defined]
 
     socket.recv_multipart.side_effect = recv
     thread.add_delayed_request("pending", time.time())
