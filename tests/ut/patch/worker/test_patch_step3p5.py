@@ -61,6 +61,7 @@ def step3p5_patch(monkeypatch):
     stub("vllm_ascend.device.device_op", DeviceOperator=Mock())
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_step3p5.py"
     spec = importlib.util.spec_from_file_location("_step3p5_patch_under_test", path)
+    assert spec is not None and spec.loader is not None
     patch = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(patch)
     return upstream, torch, factory
