@@ -171,6 +171,8 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_last_logged = {}
     manager._physical_k_score_steps = defaultdict(int)
     manager._physical_k_seen_narrow_draft = defaultdict(bool)
+    manager._physical_k_single_request_id = None
+    manager._physical_k_score_new_request = False
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
         base = list(original_batches(capture_sizes))
@@ -446,6 +448,17 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         if len(num_tokens_per_req) < min_batch_size:
             self._physical_k_recommendation = None
         else:
+            if len(num_tokens_per_req) == 1:
+                request_id = next(iter(num_tokens_per_req))
+                if request_id != self._physical_k_single_request_id:
+                    # The scheduler resets the width when this new request's
+                    # first output arrives. Price its own confidence on the
+                    # first subsequent full-width draft, not 128 steps later.
+                    self._physical_k_single_request_id = request_id
+                    self._physical_k_score_new_request = True
+            else:
+                self._physical_k_single_request_id = None
+                self._physical_k_score_new_request = False
             bucket = _batch_bucket(len(num_tokens_per_req))
             steps = self._physical_k_score_steps[bucket]
             self._physical_k_score_steps[bucket] = steps + 1
@@ -465,8 +478,15 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                         # than possibly missing it with the periodic timer.
                         probe_due = True
                         self._physical_k_seen_narrow_draft[bucket] = False
-            if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0 or probe_due:
+            new_request_ready = (
+                self._physical_k_score_new_request
+                and len(num_tokens_per_req) == 1
+                and len(draft_tokens.get(self._physical_k_single_request_id, ())) >= max_k
+            )
+            if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0 or probe_due or new_request_ready:
                 self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
+                if self._physical_k_recommendation is not None:
+                    self._physical_k_score_new_request = False
                 if (
                     self._physical_k_recommendation is not None
                     and self._physical_k_recommendation[1] == max_k

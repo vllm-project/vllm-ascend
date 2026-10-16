@@ -110,6 +110,19 @@ class AdaptiveDraftKController:
         self._active_bucket: int | None = None
         self._pending_bucket: int | None = None
         self._pending_bucket_steps = 0
+        self._single_request_id: str | None = None
+
+    def observe_single_request(self, request_id: str) -> None:
+        """Do not carry a previous request's K decision into a new rollout.
+
+        At concurrency one the bucket is reused for every request, although
+        draft acceptance can differ sharply between prompts. Start a new
+        request at the safe full width until its own confidence is priced.
+        """
+
+        if self._single_request_id is not None and self._single_request_id != request_id:
+            self._bucket_states.pop(1, None)
+        self._single_request_id = request_id
 
     @staticmethod
     def _batch_bucket(batch_size: int) -> int:
@@ -314,6 +327,9 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
     recommendation = getattr(model_runner_output, "physical_k_recommendation", None)
     scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
     scheduler_batch_size = len(scheduled)
+    req_ids = getattr(model_runner_output, "req_ids", ())
+    if scheduler_batch_size == 1 and len(req_ids) == 1:
+        controller.observe_single_request(req_ids[0])
     if recommendation is not None:
         recommended_batch_size, physical_k = recommendation
         if (
@@ -336,7 +352,6 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
                 controller.advance_profile(scheduler_batch_size)
             return
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
-    req_ids = getattr(model_runner_output, "req_ids", ())
     if sampled is not None and len(req_ids) == len(sampled):
         controller.observe(
             [len(scheduled.get(req_id, ())) for req_id in req_ids],
