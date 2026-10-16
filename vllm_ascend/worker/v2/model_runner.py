@@ -1200,8 +1200,8 @@ class NPUModelRunner(GPUModelRunner):
         previous_max_num_reqs = self.max_num_reqs
         try:
             self.input_buffers.profile_cpp = True
-            # CPP profiles the target prefill. This also matches MRV1, where the
-            # drafter dummy run is explicitly skipped for profile_cpp.
+            # CPP profiles only the target prefill, so skip the drafter dummy
+            # run while the profiling marker is active.
             self.speculator = None
             self.max_num_reqs = 1
             yield
