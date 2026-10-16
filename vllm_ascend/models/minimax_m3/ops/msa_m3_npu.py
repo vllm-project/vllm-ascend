@@ -167,9 +167,12 @@ def _minimax_m3_index_score(
     """
     # A5 disables the generic custom-op loader, so register the in-tree
     # MiniMax M3 operators lazily after the NPU runtime has been initialized.
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    # Decode calls this per layer per token, so keep the registration one-shot.
+    if not getattr(_minimax_m3_index_score, "_registered", False):
+        import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-    enable_custom_op()
+        enable_custom_op()
+        _minimax_m3_index_score._registered = True
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)

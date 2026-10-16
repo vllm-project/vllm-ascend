@@ -995,9 +995,11 @@ def test_ascendc_index_score_registers_custom_ops_lazily() -> None:
 
     A5 disables the generic custom-op loader, so a bare ``torch.ops`` lookup
     fails unless the extension is imported first. This wiring is what the
-    #17020 revert was waiting for.
+    #17020 revert was waiting for. The registration is guarded one-shot
+    because decode calls this per layer per token.
     """
     source = inspect.getsource(msa_m3_npu_module._minimax_m3_index_score)
+    assert 'getattr(_minimax_m3_index_score, "_registered", False)' in source
     assert "import vllm_ascend.vllm_ascend_C" in source
     assert "enable_custom_op()" in source
 
