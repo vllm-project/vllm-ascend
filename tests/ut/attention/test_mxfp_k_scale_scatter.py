@@ -23,13 +23,14 @@ class TestKScaleScatterDispatch(TestBase):
 
     def test_npu_dispatch_uses_targeted_scatter(self):
         module = ModuleType("vllm_ascend.ops.triton.mxfp_k_scale")
-        module.scatter_k_scales = MagicMock()
+        scatter = MagicMock()
+        vars(module)["scatter_k_scales"] = scatter
         cache = SimpleNamespace(device=SimpleNamespace(type="npu"))
         values = torch.ones((1, 1, 4, 2), dtype=torch.uint8)
         slots = tuple(torch.tensor([1]) for _ in range(3))
         with patch.dict("sys.modules", {module.__name__: module}):
             scatter_mxfp_k_scale_cache(values, cache, slots)
-        module.scatter_k_scales.assert_called_once_with(values, cache, slots)
+        scatter.assert_called_once_with(values, cache, slots)
 
     def test_empty_scatter_does_not_access_cache(self):
         slots = tuple(torch.empty(0, dtype=torch.int64) for _ in range(3))
