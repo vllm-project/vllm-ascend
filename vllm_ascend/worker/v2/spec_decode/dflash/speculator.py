@@ -145,7 +145,36 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         with disable_profiling_chunk_for_draft(self.vllm_config):
-            return super().load_draft_model(target_model, target_attn_layer_names)
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        # Generic DFlash draft models never pass lmhead_tp_capacity to the
+        # head constructor; attach the static bound post-load so the
+        # head-level pad has a fallback for steps without a DP sync.
+        self._lmhead_tp_inject_static_capacity(model)
+        return model
+
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the DFlash draft backbone and publish the draft LM-head
+        capacity before this step's head call. DFlash drafts
+        ``num_query_per_req`` query tokens per request, so the group-agreed
+        request count is ``max query rows // num_query_per_req``."""
+        output = super()._run_model(
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+        )
+        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp, tokens_per_req=self.num_query_per_req)
+        return output
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req

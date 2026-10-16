@@ -666,3 +666,74 @@ def test_eagle_load_draft_model_injects_static_capacity():
 
     assert loaded is draft
     assert draft.lm_head.lmhead_tp_capacity == 16  # 8 * (1 + 1)
+
+
+def test_dflash_run_model_publishes_draft_capacity():
+    """``AscendDFlashSpeculator._run_model`` must publish the draft-head
+    capacity derived from the DP sync: DFlash drafts ``num_query_per_req``
+    query tokens per request, so the group-agreed request count is
+    ``max query rows // num_query_per_req``, and the capacity keeps the
+    mixin-era ``num_speculative_steps + 1`` coefficient."""
+    from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+
+    spec = object.__new__(AscendDFlashSpeculator)
+    spec.num_query_per_req = 4
+    spec.num_speculative_steps = 2
+    spec.model = MagicMock()
+    spec.model.lm_head = MagicMock()
+
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+        return ("hidden", "sample_hidden")
+
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendDFlashSpeculator, "_run_model") as super_run_model,
+    ):
+        super_run_model.side_effect = fake_run_model
+        # query rows = 3 reqs * 4 = 12 -> group max reqs 3; capacity = 3 * (2 + 1) = 9
+        spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 9
+
+    # No sync value this round -> the previous dynamic capacity is dropped
+    # so the static lmhead_tp_capacity stays authoritative.
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendDFlashSpeculator, "_run_model") as super_run_model,
+    ):
+        super_run_model.side_effect = fake_run_model
+        spec._run_model(4, None, None, None)
+    assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
+
+    # Non-divisible query rows fail fast.
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendDFlashSpeculator, "_run_model") as super_run_model,
+        pytest.raises(ValueError, match="tokens_per_req"),
+    ):
+        super_run_model.side_effect = fake_run_model
+        spec._run_model(5, None, None, torch.tensor([5], dtype=torch.int32))
+
+
+def test_dflash_load_draft_model_injects_static_capacity(monkeypatch):
+    """DFlash's load_draft_model must hand the loaded draft model to the
+    static-capacity injection (generic DFlash draft models never pass
+    lmhead_tp_capacity themselves) and return it unchanged."""
+    import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
+    from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+
+    spec = object.__new__(AscendDFlashSpeculator)
+    spec.max_num_reqs = 8
+    spec.num_speculative_steps = 1
+    spec.vllm_config = MagicMock()
+    draft = SimpleNamespace(lm_head=SimpleNamespace())
+    monkeypatch.setattr(dflash_module, "disable_profiling_chunk_for_draft", lambda _: nullcontext())
+
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendDFlashSpeculator, "load_draft_model") as super_load,
+    ):
+        super_load.return_value = draft
+        loaded = spec.load_draft_model(MagicMock(), set())
+
+    assert loaded is draft
+    assert draft.lm_head.lmhead_tp_capacity == 16  # 8 * (1 + 1)
