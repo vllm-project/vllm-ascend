@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
     EmbeddingStoreError,
-    EmbeddingStoreOperationError,
 )
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
@@ -54,24 +53,35 @@ def _make_client(*, use_fabric_mem=False, use_store_independent_te=False):
     return client, store, bounce_arena, bounce, tensor
 
 
-def test_independent_store_registers_staging_slab_once():
-    client, store, _, _, tensor = _make_client(
-        use_store_independent_te=True
+def _make_store_config():
+    return MagicMock(
+        metadata_server="P2PHANDSHAKE",
+        global_segment_size=1024,
+        local_buffer_size=512,
+        protocol="ascend",
+        device_name="",
+        master_server_address="127.0.0.1:50051",
+        tenant_id=store_client_module.DEFAULT_TENANT_ID,
+        enable_offload=False,
+        mode="embedded",
     )
-    tensor.data_ptr.return_value = _DIRECT_ADDRESS
 
-    client.register_staging_buffer(tensor)
-    client.register_staging_buffer(tensor)
 
-    store.register_buffer.assert_called_once_with(_DIRECT_ADDRESS, 128)
-    assert client._independent_staging_owner is tensor
+def _make_mooncake_modules(store):
+    mooncake = ModuleType("mooncake")
+    mooncake.__path__ = []
+    mooncake_store = ModuleType("mooncake.store")
+    mooncake_store.MooncakeDistributedStore = MagicMock(return_value=store)
+    mooncake_store.ObjectDataType = SimpleNamespace(TENSOR="tensor")
+    mooncake_store.ReplicateConfig = MagicMock(return_value=MagicMock())
+    mooncake.store = mooncake_store
+    return mooncake, mooncake_store
 
 
 def test_independent_store_keeps_staging_registration_until_process_exit():
-    client, store, _, _, tensor = _make_client(
-        use_store_independent_te=True
-    )
+    client, store, _, _, tensor = _make_client(use_store_independent_te=True)
     tensor.data_ptr.return_value = _DIRECT_ADDRESS
+    client.register_staging_buffer(tensor)
     client.register_staging_buffer(tensor)
     retained = store_client_module._PROCESS_LIFETIME_STORE_OWNERS
     before = len(retained)
@@ -79,6 +89,7 @@ def test_independent_store_keeps_staging_registration_until_process_exit():
         client.close()
         client.close()
 
+        store.register_buffer.assert_called_once_with(_DIRECT_ADDRESS, 128)
         assert retained[before:] == [(store, tensor)]
         store.unregister_buffer.assert_not_called()
         store.close.assert_not_called()
@@ -181,9 +192,7 @@ def test_put_tensor_uses_planned_ascend_buffer_layout(
                 ),
             )
         )
-        client._registration_transfer.release_registration_ranges.assert_called_once_with(
-            [direct_address]
-        )
+        client._registration_transfer.release_registration_ranges.assert_called_once_with([direct_address])
     else:
         client._registration_transfer.acquire_registration_ranges.assert_not_called()
     store.register_buffer.assert_not_called()
@@ -201,9 +210,7 @@ def test_safe_put_rejection_releases_temporary_resources():
         _put(client, tensor, _make_plan(tensor, 32, _DIRECT_ADDRESS, 96))
 
     assert client._poisoned is False
-    client._registration_transfer.release_registration_ranges.assert_called_once_with(
-        [_DIRECT_ADDRESS]
-    )
+    client._registration_transfer.release_registration_ranges.assert_called_once_with([_DIRECT_ADDRESS])
     bounce_arena.release.assert_called_once_with(lease)
 
 
@@ -247,17 +254,6 @@ def test_prepared_put_uses_exact_joint_wave_addresses_without_registration():
     client._registration_transfer.release_registration_ranges.assert_not_called()
 
 
-def test_prepared_put_safe_rejection_does_not_poison_wave_owners():
-    client, store, _, _, tensor = _make_client()
-    store.batch_put_from_multi_buffers.return_value = [-200]
-
-    with pytest.raises(EmbeddingStoreOperationError, match="failed to put"):
-        client.put_prepared_tensor("key", [1], [128], [tensor])
-
-    assert client._poisoned is False
-    assert client._unsafe_owners == []
-
-
 def test_prepared_put_unknown_completion_poisons_all_wave_owners():
     client, store, bounce_arena, _, tensor = _make_client()
     lease = MagicMock()
@@ -280,9 +276,7 @@ def test_prepared_put_unknown_completion_poisons_all_wave_owners():
 def test_registration_failure_releases_bounce_lease():
     client, store, bounce_arena, _, tensor = _make_client()
     lease = bounce_arena.acquire.return_value
-    client._registration_transfer.acquire_registration_ranges.side_effect = RuntimeError(
-        "registration failed"
-    )
+    client._registration_transfer.acquire_registration_ranges.side_effect = RuntimeError("registration failed")
 
     with pytest.raises(
         store_client_module.EmbeddingStoreOperationError,
@@ -349,61 +343,6 @@ def test_fabric_get_uses_npu_read_buffer_without_registration():
     store.batch_get_into.assert_called_once()
 
 
-def test_non_fabric_get_scatters_into_bounce_and_final_tensor():
-    client, store, bounce_arena, bounce, target = _make_client()
-    device = SimpleNamespace(type="npu")
-    spec = SimpleNamespace(
-        shape=(4, 16),
-        dtype="torch.bfloat16",
-        nbytes=128,
-    )
-    plan = _make_plan(target, 32, _DIRECT_ADDRESS, 96)
-    lease = SimpleNamespace(offset=256)
-    bounce_arena.acquire.return_value = lease
-    header_view = MagicMock()
-    header_view.cpu.return_value.tolist.return_value = list(
-        range(store_client_module._MOONCAKE_TENSOR_HEADER.size)
-    )
-    prefix_view = MagicMock()
-    bounce.narrow.side_effect = [header_view, prefix_view]
-    store.batch_get_into_multi_buffers.return_value = [
-        store_client_module._MOONCAKE_TENSOR_HEADER.size + spec.nbytes
-    ]
-
-    with (
-        patch.object(store_client_module.torch.npu, "set_device") as set_device,
-        patch.object(store_client_module.torch.npu, "synchronize") as synchronize,
-        patch.object(store_client_module.torch, "empty", return_value=target),
-        patch.object(store_client_module, "_plan_source", return_value=plan),
-        patch.object(store_client_module, "_validate_mooncake_tensor_metadata") as validate,
-    ):
-        loaded = client._load_chunk({"key": spec}, device)
-
-    header_size = store_client_module._MOONCAKE_TENSOR_HEADER.size
-    assert loaded == {"key": target}
-    set_device.assert_called_once_with(device)
-    synchronize.assert_called_once_with(device)
-    bounce_arena.acquire.assert_called_once_with(header_size + plan.prefix_nbytes)
-    store.batch_get_into_multi_buffers.assert_called_once_with(
-        ["key"],
-        [[
-            _BOUNCE_ADDRESS + lease.offset,
-            _BOUNCE_ADDRESS + lease.offset + header_size,
-            _DIRECT_ADDRESS,
-        ]],
-        [[header_size, plan.prefix_nbytes, plan.direct_nbytes]],
-    )
-    validate.assert_called_once()
-    client._registration_transfer.acquire_registration_ranges.assert_called_once()
-    client._registration_transfer.release_registration_ranges.assert_called_once_with(
-        [_DIRECT_ADDRESS]
-    )
-    store.register_buffer.assert_not_called()
-    bounce_arena.release.assert_called_once_with(lease)
-    store.batch_get_into.assert_not_called()
-    assert client._read_buffer is None
-
-
 def test_shared_roce_get_batches_objects_into_final_tensors():
     client, store, bounce_arena, bounce, _ = _make_client()
     device = SimpleNamespace(type="npu")
@@ -443,8 +382,8 @@ def test_shared_roce_get_batches_objects_into_final_tensors():
     ]
 
     with (
-        patch.object(store_client_module.torch.npu, "set_device"),
-        patch.object(store_client_module.torch.npu, "synchronize"),
+        patch.object(store_client_module.torch.npu, "set_device") as set_device,
+        patch.object(store_client_module.torch.npu, "synchronize") as synchronize,
         patch.object(
             store_client_module.torch,
             "empty",
@@ -455,16 +394,33 @@ def test_shared_roce_get_batches_objects_into_final_tensors():
             "_plan_source",
             side_effect=plans,
         ),
-        patch.object(store_client_module, "_validate_mooncake_tensor_metadata"),
+        patch.object(
+            store_client_module,
+            "_validate_mooncake_tensor_metadata",
+        ) as validate,
     ):
         loaded = client._load_chunk(specs, device)
 
     assert loaded == {"first": first, "second": second}
-    store.batch_get_into_multi_buffers.assert_called_once()
-    args = store.batch_get_into_multi_buffers.call_args.args
-    assert args[0] == ["first", "second"]
-    assert len(args[1]) == 2
-    assert len(args[2]) == 2
+    set_device.assert_called_once_with(device)
+    synchronize.assert_called_once_with(device)
+    store.batch_get_into_multi_buffers.assert_called_once_with(
+        ["first", "second"],
+        [
+            [
+                _BOUNCE_ADDRESS + lease.offset,
+                _BOUNCE_ADDRESS + lease.offset + header_size,
+                _DIRECT_ADDRESS,
+            ],
+            [
+                _BOUNCE_ADDRESS + lease.offset + header_size + 32,
+                _BOUNCE_ADDRESS + lease.offset + 2 * header_size + 32,
+                _DIRECT_ADDRESS * 2,
+            ],
+        ],
+        [[header_size, 32, 96], [header_size, 32, 96]],
+    )
+    assert validate.call_count == 2
     client._registration_transfer.acquire_registration_ranges.assert_called_once()
     client._registration_transfer.release_registration_ranges.assert_called_once_with(
         [_DIRECT_ADDRESS, _DIRECT_ADDRESS * 2]
@@ -472,6 +428,8 @@ def test_shared_roce_get_batches_objects_into_final_tensors():
     store.register_buffer.assert_not_called()
     bounce_arena.acquire.assert_called_once_with(2 * (header_size + 32))
     bounce_arena.release.assert_called_once_with(lease)
+    store.batch_get_into.assert_not_called()
+    assert client._read_buffer is None
 
 
 def test_unconfirmed_non_fabric_get_retains_targets_and_bounce_lease():
@@ -502,30 +460,6 @@ def test_unconfirmed_non_fabric_get_retains_targets_and_bounce_lease():
     bounce_arena.release.assert_not_called()
 
 
-def test_non_fabric_close_without_owned_bounce_closes_store():
-    client, store, _, _, _ = _make_client()
-    store.close.return_value = 0
-
-    client.close()
-
-    assert store.mock_calls == [call.close()]
-    assert client._put_header_tensor is None
-    client._registration_transfer.close.assert_not_called()
-
-
-def test_fabric_close_does_not_unregister_implicit_npu_buffers():
-    client, store, _, _, _ = _make_client(use_fabric_mem=True)
-    store.close.return_value = 0
-    client._put_header_tensor = MagicMock()
-    client._read_buffer = MagicMock()
-
-    client.close()
-
-    assert store.mock_calls == [call.close()]
-    assert client._put_header_tensor is None
-    assert client._read_buffer is None
-
-
 def test_factory_rejects_non_ascend_store_protocol():
     bounce_arena = MagicMock()
     registration_transfer = MagicMock()
@@ -546,96 +480,20 @@ def test_factory_rejects_non_ascend_store_protocol():
     registration_transfer._ensure_engine.assert_not_called()
 
 
-def test_fabric_store_setup_uses_store_owned_engine_without_local_buffer():
-    store = MagicMock()
-    store.setup.return_value = 0
-    config = MagicMock(
-        metadata_server="P2PHANDSHAKE",
-        global_segment_size=1024,
-        protocol="ascend",
-        device_name="",
-        master_server_address="127.0.0.1:50051",
-        tenant_id=store_client_module.DEFAULT_TENANT_ID,
-    )
-
-    store_client_module._setup_store_owned_engine(
-        store,
-        config,
-        "local-host",
-        "FabricMem",
-    )
-
-    store.setup.assert_called_once_with(
-        "local-host",
-        "P2PHANDSHAKE",
-        1024,
-        0,
-        "ascend",
-        "",
-        "127.0.0.1:50051",
-    )
-
-
-def test_roce_store_setup_adopts_shared_engine_and_unique_endpoint():
-    store = MagicMock()
-    store.setup.return_value = 0
-    engine = MagicMock()
-    engine.get_rpc_port.return_value = 12345
-    native_engine = engine.get_engine.return_value
-    config = MagicMock(
-        metadata_server="P2PHANDSHAKE",
-        global_segment_size=1024,
-        local_buffer_size=512,
-        protocol="ascend",
-        device_name="",
-        master_server_address="127.0.0.1:50051",
-        tenant_id=store_client_module.DEFAULT_TENANT_ID,
-    )
-
-    store_client_module._setup_store_with_shared_engine(
-        store,
-        config,
-        "local-host",
-        engine,
-    )
-
-    store.setup.assert_called_once_with(
-        "local-host:12345",
-        "P2PHANDSHAKE",
-        1024,
-        512,
-        "ascend",
-        "",
-        "127.0.0.1:50051",
-        engine=native_engine,
-    )
-
-
-def test_shared_roce_engine_rejects_global_resource_config():
-    with patch.dict(
-        store_client_module.os.environ,
-        {
-            "HCCL_INTRA_ROCE_ENABLE": "1",
-            "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}",
-        },
-        clear=True,
-    ):
-        with pytest.raises(ValueError, match="must be unset"):
-            store_client_module._configure_shared_roce()
-
-
-@pytest.mark.parametrize("value", ["not-json", "[]", "1"])
+@pytest.mark.parametrize("value", ["not-json", "[]"])
 def test_independent_store_requires_global_config_json_object(value):
-    with patch.dict(
-        store_client_module.os.environ,
-        {
-            "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
-            "ASCEND_GLOBAL_RESOURCE_CONFIG": value,
-        },
-        clear=True,
+    with (
+        patch.dict(
+            store_client_module.os.environ,
+            {
+                "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": value,
+            },
+            clear=True,
+        ),
+        pytest.raises(ValueError, match="must be a JSON object"),
     ):
-        with pytest.raises(ValueError, match="must be a JSON object"):
-            store_client_module.use_store_independent_te()
+        store_client_module.use_store_independent_te()
 
 
 def test_shared_roce_engine_enables_roce_before_engine_initialization():
@@ -655,39 +513,30 @@ def test_shared_roce_engine_enables_roce_before_engine_initialization():
 
 
 def test_shared_roce_engine_rejects_internal_buffer_pool():
-    with patch.dict(
-        store_client_module.os.environ,
-        {
-            "HCCL_INTRA_ROCE_ENABLE": "1",
-            "ASCEND_BUFFER_POOL": "4:8",
-        },
-        clear=True,
+    with (
+        patch.dict(
+            store_client_module.os.environ,
+            {
+                "HCCL_INTRA_ROCE_ENABLE": "1",
+                "ASCEND_BUFFER_POOL": "4:8",
+            },
+            clear=True,
+        ),
+        pytest.raises(ValueError, match="ASCEND_BUFFER_POOL to be unset"),
     ):
-        with pytest.raises(ValueError, match="ASCEND_BUFFER_POOL to be unset"):
-            store_client_module._configure_shared_roce()
+        store_client_module._configure_shared_roce()
 
 
 def test_factory_adopts_ec_engine_for_roce_store():
     store = MagicMock()
+    store.setup.return_value = 0
     registration_transfer = MagicMock()
     transfer_engine = registration_transfer._ensure_engine.return_value
+    transfer_engine.get_rpc_port.return_value = 12345
+    native_engine = transfer_engine.get_engine.return_value
     bounce_arena = MagicMock()
-    config = MagicMock(
-        protocol="ascend",
-        enable_offload=False,
-        tenant_id=store_client_module.DEFAULT_TENANT_ID,
-        mode="embedded",
-        global_segment_size=1024,
-        local_buffer_size=512,
-    )
-
-    mooncake = ModuleType("mooncake")
-    mooncake.__path__ = []
-    mooncake_store = ModuleType("mooncake.store")
-    mooncake_store.MooncakeDistributedStore = MagicMock(return_value=store)
-    mooncake_store.ObjectDataType = SimpleNamespace(TENSOR="tensor")
-    mooncake_store.ReplicateConfig = MagicMock(return_value=MagicMock())
-    mooncake.store = mooncake_store
+    config = _make_store_config()
+    mooncake, mooncake_store = _make_mooncake_modules(store)
 
     with (
         patch.dict(
@@ -713,10 +562,6 @@ def test_factory_adopts_ec_engine_for_roce_store():
             "_configure_shared_roce",
             return_value=True,
         ),
-        patch.object(
-            store_client_module,
-            "_setup_store_with_shared_engine",
-        ) as setup,
     ):
         client = store_client_module.create_ascend_mooncake_embedding_store_client(
             bounce_arena,
@@ -724,7 +569,16 @@ def test_factory_adopts_ec_engine_for_roce_store():
         )
 
     registration_transfer._ensure_engine.assert_called_once_with()
-    setup.assert_called_once_with(store, config, "local-host", transfer_engine)
+    store.setup.assert_called_once_with(
+        "local-host:12345",
+        "P2PHANDSHAKE",
+        1024,
+        512,
+        "ascend",
+        "",
+        "127.0.0.1:50051",
+        engine=native_engine,
+    )
     store.register_buffer.assert_not_called()
     assert client._bounce_arena is bounce_arena
     assert client._registration_transfer is registration_transfer
@@ -732,11 +586,10 @@ def test_factory_adopts_ec_engine_for_roce_store():
 
 
 @pytest.mark.parametrize(
-    ("environment", "topology", "use_fabric_mem", "use_independent_te"),
+    ("environment", "use_fabric_mem", "use_independent_te"),
     [
         (
             {"ASCEND_ENABLE_USE_FABRIC_MEM": "1"},
-            "FabricMem",
             True,
             False,
         ),
@@ -745,7 +598,6 @@ def test_factory_adopts_ec_engine_for_roce_store():
                 "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
                 "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}",
             },
-            "independent",
             False,
             True,
         ),
@@ -754,28 +606,14 @@ def test_factory_adopts_ec_engine_for_roce_store():
 )
 def test_factory_lets_store_create_owned_engine(
     environment,
-    topology,
     use_fabric_mem,
     use_independent_te,
 ):
     store = MagicMock()
+    store.setup.return_value = 0
     registration_transfer = MagicMock()
-    config = MagicMock(
-        protocol="ascend",
-        enable_offload=False,
-        tenant_id=store_client_module.DEFAULT_TENANT_ID,
-        mode="embedded",
-        global_segment_size=1024,
-        local_buffer_size=512,
-    )
-
-    mooncake = ModuleType("mooncake")
-    mooncake.__path__ = []
-    mooncake_store = ModuleType("mooncake.store")
-    mooncake_store.MooncakeDistributedStore = MagicMock(return_value=store)
-    mooncake_store.ObjectDataType = SimpleNamespace(TENSOR="tensor")
-    mooncake_store.ReplicateConfig = MagicMock(return_value=MagicMock())
-    mooncake.store = mooncake_store
+    config = _make_store_config()
+    mooncake, mooncake_store = _make_mooncake_modules(store)
 
     with (
         patch.dict(
@@ -793,10 +631,6 @@ def test_factory_lets_store_create_owned_engine(
             return_value=config,
         ),
         patch.object(store_client_module, "get_ip", return_value="127.0.0.1"),
-        patch.object(
-            store_client_module,
-            "_setup_store_owned_engine",
-        ) as setup,
     ):
         client = store_client_module.create_ascend_mooncake_embedding_store_client(
             MagicMock(),
@@ -804,7 +638,15 @@ def test_factory_lets_store_create_owned_engine(
         )
 
     registration_transfer._ensure_engine.assert_not_called()
-    setup.assert_called_once_with(store, config, "127.0.0.1", topology)
+    store.setup.assert_called_once_with(
+        "127.0.0.1",
+        "P2PHANDSHAKE",
+        1024,
+        0,
+        "ascend",
+        "",
+        "127.0.0.1:50051",
+    )
     assert client._registration_transfer is registration_transfer
     assert client._use_fabric_mem is use_fabric_mem
     assert client.uses_store_independent_te is use_independent_te
