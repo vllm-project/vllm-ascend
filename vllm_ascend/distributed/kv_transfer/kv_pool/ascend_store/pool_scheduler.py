@@ -438,9 +438,21 @@ class KVPoolScheduler:
         readable: list[bool] = []
         for start in range(0, len(all_keys), batch_size):
             batch = all_keys[start : start + batch_size]
-            batch_readable = self.store_scheduler.batch_is_readable(batch)
-            if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
-                raise RuntimeError("Layerwise readability probe returned invalid results")
+            try:
+                batch_readable = self.store_scheduler.batch_is_readable(batch)
+                if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
+                    raise RuntimeError("Layerwise readability probe returned invalid results")
+            except Exception as exc:
+                # Ordinary pooling can recompute a miss. Layer-reuse offload
+                # must preserve its strict failure contract.
+                if self.layerwise_offload:
+                    raise
+                logger.warning(
+                    "Layerwise readability probe failed for %d keys; treating as cache misses: %s",
+                    len(batch),
+                    exc,
+                )
+                batch_readable = [False] * len(batch)
             readable.extend(batch_readable)
 
         block_hits = []
