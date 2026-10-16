@@ -264,6 +264,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+    pre_sampled_tokens: torch.Tensor | None = None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -2395,7 +2396,30 @@ class NPUModelRunner(GPUModelRunner):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                # Greedy fast path: use vocab-parallel argmax (get_top_tokens)
+                # to skip the full-vocab all-gather. Communication drops from
+                # O(batch * vocab_size) to O(batch * 2 * tp_size).
+                sampling_md = self.input_batch.sampling_metadata
+                if (
+                    sampling_md is not None
+                    and sampling_md.all_greedy
+                    and not sampling_md.all_random
+                    and sampling_md.max_num_logprobs is None
+                    and sampling_md.no_penalties
+                    and sampling_md.allowed_token_ids_mask is None
+                    and not sampling_md.bad_words_token_ids
+                    and not sampling_md.logitsprocs.non_argmax_invariant
+                    and spec_decode_metadata is None
+                    and hasattr(self.model, "logits_processor")
+                    and hasattr(self.model, "lm_head")
+                    and hasattr(self.model.logits_processor, "get_top_tokens")
+                ):
+                    pre_sampled_tokens = self.model.logits_processor.get_top_tokens(
+                        self.model.lm_head, sample_hidden_states)
+                    logits = None
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
+                    pre_sampled_tokens = None
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2431,6 +2455,7 @@ class NPUModelRunner(GPUModelRunner):
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
+                pre_sampled_tokens,
             )
             self.kv_connector_output = kv_connector_output
 
@@ -2481,9 +2506,17 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
+            pre_sampled_tokens,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        # If we pre-sampled tokens via vocab-parallel argmax (get_top_tokens),
+        # bypass the full-vocab all-gather + sampler for greedy decode.
+        if pre_sampled_tokens is not None and grammar_output is not None:
+            # Fallback: grammar requires full logits
+            logits = self.model.compute_logits(sample_hidden_states)
+            pre_sampled_tokens = None
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -2495,7 +2528,16 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if pre_sampled_tokens is not None:
+                self.input_batch.update_async_output_token_ids()
+                if lmhead_tp_enable():
+                    pre_sampled_tokens = pre_sampled_tokens[:self.input_batch.num_reqs]
+                sampler_output = SamplerOutput(
+                    sampled_token_ids=pre_sampled_tokens.to(torch.int32).unsqueeze(-1),
+                    logprobs_tensors=None,
+                )
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
