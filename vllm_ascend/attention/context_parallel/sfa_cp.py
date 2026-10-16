@@ -369,9 +369,20 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         num_replicated_tokens = get_pcp_num_replicated_tokens(
             attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
         )
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-            (kv_no_split, cos, sin), slots, num_replicated_tokens
-        )
+        if self.qk_rope_head_dim == 0:
+            # NoPE projects only the actual local tokens, while PCP slots keep
+            # the padded rank stride. Keep KV and slots in the same gather
+            # order: scatter writes do not require causal token order.
+            pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad_tokens < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad_tokens:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
+            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
+        else:
+            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+                (kv_no_split, cos, sin), slots, num_replicated_tokens
+            )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
