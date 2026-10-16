@@ -34,8 +34,9 @@ def token_prompt(tokenizer, text, length):
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_kvpp_combined_features():
+def test_kvpp_combined_features(monkeypatch):
     """Compare KVPP off/on outputs with TP, EP, chunk, prefix and MTP."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     results = []
     for enabled in (False, True):
         with VllmRunner(
