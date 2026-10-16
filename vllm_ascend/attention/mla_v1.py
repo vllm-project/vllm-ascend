@@ -2853,9 +2853,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )
-        # Unused rows still enter V/O projections at the physical query capacity.
-        # Zero them until the operator's unused-row output contract is confirmed.
-        latent.masked_fill_(~flash.token_live[None, :, None], 0)
         return self._v_up_proj(latent)
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):

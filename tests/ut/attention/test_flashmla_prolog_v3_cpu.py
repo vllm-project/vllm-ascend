@@ -107,7 +107,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     slots = torch.tensor([0, 128, -1, -1])
     tokens = slots.numel()
     attention_output = torch.ones(heads, tokens, 512)
-    # Injected unused-row values check this consumer, not the NPU output contract.
+    # Injected padding values exercise valid-row isolation, not the NPU output contract.
     attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
         slots=slots,
@@ -212,13 +212,14 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         # separately by test_flashmla_dcp.py. Here check the handoff to them.
         impl._forward_external_flashmla = Mock(return_value=torch.ones(tokens, heads * 128))
     else:
+        impl.W_UV = torch.eye(impl.kv_lora_rank, impl.v_head_dim).expand(heads, -1, -1).contiguous()
 
-        def project(latent):
-            torch.testing.assert_close(latent[:, :-1], torch.ones_like(latent[:, :-1]))
-            torch.testing.assert_close(latent[:, -1], torch.zeros_like(latent[:, -1]))
-            return latent[..., :128].transpose(0, 1).reshape(tokens, heads * 128)
+        def transpose_batchmatmul(latent, weight, *, perm_y):
+            assert perm_y == (1, 0, 2)
+            return torch.bmm(latent, weight).transpose(0, 1)
 
-        impl._v_up_proj = project
+        scope["torch_npu"].npu_transpose_batchmatmul = transpose_batchmatmul
+        impl._v_up_proj = MethodType(load(MLA, "_v_up_proj", scope, "AscendMLAImpl"), impl)
         external = load(MLA, "_forward_external_flashmla", scope, "AscendMLAImpl")
         impl._forward_external_flashmla = Mock(wraps=MethodType(external, impl))
     impl._forward_decode = Mock(side_effect=AssertionError("external decode must not call FIA"))
@@ -226,12 +227,12 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     assert impl.forward("mla", torch.zeros(tokens, 16), history, metadata, output) is output
     expected = torch.ones_like(output)
     if not dcp:
-        expected[-1].zero_()
         query_arg, cache_arg = flash.adapter.attention.call_args.args
         assert query_arg is flash.query and cache_arg is history
         torch.testing.assert_close(flash.query[..., :512], torch.ones_like(flash.query[..., :512]))
         torch.testing.assert_close(flash.query[..., 512:], torch.full_like(flash.query[..., 512:], 2.0))
-    torch.testing.assert_close(output, expected)
+    # Only valid query results are consumed; padding outputs need not be zero.
+    torch.testing.assert_close(output[flash.token_live], expected[flash.token_live])
     consumed, cache_arg, meta_arg = impl._forward_external_flashmla.call_args.args
     assert cache_arg is history and meta_arg is metadata
     impl._mla_preprocess.assert_not_called()
