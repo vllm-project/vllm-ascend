@@ -209,6 +209,7 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
 @pytest.mark.parametrize("cache_factory", [_make_component_major_strided_cache, _make_token_fused_cache])
 def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monkeypatch, cache_factory):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_flashmla = False
     impl.use_mla_rope = True
     impl.fa_quant_layer = False
     impl.num_kv_heads = 1
@@ -256,6 +257,7 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
     assert len(calls) == 1
     legacy.assert_not_called()
     assert calls[0]["cache_mode"] == "PA_BSND"
+    assert calls[0]["tile_size"] == cache[0].shape[1]
     assert calls[0]["kv_cache"] is cache[0]
     assert calls[0]["kr_cache"] is cache[1]
     assert calls[0]["cache_index"].dtype is torch.int64

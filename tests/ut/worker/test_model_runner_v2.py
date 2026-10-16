@@ -46,6 +46,7 @@ def _make_runner(need_timing: bool = True):
     runner.debugger = None
     runner._debugger_started = False
     runner.attn_groups = []
+    runner.flashmla_executor = None
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
@@ -733,6 +734,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.v_head_dim = 1
         impl.enable_mlapo = False
         impl.fa_quant_layer = False
+        impl.use_flashmla = False
         impl.pcp_enabled = False
         impl.dcp_enabled = False
         impl.supports_prolog_v3_writer = lambda: True

@@ -99,8 +99,9 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     the legacy separate NoPE/RoPE protocol.
 
     Without PD, local layout selection is unrestricted. With supported PD,
-    both endpoints must use component-major pages because raw transfers carry
-    no metadata distinguishing them from token-fused FlashMLA pages.
+    both endpoints must agree on the page layout: raw transfers carry no
+    metadata distinguishing component-major from token-fused FlashMLA pages.
+    This helper identifies connector support, not cross-endpoint agreement.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
@@ -126,9 +127,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
-    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
-    # caches without query heads use the one-latent-head cache contract.
-    num_heads: int = 1
+    # Per-rank query heads used only by FlashMLA layout selection. Keep the
+    # inherited physical KV geometry independent of the query-head count.
+    num_query_heads: int = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -179,7 +180,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ascend_layouts = {
             (
                 spec.scale_dim,
-                spec.num_heads,
+                spec.num_query_heads,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -202,7 +203,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
-            num_heads=first_spec.num_heads,
+            num_query_heads=first_spec.num_query_heads,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
