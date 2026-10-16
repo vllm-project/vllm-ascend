@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -84,6 +85,7 @@ from vllm.v1.outputs import (
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -185,7 +187,11 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
+    _get_min_tokens_spec_mask_indices,
+    _min_tokens_spec_steady_structure,
+)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -303,6 +309,85 @@ def _vocab_parallel_argmax_eos_masked(
     # [batch, 2] -> [batch, 2 * tp_size]
     gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
     # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
+    gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
+    max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+    top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
+    return top_tokens.squeeze(-1).to(torch.int64)
+
+
+def _spec_greedy_shard_argmax(
+    lm_head,
+    logits_processor,
+    hidden_states: torch.Tensor,
+    target_logits_indices: torch.Tensor,
+    bonus_logits_indices: torch.Tensor,
+    mask_indices,
+) -> torch.Tensor:
+    """Vocab-parallel greedy argmax for spec-decode verification rows.
+
+    Drop-in replacement for materializing the full-vocab target logits in the
+    all-greedy MTP/spec path: the lm_head shard is computed locally and only
+    (value, index) pairs are all-gathered, so communication drops from
+    O(rows * vocab_size) to O(rows * 2 * tp_size). The steady-state MinTokens
+    EOS mask is applied on the local shard before the argmax, mirroring
+    ``_apply_min_tokens_spec_cached`` semantics (target draft rows and the
+    per-request bonus row are both masked).
+
+    Args:
+        hidden_states: selected rows for sampling (logits_indices space),
+            i.e. target draft rows plus one bonus row per request.
+        target_logits_indices / bonus_logits_indices: row indices into
+            ``hidden_states`` (device tensors from SpecDecodeMetadata).
+        mask_indices: (rows_t, cols_t, bonus_rows_t, bonus_cols_t) from
+            ``_get_min_tokens_spec_mask_indices`` (shard-local columns) or
+            None.
+
+    Returns:
+        Global argmax token ids, one per selected row (int64).
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+
+    logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=None)
+    soft_cap = getattr(logits_processor, "soft_cap", None)
+    scale = getattr(logits_processor, "scale", 1.0)
+    if soft_cap is not None:
+        logits = torch.tanh(logits / soft_cap) * soft_cap
+    if scale != 1.0:
+        logits = logits * scale
+
+    # Mask out padding entries beyond org_vocab_size on this shard.
+    num_pad = lm_head.shard_indices.num_org_vocab_padding
+    if num_pad > 0:
+        logits[..., -num_pad:] = -float("inf")
+
+    # Steady-state MinTokens EOS suppression on the local shard. The cached
+    # indices are pre-filtered to this shard at build time (host side), so the
+    # per-step work is pure integer advanced indexing — no boolean masks and
+    # no host-device syncs (masked_select/NonZero synchronizes on Ascend and
+    # was measured to cost several ms per step in the async pipeline).
+    if mask_indices is not None:
+        rows_t, cols_t, bonus_rows_t, bonus_cols_t = mask_indices
+        if rows_t.numel() > 0:
+            logits[
+                target_logits_indices.index_select(0, rows_t).to(torch.int64),
+                cols_t,
+            ] = -float("inf")
+        if bonus_rows_t.numel() > 0:
+            logits[
+                bonus_logits_indices.index_select(0, bonus_rows_t).to(torch.int64),
+                bonus_cols_t,
+            ] = -float("inf")
+
+    local_max_vals, local_max_indices = logits.max(dim=-1)
+
+    vocab_start = lm_head.shard_indices.org_vocab_start_index
+    global_indices = local_max_indices + vocab_start
+
+    if tp_size == 1:
+        return global_indices
+
+    local_pair = torch.stack([local_max_vals.float(), global_indices.float()], dim=-1)
+    gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
     gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
     max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
     top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
@@ -2499,6 +2584,70 @@ class NPUModelRunner(GPUModelRunner):
                         _logits_model.lm_head, sample_hidden_states,
                         _logits_model.logits_processor, _eos_mask)
                     logits = None
+                elif (
+                    os.environ.get("VLLM_ASCEND_DISABLE_SPEC_GREEDY_FAST", "0") != "1"
+                    and sampling_md is not None
+                    and sampling_md.all_greedy
+                    and not sampling_md.all_random
+                    and sampling_md.max_num_logprobs is None
+                    and sampling_md.no_penalties
+                    and sampling_md.allowed_token_ids_mask is None
+                    and not sampling_md.bad_words_token_ids
+                    and spec_decode_metadata is not None
+                    and hasattr(_logits_model, "logits_processor")
+                    and hasattr(_logits_model, "lm_head")
+                ):
+                    # Spec-decode greedy fast path: same idea as above, but the
+                    # argmax covers all selected rows (target draft rows + bonus
+                    # rows) and the rejection sampler consumes the pre-sampled
+                    # ids directly, skipping the full-vocab logits all-gather,
+                    # the fp32 materialization and the clone.
+                    pre_sampled_tokens = None
+                    _spec_procs = sampling_md.logitsprocs.non_argmax_invariant
+                    _spec_ok = all(
+                        isinstance(p, MinTokensLogitsProcessor) for p in _spec_procs
+                    ) and not sampling_md.logitsprocs.argmax_invariant
+                    _min_tokens_proc = next(
+                        (p for p in _spec_procs
+                         if isinstance(p, MinTokensLogitsProcessor)), None)
+                    _mask_indices = None
+                    if _spec_ok and _min_tokens_proc is not None:
+                        _structure = _min_tokens_spec_steady_structure(
+                            _min_tokens_proc, list(spec_decode_metadata.num_draft_tokens))
+                        if _structure is None:
+                            # Tail of min_tokens: mask changes every step,
+                            # fall back to the full logits path.
+                            _spec_ok = False
+                        elif _structure:
+                            _shard = _logits_model.lm_head.shard_indices
+                            _mask_indices = _get_min_tokens_spec_mask_indices(
+                                _min_tokens_proc,
+                                list(spec_decode_metadata.num_draft_tokens),
+                                _structure,
+                                sample_hidden_states.device,
+                                shard_range=(
+                                    _shard.org_vocab_start_index,
+                                    _shard.org_vocab_end_index,
+                                ),
+                            )
+                    if _spec_ok:
+                        logger.info_once(
+                            "[model_runner] spec-decode greedy fast path enabled "
+                            "(vocab-parallel argmax, min_tokens mask %s)",
+                            "on" if _mask_indices is not None else "off",
+                        )
+                        pre_sampled_tokens = _spec_greedy_shard_argmax(
+                            _logits_model.lm_head,
+                            _logits_model.logits_processor,
+                            sample_hidden_states,
+                            spec_decode_metadata.target_logits_indices,
+                            spec_decode_metadata.bonus_logits_indices,
+                            _mask_indices,
+                        )
+                    if pre_sampled_tokens is not None:
+                        logits = None
+                    else:
+                        logits = self.model.compute_logits(sample_hidden_states)
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     pre_sampled_tokens = None
@@ -2610,12 +2759,27 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            if pre_sampled_tokens is not None:
+            if pre_sampled_tokens is not None and spec_decode_metadata is not None:
+                # Spec-decode greedy fast path: pre_sampled_tokens carries the
+                # vocab-parallel argmax ids for all selected rows (target draft
+                # rows + bonus rows). Run rejection sampling directly on them,
+                # skipping the full-vocab logits all-gather + fp32 materialization.
+                self.input_batch.update_async_output_token_ids()
+                sampler_output = self.rejection_sampler.forward_greedy_presampled(
+                    spec_decode_metadata,
+                    pre_sampled_tokens,
+                    self.input_batch.sampling_metadata,
+                )
+            elif pre_sampled_tokens is not None:
                 self.input_batch.update_async_output_token_ids()
                 if lmhead_tp_enable():
                     pre_sampled_tokens = pre_sampled_tokens[:self.input_batch.num_reqs]
                 sampler_output = SamplerOutput(
-                    sampled_token_ids=pre_sampled_tokens.unsqueeze(-1) if pre_sampled_tokens.dtype == torch.int32 else pre_sampled_tokens.to(torch.int32).unsqueeze(-1),
+                    sampled_token_ids=(
+                        pre_sampled_tokens.unsqueeze(-1)
+                        if pre_sampled_tokens.dtype == torch.int32
+                        else pre_sampled_tokens.to(torch.int32).unsqueeze(-1)
+                    ),
                     logprobs_tensors=None,
                 )
             else:
