@@ -16,7 +16,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import Any
+
+import torch
 from vllm.config import VllmConfig, replace
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
@@ -40,3 +44,39 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
             enable_eplb=False,
         )
         return draft_vllm_config
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        """Inject the lmhead-TP static row capacity post-load: EAGLE draft
+        models are generic model files that never pass ``lmhead_tp_capacity``
+        to the head constructor themselves."""
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        self._lmhead_tp_inject_static_capacity(model)
+        return model
+
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the EAGLE draft backbone and publish the draft LM-head
+        capacity before this step's head call. EAGLE drafts one query token
+        per request per step, so the synced max query rows are the
+        group-agreed request count (``tokens_per_req=1``)."""
+        output = super()._run_model(
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+        )
+        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp, tokens_per_req=1)
+        return output

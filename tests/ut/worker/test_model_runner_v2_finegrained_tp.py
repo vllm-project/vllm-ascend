@@ -1,4 +1,4 @@
-"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
+﻿"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
 contract of sample()/_dummy_run (lmhead TP), guard the copied dispatch tail
@@ -170,7 +170,7 @@ def _canary_tail_calls(parent):
 def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     """Main2main canary: with lmhead TP on, the override must drive the
     dispatch tail (grammar bitmask / sampler / rejection sampler) exactly like
-    upstream GPUModelRunner.sample — same calls, same order, same arguments
+    upstream GPUModelRunner.sample 鈥?same calls, same order, same arguments
     (upstream's logits are bitwise identical to the override's trimmed
     logits). If upstream sample() gains a dispatch branch or changes its
     calling contract, this comparison fails and the copied tail in the
@@ -515,18 +515,18 @@ def test_sample_uses_step_capacity():
     torch.testing.assert_close(compute_input[3:], hidden_states[0].expand(12 - 3, 4))
 
 
-def _patch_super_run_model(spec_cls):
-    """Patch the nearest MRO ancestor that defines ``_run_model``.
+def _patch_super_method(spec_cls, method_name):
+    """Patch the nearest MRO ancestor that defines ``method_name``.
 
-    Families resolve ``super()._run_model`` differently (EAGLE to the
-    Ascend autoregressive base, DSpark/DFlash to their upstream parents),
-    and ``__bases__[0]`` can be the sampling mixin, which never defines
-    ``_run_model`` — patching it would raise AttributeError.
+    Families resolve ``super()`` differently (EAGLE to the Ascend
+    autoregressive base, DSpark/DFlash to their upstream parents), and
+    ``__bases__[0]`` can be the sampling mixin, which never defines these
+    methods 鈥?patching it would raise AttributeError.
     """
     for cls in spec_cls.__mro__[1:]:
-        if "_run_model" in cls.__dict__:
-            return patch.object(cls, "_run_model")
-    raise AssertionError(f"no ancestor of {spec_cls.__name__} defines _run_model")
+        if method_name in cls.__dict__:
+            return patch.object(cls, method_name)
+    raise AssertionError(f"no ancestor of {spec_cls.__name__} defines {method_name}")
 
 
 def test_dspark_run_model_publishes_draft_capacity():
@@ -546,7 +546,7 @@ def test_dspark_run_model_publishes_draft_capacity():
     def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
         return ("hidden", "sample_hidden")
 
-    with _patch_super_run_model(AscendDSparkSpeculator) as super_run_model:
+    with _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model:
         super_run_model.side_effect = fake_run_model
         # query rows = 3 reqs * 4 = 12; draft capacity = 3 * 4 = 12
         spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
@@ -554,15 +554,115 @@ def test_dspark_run_model_publishes_draft_capacity():
 
     # No sync value this round -> the previous round's dynamic capacity is
     # dropped so the static lmhead_tp_capacity stays authoritative.
-    with _patch_super_run_model(AscendDSparkSpeculator) as super_run_model:
+    with _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model:
         super_run_model.side_effect = fake_run_model
         spec._run_model(4, None, None, None)
     assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
 
     # Non-divisible query rows fail fast.
     with (
-        _patch_super_run_model(AscendDSparkSpeculator) as super_run_model,
+        _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model,
         pytest.raises(ValueError, match="num_query_per_req"),
     ):
         super_run_model.side_effect = fake_run_model
         spec._run_model(5, None, None, torch.tensor([5], dtype=torch.int32))
+
+
+def test_lmhead_tp_inject_static_capacity():
+    """``_lmhead_tp_inject_static_capacity`` must attach the config-derived
+    static bound (``max_num_reqs * (num_speculative_steps + 1)`` — the
+    mixin-era coefficient) to a draft model's lm_head, gated on lmhead TP:
+    generic draft families (EAGLE, DFlash) build their heads in shared model
+    files that know nothing about the capacity kwarg."""
+    spec = _make_speculator(max_num_reqs=8, num_speculative_steps=1)  # static 16
+    model = SimpleNamespace(lm_head=SimpleNamespace())
+
+    with _spec_lmhead(True):
+        spec._lmhead_tp_inject_static_capacity(model)
+    assert model.lm_head.lmhead_tp_capacity == 16
+
+    # Feature off: nothing attached — the head keeps its passthrough behavior.
+    model_off = SimpleNamespace(lm_head=SimpleNamespace())
+    with _spec_lmhead(False):
+        spec._lmhead_tp_inject_static_capacity(model_off)
+    assert not hasattr(model_off.lm_head, "lmhead_tp_capacity")
+
+
+def test_lmhead_tp_inject_static_capacity_requires_lm_head():
+    """A draft model without an lm_head must fail loudly at load time, not
+    silently run unaligned collectives."""
+    spec = _make_speculator()
+    with (
+        _spec_lmhead(True),
+        pytest.raises(ValueError, match="lm_head"),
+    ):
+        spec._lmhead_tp_inject_static_capacity(SimpleNamespace())
+
+
+def test_lmhead_tp_publish_draft_capacity_gated_off():
+    """The per-step publish is gated on lmhead TP: with the feature off it
+    must not touch the head (and must not pay the DP-sync ``.item()``)."""
+    spec = _make_speculator(max_num_reqs=8, num_speculative_steps=1)
+    spec.model = SimpleNamespace(lm_head=SimpleNamespace())
+
+    with _spec_lmhead(False):
+        spec._lmhead_tp_publish_draft_capacity(torch.tensor([3, 2], dtype=torch.int32))
+    assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
+
+
+def test_eagle_run_model_publishes_draft_capacity():
+    """``AscendEagleSpeculator._run_model`` must publish the draft-head
+    capacity derived from the DP sync: EAGLE drafts one query token per
+    request per step (tokens_per_req=1), so the synced max query rows are
+    the group-agreed request count, and the capacity keeps the mixin-era
+    ``num_speculative_steps + 1`` coefficient."""
+    from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+
+    spec = object.__new__(AscendEagleSpeculator)
+    spec.num_speculative_steps = 2
+    spec.model = MagicMock()
+    spec.model.lm_head = MagicMock()
+
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+        return ("hidden", "sample_hidden")
+
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendEagleSpeculator, "_run_model") as super_run_model,
+    ):
+        super_run_model.side_effect = fake_run_model
+        # one query token per req: group max reqs = 3; capacity = 3 * (2 + 1) = 9
+        spec._run_model(3, None, None, torch.tensor([3, 2], dtype=torch.int32))
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 9
+
+    # No sync value this round -> the previous dynamic capacity is dropped
+    # so the static lmhead_tp_capacity stays authoritative.
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendEagleSpeculator, "_run_model") as super_run_model,
+    ):
+        super_run_model.side_effect = fake_run_model
+        spec._run_model(3, None, None, None)
+    assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
+
+
+def test_eagle_load_draft_model_injects_static_capacity():
+    """EAGLE's load_draft_model must hand the loaded draft model to the
+    static-capacity injection (generic EAGLE model files never pass
+    lmhead_tp_capacity themselves) and return it unchanged."""
+    from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+
+    spec = object.__new__(AscendEagleSpeculator)
+    spec.max_num_reqs = 8
+    spec.num_speculative_steps = 1
+    draft = SimpleNamespace(lm_head=SimpleNamespace())
+
+    with (
+        _spec_lmhead(True),
+        _patch_super_method(AscendEagleSpeculator, "load_draft_model") as super_load,
+    ):
+        super_load.return_value = draft
+        loaded = spec.load_draft_model(MagicMock(), set())
+
+    assert loaded is draft
+    assert draft.lm_head.lmhead_tp_capacity == 16  # 8 * (1 + 1)
