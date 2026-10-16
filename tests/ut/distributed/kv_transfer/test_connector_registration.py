@@ -114,12 +114,19 @@ def test_alias_helper_registers_alias_when_names_differ(
 
 
 def test_d2rh_connector_class_name_matches_its_config_name() -> None:
-    """MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
+    """The D2RH connector's class must carry its config name.
+
+    MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
     that key through KVConnectorFactory, which is indexed by the registered
-    config name. The D2RH connector's class must therefore carry the config
-    name; the historical ``MooncakeConnector`` name resolves to the upstream
-    registry entry and reconstructs an incompatible stats schema (KeyError on
-    every stats interval under MultiConnector).
+    config name. The D2RH connector extends the V1 ``mooncake_connector``
+    ``MooncakeConnector``, which does not override ``get_kv_connector_stats``,
+    so it emits no stats today: this is a latent hazard, not an active crash.
+    The historical ``MooncakeConnector`` class name nevertheless collides with
+    the upstream ``MooncakeConnector`` registration, so a future stats key
+    would resolve to a different class with an unrelated schema. Keeping the
+    class name equal to the config name removes that ambiguity;
+    ``MooncakeConnector`` / ``MooncakeD2RHConnector`` stay as back-compat
+    aliases.
     """
     from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh
 
@@ -253,8 +260,8 @@ def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatc
     """The no-alias decision for the stats-silent PreemptOffloadConnector is
     comment-only in the source; pin the negative case so a class-name key
     cannot appear in the registry without someone updating the comments.
-    (AscendSimpleCPUOffloadConnector now carries a class-name alias: upstream
-    vLLM exposes SimpleCPU offload metrics, vllm-project/vllm#41790.)
+    (AscendSimpleCPUOffloadConnector now carries a class-name alias: from
+    upstream v0.31.0 the upstream SimpleCPUOffloadConnector emits stats.)
     """
     from vllm_ascend.distributed.kv_transfer import register_connector
 
@@ -267,8 +274,8 @@ def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatc
 def test_simple_cpu_offload_connector_carries_class_name_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upstream vLLM now exposes SimpleCPU offload metrics
-    (vllm-project/vllm#41790), so AscendSimpleCPUOffloadConnector emits stats
+    """From upstream v0.31.0 the upstream SimpleCPUOffloadConnector overrides
+    ``get_kv_connector_stats``, so AscendSimpleCPUOffloadConnector emits stats
     and must carry a class-name alias or the #16932 crash returns. Pin the
     positive case: both the config name and the class name resolve to the
     Ascend class.
@@ -290,9 +297,9 @@ def test_no_alias_connectors_inherit_base_stats_default() -> None:
     pin the premise so a future get_kv_connector_stats override is caught here
     instead of reviving the #16932 crash.
 
-    AscendSimpleCPUOffloadConnector is no longer checked: upstream vLLM now
-    exposes SimpleCPU offload metrics (vllm-project/vllm#41790), so it emits
-    stats and carries a class-name alias (see register_connector).
+    AscendSimpleCPUOffloadConnector is no longer checked: from upstream
+    v0.31.0 the upstream SimpleCPUOffloadConnector emits stats, so it carries
+    a class-name alias (see register_connector).
     """
     from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (
         PreemptOffloadConnectorV1,
