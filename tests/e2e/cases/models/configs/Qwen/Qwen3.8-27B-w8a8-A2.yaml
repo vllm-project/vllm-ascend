@@ -8,6 +8,7 @@ _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
   VLLM_USE_MODELSCOPE: "true"
+  VLLM_USE_V2_MODEL_RUNNER: "0"
   SERVER_PORT: "DEFAULT_PORT"
 test_cases:
   - name: "Qwen3.8-27B-w8a8-in128k-TPOT50-prefix90-24-6"
