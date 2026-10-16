@@ -54,6 +54,21 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertEqual(result["weight"].shape, (output_size, input_size))
             self.assertEqual(result["weight"].dtype, torch.float8_e4m3fn)
 
+    def test_pergroup_allocation_uses_tp_group_offset(self):
+        self.scheme.group_size = 32
+        layer = RowParallelLinear.__new__(RowParallelLinear)
+        nn.Module.__init__(layer)
+        for rank in range(4):
+            layer.tp_rank = rank
+            for width in (1076, 1088):
+                with self.subTest(rank=rank, width=width):
+                    start = rank * width
+                    expected_groups = (start + width + 31) // 32 - start // 32
+                    params = self.scheme.get_pergroup_param_for_layer(layer, width, 8, torch.bfloat16, "row")
+                    self.assertEqual(params["weight_scale"].shape, (8, expected_groups))
+        params = self.scheme.get_pergroup_param_for_layer(nn.Module(), 1076, 8, torch.bfloat16, "others")
+        self.assertEqual(params["weight_scale"].shape, (8, 34))
+
     def test_get_pergroup_param_group_size_variations(self):
         group_sizes = [16, 32, 64, 128]
         for gs in group_sizes:
