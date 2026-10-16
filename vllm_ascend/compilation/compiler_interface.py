@@ -127,6 +127,12 @@ def _configure_backend(
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+        if ascend_compilation_config.enable_super_kernel:
+            logger.info_once(
+                "enable_super_kernel is enabled, super kernel will be used to fuse small operators.",
+                scope="global",
+            )
+            options["super_kernel_optimize"] = True
         process_kwargs_options(config, {"options": options})
     else:
         # torchair (reduce-overhead): use nested config structure directly.
