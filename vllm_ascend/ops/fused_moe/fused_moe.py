@@ -40,6 +40,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -133,6 +134,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
+        # Submit routed work before the complete shared forward for latent
+        # W4A8 sequence-parallel shared experts, as in release/v0.27.1rc.
+        self._release_shared_schedule = (
+            self.quant_type is QuantType.W4A8
+            and self._can_overlap_sp_shared_with(self.routed_input_transform)
+            and self._can_overlap_sp_shared_with(self.routed_output_transform)
+        )
+
         setup_moe_comm_method(self.moe_config)
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
@@ -159,17 +168,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
-        Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
-        including the runtime-aware reduction hooks (#16550), is inherited
-        unchanged.
-
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
+        Latent W4A8 SP shared experts use a plain tensor Add after the
+        routed-output transform. Other paths retain the foreach combine.
+        The runtime-aware reduction hooks (#16550) are unchanged.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -232,7 +233,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            if getattr(self, "_release_shared_schedule", False):
+                result = shared_output + fused_output
+            else:
+                result = torch._foreach_add([shared_output], [fused_output])[0]
         else:
             result = fused_output
 
@@ -442,6 +446,20 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         torch.npu.Event,
         SubmittedSharedExpertGateUp | None,
     ]:
+        if getattr(self, "_release_shared_schedule", False):
+            # The shared stream observes these events when its complete
+            # forward is submitted after routed_experts.forward_impl.
+            if self.is_internal_router:
+                router_input = self._prepare_router_input(shared_hidden_states, router_logits)
+                shared_input_ready = torch.npu.current_stream().record_event()
+                router_logits = self._apply_router_linear(router_input)
+                del router_input
+                router_output_ready = torch.npu.current_stream().record_event()
+            else:
+                shared_input_ready = torch.npu.current_stream().record_event()
+                router_output_ready = shared_input_ready
+            return router_logits, shared_input_ready, router_output_ready, None
+
         if self.is_internal_router:
             router_input = self._prepare_router_input(shared_hidden_states, router_logits)
             # Release shared Vector/AIV preparation after any external FP32
