@@ -136,6 +136,17 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
         """
         return {}
 
+    def get_pergroup_param_for_layer(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Allocate per-group parameters with optional layer-specific context."""
+        return self.get_pergroup_param(input_size, output_size, params_dtype, layer_type=layer_type)
+
     def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
