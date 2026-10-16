@@ -564,7 +564,14 @@ class AscendFusedMoE(FusedMoE):
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
+        # Switch to the shared-experts side stream only when overlap is enabled
+        # AND we are not capturing an NPU graph. During capture the side stream is
+        # not registered with the graph pool, so npu_stream_switch(enabled=True)
+        # would route shared-expert computation onto an unregistered stream and
+        # crash capture with aclrtAllocatorGetByStream. Capturing falls back to
+        # the default stream (the golden serial path).
+        overlap_enabled = self.multistream_overlap_shared_expert and not get_forward_context().capturing
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=overlap_enabled):
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
                 self._shared_experts.down_proj, "weight_scale"
@@ -572,7 +579,7 @@ class AscendFusedMoE(FusedMoE):
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
@@ -620,7 +627,7 @@ class AscendFusedMoE(FusedMoE):
             elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                     hidden_states, dst_type=torch.float8_e4m3fn
                 )
@@ -644,7 +651,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
@@ -654,23 +661,37 @@ class AscendFusedMoE(FusedMoE):
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts_part2(hidden_states, part1_out)
 
-        # iter27a: When overlap is enabled, keep the AllReduce on the side stream
-        # so it overlaps with routed expert computation on the default stream.
-        if self.multistream_overlap_shared_expert:
-            moe_comm_type = _EXTRA_CTX.moe_comm_type
-            if (
-                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-                and not shared_expert_dp_enabled()
-            ):
+        # Make sure the default stream waits for the shared experts stream to
+        # finish.
+        # When overlapping shared experts on the side stream, keep the AllReduce
+        # on the side stream so it overlaps with routed expert computation on
+        # the default stream. This side-stream path is **not** capture-safe:
+        # during NPU graph capture the side stream is not registered with the
+        # graph pool, and a side-stream AllReduce / wait_stream raises
+        # `aclrtAllocatorGetByStream failed` and `rtStreamWaitEvent` mismatches.
+        # So during capture we fall back to the golden serial path (AllReduce on
+        # the default stream), which is what gets recorded into the graph. The
+        # overlap benefit only applies at replay time.
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        need_all_reduce = (
+            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+            and not shared_expert_dp_enabled()
+        )
+        if self.multistream_overlap_shared_expert and not get_forward_context().capturing:
+            # Overlap path (replay only): AllReduce on the side stream.
+            if need_all_reduce:
                 with torch.npu.stream(shared_experts_calculation_stream()):
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
-        else:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
-            moe_comm_type = _EXTRA_CTX.moe_comm_type
-            if (
-                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-                and not shared_expert_dp_enabled()
-            ):
+        else:
+            # Serial path (capture + disabled): AllReduce on the default stream.
+            # NOTE: do NOT touch shared_experts_calculation_stream() here — even a
+            # wait_stream() would record_event() on the unregistered side stream
+            # and crash capture with aclrtAllocatorGetByStream. During capture the
+            # shared-expert computation already ran on the default stream (the
+            # npu_stream_switch above was disabled), so no cross-stream sync is
+            # needed; just do the AllReduce on the default stream.
+            if need_all_reduce:
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out
 
@@ -715,7 +736,17 @@ class AscendFusedMoE(FusedMoE):
             shared_out = fc3_context.shared_out
             return shared_out, routed_out
 
-        if self.multistream_overlap_shared_expert:
+        if self.multistream_overlap_shared_expert and not get_forward_context().capturing:
+            # Overlap path (replay only): run shared experts first on the
+            # side stream, then routed experts on the default stream so they
+            # overlap. skip_dispatch_combine_events nulls out the dispatch/
+            # combine/gmm2 event records because the routed-expert side no longer
+            # needs to synchronize with the shared-expert side via those events.
+            # This reordering + side-stream switch is not capture-safe (the side
+            # stream is not registered with the NPU graph pool during capture,
+            # raising aclrtAllocatorGetByStream / rtStreamWaitEvent errors), so it
+            # is only taken at replay time; during capture we fall through to the
+            # serial path below, which is what gets recorded into the graph.
             _EXTRA_CTX.skip_dispatch_combine_events = True
             shared_out = self._forward_shared_experts(
                 hidden_states,
@@ -737,6 +768,8 @@ class AscendFusedMoE(FusedMoE):
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
             _EXTRA_CTX.skip_dispatch_combine_events = False
         else:
+            # Serial path (capture + disabled): routed experts first, then shared
+            # experts on the default stream. This is the capture-safe golden path.
             fused_moe_results = self.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
