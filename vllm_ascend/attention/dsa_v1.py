@@ -717,6 +717,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._init_hadamard(layer_names)
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
+        # [STARTPOS-DRAFT-FIX] Resident sibling of ``start_pos_prefill`` for the
+        # DSpark draft metadata path.  ``build_req_metadata_for_drafting`` used to
+        # hand ``AscendDSAReqMetadata.start_pos`` a tensor materialised from
+        # scratch on every step (a fresh ``seq_lens - seq_lens_q``), so
+        # the address baked into the draft ACL graph was only *sometimes* the
+        # block the caching allocator handed back on replay (shadow-eager 7/7 vs
+        # 0/7).  Same contract as ``start_pos_prefill``: one persistent buffer,
+        # refreshed in place once per step, and only a slice of it is handed out.
+        self.start_pos_draft: torch.Tensor = torch.zeros(
+            max_num_reqs,
+            dtype=self.start_pos_prefill.dtype,
+            device=self.start_pos_prefill.device,
+        )
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
@@ -1244,9 +1257,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
                 # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
                 max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
+            max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
             preamble = (
                 max_seqlen_q,
-                torch.max(seq_lens_cpu[:num_reqs]).item(),
+                max_seqlen_kv,
                 seq_lens - seq_lens_q,
             )
             metadata_cache["req_preamble"] = preamble
@@ -1550,6 +1564,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
         has_prefill = self.num_prefills > 0
+        # [STARTPOS-DRAFT-FIX] Refresh the resident draft ``start_pos`` in place
+        # (address is invariant across ACL-graph replays) and hand the *slice* to
+        # the metadata, exactly like ``self.start_pos_prefill`` in
+        # ``build_req_metadata``.  ``seq_lens``/``seq_lens_q`` are int32 slices of
+        # the persistent spec-decode buffers, so the explicit ``.to`` only
+        # documents the dtype the metadata consumer requires; it is a no-op when
+        # the dtypes already match.
+        self.start_pos_draft[:num_reqs] = (seq_lens - seq_lens_q).to(self.start_pos_draft.dtype)
 
         dspark_swa_indices = None
         build_dspark_swa = None
@@ -1704,7 +1726,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_compressed_tokens=self.num_actual_tokens,
             sin=sin,
             cos=cos,
-            start_pos=self.seq_lens[:num_reqs] - seq_lens_q,
+            start_pos=self.start_pos_draft[:num_reqs],
             num_actual_reqs=num_reqs,
             cache_group_key=self.cache_group_key,
             sas_metadata=sas_metadata,

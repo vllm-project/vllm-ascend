@@ -120,7 +120,7 @@ def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_u
     class MetadataChecked(Exception):
         pass
 
-    def check_metadata(common_metadata, num_input_tokens, num_actual_tokens):
+    def check_metadata(common_metadata, num_input_tokens, num_actual_tokens, batch_descriptor=None):
         assert num_input_tokens == num_actual_tokens == 6
         assert common_metadata.num_reqs == 1
         assert torch.equal(common_metadata.query_start_loc, query_start_loc)

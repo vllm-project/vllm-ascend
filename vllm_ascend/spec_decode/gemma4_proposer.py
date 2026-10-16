@@ -128,6 +128,7 @@ class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
+        batch_descriptor=None,
     ):
         per_layer_attn_metadata = {}
         for attn_group in self.draft_attn_groups:
