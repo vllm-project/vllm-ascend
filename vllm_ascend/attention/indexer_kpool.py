@@ -2,16 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-from filelock import FileLock
 from torch import nn
 from torch.utils.cpp_extension import _get_build_directory
+from torch.utils.file_baton import FileBaton
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tp_group
@@ -34,6 +37,28 @@ from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_curr
 from vllm_ascend.utils import _round_up, enable_dsa_cp
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+
+
+_CANN_OPS_INITIALIZATION_LOCK_TIMEOUT = 1800
+
+
+@contextmanager
+def _cann_ops_initialization_lock(cache_dir: str) -> Iterator[None]:
+    # Atomic creation coordinates shared-cache clients without relying on flock.
+    baton = FileBaton(str(Path(cache_dir) / "initialization.lock"))
+    deadline = monotonic() + _CANN_OPS_INITIALIZATION_LOCK_TIMEOUT
+    while not baton.try_acquire():
+        if monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for CANN initialization lock {baton.lock_file_path}. "
+                "A terminated initializer may have left the marker; remove it only "
+                "after confirming all initializers have stopped."
+            )
+        sleep(baton.wait_seconds)
+    try:
+        yield
+    finally:
+        baton.release()
 
 
 @dataclass
@@ -619,7 +644,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             # The package JIT-compiles operators at import time; concurrent
             # workers can remove one another's torch extension build locks.
             cache_dir = _get_build_directory("cann_ops_transformer", verbose=False)
-            with FileLock(str(Path(cache_dir) / "import.lock")):
+            with _cann_ops_initialization_lock(cache_dir):
                 import_module("cann_ops_transformer")
                 # These operators otherwise JIT-compile on their first NPU call.
                 for op_name in ("key_pool", "pool_key_indexer"):

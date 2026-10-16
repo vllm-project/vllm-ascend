@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fcntl
 import importlib.util
 import time
 from multiprocessing import get_context
@@ -367,7 +368,23 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
     assert missing in [call.args[0] for call in loader.call_args_list]
 
 
+def test_cann_initialization_timeout_preserves_existing_lock(monkeypatch, tmp_path):
+    marker = tmp_path / "initialization.lock"
+    marker.touch()
+    monkeypatch.setattr(backend_module, "_CANN_OPS_INITIALIZATION_LOCK_TIMEOUT", 0)
+
+    with (
+        pytest.raises(TimeoutError, match="confirming all initializers have stopped"),
+        backend_module._cann_ops_initialization_lock(str(tmp_path)),
+    ):
+        pytest.fail("An existing initialization lock must not be bypassed")
+
+    assert marker.exists()
+
+
 def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch, tmp_path):
+    # Model shared filesystems whose flock does not exclude another node.
+    monkeypatch.setattr(fcntl, "flock", lambda *args: None)
     context = get_context("fork")
     barrier = context.Barrier(2)
     building = context.Lock()
