@@ -29,7 +29,7 @@ def load(name, path):
 def runtime(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = []
-    cast(Any, package).envs = NS(VLLM_ASCEND_KV_GUARD=True)
+    cast(Any, package).envs = NS(VLLM_ASCEND_KV_GUARD=True, VLLM_ASCEND_KV_GUARD_ACTION="log")
     debug = ModuleType("vllm_ascend.debug")
     debug.__path__ = []
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
@@ -51,29 +51,15 @@ def runtime(monkeypatch):
     runtime.layer_groups = {"layer0": 0, "layer1": 0}
     runtime.events = []
     runtime.state.emit = lambda event, **fields: runtime.events.append({"event": event, **fields})
-    runtime.gap = lambda reason: runtime.events.append({"event": "guard.coverage_gap", "reason": reason})
+    runtime.gap = lambda reason, **fields: runtime.events.append(
+        {"event": "guard.coverage_gap", "reason": reason, **fields}
+    )
     return runtime
 
 
 def bind(runtime, request="r", block=1, computed=0):
     runtime.state.bind(
-        {
-            "requests": [
-                {
-                    "request_id": request,
-                    "num_computed_tokens": computed,
-                    "block_refs": [
-                        {
-                            "pool_id": "pool",
-                            "alloc_epoch": "1",
-                            "group_id": 0,
-                            "block_id": block,
-                            "logical_block_index": 0,
-                        }
-                    ],
-                }
-            ]
-        }
+        {"pool_id": "pool", "requests": {request: [[(block, 1)]]}, "scheduled_requests": {request: (computed, 0)}}
     )
 
 
@@ -95,27 +81,17 @@ def test_access_hooks_validate_case4_without_kv_copy_or_hash(runtime):
     assert any(e.get("reason") == "read_invalid_block" for e in runtime.events)
 
 
-def test_full_graph_replays_captured_write_addresses_and_current_read_parameters(runtime):
-    slots, table = torch.tensor([-1]), torch.tensor([[1]])
+def test_full_graph_without_current_metadata_reports_a_gap(runtime):
+    bind(runtime, computed=19)
     runner, context = NS(input_batch=NS(req_ids=[])), NS(cudagraph_runtime_mode="FULL")
 
-    def capture(n):
-        runtime.write("layer0", slots)
-
-    runtime.wrap_forward(runner, capture, lambda: context)(1, _kv_guard_phase="warmup")
-    assert not runtime.events
-    bind(runtime, computed=19)
-    runtime.events.clear()
-    slots[0] = 142
-
     def replay(n):
-        # Graph replay does not execute Python cache-write hooks again.
-        runtime.read("layer0", table, [1])
-        return "replayed"
+        runtime.write("layer0", torch.tensor([142]))
+        runtime.read("layer0", torch.tensor([[1]]), [19])
 
-    assert runtime.wrap_forward(runner, replay, lambda: context)(1, _kv_guard_phase="dummy") == "replayed"
-    assert runtime.events[0]["reason"] == "dummy_write_to_live_block"
-    assert not any(e["event"] == "guard.coverage_gap" for e in runtime.events)
+    runtime.wrap_forward(runner, replay, lambda: context)(1, _kv_guard_phase="dummy")
+    assert any(e.get("reason") == "full_graph_metadata_missing" for e in runtime.events)
+    assert runtime.state.blocks[0, 1].valid_end == 19
 
 
 def test_layer_hook_duplicates_do_not_look_like_repeated_writes(runtime):
@@ -151,23 +127,13 @@ def test_split_decode_prefill_write_ranges_and_read_request_offsets(runtime):
 
 def test_receive_only_step_binds_before_execute_and_cleans_finished(runtime):
     output = NS(
-        _ascend_kv_guard_context={
-            "requests": [
-                {
-                    "request_id": "r",
-                    "num_computed_tokens": 0,
-                    "block_refs": [
-                        {"pool_id": "pool", "alloc_epoch": "1", "group_id": 0, "block_id": 1, "logical_block_index": 0}
-                    ],
-                }
-            ]
-        }
+        _ascend_kv_guard_context={"pool_id": "pool", "requests": {"r": [[(1, 1)]]}, "scheduled_requests": {"r": (0, 0)}}
     )
     runtime.wrap_execute(lambda message: None)(output)
     runtime.transfer("load", {"request_id": "r", "local_block_ids": [[1]], "num_computed_tokens": 19})
     assert runtime.state.blocks[0, 1].valid_end == 19
     runtime.wrap_execute(lambda message: None)(
-        NS(_ascend_kv_guard_context={"requests": [], "finished_request_ids": ["r"]})
+        NS(_ascend_kv_guard_context={"requests": {}, "released_request_ids": ["r"], "scheduled_requests": {}})
     )
     assert runtime.state.blocks[0, 1].owners == set()
 
@@ -217,7 +183,9 @@ def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime):
         def __init__(self):
             self.pool = Pool()
             self.mapping = {"r": [[1]]}
-            self.kv_cache_manager = NS(block_pool=self.pool, get_block_ids=lambda request: self.mapping[request])
+            self.kv_cache_manager = NS(
+                block_pool=self.pool, get_block_ids=lambda request: self.mapping[request], free=lambda request: None
+            )
             self.output = NS(
                 scheduled_new_reqs=[NS(req_id="r", num_computed_tokens=0)],
                 scheduled_cached_reqs=NS(req_ids=[], num_computed_tokens=[]),
@@ -234,16 +202,26 @@ def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime):
     scheduler.pool.get_new_blocks(1)
     assert scheduler.schedule() is scheduler.output
     binding = scheduler.output._ascend_kv_guard_context
-    assert binding["requests"][0]["block_refs"][0]["alloc_epoch"] == "1"
+    assert binding["requests"]["r"] == [[(1, 1)]]
+    assert binding["scheduled_requests"] == {"r": (0, 1)}
     scheduler.schedule()
-    assert scheduler.output._ascend_kv_guard_context["requests"] == []
+    assert scheduler.output._ascend_kv_guard_context["requests"] == {}
     scheduler.pool.get_new_blocks(1)
     scheduler.schedule()
-    assert scheduler.output._ascend_kv_guard_context["requests"][0]["block_refs"][0]["alloc_epoch"] == "2"
+    assert scheduler.output._ascend_kv_guard_context["requests"]["r"] == [[(1, 2)]]
+    scheduler.kv_cache_manager.free(NS(request_id="r"))
+    scheduler.schedule()
+    assert scheduler.output._ascend_kv_guard_context["released_request_ids"] == ["r"]
+    assert "r" in scheduler.output._ascend_kv_guard_context["requests"]
     scheduler.output.finished_req_ids = {"r"}
     scheduler.output.num_scheduled_tokens = {}
     scheduler.schedule()
-    assert scheduler.output._ascend_kv_guard_context == {"requests": [], "finished_request_ids": ["r"]}
+    assert scheduler.output._ascend_kv_guard_context == {
+        "pool_id": binding["pool_id"],
+        "requests": {},
+        "released_request_ids": ["r"],
+        "scheduled_requests": {},
+    }
 
 
 def test_graph_update_uses_bound_guard_and_exact_operator_kwargs(runtime, monkeypatch):
@@ -279,33 +257,30 @@ def test_graph_update_uses_bound_guard_and_exact_operator_kwargs(runtime, monkey
     assert order == [("read", "layer0", [[1]], [20]), "begin", ("operation", [20]), "end", "event"]
 
 
-def test_state_log_limit_does_not_suppress_new_violations(runtime):
+def test_repeated_violations_are_deduplicated_without_hiding_other_blocks(runtime):
     messages = []
     runtime.logger = NS(
         info=lambda *args: messages.append(("info", args)),
         warning=lambda *args: messages.append(("warning", args)),
         error=lambda *args: messages.append(("error", args)),
     )
-    runtime._max_reports = 1
-    runtime.report("guard.state", state="PARTIAL")
-    runtime.report("guard.state", state="INVALID")
     runtime.report("guard.violation", operation="read", reason="read_invalid_block", block_id=1)
     runtime.report("guard.violation", operation="read", reason="read_invalid_block", block_id=1)
     runtime.report("guard.violation", operation="read", reason="read_invalid_block", block_id=2)
     assert [level for level, args in messages].count("error") == 2
 
 
-def test_full_graph_raw_key_read_is_not_a_missing_kv_read_hook(runtime):
+def test_eager_raw_key_read_does_not_require_paged_cache_read_metadata(runtime):
     bind(runtime)
-    slots = torch.tensor([128])
-    runner, context = NS(input_batch=NS(req_ids=["r"])), NS(cudagraph_runtime_mode="FULL")
-    runtime._plans[("FULL", 1)] = [runtime.subject.WriteAccess("layer0", slots)]
+    runner, context = NS(input_batch=NS(req_ids=["r"])), NS(cudagraph_runtime_mode="NONE")
 
-    def replay(n):
-        runtime.read("layer0", None, [1])  # FIA reads current K, not paged KV.
+    def model(n):
+        runtime.write("layer0", torch.tensor([128]))
+        runtime.read("layer0", None, [1])
 
-    runtime.wrap_forward(runner, replay, lambda: context)(1)
-    assert not any(event["event"] == "guard.coverage_gap" for event in runtime.events)
+    runtime.wrap_forward(runner, model, lambda: context)(1)
+    assert runtime.state.blocks[0, 1].valid_end == 1
+    assert not any(e["event"] == "guard.coverage_gap" for e in runtime.events)
 
 
 def test_same_layer_double_write_is_not_deduplicated(runtime):
@@ -358,7 +333,7 @@ def test_runner_plan_detects_case4_without_any_operator_hook(runtime):
     runtime.wrap_forward(runner, lambda n: "result", lambda: context)(1, _kv_guard_phase="dummy")
     violation = next(e for e in runtime.events if e.get("reason") == "dummy_write_to_live_block")
     assert violation["evidence"] == "execution_plan" and violation["offsets"] == [14]
-    assert runtime.state.blocks[0, 1].state.value == "INVALIDATE_BLOCK"
+    assert runtime.state.blocks[0, 1].valid_end == runtime.subject.INVALID_PREFIX
 
 
 def test_final_metadata_is_read_after_forward_parameter_updates_and_copied_once(runtime, monkeypatch):
@@ -388,18 +363,17 @@ def test_final_metadata_is_read_after_forward_parameter_updates_and_copied_once(
     assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)
 
 
-def test_current_full_graph_metadata_replaces_stale_captured_arguments(runtime):
+def test_current_full_graph_metadata_ignores_operator_callbacks(runtime):
     bind(runtime, computed=19)
-    runtime._plans[("FULL", 1)] = [runtime.subject.WriteAccess("layer0", torch.tensor([142]))]
     item = metadata(torch.tensor([147]), torch.tensor([[1]]), [20])
     context = NS(cudagraph_runtime_mode="FULL", attn_metadata={"layer0": item, "layer1": item})
     runner = NS(input_batch=NS(req_ids=["r"]))
-    runtime.wrap_forward(runner, lambda n: None, lambda: context)(1)
+    runtime.wrap_forward(runner, lambda n: runtime.write("layer0", torch.tensor([142])), lambda: context)(1)
     assert runtime.state.blocks[0, 1].valid_end == 20
     assert not any(e["event"] == "guard.violation" for e in runtime.events)
 
 
-def test_registered_ring_cache_without_attention_impl_gets_null_write_protection(runtime):
+def test_unadapted_ring_cache_is_rejected_instead_of_silently_reducing_checks(runtime):
     spec = type("CircularBufferSpec", (), {"block_size": 128, "head_size": 64})()
     runtime.config = NS(
         parallel_config=NS(),
@@ -411,13 +385,8 @@ def test_registered_ring_cache_without_attention_impl_gets_null_write_protection
     runner = NS(
         input_batch=NS(req_ids=[]), kv_cache_config=NS(kv_cache_groups=[NS(kv_cache_spec=spec, layer_names=["ring"])])
     )
-    runtime.configure(runner)
-    context = NS(cudagraph_runtime_mode="FULL", attn_metadata={"ring": NS(slot_mapping=torch.tensor([0, -1]))})
-    runtime.wrap_forward(runner, lambda n: None, lambda: context)(2, _kv_guard_phase="warmup")
-    violation = next(e for e in runtime.events if e.get("reason") == "write_null_block")
-    assert violation["layer"] == "ring" and violation["evidence"] == "execution_plan"
-    assert any(e.get("reason", "").startswith("cache_validity_rules_unadapted") for e in runtime.events)
-    assert 0 in runtime.state.tainted_nulls
+    with pytest.raises(ValueError, match="unadapted cache validity"):
+        runtime.configure(runner)
 
 
 def test_missing_layer_metadata_does_not_advance_group_validity(runtime):
@@ -454,7 +423,7 @@ def test_later_illegal_write_does_not_retroactively_invalidate_earlier_read(runt
     runtime.wrap_forward(runner, model, lambda: context)(1)
     assert any(e.get("reason") == "overwrite_valid_prefix" for e in runtime.events)
     assert not any(e.get("reason") == "read_invalid_block" for e in runtime.events)
-    assert runtime.state.blocks[0, 1].state.value == "INVALIDATE_BLOCK"
+    assert runtime.state.blocks[0, 1].valid_end == runtime.subject.INVALID_PREFIX
 
 
 def test_one_layers_write_cannot_hide_another_layers_missing_write(runtime):
@@ -477,7 +446,6 @@ def test_one_layers_write_cannot_hide_another_layers_missing_write(runtime):
 
 def test_missing_known_operator_layer_is_reported_and_not_committed(runtime):
     bind(runtime)
-    runtime.operator_layers = {"layer0", "layer1"}
     item = metadata(torch.tensor([128]), torch.tensor([[1]]), [1])
     context = NS(cudagraph_runtime_mode="NONE", attn_metadata={"layer0": item, "layer1": item})
     runner = NS(input_batch=NS(req_ids=["r"]))
@@ -497,7 +465,7 @@ def test_failed_forward_preserves_exception_and_does_not_commit_planned_writes(r
 
     with pytest.raises(RuntimeError, match="model failure"):
         runtime.wrap_forward(runner, model, lambda: context)(1)
-    assert runtime.state.blocks[0, 1].valid_end == 0 and not runtime._active
+    assert runtime.state.blocks[0, 1].valid_end == 0 and runtime._phase is None
 
 
 def test_only_needed_block_table_rows_and_columns_are_copied(runtime, monkeypatch):
@@ -520,7 +488,7 @@ def test_only_needed_block_table_rows_and_columns_are_copied(runtime, monkeypatc
     assert not any(e["event"] == "guard.violation" for e in runtime.events)
 
 
-def test_metadata_collection_does_not_mutate_an_unknown_slotted_backend(runtime):
+def test_unknown_backend_is_rejected_without_mutating_it(runtime):
     class OtherAttentionImpl:
         __slots__ = ()
 
@@ -539,14 +507,9 @@ def test_metadata_collection_does_not_mutate_an_unknown_slotted_backend(runtime)
             kv_cache_groups=[NS(kv_cache_spec=NS(block_size=128, head_size=64), layer_names=["layer0"])]
         ),
     )
-    runtime.configure(runner)
-    bind(runtime)
-    item = metadata(torch.tensor([128]), torch.tensor([[1]]), [1])
-    context = NS(cudagraph_runtime_mode="NONE", attn_metadata={"layer0": item})
-    runtime.wrap_forward(runner, lambda n: None, lambda: context)(1)
+    with pytest.raises(ValueError, match="unadapted attention implementation"):
+        runtime.configure(runner)
     assert not hasattr(impl, "_kv_guard")
-    assert runtime.state.blocks[0, 1].valid_end == 1
-    assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)
 
 
 def test_eager_uses_operator_arguments_without_building_unused_plans(runtime, monkeypatch):
@@ -631,7 +594,7 @@ def test_unique_layer_patterns_share_owner_snapshot_and_reuse_checker(runtime, m
 
 
 def test_execute_and_update_bind_once_without_skipping_receive_only_or_next_step(runtime, monkeypatch):
-    output = NS(_ascend_kv_guard_context={"requests": [], "finished_request_ids": []})
+    output = NS(_ascend_kv_guard_context={"requests": {}, "released_request_ids": []})
     runner = NS(requests={})
     bound = []
     original = runtime.state.bind
@@ -644,11 +607,11 @@ def test_execute_and_update_bind_once_without_skipping_receive_only_or_next_step
     update = runtime.wrap_update(runner, lambda value: None)
     execute = runtime.wrap_execute(update)
     execute(output)
-    assert len(bound) == 1 and runtime._bound_output is None
+    assert len(bound) == 1 and runtime._scheduled is None
     execute(output)
-    assert len(bound) == 2 and runtime._bound_output is None
+    assert len(bound) == 2 and runtime._scheduled is None
     runtime.wrap_execute(lambda value: None)(output)
-    assert len(bound) == 3 and runtime._bound_output is None
+    assert len(bound) == 3 and runtime._scheduled is None
 
 
 def test_shared_unsupported_metadata_reports_missing_read_coverage_for_each_group(runtime):
@@ -659,3 +622,190 @@ def test_shared_unsupported_metadata_reports_missing_read_coverage_for_each_grou
     runner = NS(input_batch=NS(req_ids=[]))
     runtime.wrap_forward(runner, lambda n: None, lambda: context)(1)
     assert runtime._missing_groups == {0, 1}
+
+
+@pytest.mark.parametrize("mode", ["NONE", "FULL"])
+@pytest.mark.parametrize("swapped", [False, True])
+def test_scheduler_plan_detects_cross_request_slot_swaps(runtime, mode, swapped):
+    bind(runtime, "A", 1)
+    bind(runtime, "B", 2)
+    slots = torch.tensor([256, 128] if swapped else [128, 256])
+    table = torch.tensor([[1], [2]])
+    item = metadata(slots, table, [1, 1])
+    context = NS(cudagraph_runtime_mode=mode, attn_metadata={"layer0": item, "layer1": item})
+    runner = NS(input_batch=NS(req_ids=["A", "B"]))
+    output = NS(_ascend_kv_guard_context={"requests": {}, "scheduled_requests": {"A": (0, 1), "B": (0, 1)}})
+
+    def model(n):
+        for layer in runtime.layer_groups:
+            runtime.write(layer, slots)
+            runtime.read(layer, table, [1, 1])
+
+    forward = runtime.wrap_forward(runner, model, lambda: context)
+    runtime.wrap_execute(lambda message: forward(2))(output)
+    violations = [e for e in runtime.events if e["event"] == "guard.violation"]
+    if swapped:
+        mismatch = next(e for e in violations if e["reason"] == "write_target_mismatch")
+        assert mismatch["request_id"] == "A" and mismatch["slot"] == 256 and mismatch["expected_slot"] == 128
+        assert all(b.valid_end == runtime.subject.INVALID_PREFIX for b in runtime.state.blocks.values())
+    else:
+        assert not violations
+    assert runtime._scheduled is None
+
+
+def test_split_mixed_batch_uses_explicit_token_offset_and_runner_request_order(runtime):
+    bind(runtime, "prefill", 2, 10)
+    bind(runtime, "decode", 1, 19)
+    runtime._scheduled = {"prefill": (10, 2), "decode": (19, 1)}
+    runner = NS(input_batch=NS(req_ids=["decode", "prefill"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+
+    def model(n):
+        runtime.write("layer0", torch.tensor([266, 267]), token_offset=1)
+        runtime.write("layer0", torch.tensor([147]))
+        runtime.read("layer0", torch.tensor([[1], [2]]), [20, 12])
+
+    runtime.wrap_forward(runner, model, lambda: context)(3)
+    assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)
+
+
+@pytest.mark.parametrize(
+    "slots, mismatch", [([128, 129, -1], False), ([129, 128, -1], True), ([128, -1, -1], True), ([128, 129, 256], True)]
+)
+def test_exact_token_positions_distinguish_permutation_missing_write_and_padding(runtime, slots, mismatch):
+    bind(runtime)
+    runtime._scheduled = {"r": (0, 2)}
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+    runtime.wrap_forward(runner, lambda n: runtime.write("layer0", torch.tensor(slots)), lambda: context)(3)
+    assert any(e.get("reason") == "write_target_mismatch" for e in runtime.events) == mismatch
+
+
+def test_missing_scheduler_range_does_not_advance_validity(runtime):
+    bind(runtime)
+    runtime._scheduled = {"r": (None, 1)}
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+    runtime.wrap_forward(runner, lambda n: runtime.write("layer0", torch.tensor([128])), lambda: context)(1)
+    assert any(e.get("reason") == "scheduler_write_range_missing" and e["request_id"] == "r" for e in runtime.events)
+    assert runtime.state.blocks[0, 1].valid_end == 0
+
+
+def test_raise_mode_stops_output_and_remains_latched_after_caller_catches(runtime):
+    bind(runtime, computed=19)
+    runtime.action = "raise"
+    runtime.state.emit = runtime.report
+    runner = NS(input_batch=NS(req_ids=[]))
+    context = NS(cudagraph_runtime_mode="NONE")
+    completed = []
+
+    def model(n):
+        runtime.write("layer0", torch.tensor([142]))
+        completed.append("kernel submitted")
+        return "must not escape"
+
+    forward = runtime.wrap_forward(runner, model, lambda: context)
+    with pytest.raises(runtime.subject.KVGuardError, match="dummy_write_to_live_block"):
+        forward(1, _kv_guard_phase="dummy")
+    assert completed == ["kernel submitted"]  # Auditing cannot undo submitted operations.
+    with pytest.raises(runtime.subject.KVGuardError):
+        forward(1, _kv_guard_phase="dummy")
+    assert completed == ["kernel submitted"] and runtime._phase is None
+
+
+def test_raise_mode_stops_on_coverage_gap_before_execution(runtime):
+    runtime.action = "raise"
+    runtime.gap = runtime.subject.GuardRuntime.gap.__get__(runtime)
+    called = []
+    with pytest.raises(runtime.subject.KVGuardError, match="scheduler_write_plan_missing"):
+        runtime.wrap_execute(lambda message: called.append(True))(NS(_ascend_kv_guard_context={"requests": {}}))
+    assert not called
+
+
+def test_physical_zero_and_copy_preserve_only_proven_validity(runtime):
+    bind(runtime, "source", 1, 19)
+    output = NS(
+        _ascend_kv_guard_context={
+            "pool_id": "pool",
+            "requests": {"dest": [[(2, 1)]]},
+            "scheduled_requests": {"dest": (19, 0)},
+        },
+        new_block_ids_to_zero=[2],
+        kv_cache_block_copies=[NS(src_block_id=1, dst_block_id=2)],
+    )
+
+    def execute(message):
+        assert runtime.state.blocks[0, 2].valid_end == 0
+        runtime.zero_blocks(message.new_block_ids_to_zero)
+        assert runtime.state.blocks[0, 2].valid_end == 0
+        runtime.copy_blocks(message.kv_cache_block_copies)
+        assert runtime.state.blocks[0, 2].valid_end == 19
+
+    runtime.wrap_execute(execute)(output)
+    assert not any(e["event"] == "guard.violation" for e in runtime.events)
+    runtime.zero_blocks([2])
+    assert runtime.state.blocks[0, 2].valid_end == runtime.subject.INVALID_PREFIX
+    assert any(e.get("reason") == "clear_live_block" for e in runtime.events)
+
+
+def test_read_block_order_within_one_request_is_checked_against_scheduler(runtime):
+    runtime.state.bind(
+        {"pool_id": "pool", "requests": {"r": [[(1, 1), (2, 1), (3, 1)]]}, "scheduled_requests": {"r": (256, 1)}}
+    )
+    runtime._scheduled = {"r": (256, 1)}
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+    runtime.wrap_forward(runner, lambda n: runtime.read("layer0", torch.tensor([[2, 1]]), [256]), lambda: context)(1)
+    assert any(e.get("reason") == "read_target_mismatch" for e in runtime.events)
+
+
+def test_shared_prefix_read_and_tail_append_remain_legal(runtime):
+    runtime.state.bind(
+        {
+            "pool_id": "pool",
+            "requests": {"A": [[(1, 1), (2, 1)]], "B": [[(1, 1), (3, 1)]]},
+            "scheduled_requests": {"A": (128, 1), "B": (128, 1)},
+        }
+    )
+    runtime._scheduled = {"A": (128, 1), "B": (128, 1)}
+    runner = NS(input_batch=NS(req_ids=["B", "A"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+
+    def model(n):
+        runtime.write("layer0", torch.tensor([384, 256]))
+        runtime.read("layer0", torch.tensor([[1, 3], [1, 2]]), [129, 129])
+
+    runtime.wrap_forward(runner, model, lambda: context)(2)
+    assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)
+
+
+def test_truncated_write_observation_is_incomplete_even_if_read_only_uses_old_prefix(runtime):
+    bind(runtime, computed=19)
+    runtime._scheduled = {"r": (19, 2)}
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    context = NS(cudagraph_runtime_mode="NONE")
+
+    def model(n):
+        runtime.write("layer0", torch.tensor([147]))
+        runtime.read("layer0", torch.tensor([[1]]), [19])
+
+    runtime.wrap_forward(runner, model, lambda: context)(2)
+    assert any(e.get("reason") == "write_tokens_not_observed" for e in runtime.events)
+    assert runtime.state.blocks[0, 1].valid_end == 19
+
+
+def test_copy_to_null_or_unbound_block_cannot_silently_pass(runtime):
+    bind(runtime, computed=19)
+    runtime.copy_blocks([NS(src_block_id=1, dst_block_id=0), NS(src_block_id=1, dst_block_id=99)])
+    assert any(e.get("reason") == "write_null_block" and e["operation"] == "copy" for e in runtime.events)
+    assert any(e.get("reason") == "copy_destination_unbound" and e["block_id"] == 99 for e in runtime.events)
+
+
+def test_scheduler_optional_zero_and_copy_fields_accept_none(runtime):
+    output = NS(
+        _ascend_kv_guard_context={"requests": {}, "scheduled_requests": {}},
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=None,
+    )
+    assert runtime.wrap_execute(lambda message: "executed")(output) == "executed"
+    assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)

@@ -751,7 +751,8 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
             if all_tasks_done:
-                if transfer_failed or self._is_failed_recv_request(request_id):
+                transfer_failed = transfer_failed or self._is_failed_recv_request(request_id)
+                if transfer_failed:
                     with self.pending_reformat_lock:
                         self.pending_reformat.pop(request_id, None)
                 else:
@@ -768,8 +769,9 @@ class KVCacheRecvingThread(threading.Thread):
                             e,
                         )
                 # Drain the failure with completion, after all local writes end.
-                if self._kv_guard is not None:
-                    self._kv_guard.transfer("error" if transfer_failed else "load", req_meta)
+                guard = getattr(self, "_kv_guard", None)
+                if guard is not None:
+                    guard.transfer("error" if transfer_failed else "load", req_meta)
                 self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)

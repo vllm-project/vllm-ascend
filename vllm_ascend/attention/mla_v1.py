@@ -2331,7 +2331,11 @@ class AscendMLAImpl(MLAAttentionImpl):
     ):
         guard = getattr(self, "_kv_guard", None)
         if guard is not None:
-            guard.write(self._kv_guard_layer_name, slots)
+            guard.write(
+                self._kv_guard_layer_name,
+                slots,
+                token_offset=attn_metadata.num_decode_tokens if attn_metadata else 0,
+            )
         pcp_local_range = None
         if self.pcp_enabled:
             assert attn_metadata is not None

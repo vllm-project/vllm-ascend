@@ -1010,6 +1010,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
+            guard = getattr(self, "_kv_guard", None)
+            if guard is not None:
+                guard.copy_blocks(scheduler_output.kv_cache_block_copies)
             scheduler_output = replace(
                 scheduler_output,
                 new_block_ids_to_zero=[],
@@ -4379,7 +4382,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 guard_kwargs: dict[str, Any] = {}
-                if self._kv_guard is not None:
+                if getattr(self, "_kv_guard", None) is not None:
                     guard_kwargs["_kv_guard_phase"] = "warmup" if is_profile or is_graph_capturing else "dummy"
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds,
@@ -4851,6 +4854,8 @@ class NPUModelRunner(GPUModelRunner):
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Prepare freshly assigned attention pages, including static C8 scales."""
         super()._zero_block_ids(block_ids)
+        if getattr(self, "_kv_guard", None) is not None:
+            self._kv_guard.zero_blocks(block_ids)
         # MRV1 can receive new attention block IDs without a KV zeroer. Scale
         # restoration must still run: Mamba owns the same physical pages while
         # those IDs are assigned to its cache groups.
@@ -4883,8 +4888,9 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches = self._reshape_kv_cache_tensors(
             kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
         )
-        if self._kv_guard is not None:
-            self._kv_guard.configure(self)
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.configure(self)
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
