@@ -49,8 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    AsynchronousBulkWorker,
-    SynchronousBulkWorker,
+    BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -93,7 +92,7 @@ def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_
     resources = KVPoolResources(
         backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
     )
-    worker = SynchronousBulkWorker(
+    worker = BulkWorker(
         topology, compile_bulk_projection_binder(topology, 64), resources, source_ready_event_factory=FakeEvent
     )
     caches = {name: torch.zeros((8, 2, 4, 1, 1), dtype=torch.float32) for name in names}
@@ -227,7 +226,7 @@ def test_worker_bind_failure_releases_registration_before_backend_close() -> Non
     projection_binder = compile_bulk_projection_binder(topology, 64)
 
     with patch.object(type(projection_binder), "bind", side_effect=RuntimeError("projection binding failed")):
-        worker = SynchronousBulkWorker(topology, projection_binder, resources)
+        worker = BulkWorker(topology, projection_binder, resources)
         with pytest.raises(RuntimeError, match="projection binding failed"):
             worker.bind_kv_caches(caches)
 
@@ -270,7 +269,8 @@ def test_memcache_bulk_factory_binds_hybrid_buffers_without_gva_constraints(monk
 
     worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
     try:
-        assert type(worker) is (AsynchronousBulkWorker if load_async else SynchronousBulkWorker)
+        assert type(worker) is BulkWorker
+        assert (worker._load_executor is not None) is load_async
         config.model_config.get_layers_start_end_indices.assert_not_called()
         config.model_config.get_total_num_hidden_layers.assert_not_called()
         caches = {
@@ -421,7 +421,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     backend_spec = make_backend_spec(layerwise_access=None)
     resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
     projection_binder = compile_bulk_projection_binder(topology, 64)
-    worker = SynchronousBulkWorker(
+    worker = BulkWorker(
         topology,
         projection_binder,
         resources,

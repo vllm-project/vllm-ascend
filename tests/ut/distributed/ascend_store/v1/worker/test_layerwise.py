@@ -67,7 +67,7 @@ def test_layerwise_load_with_no_selected_objects_does_not_open_sessions(use_gva,
     def unexpected_session(command):
         pytest.fail("A Load with no selected objects must not open a Backend session")
 
-    monkeypatch.setattr(worker._layerwise_load_timeline._executor, "submit", unexpected_session)
+    monkeypatch.setattr(worker._load_executor, "submit", unexpected_session)
     try:
         command = LoadCommand("request", TokenRange(0, 0), ((),), ())
         begin_step(worker, load=(command,))
@@ -154,18 +154,23 @@ def test_key_range_hybrid_starts_store_before_attention_without_duplicate_saves(
     load = (LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),) if with_load else ()
     try:
         begin_step(worker, load=load, store=(store,))
+        assert worker._session is None
         worker.start_load()
-        assert worker._layerwise_store_timeline is not None
+        session = worker._session
+        assert worker._store_executor is not None
         for layer_id in (0, 1):
             layer_name = f"layers.{layer_id}.group.0"
             worker.wait_for_layer_load(layer_name)
+            if session is None:
+                session = worker._session
+            assert worker._session is session
             gate = attention_fence.get_attention_compute_start_gate()
             worker.wait_for_layer_load(f"layers.{layer_id}.group.1")
             assert attention_fence.get_attention_compute_start_gate() is gate
             assert sum(call[0] == "batch_copy_put" for call in backend.calls) == layer_id
             with attention_fence.attention_transfer_window():
                 # This point models attention compute: KV is ready, but the post-compute hook has not run.
-                worker._layerwise_store_timeline._executor._queue.join()
+                worker._store_executor.submit(lambda: None).result()
                 assert sum(call[0] == "batch_copy_put" for call in backend.calls) == layer_id + 1
             worker.save_layer(layer_name)
             worker.save_layer(f"layers.{layer_id}.group.1")
@@ -178,13 +183,14 @@ def test_key_range_hybrid_starts_store_before_attention_without_duplicate_saves(
         gate = attention_fence.get_attention_compute_start_gate()
         worker.end_step()
         assert gate.on_start is None
+        assert worker._session is None
     finally:
         worker.close()
     assert resources.closed
 
 
 @pytest.mark.parametrize("uniform_state_group", (False, True), ids=("mamba", "uniform_mamba"))
-def test_hybrid_recurrent_store_remains_after_compute(uniform_state_group, monkeypatch) -> None:
+def test_hybrid_recurrent_layer_without_range_store_does_not_record_source(uniform_state_group, monkeypatch) -> None:
     monkeypatch.setattr(attention_fence, "_attention_compute_start_gate", None)
     monkeypatch.setattr(torch.npu, "Event", Mock)
     topology = make_align_state_topology(attention_block_size=4, state_block_size=4, tp_size=1)
@@ -207,15 +213,15 @@ def test_hybrid_recurrent_store_remains_after_compute(uniform_state_group, monke
     try:
         begin_step(worker, store=(command,))
         worker.start_load()
-        assert worker._layerwise_store_timeline is not None
+        assert worker._store_executor is not None
         for layer_id, name in enumerate(("layers.0.attention", "layers.1.state")):
             worker.wait_for_layer_load(name)
             with attention_fence.attention_transfer_window():
-                worker._layerwise_store_timeline._executor._queue.join()
+                worker._store_executor.submit(lambda: None).result()
                 assert len(source_events) == 1, "Recurrent KV is not ready at attention entry"
             worker.save_layer(name)
-            worker._layerwise_store_timeline._executor._queue.join()
-            assert len(source_events) == layer_id + 1
+            worker._store_executor.submit(lambda: None).result()
+            assert len(source_events) == 1, "Range Store has no recurrent task to record or submit"
         worker.finish_step()
         # Range Store excludes recurrent state; this change must not enable checkpoint transfer.
         assert sum(call[0] == "batch_copy_put" for call in backend.calls) == 1
@@ -426,17 +432,23 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
     assert backend.closed
 
 
-def test_layerwise_load_copies_each_layer_within_one_session() -> None:
+@pytest.mark.parametrize(
+    ("physical_layers", "expected_addresses"),
+    (((0, 1, 2), (1064, 2064, 3064)), ((2, 5, 9), (3064, 6064, 10064))),
+    ids=("contiguous", "sparse"),
+)
+def test_layerwise_load_copies_each_layer_within_one_session(physical_layers, expected_addresses) -> None:
     worker, resources, backend = make_worker(
         layerwise=True,
         store=False,
-        physical_layers=(0, 1, 2),
+        physical_layers=physical_layers,
         start_gate_factory=lambda: FakeLoadStartGate(opened=True),
     )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
     begin_step(worker, load=(command,))
     worker.start_load()
-    for layer_id in range(3):
+    for layer_id in physical_layers:
+        worker.wait_for_layer_load(f"layers.{layer_id}.group.0")
         worker.wait_for_layer_load(f"layers.{layer_id}.group.0")
     assert not worker.collect_load_result().failed_locations
     worker.end_step()
@@ -445,21 +457,23 @@ def test_layerwise_load_copies_each_layer_within_one_session() -> None:
     session_calls = [call[0] for call in backend.calls if call[0] in ("batch_get_start", "batch_get_end")]
     copy_calls = [call for call in backend.calls if call[0] == "batch_copy_get"]
     assert session_calls == ["batch_get_start", "batch_get_end"]
-    assert [call[2] for call in copy_calls] == [((1064,),), ((2064,),), ((3064,),)]
+    assert [call[2] for call in copy_calls] == [((address,),) for address in expected_addresses]
     assert [call[4] for call in copy_calls] == [((0,),), ((32,),), ((64,),)]
     assert resources.closed
 
 
 @pytest.mark.parametrize("native_result", ([-1], RuntimeError("range copy failed")), ids=("failed", "exception"))
-def test_layerwise_load_failure_closes_session_and_reports_original_block(native_result) -> None:
+@pytest.mark.parametrize("physical_layer_id", (0, 5), ids=("contiguous", "sparse"))
+def test_layerwise_load_failure_closes_session_and_reports_original_block(native_result, physical_layer_id) -> None:
     backend = FakeBackend()
     backend.session_copy_result = native_result
-    worker, resources, _ = make_worker(backend, layerwise=True, store=False, physical_layers=(0,))
+    worker, resources, _ = make_worker(backend, layerwise=True, store=False, physical_layers=(physical_layer_id,))
     command = LoadCommand("request", TokenRange(0, 4), ((7,),), (b"a",))
     try:
         begin_step(worker, load=(command,))
         worker.start_load()
-        worker.wait_for_layer_load("layers.0.group.0")
+        worker.wait_for_layer_load(f"layers.{physical_layer_id}.group.0")
+        worker.wait_for_layer_load(f"layers.{physical_layer_id}.group.0")
         result = worker.collect_load_result()
 
         assert result.failed_block_ids == {7}
@@ -500,22 +514,82 @@ def test_layerwise_load_keeps_a_bounded_prefetch_window() -> None:
 
 def test_layerwise_load_start_exception_closes_attempted_session_once(monkeypatch) -> None:
     backend = FakeBackend()
+    original_start = backend.batch_get_start
 
     def fail_start(keys):
         backend.calls.append(("batch_get_start", tuple(keys)))
         raise RuntimeError("session start failed")
 
     monkeypatch.setattr(backend, "batch_get_start", fail_start)
-    worker, resources, _ = make_worker(backend, layerwise=True, store=False)
+    worker, resources, _ = make_worker(
+        backend, layerwise=True, store=False, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
+    )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
     begin_step(worker, load=(command,))
 
-    with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
+    worker.start_load()
+    assert worker.collect_load_result().failed_block_ids == {1}
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
+    worker.end_step()
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
+    monkeypatch.setattr(backend, "batch_get_start", original_start)
+    begin_step(worker, load=(command,))
+    worker.start_load()
+    worker.wait_for_layer_load("layers.0.group.0")
+    worker.wait_for_layer_load("layers.1.group.0")
+    assert not worker.collect_load_result().failed_locations
+    worker.end_step()
+    worker.close()
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 2
+    assert resources.closed
+
+
+def test_layerwise_missing_load_hook_aborts_prefetch_and_next_step_can_load() -> None:
+    gates = []
+
+    def make_gate():
+        gate = FakeLoadStartGate()
+        gates.append(gate)
+        return gate
+
+    worker, resources, backend = make_worker(layerwise=True, store=False, start_gate_factory=make_gate)
+    command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
+    try:
+        begin_step(worker, load=(command,))
         worker.start_load()
-    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
-    with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
+        worker.wait_for_layer_load("layers.0.group.0")
+        with pytest.raises(RuntimeError, match=r"did not reach physical layers \[1\]"):
+            worker.collect_load_result()
+        assert sum(call[0] == "batch_copy_get" for call in backend.calls) == 1
+        assert sum(call[0] == "batch_get_end" for call in backend.calls) == 1
+        worker.end_step()
+
+        begin_step(worker, load=(command,))
+        worker.start_load()
+        worker.wait_for_layer_load("layers.0.group.0")
+        gates[-1].open()
+        worker.wait_for_layer_load("layers.1.group.0")
+        assert not worker.collect_load_result().failed_locations
+        assert sum(call[0] == "batch_copy_get" for call in backend.calls) == 3
+        assert sum(call[0] == "batch_get_end" for call in backend.calls) == 2
+        worker.end_step()
+    finally:
         worker.close()
-    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
+    assert resources.closed
+
+
+def test_layerwise_failed_load_finish_is_observed_without_repeating_backend_cleanup() -> None:
+    worker, resources, backend = make_worker(layerwise=True, store=False, physical_layers=(0,))
+    backend.session_end_result = -1
+    command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
+    begin_step(worker, load=(command,))
+    worker.start_load()
+    with pytest.raises(RuntimeError, match="batch_get_end failed"):
+        worker.wait_for_layer_load("layers.0.group.0")
+    with pytest.raises(RuntimeError, match="batch_get_end failed"):
+        worker.close()
+    assert sum(call[0] == "batch_get_end" for call in backend.calls) == 1
+    assert worker._load_executor.stopped
     assert resources.closed
 
 
@@ -591,8 +665,8 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     begin_step(worker, store=(command,))
 
     worker.save_layer("layers.0.group.0")
-    assert worker._layerwise_store_timeline is not None
-    worker._layerwise_store_timeline._executor._queue.join()
+    assert worker._store_executor is not None
+    worker._store_executor.submit(lambda: None).result()
     assert [call[0] for call in backend.calls].count("batch_copy_put") == 1
     assert "batch_commit" not in [call[0] for call in backend.calls]
 
@@ -613,14 +687,87 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     with pytest.raises(RuntimeError, match="Store source release is unknown"):
         failed.finish_step()
     assert failed._pending_store_batch is not None
-    assert not failed._pending_store_batch.completions[0].evidence.source_release_confirmed
-    assert failed._pending_store_batch.completions[1].evidence.source_release_confirmed
+    assert not failed._pending_store_batch.future.result()[0].evidence.source_release_confirmed
+    assert failed._pending_store_batch.future.result()[1].evidence.source_release_confirmed
     assert failed.take_released_store_job_ids() == {18}
     assert "batch_commit" not in [call[0] for call in failing_backend.calls]
     assert "batch_revoke" in [call[0] for call in failing_backend.calls]
     with pytest.raises(RuntimeError, match="fatal Store failure"):
         failed.close()
     assert not failed_resources.closed
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_layerwise_escaped_copy_error_preserves_later_jobs_and_retains_unknown_sources(use_gva, monkeypatch) -> None:
+    worker, resources, backend = make_gva_worker() if use_gva else make_worker(layerwise=True)
+    original = worker._layerwise_backend_io.store_layer
+    reached = []
+
+    def copy_then_raise(source_ready, layer_id):
+        result = original(source_ready, layer_id)
+        reached.append(layer_id)
+        if layer_id == 0:
+            raise RuntimeError("escaped layer copy error")
+        return result
+
+    monkeypatch.setattr(worker._layerwise_backend_io, "store_layer", copy_then_raise)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    begin_step(worker, store=(command,))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
+    with pytest.raises(RuntimeError, match="Store source release is unknown"):
+        worker.finish_step()
+    assert reached == [0, 1]
+    assert not worker.take_released_store_job_ids()
+    assert not any(call[0] in ("publish", "batch_commit") for call in backend.calls)
+    assert worker._pending_store_batch is not None
+    evidence = worker._pending_store_batch.future.result()[0].evidence
+    assert not evidence.succeeded
+    assert not evidence.source_release_confirmed
+    assert str(evidence.error) == "escaped layer copy error"
+    with pytest.raises(RuntimeError, match="fatal Store failure"):
+        worker.close()
+    assert worker._store_executor.stopped
+    assert worker._load_executor.stopped
+    assert not resources.closed
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_layerwise_escaped_preparation_error_skips_copies_releases_sources_and_next_step_recovers(
+    use_gva, monkeypatch
+) -> None:
+    worker, resources, backend = make_gva_worker() if use_gva else make_worker(layerwise=True)
+    original = worker._open_store
+
+    def prepare_then_raise(progress):
+        original(progress)
+        raise RuntimeError("escaped Store preparation error")
+
+    monkeypatch.setattr(worker, "_open_store", prepare_then_raise)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    try:
+        begin_step(worker, store=(command,))
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+        worker.finish_step()
+        assert worker.take_released_store_job_ids() == {17}
+        assert not any(call[0] in ("copy", "batch_copy_put", "publish", "batch_commit") for call in backend.calls)
+        if use_gva:
+            assert worker.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))).available_end_token == 0
+        worker.end_step()
+
+        monkeypatch.setattr(worker, "_open_store", original)
+        next_command = RangeStoreCommand("next", TokenRange(0, 4), ((3,),), (b"b",), 4, 18)
+        begin_step(worker, store=(next_command,))
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+        worker.finish_step()
+        assert worker.take_released_store_job_ids() == {18}
+        assert sum(call[0] in ("publish", "batch_commit") for call in backend.calls) == 1
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
 
 
 @pytest.mark.parametrize("start_results", ([0, 0], [0, -1]), ids=("all_started", "partial_start"))
@@ -791,13 +938,13 @@ def test_gva_worker_publishes_after_all_layers_and_reports_job_release() -> None
     begin_step(worker, store=(command,))
 
     worker.save_layer("layers.0.group.0")
-    assert worker._layerwise_store_timeline is not None
-    worker._layerwise_store_timeline._executor._queue.join()
+    assert worker._store_executor is not None
+    worker._store_executor.submit(lambda: None).result()
     assert [call[0] for call in store.calls].count("copy") == 1
     assert not any(call[0] == "publish" for call in store.calls)
 
     worker.save_layer("layers.1.group.0")
-    worker._layerwise_store_timeline._executor._queue.join()
+    worker._store_executor.submit(lambda: None).result()
     worker.finish_step()
     assert [call[0] for call in store.calls if call[0] in ("alloc", "copy", "publish")] == [
         "alloc",

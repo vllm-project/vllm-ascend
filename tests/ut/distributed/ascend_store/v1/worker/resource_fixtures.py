@@ -17,7 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection impo
     compile_bulk_projection_binder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    SynchronousBulkWorker,
+    BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
     KVPoolResources,
@@ -87,7 +87,7 @@ def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
     resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
     projection_binder = compile_bulk_projection_binder(topology, 64)
-    worker = SynchronousBulkWorker(
+    worker = BulkWorker(
         topology,
         projection_binder,
         resources,

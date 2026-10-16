@@ -61,16 +61,9 @@ def prepare_layer_store(
     batch: KVTransferBatch,
     resolve_object_bases: ObjectBaseResolver | None = None,
 ) -> LayerTransferPlan:
-    """Bind session-only GVA bases to the plan produced by materialization."""
+    """Lower admitted Store objects once; every physical layer reuses this plan."""
 
-    plan = batch.layer_store_plan
-    if plan is None:
-        # Partial session-start failure creates a new selected batch. Rebuild only
-        # on that cold failure path; the successful path reuses the original plan.
-        plan = make_layer_transfer_plan(
-            batch,
-            tuple(make_layer_transfer_group(group) for group in batch.groups),
-        )
+    plan = make_layer_transfer_plan(batch, tuple(make_layer_transfer_group(group) for group in batch.groups))
     return _bind_object_bases(plan, resolve_object_bases)
 
 

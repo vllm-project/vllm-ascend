@@ -5,31 +5,23 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 from functools import wraps
-from typing import Any, Concatenate, ParamSpec, TypeAlias, TypeVar
+from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar
 
-import numpy as np
 import torch
 from vllm.logger import logger
 
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
-from ..timeline.asynchronous_load import AsynchronousLoadTimeline
-from ..timeline.asynchronous_store import AsynchronousStoreTimeline
-from ..timeline.layerwise_load import LayerwiseLoadTimeline
-from ..timeline.layerwise_store import LayerwiseStoreTimeline
-from ..timeline.store_batch import StoreBatch
-from ..timeline.synchronous_load import SynchronousLoadTimeline
 from ..topology import KVPoolTopology
 from .io import BackendIO
 from .resources import KVPoolResources
-from .transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch, make_layer_store_group, make_layer_store_plan
+from .transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
 from .transfer.evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from .transfer.result import LoadFailureLocation, LoadResult
 from .transfer.state import (
     KVPoolStepContext,
-    MaterializedStoreGroup,
+    PendingStore,
     StoreCandidates,
     StoreGroupCandidates,
     compact_single_axis_rows,
@@ -41,8 +33,18 @@ from .transfer.state import (
 
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
-_LoadTimeline: TypeAlias = SynchronousLoadTimeline | AsynchronousLoadTimeline | LayerwiseLoadTimeline
-_StoreTimeline: TypeAlias = AsynchronousStoreTimeline | LayerwiseStoreTimeline
+_WorkerT = TypeVar("_WorkerT", bound="KVPoolWorker")
+
+
+class _ExecutionResource(Protocol):
+    """Start after cache binding and stop before registered memory is released."""
+
+    def start(self) -> None: ...
+
+    def close(self) -> object: ...
+
+    @property
+    def stopped(self) -> bool: ...
 
 
 class KVPoolWorker(ABC):
@@ -53,37 +55,35 @@ class KVPoolWorker(ABC):
         topology: KVPoolTopology,
         resources: KVPoolResources,
         backend_io: BackendIO,
-        load_timeline: _LoadTimeline,
-        store_timeline: _StoreTimeline | None,
+        execution_resources: Sequence[_ExecutionResource],
         *,
+        store_enabled: bool,
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._topology = topology
         self._resources = resources
         self._backend_io = backend_io
-        self._load_timeline = load_timeline
-        self._store_timeline = store_timeline
+        self._execution_resources = tuple(execution_resources)
+        self._store_enabled = store_enabled
         self._groups = {group.group_id: group for group in topology.transfer_groups}
         self._active_step: KVPoolStepContext | None = None
-        self._pending_load_request_ids: set[str] = set()
-        self._pending_store_batches: deque[StoreBatch] = deque()
-        self._pending_store_batch: StoreBatch | None = None
-        self._latest_store_batch_by_request: dict[str, StoreBatch] = {}
+        self._pending_store_batches: deque[PendingStore] = deque()
+        self._pending_store_batch: PendingStore | None = None
+        self._latest_store_batch_by_request: dict[str, PendingStore] = {}
         self._released_store_job_ids: set[int] = set()
         # Only source-safety and execution faults block later steps. Completed
         # cache write failures are logged at the Store fence.
         self._store_fatal_error: Exception | None = None
-        self._timelines_started = False
+        self._execution_started = False
         self._source_ready_event_factory = source_ready_event_factory or (lambda: torch.npu.Event())
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
             registration = self._resources.bind_kv_caches(kv_caches)
             self._bind_projection(registration)
-            if self._store_timeline is not None:
-                self._store_timeline.start()
-            self._load_timeline.start()
-            self._timelines_started = True
+            for execution in self._execution_resources:
+                execution.start()
+            self._execution_started = True
         except BaseException:
             try:
                 self.close()
@@ -104,7 +104,7 @@ class KVPoolWorker(ABC):
         if self._active_step is not None:
             raise RuntimeError("Previous KV Pool step has not ended")
         context = KVPoolStepContext(step)
-        if self._store_timeline is not None and step.store.commands:
+        if self._store_enabled and step.store.commands:
             try:
                 self._prepare_step_store(step.store.commands)
                 if step.store.all_sources_ready:
@@ -121,10 +121,10 @@ class KVPoolWorker(ABC):
 
     @staticmethod
     def _with_active_step(
-        method: Callable[Concatenate[KVPoolWorker, KVPoolStepContext, _Parameters], _Result],
-    ) -> Callable[Concatenate[KVPoolWorker, _Parameters], _Result]:
+        method: Callable[Concatenate[_WorkerT, KVPoolStepContext, _Parameters], _Result],
+    ) -> Callable[Concatenate[_WorkerT, _Parameters], _Result]:
         @wraps(method)
-        def guarded(self: KVPoolWorker, *args: _Parameters.args, **kwargs: _Parameters.kwargs) -> _Result:
+        def guarded(self: _WorkerT, *args: _Parameters.args, **kwargs: _Parameters.kwargs) -> _Result:
             if self._active_step is None:
                 raise RuntimeError("KV Pool step has not begun")
             return method(self, self._active_step, *args, **kwargs)
@@ -136,20 +136,14 @@ class KVPoolWorker(ABC):
         if not context.step.load.commands:
             return
         batch = self._build_load_batch(context.step.load.commands)
-        self._before_load_submit(batch)
-        try:
-            completions = self._load_timeline.submit(batch)
-        except BaseException:
-            self._load_submit_failed(batch)
-            raise
-
+        completions = self._submit_load(batch)
         for completion in completions:
             self._record_load_completion(context, completion)
         self._raise_load_error(context)
 
     @_with_active_step
     def collect_load_result(self, context: KVPoolStepContext) -> LoadResult:
-        completions: Sequence[LoadCompletion] = self._load_timeline.collect()
+        completions = self._collect_load_completions()
 
         for completion in completions:
             self._accept_load_completion(completion)
@@ -187,7 +181,7 @@ class KVPoolWorker(ABC):
     @_with_active_step
     def finish_step(self, context: KVPoolStepContext) -> None:
         self._raise_store_fatal_error()
-        if self._store_timeline is None or not context.step.store.commands or context.store_submitted:
+        if not self._store_enabled or not context.step.store.commands or context.store_submitted:
             return
         try:
             self._submit_step_store(context, fence=True)
@@ -204,7 +198,7 @@ class KVPoolWorker(ABC):
 
         del commands
 
-    def _prepare_store_close(self) -> StoreBatch | None:
+    def _prepare_store_close(self) -> PendingStore | None:
         return None
 
     def _submit_store_layer(self, layer_name: str) -> None:
@@ -215,22 +209,25 @@ class KVPoolWorker(ABC):
     def _wait_for_layer_load(self, layer_name: str) -> tuple[LoadCompletion, ...]:
         return ()
 
-    def _before_load_submit(self, batch: KVTransferBatch) -> None:
-        """Reserve route-specific Load state before Timeline submission."""
+    @abstractmethod
+    def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
+        """Run or submit Load, returning only results available in the submitting call."""
 
-        del batch
+    @abstractmethod
+    def _collect_load_completions(self) -> Sequence[LoadCompletion]:
+        """Consume route-specific Load completions at the result boundary."""
 
-    def _load_submit_failed(self, batch: KVTransferBatch) -> None:
-        """Roll back route-specific Load state after submission failure."""
+    def _abort_load(self) -> None:
+        """Finish route-specific Load state after a fatal business result."""
 
-        del batch
+        return None
 
     def _accept_load_completion(self, completion: LoadCompletion) -> None:
         """Consume route-specific pending state for one completion."""
 
         del completion
 
-    def _track_store_batch(self, batch: StoreBatch) -> None:
+    def _track_store_batch(self, batch: PendingStore) -> None:
         if self._pending_store_batch is None:
             self._pending_store_batch = batch
         self._pending_store_batches.append(batch)
@@ -247,8 +244,8 @@ class KVPoolWorker(ABC):
         self._raise_store_fatal_error()
         if self._pending_store_batch is None:
             return ()
-        if self._store_timeline is None:
-            raise RuntimeError("Store completion exists without a Store timeline")
+        if not self._store_enabled:
+            raise RuntimeError("Store completion exists while Store is disabled")
         required_batch_ids = (
             set()
             if released_request_ids is None
@@ -260,14 +257,10 @@ class KVPoolWorker(ABC):
         )
         collected: list[StoreCompletion] = []
         try:
-            # An executor failure can leave later queued batch events unset.
-            self._store_timeline.collect(None)
             while self._pending_store_batches:
                 pending = self._pending_store_batches[0]
-                completions = (
-                    self._store_timeline.wait(pending)
-                    if released_request_ids is None or required_batch_ids
-                    else self._store_timeline.collect(pending)
+                completions = self._collect_store_completions(
+                    pending, wait=released_request_ids is None or bool(required_batch_ids)
                 )
                 if completions is None:
                     break
@@ -284,7 +277,11 @@ class KVPoolWorker(ABC):
             raise
         return tuple(collected)
 
-    def _accept_store_completions(self, batch: StoreBatch, completions: tuple[StoreCompletion, ...]) -> None:
+    @abstractmethod
+    def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
+        """Read one Store result; readiness alone does not confirm source release."""
+
+    def _accept_store_completions(self, batch: PendingStore, completions: tuple[StoreCompletion, ...]) -> None:
         for completion in completions:
             if completion.evidence.source_release_confirmed and completion.store_job_id is not None:
                 self._released_store_job_ids.add(completion.store_job_id)
@@ -315,7 +312,7 @@ class KVPoolWorker(ABC):
     def close(self) -> None:
         close_error: BaseException | None = None
         store_handoff_complete = False
-        if not self._timelines_started and self._pending_store_batch is None:
+        if not self._execution_started and self._pending_store_batch is None:
             store_handoff_complete = True
         else:
             try:
@@ -328,42 +325,40 @@ class KVPoolWorker(ABC):
             except BaseException as error:
                 close_error = error
 
-        store_timeline_stopped = True
-        if self._store_timeline is not None:
+        for execution in self._execution_resources:
             try:
-                self._store_timeline.close()
+                execution.close()
             except BaseException as error:
                 if close_error is None:
                     close_error = error
                 else:
-                    logger.exception("Failed to close Store Timeline after an earlier close failure")
-            store_timeline_stopped = self._store_timeline.stopped
+                    logger.exception("Failed to close execution resource after an earlier close failure")
 
-        load_timeline_stopped = False
-        try:
-            self._load_timeline.close()
-        except BaseException as error:
-            if close_error is None:
-                close_error = error
-            else:
-                logger.exception("Failed to close Load Timeline after an earlier close failure")
-        load_timeline_stopped = self._load_timeline.stopped
+        execution_stopped = all(execution.stopped for execution in self._execution_resources)
+        if execution_stopped:
+            try:
+                self._check_execution_results()
+            except BaseException as error:
+                if close_error is None:
+                    close_error = error
+                else:
+                    logger.exception("Failed to check execution results after an earlier close failure")
 
-        if (
-            store_handoff_complete
-            and self._pending_store_batch is None
-            and store_timeline_stopped
-            and load_timeline_stopped
-        ):
+        if store_handoff_complete and self._pending_store_batch is None and execution_stopped:
             try:
                 self._resources.close()
             except BaseException as error:
                 if close_error is None:
                     close_error = error
                 else:
-                    logger.exception("Failed to close KV Pool resources after Timeline close failed")
+                    logger.exception("Failed to close KV Pool resources after execution close failed")
         if close_error is not None:
             raise close_error
+
+    def _check_execution_results(self) -> None:
+        """Observe execution errors after draining, without consuming pending Load notifications."""
+
+        return None
 
     def _record_source_ready(self) -> Any:
         source_ready_event = self._source_ready_event_factory()
@@ -375,48 +370,30 @@ class KVPoolWorker(ABC):
         commands: tuple[StoreCommand, ...],
         candidates: StoreCandidates,
         selected_objects: tuple[bool, ...] | None,
-        *,
-        prepare_layerwise: bool = False,
     ) -> KVTransferBatch:
         groups = []
-        layer_store_groups = []
         object_offset = 0
         for group_candidates in candidates.groups:
             next_offset = object_offset + group_candidates.object_count
             group_selection = None if selected_objects is None else selected_objects[object_offset:next_offset]
-            materialized = self._materialize_store_group(
-                group_candidates,
-                group_selection,
-                prepare_layerwise=prepare_layerwise,
-            )
-            groups.append(materialized.batch)
-            if materialized.layer_store is not None:
-                layer_store_groups.append(materialized.layer_store)
+            groups.append(self._materialize_store_group(group_candidates, group_selection))
             object_offset = next_offset
         if selected_objects is not None and object_offset != len(selected_objects):
             raise RuntimeError("Store candidate selection does not match the candidate object count")
 
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
-        batch = KVTransferBatch(
+        return KVTransferBatch(
             tuple(command.request_id for command in commands),
             tuple(groups),
             tuple(command.store_job_id for command in commands),
             selected_keys,
         )
-        if prepare_layerwise:
-            batch = replace(
-                batch,
-                layer_store_plan=make_layer_store_plan(tuple(layer_store_groups), batch),
-            )
-        return batch
 
     def _materialize_store_group(
         self,
         candidates: StoreGroupCandidates,
         selected_objects: tuple[bool, ...] | None,
-        *,
-        prepare_layerwise: bool,
-    ) -> MaterializedStoreGroup:
+    ) -> KVGroupBatch:
         row_count = candidates.row_count
         for counts, hashes, block_ids in candidates.rows_by_request:
             if len(hashes) != len(counts) or len(block_ids) != len(counts):
@@ -429,7 +406,6 @@ class KVPoolWorker(ABC):
             )
 
         key_axes: KeyAxes
-        selected_object_indices = None
         if selected_objects is not None and len(candidates.key_axes) == 1:
             token_counts, block_ids, request_splits, selected_axis = compact_single_axis_rows(
                 candidates.rows_by_request,
@@ -457,8 +433,6 @@ class KVPoolWorker(ABC):
                 include for axis in selections_by_axis for include, keep in zip(axis, keep_rows, strict=True) if keep
             )
             materialized_selection = None if all(compact_selection) else readonly_bool(compact_selection)
-            if materialized_selection is not None:
-                selected_object_indices = np.flatnonzero(materialized_selection)
             selected_keys = tuple(
                 key
                 for axis, selection in zip(key_axes, split_selection(compact_selection, len(key_axes)), strict=True)
@@ -485,7 +459,7 @@ class KVPoolWorker(ABC):
 
         topology = self._groups[candidates.group_id]
         object_size, physical_layer_ids_by_axis = self._store_group_layout(candidates.group_id)
-        group = KVGroupBatch(
+        return KVGroupBatch(
             candidates.group_id,
             readonly_uint64(block_ids),
             readonly_uint64(token_counts),
@@ -497,10 +471,6 @@ class KVPoolWorker(ABC):
             selected_keys,
             physical_layer_ids_by_axis,
         )
-        layer_store = (
-            make_layer_store_group(group, selected_object_indices) if prepare_layerwise and selected_keys else None
-        )
-        return MaterializedStoreGroup(group, layer_store)
 
     def _admitted_store_keys(self, selected_keys: tuple[str, ...]) -> tuple[set[str] | None, bool]:
         if not selected_keys:
@@ -541,7 +511,7 @@ class KVPoolWorker(ABC):
     def _raise_load_error(self, context: KVPoolStepContext) -> None:
         if not context.failed_request_ids:
             return
-        self._load_timeline.abort()
+        self._abort_load()
         failed_locations = sorted({(source.group_id, source.block_id) for source in context.failed_sources})
         raise RuntimeError(
             f"Hybrid KV Load failed for requests {sorted(context.failed_request_ids)}; "

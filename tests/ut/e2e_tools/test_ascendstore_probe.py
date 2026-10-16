@@ -22,7 +22,7 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import SynchronousBulkWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import BulkWorker
 
 _PRODUCTION_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
 
@@ -87,7 +87,7 @@ def worker_factory(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], SimpleNam
         elif implementation == "v1":
             connector_type = type("AscendStoreV1Connector", (), {"__module__": _V1_MODULE})
             connector = connector_type()
-            connector.worker = SynchronousBulkWorker.__new__(SynchronousBulkWorker)
+            connector.worker = BulkWorker.__new__(BulkWorker)
             connector.worker._resources = SimpleNamespace(kv_caches={"layer": cache}, backend=backend)
             connector.worker._topology = SimpleNamespace(cache_transfer_granularity=4)
             connector.worker._store_fatal_error = None

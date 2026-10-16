@@ -48,19 +48,18 @@ class LayerwiseLoadTiming:
 
     def install(self) -> None:
         try:
-            # These callbacks were captured at construction: patch the actual call sites, not their source methods.
-            timeline = self._worker._layerwise_load_timeline
+            io = self._worker._layerwise_backend_io
             self._patch(self._lookup_server, "_lookup", "lookup_service", independent=True)
             self._patch(self._backend, "exists", "lookup_backend_exists", independent=True)
             self._patch(self._worker, "_build_load_batch", "load_batch_prepare")
             self._patch(self._worker, "start_load", "load_start_host")
             self._patch(self._worker, "wait_for_layer_load", "layer_wait_host", layer_argument="layer_name")
-            self._patch(timeline, "_prepare_layers", "layer_plan_prepare")
-            self._patch(timeline, "_execute_layer", "layer_task_host", layer_argument="job")
-            self._patch(timeline, "_operation", "layer_io_host", layer_argument="layer_id")
+            self._patch(io, "prepare_load_layers", "layer_plan_prepare")
+            self._patch(io, "load_layer", "layer_io_host", layer_argument="layer_id")
             self._patch(self._backend, "start_key_range_load", "session_start")
             self._patch(self._backend, "copy_key_range_load", "range_copy")
             self._patch(self._backend, "finish_key_range_load", "session_end")
+            self._replace(self._worker, "_submit_load", self._submit_load_wrapper(self._worker._submit_load))
             self._replace(self._runner, "execute_model", self._execute_wrapper(self._runner.execute_model))
             self._replace(self._runner, "sample_tokens", self._sample_wrapper(self._runner.sample_tokens))
         except BaseException:
@@ -86,7 +85,7 @@ class LayerwiseLoadTiming:
                 if layer_argument == "layer_name":
                     layer = self._worker._layer_ids_by_name.get(value)
                 else:
-                    layer = value.layer_id if layer_argument == "job" else value
+                    layer = value
             self._layer_context.layer = layer
             previous_lookup = getattr(self._layer_context, "lookup", False)
             if stage == "lookup_service":
@@ -98,6 +97,35 @@ class LayerwiseLoadTiming:
                 self._layer_context.lookup = previous_lookup
 
         self._replace(owner, name, timed)
+
+    def _submit_load_wrapper(self, original: Any) -> Any:
+        @wraps(original)
+        def submit(*args: Any, **kwargs: Any) -> Any:
+            result = original(*args, **kwargs)
+            session = self._worker._session
+            if session is not None:
+                submit_task = session._load_submit
+
+                @wraps(submit_task)
+                def submit_timed_task(operation: Any, *task_args: Any, **task_kwargs: Any) -> Any:
+                    # Layer tasks receive (layer_id, gate); the finish callback takes no arguments.
+                    if not task_args:
+                        return submit_task(operation, *task_args, **task_kwargs)
+
+                    @wraps(operation)
+                    def run_layer(layer_id: int, gate: Any) -> Any:
+                        step = self._active_step
+                        if step is None:
+                            return operation(layer_id, gate)
+                        return self._invoke("layer_task_host", step, layer_id, operation, (layer_id, gate), {})
+
+                    return submit_task(run_layer, *task_args, **task_kwargs)
+
+                # Observe the injected submit function without depending on the task's private name.
+                self._replace(session, "_load_submit", submit_timed_task)
+            return result
+
+        return submit
 
     def _execute_wrapper(self, original: Any) -> Any:
         @wraps(original)
@@ -118,11 +146,14 @@ class LayerwiseLoadTiming:
                 }
             )
             self._active_step = step
+            checkpoint = len(self._restorations)
             try:
                 result = self._invoke("execute_model_host", step, None, original, args, kwargs)
                 self._sample_step = step
                 return result
             finally:
+                # Per-step Session hooks must not retain completed sessions across diagnostic requests.
+                self.restore(keep=checkpoint)
                 self._active_step = None
 
         return execute
@@ -158,8 +189,8 @@ class LayerwiseLoadTiming:
         self._restorations.append((owner, name, name in attributes, attributes.get(name)))
         setattr(owner, name, replacement)
 
-    def restore(self) -> None:
-        while self._restorations:
+    def restore(self, *, keep: int = 0) -> None:
+        while len(self._restorations) > keep:
             owner, name, existed, value = self._restorations.pop()
             if existed:
                 setattr(owner, name, value)

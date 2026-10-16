@@ -35,8 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
     TPPartitionSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    AsynchronousBulkWorker,
-    SynchronousBulkWorker,
+    BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -367,12 +366,12 @@ def make_worker(
             source_ready_event_factory=source_ready_event_factory or FakeEvent,
         )
     else:
-        worker_type = AsynchronousBulkWorker if async_load else SynchronousBulkWorker
-        worker = worker_type(
+        worker = BulkWorker(
             topology,
             projection_binder,
             resources,  # type: ignore[arg-type]
             store_enabled=store,
+            load_async=async_load,
             source_ready_event_factory=source_ready_event_factory or FakeEvent,
         )
     if bind:

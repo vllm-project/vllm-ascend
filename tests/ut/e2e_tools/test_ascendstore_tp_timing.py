@@ -14,7 +14,7 @@ import torch
 
 from tests.e2e.pull_request.four_card.ascendstore_v1_tp_timing import AscendStoreTPBenchmarkWorkerExtension
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import SynchronousBulkWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import BulkWorker
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def tp_worker(monkeypatch):
             connector = connector_type()
             connector.connector_worker = worker
         else:
-            worker = SynchronousBulkWorker.__new__(SynchronousBulkWorker)
+            worker = BulkWorker.__new__(BulkWorker)
             worker._resources = SimpleNamespace(backend=backend)
             worker._pending_store_batch = None
             worker._topology = SimpleNamespace(

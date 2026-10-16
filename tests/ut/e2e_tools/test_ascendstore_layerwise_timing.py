@@ -1,4 +1,4 @@
-"""Exercise test-only timing against the actual v1 Worker and its captured executor callbacks."""
+"""Verify that the timing adapter preserves actual v1 Worker calls and execution results."""
 
 from types import SimpleNamespace
 

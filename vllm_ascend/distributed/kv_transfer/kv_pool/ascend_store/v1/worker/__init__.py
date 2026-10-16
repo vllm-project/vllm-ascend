@@ -12,13 +12,11 @@ from typing import Any
 
 _WORKER_EXPORTS = MappingProxyType(
     {
-        "AsynchronousBulkWorker": "bulk",
         "BulkWorker": "bulk",
         "GVALayerwiseWorker": "layerwise",
         "KVPoolWorker": "base",
         "KeyRangeLayerwiseWorker": "layerwise",
         "LayerwiseWorker": "layerwise",
-        "SynchronousBulkWorker": "bulk",
     }
 )
 

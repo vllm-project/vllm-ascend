@@ -196,7 +196,6 @@ class KVTransferBatch:
     groups: tuple[KVGroupBatch, ...]
     store_job_ids: tuple[int | None, ...] | None = None
     selected_key_values: tuple[str, ...] | None = None
-    layer_store_plan: LayerTransferPlan | None = None
 
     @property
     def empty(self) -> bool:
@@ -211,37 +210,12 @@ class KVTransferBatch:
         claimed: set[str] | None = set() if claim_once else None
         groups = tuple(group.select_keys(accepted, claimed) for group in self.groups)
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
-        layer_store_plan = (
-            None
-            if self.layer_store_plan is None
-            else make_layer_transfer_plan(
-                replace(self, groups=groups, selected_key_values=selected_keys, layer_store_plan=None),
-                tuple(make_layer_transfer_group(group) for group in groups),
-            )
-        )
-        return replace(
-            self,
-            groups=groups,
-            selected_key_values=selected_keys,
-            layer_store_plan=layer_store_plan,
-        )
+        return replace(self, groups=groups, selected_key_values=selected_keys)
 
     def for_layer(self, layer_id: int) -> KVTransferBatch:
         groups = tuple(group for group in self.groups if layer_id in group.physical_layer_ids)
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
-        return replace(self, groups=groups, selected_key_values=selected_keys, layer_store_plan=None)
-
-
-# Store builds this plan during Worker materialization. Load builds the same
-# shape after session admission, so both directions retain one cross-layer
-# lowering without sharing mutable lifecycle state.
-LayerStoreGroup = LayerTransferGroup
-LayerStorePlan = LayerTransferPlan
-make_layer_store_group = make_layer_transfer_group
-
-
-def make_layer_store_plan(groups: tuple[LayerTransferGroup, ...], batch: KVTransferBatch) -> LayerTransferPlan:
-    return make_layer_transfer_plan(batch, groups)
+        return replace(self, groups=groups, selected_key_values=selected_keys)
 
 
 def make_layer_load_plan(batch: KVTransferBatch) -> LayerTransferPlan:

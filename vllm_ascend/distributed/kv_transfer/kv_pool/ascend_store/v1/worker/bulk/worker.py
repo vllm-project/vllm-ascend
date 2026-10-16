@@ -1,13 +1,15 @@
-"""Bulk Worker routes with fixed synchronous or asynchronous Load timelines."""
+"""Execute Bulk transfers with construction-time Load mode and independent I/O executors."""
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import BrokenExecutor, CancelledError, Future
 from typing import Any
 
 from vllm.logger import logger
 
+from ...execution.executor import Executor
 from ...projection import (
     BulkProjection,
     BulkProjectionBinder,
@@ -45,9 +47,6 @@ from ...projection.bulk.tp_mismatch import (
 from ...projection.store import StoreCandidateRows, checkpoint_companion_indices, store_candidate_rows
 from ...protocol.lookup import LookupRequest, LookupResult
 from ...protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
-from ...timeline.asynchronous_load import AsynchronousLoadTimeline
-from ...timeline.asynchronous_store import AsynchronousStoreTimeline
-from ...timeline.synchronous_load import SynchronousLoadTimeline
 from ...topology import KVPoolTopology
 from ..base import KVPoolWorker, _failed_store_completions, _store_command_completions
 from ..io import BackendIO
@@ -66,6 +65,7 @@ from ..transfer.rows import (
 )
 from ..transfer.state import (
     KVPoolStepContext,
+    PendingStore,
     StoreCandidates,
     StoreGroupCandidates,
     concat_uint64,
@@ -78,7 +78,7 @@ from ..transfer.state import (
 
 
 class BulkWorker(KVPoolWorker):
-    """Own one bound Bulk projection and its common Store execution route."""
+    """Own Bulk business operations, pending results and independent Load/Store execution."""
 
     def __init__(
         self,
@@ -87,29 +87,26 @@ class BulkWorker(KVPoolWorker):
         resources: KVPoolResources,
         *,
         store_enabled: bool = True,
+        load_async: bool = False,
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._bulk_projection_binder = projection_binder
         self._bulk_projection: BulkProjection | None = None
         backend_io = BackendIO(resources.backend, resources.backend_spec)
         self._bulk_backend_io = backend_io
-        load_timeline = self._create_load_timeline(backend_io)
-        store_timeline = (
-            AsynchronousStoreTimeline(backend_io.initialize_thread, self._execute_bulk_store) if store_enabled else None
-        )
-        self._asynchronous_store_timeline = store_timeline
+        self._store_executor = Executor("KVPoolStoreExecutor", backend_io.initialize_thread) if store_enabled else None
+        self._load_executor = Executor("KVPoolLoadExecutor", backend_io.initialize_thread) if load_async else None
+        self._pending_loads: deque[Future[tuple[LoadCompletion, ...]]] = deque()
+        self._load_batches: dict[Future[tuple[LoadCompletion, ...]], KVTransferBatch] = {}
+        self._pending_load_request_ids: set[str] = set()
         super().__init__(
             topology,
             resources,
             backend_io,
-            load_timeline,
-            store_timeline,
+            tuple(executor for executor in (self._store_executor, self._load_executor) if executor is not None),
+            store_enabled=store_enabled,
             source_ready_event_factory=source_ready_event_factory,
         )
-
-    @abstractmethod
-    def _create_load_timeline(self, backend_io: BackendIO) -> SynchronousLoadTimeline | AsynchronousLoadTimeline:
-        """Create the leaf Worker's fixed Bulk Load timeline."""
 
     def _bind_projection(self, registration: dict[str, Any]) -> None:
         self._bulk_projection = self._bulk_projection_binder.bind(**registration, kv_caches=self._resources.kv_caches)
@@ -119,6 +116,71 @@ class BulkWorker(KVPoolWorker):
         if self._bulk_projection is None:
             raise RuntimeError("Concrete Bulk projection is unavailable before cache registration")
         return self._bulk_projection
+
+    def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
+        if self._load_executor is None:
+            return self._execute_bulk_load(batch)
+        overlapping = self._pending_load_request_ids.intersection(batch.request_ids)
+        if overlapping:
+            raise RuntimeError(f"Request already has a pending asynchronous Load: {sorted(overlapping)}")
+        self._pending_load_request_ids.update(batch.request_ids)
+        try:
+            future = self._load_executor.submit(self._execute_bulk_load, batch)
+        except BaseException:
+            self._pending_load_request_ids.difference_update(batch.request_ids)
+            raise
+        self._load_batches[future] = batch
+        self._pending_loads.append(future)
+        return ()
+
+    def _collect_load_completions(self) -> tuple[LoadCompletion, ...]:
+        completed: list[LoadCompletion] = []
+        while self._pending_loads and self._pending_loads[0].done():
+            future = self._pending_loads.popleft()
+            batch = self._load_batches.pop(future)
+            completed.extend(self._load_batch_completions(future, batch))
+        return tuple(completed)
+
+    def _load_batch_completions(
+        self, future: Future[tuple[LoadCompletion, ...]], batch: KVTransferBatch
+    ) -> tuple[LoadCompletion, ...]:
+        try:
+            return future.result()
+        except (BrokenExecutor, CancelledError):
+            raise
+        except Exception:
+            logger.exception("Bulk Load failed for requests %s", batch.request_ids)
+            return _failed_load_completions(batch, None)
+
+    def _accept_load_completion(self, completion: LoadCompletion) -> None:
+        if completion.request_id not in self._pending_load_request_ids:
+            raise RuntimeError(f"Load completion has no pending execution: {completion.request_id}")
+        self._pending_load_request_ids.remove(completion.request_id)
+
+    def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
+        del fence
+        if self._store_executor is None:
+            raise RuntimeError("Bulk Store is disabled")
+        commands = context.step.store.commands
+        future = self._store_executor.submit(self._execute_bulk_store, commands, self._record_source_ready())
+        self._track_store_batch(
+            PendingStore(
+                future,
+                frozenset(command.request_id for command in commands),
+                frozenset(command.store_job_id for command in commands if command.store_job_id is not None),
+            )
+        )
+        context.store_submitted = True
+
+    def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
+        if not wait and not batch.future.done():
+            return None
+        return batch.future.result()
+
+    def _check_execution_results(self) -> None:
+        # Observe task failures at shutdown without consuming pending Load notifications.
+        for future in self._pending_loads:
+            self._load_batch_completions(future, self._load_batches[future])
 
     def lookup(self, request: LookupRequest) -> LookupResult:
         projection = self._bound_bulk_projection
@@ -491,13 +553,7 @@ class BulkWorker(KVPoolWorker):
         projection = self._bound_bulk_projection
         return len(projection.group_ids) if isinstance(projection, HybridBulkProjection) else 1
 
-    def _execute_bulk_load(
-        self,
-        batch: KVTransferBatch,
-        layer_id: int | None = None,
-    ) -> tuple[LoadCompletion, ...]:
-        if layer_id is not None:
-            raise ValueError("Bulk Load does not select an individual layer")
+    def _execute_bulk_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         if self._bulk_projection is None:
             raise RuntimeError("Bulk Load requires explicit Bulk projection")
         try:
@@ -609,51 +665,3 @@ class BulkWorker(KVPoolWorker):
             sizes,
             _batch_sources(batch, None),
         )
-
-    def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
-        del fence
-        timeline = self._asynchronous_store_timeline
-        if timeline is None:
-            raise RuntimeError("Bulk Store is disabled")
-        self._track_store_batch(timeline.submit(context.step.store.commands, self._record_source_ready()))
-        context.store_submitted = True
-
-
-class SynchronousBulkWorker(BulkWorker):
-    """Run Bulk Load on the caller while retaining asynchronous Store."""
-
-    def _create_load_timeline(self, backend_io: BackendIO) -> SynchronousLoadTimeline:
-        del backend_io
-        timeline = SynchronousLoadTimeline(self._execute_bulk_load)
-        self._synchronous_load_timeline = timeline
-        return timeline
-
-
-class AsynchronousBulkWorker(BulkWorker):
-    """Run Bulk Load and Store on Worker-owned execution threads."""
-
-    def _create_load_timeline(self, backend_io: BackendIO) -> AsynchronousLoadTimeline:
-        timeline = AsynchronousLoadTimeline(backend_io.initialize_thread, self._execute_bulk_load)
-        self._asynchronous_load_timeline = timeline
-        return timeline
-
-    def _before_load_submit(self, batch: KVTransferBatch) -> None:
-        overlapping = self._pending_load_request_ids.intersection(batch.request_ids)
-        if overlapping:
-            raise RuntimeError(f"Request already has a pending asynchronous Load: {sorted(overlapping)}")
-        self._pending_load_request_ids.update(batch.request_ids)
-
-    def _load_submit_failed(self, batch: KVTransferBatch) -> None:
-        self._pending_load_request_ids.difference_update(batch.request_ids)
-
-    def _accept_load_completion(self, completion: LoadCompletion) -> None:
-        if completion.request_id not in self._pending_load_request_ids:
-            raise RuntimeError(f"Load completion has no pending execution: {completion.request_id}")
-        self._pending_load_request_ids.remove(completion.request_id)
-
-
-__all__ = (
-    "AsynchronousBulkWorker",
-    "BulkWorker",
-    "SynchronousBulkWorker",
-)
