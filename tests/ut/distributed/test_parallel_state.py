@@ -198,9 +198,10 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
 
 
 @pytest.mark.parametrize("shared", [False, True])
-@pytest.mark.parametrize("shard_size", [1, 4])
-def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, shard_size):
+@pytest.mark.parametrize("candidate", [1, 4, 16])
+def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, candidate):
     from vllm_ascend.distributed import parallel_state
+    from vllm_ascend.patch.platform import patch_engram_config
 
     for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
         monkeypatch.setattr(parallel_state, name, None)
@@ -219,11 +220,12 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
     upstream = parallel_state.vllm_parallel_state
     for name in ("_ENGRAM_DP", "_TP", "_ETP", "_DCP", "_PCP", "_PP", "_DP", "_EP", "_EPLB"):
         monkeypatch.setattr(upstream, name, None)
-    node_partition = MagicMock(return_value=shard_size)
-    monkeypatch.setattr(upstream, "_engram_dp_shard_size", node_partition)
+    node_partition = MagicMock(return_value=candidate)
+    monkeypatch.setattr(patch_engram_config, "_original_engram_dp_shard_size", node_partition)
+    monkeypatch.setattr(upstream, "_engram_dp_shard_size", patch_engram_config._engram_dp_shard_size)
     init_group = MagicMock(side_effect=lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 32)
     monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
     monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
     monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
@@ -231,15 +233,31 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
     topology = SimpleNamespace(
         tensor_parallel_size=2,
         pipeline_parallel_size=1,
-        data_parallel_size=2,
-        prefill_context_parallel_size=2,
+        data_parallel_size=4,
+        prefill_context_parallel_size=4,
     )
     engram = SimpleNamespace(dp_shared_memory=shared)
+    model = SimpleNamespace(
+        architecture="DeepseekV41ForCausalLM",
+        hf_text_config=SimpleNamespace(engram_n_heads=8, engram_max_ngram_size=4),
+    )
+    monkeypatch.setattr(
+        patch_engram_config,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(parallel_config=topology, engram_config=engram, model_config=model),
+    )
+    shard_size = candidate if shared or candidate == 1 else 4
     parallel_state.init_ascend_model_parallel(topology, engram)
-    node_partition.assert_called_once_with(8, 4, 2)
+    node_partition.assert_called_once_with(32, 16, 2)
     group = upstream.get_engram_dp_group()
     if shard_size > 1:
-        assert init_group.call_args_list[0].args == ([[0, 2, 4, 6], [1, 3, 5, 7]], 0, "gloo" if shared else "hccl")
+        expected_ranks = [
+            list(range(start + tp_rank, start + tp_rank + 2 * shard_size, 2))
+            for tp_rank in range(2)
+            for start in range(0, 32, 2 * shard_size)
+        ]
+        assert init_group.call_args_list[0].args == (expected_ranks, 0, "gloo" if shared else "hccl")
+        assert sorted(rank for ranks in expected_ranks for rank in ranks) == list(range(32))
         assert init_group.call_args_list[0].kwargs == {"group_name": "edp", "use_device_communicator": not shared}
         assert group is not None
     else:

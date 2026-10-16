@@ -140,12 +140,18 @@ class TestNPUWorker(TestBase):
                     if fails:
                         raise RuntimeError("group initialization failed")
 
+                def initialize_ascend_groups(*args, config=config):
+                    self.assertIs(get_current_vllm_config(), config)
+
+                outer_config = SimpleNamespace(engram_config=None)
                 with (
-                    set_current_vllm_config(config),
+                    set_current_vllm_config(outer_config),
                     patch("vllm_ascend.worker.worker.init_batch_invariance"),
                     patch("vllm_ascend.worker.worker.init_distributed_environment"),
                     patch("vllm_ascend.worker.worker.ensure_model_parallel_initialized", side_effect=initialize_groups),
-                    patch("vllm_ascend.worker.worker.init_ascend_model_parallel") as ascend_init,
+                    patch(
+                        "vllm_ascend.worker.worker.init_ascend_model_parallel", side_effect=initialize_ascend_groups
+                    ) as ascend_init,
                     patch("vllm_ascend.worker.worker.ensure_ec_transfer_initialized"),
                 ):
                     if fails:
@@ -155,7 +161,7 @@ class TestNPUWorker(TestBase):
                     else:
                         worker._init_worker_distributed_environment()
                         ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
-                    self.assertIs(get_current_vllm_config(), config)
+                    self.assertIs(get_current_vllm_config(), outer_config)
 
     def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
         from vllm_ascend.core.kv_cache_interface import (
