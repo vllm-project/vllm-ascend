@@ -38,8 +38,7 @@ def scheduler_device(monkeypatch):
     return events, compute, transfer
 
 
-@pytest.mark.parametrize("explicit_caches", [False, True])
-def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, explicit_caches):
+def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device):
     main, indexer, mtp = layer_name(11), indexer_name(11), layer_name(17)
     specs = {name: make_kvpp_specs()[name] for name in (main, indexer, mtp)}
     plan = KVPPPhysicalCachePlan(
@@ -66,7 +65,6 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
         vllm_config=make_kvpp_config(2),
         kv_cache_config=make_cache_config(specs, 2),
         static_forward_context=context,
-        kv_caches=caches if explicit_caches else None,
     )
     scheduler = runtime.scheduler
     assert scheduler.attention_layer_names == (main,)
@@ -123,11 +121,12 @@ def test_dspark_draft_layers_are_absent_from_runtime_prefetch(monkeypatch, sched
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: group)
     caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs), torch.device("cpu"))
     context = config.compilation_config.static_forward_context
+    for name, cache in caches.items():
+        context[name].kv_cache = cache
     runtime = kvpp.KVPPRuntime.create_from_kv_cache(
         vllm_config=config,
         kv_cache_config=make_cache_config(specs),
         static_forward_context=context,
-        kv_caches=caches,
     )
     scheduler = runtime.scheduler
     targets = tuple(layer_name(i) for i in range(9, 17))

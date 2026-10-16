@@ -55,7 +55,7 @@ Prefetching uses a separate transfer stream. A ready event establishes data depe
 
 | Area | Scope |
 | --- | --- |
-| Models and execution | Non-hybrid MLA/SFA models in eager mode; Model Runner V1 and V2 |
+| Models and execution | Non-hybrid MLA/SFA models in eager mode; Model Runner V2 |
 | Supported combinations | TP, EP, PP, chunked prefill, prefix caching, asynchronous scheduling, fixed-step MTP |
 | Cache layouts | Allocated from actual specifications, including LI-C8 and SFA-C8 |
 | Not supported | Graph execution, PCP, DCP, disaggregated prefill/decode, variable-step MTP |

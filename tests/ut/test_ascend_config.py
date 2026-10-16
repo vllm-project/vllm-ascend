@@ -2129,6 +2129,14 @@ class TestKVPPConfig(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
 
+    def test_kvpp_requires_model_runner_v2(self):
+        from vllm_ascend.platform import _validate_parallel_config
+
+        config = make_kvpp_config()
+        config.use_v2_model_runner = False
+        with self.assertRaisesRegex(ValueError, "KVPP requires Model Runner V2"):
+            _validate_parallel_config(config)
+
     def test_dspark_accepts_fixed_length_and_dynamic_verification(self):
         config = make_kvpp_config()
         config.speculative_config.method = "dspark"

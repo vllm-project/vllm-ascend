@@ -129,7 +129,6 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.vllm_config = config
     runner.dcp_size = config.parallel_config.decode_context_parallel_size
     runner.ascend_config = SimpleNamespace(
-        kvpp_config=SimpleNamespace(size=1),
         xlite_graph_config=SimpleNamespace(enabled=False),
     )
     runner.compilation_config = config.compilation_config

@@ -68,7 +68,6 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
     runner.vllm_config = vllm_config
     runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
     runner.dcp_size = 1
-    runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     runner.use_sparse = True
     runner.use_compress = False
     runner.sparse_kv_offload_enabled = False
