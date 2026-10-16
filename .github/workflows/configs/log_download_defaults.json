@@ -1,14 +1,1 @@
-{
-  "1": {
-    "node0": ["outputs/default/"]
-  },
-  "2": {
-    "node0": ["outputs/default/"]
-  },
-  "3": {
-    "node0": ["outputs/default/"]
-  },
-  "4": {
-    "node0": ["outputs/default/"]
-  }
-}
+["outputs/default/"]
