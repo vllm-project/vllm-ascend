@@ -245,7 +245,12 @@ def merge_key_range_arguments(ranges: KeyRangeArguments) -> KeyRangeArguments:
 
 
 def _layer_sources(group: LayerTransferGroup, layer_id: int) -> tuple[TransferSource, ...]:
-    return tuple(group.batch.source(int(index), layer_id) for index in group.object_indices)
+    if group.request_indices is None:
+        raise RuntimeError("Layerwise Load request ownership was not prepared")
+    return tuple(
+        group.batch.source(int(index), layer_id, request_index=request_index)
+        for index, request_index in zip(group.object_indices, group.request_indices, strict=True)
+    )
 
 
 def _concatenate_gva_parts(parts: list[np.ndarray]) -> np.ndarray:

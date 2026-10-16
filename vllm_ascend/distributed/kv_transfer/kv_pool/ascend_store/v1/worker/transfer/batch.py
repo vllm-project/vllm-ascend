@@ -83,7 +83,7 @@ class KVGroupBatch:
         row_index = object_index % self.row_count
         return int(np.searchsorted(self.request_splits, row_index, side="right") - 1)
 
-    def source(self, object_index: int, layer_id: int | None) -> TransferSource:
+    def source(self, object_index: int, layer_id: int | None, *, request_index: int | None = None) -> TransferSource:
         axis_index, row_index = divmod(object_index, self.row_count)
         layer_ids: tuple[int, ...]
         if layer_id is not None:
@@ -92,7 +92,8 @@ class KVGroupBatch:
             layer_ids = self.physical_layer_ids
         else:
             layer_ids = self.physical_layer_ids_by_axis[axis_index]
-        request_index = self.request_index(object_index)
+        if request_index is None:
+            request_index = self.request_index(object_index)
         key = self.key_axes[axis_index][row_index]
         return TransferSource(self, object_index, row_index, request_index, layer_ids, key)
 
@@ -106,6 +107,8 @@ class LayerTransferGroup:
     block_ids: ByteArray
     token_counts: ByteArray
     object_indices: range | IndexArray
+    # Load resolves ownership after session admission; Store does not need this lowering.
+    request_indices: tuple[int, ...] | None = None
 
     @property
     def group_id(self) -> int:
@@ -242,7 +245,12 @@ def make_layer_store_plan(groups: tuple[LayerTransferGroup, ...], batch: KVTrans
 
 
 def make_layer_load_plan(batch: KVTransferBatch) -> LayerTransferPlan:
-    return make_layer_transfer_plan(batch, tuple(make_layer_transfer_group(group) for group in batch.groups))
+    groups = []
+    for batch_group in batch.groups:
+        group = make_layer_transfer_group(batch_group)
+        request_indices = tuple(batch_group.request_index(int(index)) for index in group.object_indices)
+        groups.append(replace(group, request_indices=request_indices))
+    return make_layer_transfer_plan(batch, tuple(groups))
 
 
 @dataclass(frozen=True, slots=True)
