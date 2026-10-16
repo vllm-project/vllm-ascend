@@ -11,7 +11,7 @@ from vllm_ascend.ops.linear import AscendQKVParallelLinear, AscendRowParallelLin
 from vllm_ascend.utils import is_moe_model
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
-MOE_PREFETCH_TOKEN_THRESHOLD = 96
+MOE_PREFETCH_TOKEN_THRESHOLD = 1
 MAX_PREFETCH_WEIGHT_SIZE = 18 * 1024 * 1024
 
 
