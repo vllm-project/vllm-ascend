@@ -25,6 +25,7 @@ from vllm.model_executor.utils import set_weight_attrs
 # FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
 # through the OOT registration in `vllm_ascend.utils` rather than by import.
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -307,13 +308,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        # Keep the layer's dispatch outside piecewise graph compilation.
-        self._forward(
-            qkv_proj_states=qkv,
-            g1=g1,
-            beta=beta,
-            core_attn_out=core_attn_out,
-        )
+        # Resolve runtime metadata outside the compiled projection graph.
+        torch.ops.vllm.glm5next_kda_attention(qkv, g1, beta, core_attn_out, self.prefix)
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
@@ -538,3 +534,33 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+def glm5next_kda_attention(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward(qkv_proj_states, g1, beta, core_attn_out)
+
+
+def glm5next_kda_attention_fake(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_attention",
+    op_func=glm5next_kda_attention,
+    mutates_args=["core_attn_out"],
+    fake_impl=glm5next_kda_attention_fake,
+    dispatch_key="PrivateUse1",
+)
