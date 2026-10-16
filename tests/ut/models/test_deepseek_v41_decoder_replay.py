@@ -4,7 +4,6 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 
-import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
@@ -12,8 +11,7 @@ from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_decoder_replay_requires_mrv2_with_prefix_caching(use_v2):
+def test_decoder_replay_enabled_with_prefix_caching():
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -22,10 +20,11 @@ def test_decoder_replay_requires_mrv2_with_prefix_caching(use_v2):
         _run_replay_layers=lambda *states: states,
         topk_indices_buffer=torch.zeros(8, 2),
         candidate_indices_buffer=torch.zeros(8, 2),
+        candidate_lengths_buffer=torch.zeros(8),
+        topk_lengths_buffer=torch.zeros(8),
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=True),
-        use_v2_model_runner=use_v2,
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -37,8 +36,43 @@ def test_decoder_replay_requires_mrv2_with_prefix_caching(use_v2):
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
-    assert (replay is not None) == use_v2
-    assert model.decoder_replay_start == (1 if use_v2 else 3)
+    assert replay is not None
+    assert model.decoder_replay_start == 1
+
+
+def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
+    buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[2], engram_layer_ids=[1], sliding_window=2),
+        end_layer=5,
+        use_sequence_parallel=False,
+        topk_indices_buffer=buffers[0],
+        candidate_indices_buffer=buffers[1],
+        candidate_lengths_buffer=buffers[2],
+        topk_lengths_buffer=buffers[3],
+        _run_replay_layers=lambda hidden, optional, positions: (hidden,),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        lora_config=None,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+    )
+    replay = replay_mod.make_decoder_replay(model, config)
+    assert replay is not None
+    replay.rows = torch.tensor([4, 5])
+    replay.num_actual_rows = 2
+    replay.context_factory = nullcontext
+    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    replay(torch.arange(6), None, torch.arange(6))
+    for buffer, offset in zip(buffers, (0, 10, 20, 30)):
+        assert buffer[:2].tolist() == [offset + 4, offset + 5]
 
 
 def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
@@ -91,6 +125,8 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.layers = [Layer(i) for i in range(3)]
     model.norm = lambda hidden: hidden
     model.end_layer = 3
+    model.start_layer = 0
+    model.needs_moe_input_ids = False
     model.decoder_replay_start = 1
     model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])

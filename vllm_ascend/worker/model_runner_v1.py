@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -901,6 +901,7 @@ class NPUModelRunner(GPUModelRunner):
             or needs_uniform_moe_input
             or needs_uniform_mega_moe_input
             or needs_finegrained_tp
+            or needs_uniform_routing_capture
         ):
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
@@ -3314,6 +3315,7 @@ class NPUModelRunner(GPUModelRunner):
             self.query_start_loc.gpu,
             self._decoder_replay_dropped_before.gpu,
             self.seq_lens,
+            self.replay_start.gpu,
             self.positions,
             self._decoder_replay_source_slot_mappings,
             self._decoder_replay_rows,
@@ -3417,6 +3419,7 @@ class NPUModelRunner(GPUModelRunner):
             original.query_start_loc[: num_reqs + 1],
             self._decoder_replay_dropped_before.gpu[: num_reqs + 1],
             original.seq_lens[:num_reqs],
+            self.replay_start.gpu[:num_reqs],
             original.positions,
             source_slots,
             self._decoder_replay_rows,

@@ -18,7 +18,7 @@
 #
 
 from collections.abc import Callable, Collection
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -26,15 +26,15 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import torch.distributed as dist
-from vllm.distributed import get_dp_group
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -44,9 +44,9 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
+from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
@@ -133,6 +133,7 @@ class AscendModelState(DefaultModelState):
             self.max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=is_pin_memory_available()
         )
         self._decoder_replay_start = torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._decoder_replay_zero_start = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device)
         self._decoder_replay_slot_mappings = None
         self._decoder_replay_source_slot_mappings = None
         self._decoder_replay_builders = []
@@ -167,6 +168,7 @@ class AscendModelState(DefaultModelState):
             self._decoder_replay_offsets.gpu,
             self._decoder_replay_dropped_before.gpu,
             torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device),
+            self._decoder_replay_zero_start,
             torch.zeros(self._decoder_replay_rows.numel(), dtype=torch.int64, device=self.device),
             self._decoder_replay_source_slot_mappings,
             self._decoder_replay_rows,
@@ -218,9 +220,7 @@ class AscendModelState(DefaultModelState):
         self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
         if enable_dsa_cp():
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            self._decoder_replay_num_tokens = (
-                (self._decoder_replay_num_tokens + tp_size - 1) // tp_size
-            ) * tp_size
+            self._decoder_replay_num_tokens = ((self._decoder_replay_num_tokens + tp_size - 1) // tp_size) * tp_size
         self._decoder_replay_counts = None
         self._decoder_replay_counts_device = None
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -263,6 +263,7 @@ class AscendModelState(DefaultModelState):
             original.query_start_loc[: num_reqs + 1],
             self._decoder_replay_dropped_before.gpu[: num_reqs + 1],
             original.seq_lens[:num_reqs],
+            original.replay_start if original.replay_start is not None else self._decoder_replay_zero_start[:num_reqs],
             original.positions,
             source_slots,
             self._decoder_replay_rows,
