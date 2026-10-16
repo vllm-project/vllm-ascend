@@ -47,7 +47,8 @@ def state(monkeypatch):
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
-    return deepseek_v41.EngramModelState(None, EngramModel(), None, torch.device("cpu"))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
 
 def batch():
@@ -185,3 +186,40 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
     assert state._replay_start.gpu.shape == (8,)
     assert torch.count_nonzero(state._replay_start.gpu) == 0
     assert captured["model_specific_attn_metadata"] is None
+
+
+def test_pcp_replay_metadata_covers_dual_chunk_request_rows(monkeypatch):
+    """PCP may produce two local metadata rows per scheduled request."""
+
+    def init(self, config, model, encoder_cache, device):
+        self.model = model
+        self.max_num_reqs = 4
+
+    monkeypatch.setattr(AscendModelState, "__init__", init)
+    monkeypatch.setattr(AscendModelState, "prepare_attn", lambda *args, **kwargs: {})
+    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=4))
+    state = deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
+    state._replay_groups = (0, torch.empty(0, dtype=torch.int32))
+    state._replay_start_np[:] = np.arange(1, 5, dtype=np.int32)
+
+    batch = SimpleNamespace(
+        num_reqs=8,
+        num_reqs_after_padding=8,
+        is_prefilling_np=np.ones(8, dtype=np.bool_),
+        idx_mapping_np=np.repeat(np.arange(4, dtype=np.int32), 2),
+    )
+    state.prepare_attn(
+        batch,
+        CUDAGraphMode.NONE,
+        (),
+        torch.empty((0, 1), dtype=torch.int32),
+        [],
+        None,
+    )
+
+    assert state._replay_start_np.shape == (4,)
+    assert state._replay_start.gpu.shape == (8,)
+    torch.testing.assert_close(
+        state._replay_start.gpu,
+        torch.tensor([1, 1, 2, 2, 3, 3, 4, 4], dtype=torch.int32),
+    )
