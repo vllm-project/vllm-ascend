@@ -121,12 +121,8 @@ def register_kvpp_draft_layers(
     if not is_last_pp_rank:
         draft_names = set()
     else:
-        if vllm_config.use_v2_model_runner:
-            proposer = getattr(model_runner, "speculator", None)
-            names = getattr(proposer, "draft_attn_layer_names", None)
-        else:
-            proposer = getattr(model_runner, "drafter", None)
-            names = getattr(proposer, "_draft_attn_layer_names", None)
+        proposer = getattr(model_runner, "speculator", None)
+        names = getattr(proposer, "draft_attn_layer_names", None)
         if names is None:
             raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
         draft_names = set(names)

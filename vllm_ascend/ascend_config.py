@@ -80,6 +80,8 @@ class KVPPConfig:
         return cls(size=parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size)
 
     def validate(self, vllm_config: VllmConfig) -> None:
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError("KVPP requires Model Runner V2.")
         parallel_config = vllm_config.parallel_config
         if parallel_config.decode_context_parallel_size != 1:
             raise ValueError("KVPP and DCP cannot be enabled at the same time.")

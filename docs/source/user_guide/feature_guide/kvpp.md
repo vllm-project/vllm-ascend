@@ -18,7 +18,7 @@ On 950DT Products, the measured KV cache capacity was **6.25×** with GLM-5.2-W4
 
 ### Supported Models
 
-KVPP supports non-hybrid MLA and SFA models with Model Runner V1 and V2. Combining KVPP with PCP requires Model Runner V2.
+KVPP supports non-hybrid MLA and SFA models with Model Runner V2. Model Runner V1 is no longer supported.
 
 | Attention backend | KVPP support | Model scope |
 | --- | --- | --- |
