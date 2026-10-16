@@ -990,7 +990,7 @@ def test_ascendc_index_cache_unwraps_runtime_tuple() -> None:
     assert actual.data_ptr() == index_key_cache.data_ptr()
 
 
-def test_ascendc_index_score_forwards_metadata_operands() -> None:
+def test_cann_index_score_forwards_metadata_operands() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
     block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
@@ -1000,11 +1000,8 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
     expected = torch.zeros(2, 1, 4)
 
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
-        return_value=expected,
-        create=True,
-    ) as mock_index_score:
+    mock_index_score = MagicMock(return_value=expected)
+    with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
         actual = _minimax_m3_index_score(
             idx_q,
             index_key_cache,
@@ -1018,15 +1015,23 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
         )
 
     assert actual is expected
+    mock_index_score.assert_called_once()
     args, kwargs = mock_index_score.call_args
+    assert args[0] is idx_q
     assert args[1].shape == (4, 128, 1, 128)
-    assert args[3] is start_loc
+    assert args[1].data_ptr() == index_key_cache.data_ptr()
+    assert args[2] is start_loc
+    assert kwargs["block_table"] is block_table
     assert kwargs["atten_mask"] is causal_mask
-    assert "init_blocks" not in kwargs
-    assert "local_blocks" not in kwargs
+    assert kwargs["actual_seq_qlen"] is cu_seqlens_q
+    assert kwargs["actual_seq_klen"] is seq_lens
+    assert kwargs["layout_key"] == "BBND"
+    assert kwargs["sparse_mode"] == 3
+    assert kwargs["init_blocks"] == 0
+    assert kwargs["local_blocks"] == 0
 
 
-def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
+def test_cann_index_score_casts_query_to_fp8_cache_dtype() -> None:
     idx_q = torch.ones(1, 2, 128, dtype=torch.bfloat16)
     index_key_cache = torch.zeros(4, 128, 128, dtype=torch.float8_e4m3fn)
     block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
@@ -1035,11 +1040,8 @@ def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
     start_loc = torch.tensor([1], dtype=torch.int32)
     expected = torch.zeros(2, 1, 4)
 
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
-        return_value=expected,
-        create=True,
-    ) as mock_index_score:
+    mock_index_score = MagicMock(return_value=expected)
+    with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
         actual = _minimax_m3_index_score(
             idx_q,
             index_key_cache,
@@ -1057,7 +1059,7 @@ def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
     assert "scale" not in kwargs
 
 
-def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
+def test_cann_index_score_uses_dense_mode_without_mask() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
     block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
@@ -1065,11 +1067,8 @@ def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     seq_lens = torch.tensor([128], dtype=torch.int32)
     start_loc = torch.tensor([1], dtype=torch.int32)
 
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
-        return_value=torch.zeros(2, 1, 4),
-        create=True,
-    ) as mock_index_score:
+    mock_index_score = MagicMock(return_value=torch.zeros(2, 1, 4))
+    with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
         _minimax_m3_index_score(
             idx_q,
             index_key_cache,
@@ -1083,6 +1082,8 @@ def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     kwargs = mock_index_score.call_args.kwargs
     assert kwargs["atten_mask"] is None
     assert kwargs["sparse_mode"] == 0
+    assert kwargs["init_blocks"] == 0
+    assert kwargs["local_blocks"] == 0
 
 
 @pytest.mark.parametrize(
