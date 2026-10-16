@@ -34,7 +34,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
@@ -254,14 +254,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            # Every active draft group must use device KV lengths.
-            # One FlashMLA group does not rule out a mixed FIA group.
-            draft_builders = [group.get_metadata_builder(0) for groups in self.attn_groups for group in groups]
-            self._draft_mla_uses_device_lengths = (
-                self.attn_architecture == "MLA"
-                and bool(draft_builders)
-                and all(getattr(builder, "flashmla_state", None) is not None for builder in draft_builders)
-            )
+            # Read each draft MLA layer's final backend selection.
+            self._draft_mla_uses_device_lengths = self.attn_architecture == "MLA" and all_mla_use_flashmla(self.model)
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
                 self.vllm_config.cache_config.block_size
             )

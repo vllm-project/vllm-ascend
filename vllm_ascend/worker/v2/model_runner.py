@@ -65,7 +65,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -1288,21 +1288,8 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return False
 
-        has_mla = False
-        draft_layer_names = self.speculator.draft_attn_layer_names
-        for groups in self.attn_groups:
-            for group in groups:
-                # K3's non-MLA attention uses the KDA device-length path.
-                if not issubclass(group.backend, AscendMLABackend):
-                    continue
-                if not any(name not in draft_layer_names for name in group.layer_names):
-                    continue
-                if not group.metadata_builders or any(
-                    getattr(builder, "flashmla_state", None) is None for builder in group.metadata_builders
-                ):
-                    return False
-                has_mla = True
-        return has_mla
+        # K3's non-MLA attention uses the KDA device-length path.
+        return all_mla_use_flashmla(self.model)
 
     def postprocess_sampled(
         self,
