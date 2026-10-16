@@ -3,8 +3,17 @@
 from unittest.mock import patch
 
 import torch
+import torch.nn.functional as F
 
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+
+
+def _norm(x):
+    # CPU stand-in for the real Triton l2norm_fwd (the CI runner has no
+    # triton backend, so the real kernel raises AttributeError). Keeps the
+    # input dtype so the cast semantics under test stay observable at the
+    # op boundary, matching the real kernel's behavior.
+    return F.normalize(x, dim=-1)
 
 
 class TestChunkGatedDeltaRuleFusedCast:
@@ -35,8 +44,12 @@ class TestChunkGatedDeltaRuleFusedCast:
 
         # create=True: the CI torch_npu build may not ship the op at all (the
         # availability probe exists precisely for that), so the patch must be
-        # allowed to synthesize the attribute.
-        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True):
+        # allowed to synthesize the attribute. l2norm_fwd is patched for the
+        # same reason (no triton backend on the CPU runner).
+        with (
+            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=_norm),
+            patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True),
+        ):
             o, final_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 q=q,
                 k=k,
@@ -75,8 +88,12 @@ class TestChunkGatedDeltaRuleFusedCast:
 
         # create=True: the CI torch_npu build may not ship the op at all (the
         # availability probe exists precisely for that), so the patch must be
-        # allowed to synthesize the attribute.
-        with patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True):
+        # allowed to synthesize the attribute. l2norm_fwd is patched for the
+        # same reason (no triton backend on the CPU runner).
+        with (
+            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=_norm),
+            patch("torch_npu.npu_chunk_gated_delta_rule", side_effect=fake_op, create=True),
+        ):
             o, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 q=q,
                 k=k,
