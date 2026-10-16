@@ -381,6 +381,7 @@ def fia_v2_boundary(monkeypatch):
         assert value is key
         assert num_key_value_heads == 1
         assert softmax_scale == 0.5
+        lse_shape: tuple[int, ...]
         if input_layout == "TND":
             lse_shape = (query.shape[0], num_query_heads, 1)
         else:
@@ -418,7 +419,7 @@ def fia_v2_boundary(monkeypatch):
         workspace_calls.append(calls.pop())
         return torch.empty(128, dtype=torch.uint8)
 
-    fia.out = fia
+    monkeypatch.setattr(fia, "out", fia, raising=False)
     monkeypatch.setattr(mla_cp.torch_npu, "npu_fused_infer_attention_score_v2", fia)
     monkeypatch.setattr(
         mla_cp.torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace", get_workspace, raising=False
