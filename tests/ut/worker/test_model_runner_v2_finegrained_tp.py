@@ -569,8 +569,10 @@ def test_dspark_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
-        return ("hidden", "sample_hidden")
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+    ):
+        return "hidden"
 
     with _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model:
         super_run_model.side_effect = fake_run_model
@@ -649,7 +651,9 @@ def test_eagle_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode, mm_inputs
+    ):
         return ("hidden", "sample_hidden")
 
     with (
@@ -708,8 +712,10 @@ def test_dflash_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
-        return ("hidden", "sample_hidden")
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+    ):
+        return "hidden"
 
     with (
         _spec_lmhead(True),
