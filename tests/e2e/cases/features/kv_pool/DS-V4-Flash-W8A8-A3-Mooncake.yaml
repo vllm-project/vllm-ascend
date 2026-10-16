@@ -1,6 +1,6 @@
 # Single-node A3 (16 NPUs), based on DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml.
 # Basic non-layerwise Mooncake pooling accuracy and performance coverage.
-# Fabric memory is disabled to avoid the ADXL device-access mapping failure.
+# A3 HCCS uses Fabric Memory; internal DP keeps all 16 NPUs visible.
 # The framework starts mooncake_master and injects MOONCAKE_CONFIG_PATH.
 test_cases:
   - name: "DS-V4-Flash-W8A8-A3-Mooncake"
@@ -13,7 +13,8 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_BUFFSIZE: "1024"
       ASCEND_LAUNCH_BLOCKING: "0"
-      ASCEND_ENABLE_USE_FABRIC_MEM: "0"
+      ACL_OP_INIT_MODE: "1"
+      ASCEND_ENABLE_USE_FABRIC_MEM: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
