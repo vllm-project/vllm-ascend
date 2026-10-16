@@ -86,9 +86,15 @@ def _store_qsa_rows_kernel(
     row = tl.program_id(0)
     dims = tl.arange(0, BLOCK_D)
     slot = tl.load(slots_ptr + row)
-    valid = (row < num_rows) & (slot >= 0) & (slot < num_blocks * PAGE_SIZE)
-    block = tl.maximum(slot, 0) // PAGE_SIZE
-    token = tl.maximum(slot, 0) % PAGE_SIZE
+    cache_capacity = num_blocks * PAGE_SIZE
+    valid = (row < num_rows) & (slot >= 0) & (slot < cache_capacity)
+    # Triton-Ascend can validate addresses before applying the store mask.
+    # Keep every lane in bounds even when graph padding supplies an invalid
+    # positive slot. Cast before multiplying by a potentially large stride so
+    # the physical cache offset cannot overflow int32 either.
+    safe_slot = tl.minimum(tl.maximum(slot, 0), cache_capacity - 1).to(tl.int64)
+    block = safe_slot // PAGE_SIZE
+    token = safe_slot % PAGE_SIZE
     values = tl.load(
         rows_ptr + row * stride_rows_row + dims * stride_rows_dim,
         mask=valid & (dims < WIDTH),
