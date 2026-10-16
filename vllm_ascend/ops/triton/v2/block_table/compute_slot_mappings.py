@@ -28,6 +28,7 @@ def _compute_slot_mappings_kernel(
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
+    dcp_sharded,
     slot_mapping_enabled=None,
     HAS_SLOT_MAPPING_ENABLED: tl.constexpr = False,
 ):
@@ -65,6 +66,8 @@ def _compute_slot_mappings_kernel(
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
 
+    group_dcp_sharded = tl.load(dcp_sharded + group_id).to(tl.int1)
+
     lane_offsets = tl.arange(0, TRITON_BLOCK_SIZE)
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -84,6 +87,8 @@ def _compute_slot_mappings_kernel(
             remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
             local_positions = virtual_block_indices * kv_block_size + local_offsets
+            local_positions = tl.where(group_dcp_sharded, local_positions, positions)
+            is_local = tl.where(group_dcp_sharded, is_local, True)
 
         block_indices = local_positions // kernel_block_size
         # Replace the remainder with multiply/subtract to avoid scalar fallback
