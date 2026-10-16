@@ -151,7 +151,10 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 4
-
+      - name: GLM-5.3-W8A8C8-200k-Memcache-PD
+        config_file_path: GLM-5.3-W8A8C8-200k-Memcache-PD.yaml
+        config_base_path: tests/e2e/cases/features/kv_pool
+        size: 4
   double_node:
     test_config:
       - name: DeepSeek-V3-W8A8_weekly
