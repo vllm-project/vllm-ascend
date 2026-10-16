@@ -22,8 +22,6 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 
-from vllm_ascend.device.device_config import is_310p
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
@@ -80,13 +78,14 @@ def _is_dflash2_graph(speculative_config: object) -> bool:
 
 
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
-    """Reasons this config is not V2-ready and should default to V1."""
+    """Reasons this config is not V2-ready and should default to V1.
+
+    Feature readiness only. Device-family differences (310P compatibility stack,
+    attention backend, worker cls, ops) belong in ``HardwareProfile``, not here.
+    """
     reasons: list[str] = []
     model_config = getattr(vllm_config, "model_config", None)
     spec_config = getattr(vllm_config, "speculative_config", None)
-
-    if is_310p():
-        reasons.append("310P")
 
     if _is_configured(model_config):
         if (
@@ -137,10 +136,10 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Select the Ascend model runner.
 
-    ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default,
-    except for these models and features, which fall back to V1:
+    ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default
+    (including Ascend 310P), except for these models and features, which fall
+    back to V1:
 
-    * 310P
     * pooling KV (``runner_type="pooling"``)
     * encoder-decoder (Whisper)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)

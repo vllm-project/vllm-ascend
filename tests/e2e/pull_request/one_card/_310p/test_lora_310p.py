@@ -15,7 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-
 import os
 
 import vllm
@@ -26,7 +25,6 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
 MODEL_PATH = "Qwen/Qwen3.5-4B"
 TEXT_LORA_ID = 1

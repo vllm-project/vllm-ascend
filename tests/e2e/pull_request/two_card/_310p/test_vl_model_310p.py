@@ -18,11 +18,7 @@
 import os
 import sys
 
-import pytest
-
 from tests.e2e.conftest import wait_until_npu_memory_free
-
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 full_dir = os.path.dirname(os.path.dirname(current_dir))
