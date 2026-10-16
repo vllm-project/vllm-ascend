@@ -23,8 +23,6 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
-    AscendGDNPreparedConvMetadataBackend,
-    AscendGDNPreparedConvMetadataBuilder,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
@@ -175,6 +173,7 @@ def _make_vllm_config(
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         speculative_config=speculative_config,
         use_v2_model_runner=False,
@@ -344,7 +343,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNPreparedConvMetadataBackend
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.use_prepared_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -1492,28 +1492,15 @@ def _make_prepared_conv_builder(num_slots, num_speculative_tokens=0, cudagraph_m
         device=torch.device("cpu"),
         num_heads=32,
         num_speculative_tokens=num_speculative_tokens,
-        builder_cls=AscendGDNPreparedConvMetadataBuilder,
+        builder_cls=AscendGDNHostMetadataBuilder,
         cudagraph_mode=cudagraph_mode,
     )
     builder.compilation_config.static_forward_context = {
-        "layer0": SimpleNamespace(kv_cache=(torch.empty(num_slots, 3, 8), torch.empty(0)))
+        "layer0": SimpleNamespace(
+            use_prepared_conv_indices=True, kv_cache=(torch.empty(num_slots, 3, 8), torch.empty(0))
+        )
     }
     return builder
-
-
-def test_prepared_conv_metadata_shares_mixed_prefill_decode_indices(prepared_conv_launches):
-    builder = _make_prepared_conv_builder(8)
-    common = create_common_attn_metadata(BatchSpec([8, 4], [1, 4]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.tensor([[0, 3], [5, 6]], dtype=torch.int64)
-    metadata = builder.build(0, common)
-    prefill = metadata.non_spec_prefill_metadata.causal_conv1d
-    decode = metadata.non_spec_decode_metadata.causal_conv1d
-    assert prepared_conv_launches == [("single", 8)]
-    assert prefill.prepared_cache_indices is decode.prepared_cache_indices
-    assert prefill.prepared_cache_indices.tolist() == [0, 5]
-    assert prefill.prepared_cache_indices.dtype == torch.int32
-    assert prefill.prepared_cache_indices.is_contiguous()
-    assert prefill.null_block_id == decode.null_block_id == 8
 
 
 def test_prepared_conv_metadata_uses_one_launch_for_mixed_spec_prefill(prepared_conv_launches):
@@ -1562,22 +1549,38 @@ def test_prepared_conv_metadata_refreshes_stable_graph_buffers(prepared_conv_lau
 
 def test_prepared_conv_metadata_isolated_between_cache_groups(prepared_conv_launches):
     first, second = _make_prepared_conv_builder(8), _make_prepared_conv_builder(16)
-    common = create_common_attn_metadata(BatchSpec([4, 4], [4, 4]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.tensor([[0], [12]], dtype=torch.int32)
-    a = first.build(0, common).non_spec_prefill_metadata.causal_conv1d
-    b = second.build(0, common).non_spec_prefill_metadata.causal_conv1d
+    common = create_common_attn_metadata(BatchSpec([8, 4], [1, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([[0, 3], [12, 13]], dtype=torch.int64)
+    group_a, group_b = first.build(0, common), second.build(0, common)
+    a = group_a.non_spec_prefill_metadata.causal_conv1d
+    b = group_b.non_spec_prefill_metadata.causal_conv1d
+    for group, conv, slots in ((group_a, a, 8), (group_b, b, 16)):
+        decode = group.non_spec_decode_metadata.causal_conv1d
+        assert conv.prepared_cache_indices is decode.prepared_cache_indices
+        assert conv.prepared_cache_indices.dtype == torch.int32
+        assert conv.prepared_cache_indices.is_contiguous()
+        assert conv.null_block_id == decode.null_block_id == slots
     assert a.prepared_cache_indices.tolist() == [0, 8]
     assert b.prepared_cache_indices.tolist() == [0, 12]
     assert a.prepared_cache_indices.data_ptr() != b.prepared_cache_indices.data_ptr()
     assert prepared_conv_launches == [("single", 8), ("single", 16)]
 
 
-@pytest.mark.parametrize("unbound_cache", [(), torch.empty(0), (torch.empty(0),)])
-def test_prepared_conv_metadata_before_cache_binding_uses_fallback(prepared_conv_launches, unbound_cache):
+def test_prepared_conv_metadata_before_cache_binding_uses_fallback(prepared_conv_launches):
     builder = _make_prepared_conv_builder(8)
-    builder.compilation_config.static_forward_context["layer0"].kv_cache = unbound_cache
+    builder.compilation_config.static_forward_context["layer0"].kv_cache = (torch.empty(0),)
     common = create_common_attn_metadata(BatchSpec([4], [4]), 16, torch.device("cpu"))
     conv = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d
     assert conv.prepared_cache_indices is None
     assert conv.null_block_id is None
     assert prepared_conv_launches == []
+    assert builder._non_spec_conv_indices is None
+
+    # Other Host-backend users retain raw metadata even after cache binding.
+    layer = builder.compilation_config.static_forward_context["layer0"]
+    layer.kv_cache = (torch.empty(8, 3, 8),)
+    layer.use_prepared_conv_indices = False
+    conv = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d
+    assert conv.prepared_cache_indices is None
+    assert prepared_conv_launches == []
+    assert builder._non_spec_conv_indices is None

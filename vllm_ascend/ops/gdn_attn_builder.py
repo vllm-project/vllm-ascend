@@ -1006,16 +1006,6 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
     build_device_chunk_metadata = False
 
-
-class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
-    @staticmethod
-    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
-        return AscendGDNHostMetadataBuilder
-
-
-class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
-    """Prepare GLM convolution indices once for every attention/cache group."""
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -1025,9 +1015,8 @@ class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._conv_layer_name = layer_names[0]
-        capacity = max(vllm_config.scheduler_config.max_num_seqs, self.decode_cudagraph_max_bs)
-        self._spec_conv_indices = torch.empty(capacity, dtype=torch.int32, device=device)
-        self._non_spec_conv_indices = torch.empty(capacity, dtype=torch.int32, device=device)
+        self._spec_conv_indices: torch.Tensor | None = None
+        self._non_spec_conv_indices: torch.Tensor | None = None
 
     def build(
         self,
@@ -1050,6 +1039,8 @@ class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         # cache, rather than the global block count of a hybrid cache manager.
         # Before cache binding, profiling/dummy callers retain the op fallback.
         layer = self.compilation_config.static_forward_context.get(self._conv_layer_name)
+        if not getattr(layer, "use_prepared_conv_indices", False):
+            return metadata
         caches = getattr(layer, "kv_cache", ())
         if (
             not isinstance(caches, (list, tuple))
@@ -1059,6 +1050,12 @@ class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         ):
             return metadata
         num_slots = caches[0].shape[0]
+        if self._non_spec_conv_indices is None:
+            # Allocate only for opted-in layers with a bound cache. Keep these
+            # buffers for the builder's lifetime so graph replay sees updates.
+            capacity = max(self.vllm_config.scheduler_config.max_num_seqs, self.decode_cudagraph_max_bs)
+            self._non_spec_conv_indices = torch.empty(capacity, dtype=torch.int32, device=caches[0].device)
+            self._spec_conv_indices = torch.empty_like(self._non_spec_conv_indices)
 
         prefill = metadata.non_spec_prefill_metadata
         decode = metadata.non_spec_decode_metadata
@@ -1107,10 +1104,10 @@ class AscendGDNPreparedConvMetadataBuilder(AscendGDNHostMetadataBuilder):
         return metadata
 
 
-class AscendGDNPreparedConvMetadataBackend(AscendGDNHostMetadataBackend):
+class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type[AscendGDNPreparedConvMetadataBuilder]:
-        return AscendGDNPreparedConvMetadataBuilder
+    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+        return AscendGDNHostMetadataBuilder
 
 
 class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):

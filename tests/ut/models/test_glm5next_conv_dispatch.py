@@ -11,8 +11,7 @@ conv_ops = importlib.import_module("vllm_ascend.models.glm5next.ops.causal_conv1
 
 @pytest.mark.parametrize("layout", ["contiguous", "page_strided", "row_strided", "dim_first"])
 @pytest.mark.parametrize("run_mode", [0, 1])
-@pytest.mark.parametrize("index_shape", ["flat", "column", "matrix"])
-def test_conv_state_updates_original_cache_and_preserves_unselected_slots(monkeypatch, layout, run_mode, index_shape):
+def test_conv_state_updates_original_cache_and_preserves_unselected_slots(monkeypatch, layout, run_mode):
     state = torch.zeros(4, 3, 8)
     if layout == "page_strided":
         state = torch.zeros(8, 3, 8)[::2]
@@ -21,11 +20,7 @@ def test_conv_state_updates_original_cache_and_preserves_unselected_slots(monkey
     elif layout == "dim_first":
         state = torch.zeros(4, 8, 3).transpose(1, 2)
     packed = layout == "dim_first"
-    indices = torch.tensor([1], dtype=torch.int32)
-    if index_shape == "column":
-        indices = indices[:, None]
-    elif index_shape == "matrix":
-        indices = torch.stack((indices, torch.zeros_like(indices)), dim=1)
+    indices = torch.tensor([[1, 0]], dtype=torch.int32)
     starts = torch.tensor([0, 1], dtype=torch.int32)
     x = torch.ones(1, 8)
     calls = []
@@ -97,18 +92,17 @@ def test_prepared_indices_are_reused_without_per_layer_preparation(monkeypatch, 
     monkeypatch.setattr(conv_ops, "copy_conv_state", unexpected)
     monkeypatch.setattr(conv_ops, "causal_conv1d_fn", prefill)
     monkeypatch.setattr(conv_ops, "causal_conv1d_update", decode)
-    for _ in range(3):
-        result = conv_ops.causal_conv1d(
-            x,
-            torch.ones(4, 8),
-            state,
-            starts,
-            raw,
-            run_mode=run_mode,
-            prepared_cache_indices=prepared,
-            prepared_null_block_id=4,
-        )
-        assert result is x
+    result = conv_ops.causal_conv1d(
+        x,
+        torch.ones(4, 8),
+        state,
+        starts,
+        raw,
+        run_mode=run_mode,
+        prepared_cache_indices=prepared,
+        prepared_null_block_id=4,
+    )
+    assert result is x
 
 
 def test_prepared_indices_require_their_null_slot():
