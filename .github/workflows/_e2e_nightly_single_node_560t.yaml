@@ -502,11 +502,11 @@ jobs:
           ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch || '' }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
         run: |
           set -e
-          resolved=$(python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/resolve_download_paths.py \
-            --config /vllm-workspace/vllm-ascend/.github/workflows/configs/log_download_defaults.json \
-            --size 1 --request "$REQUESTED_PATHS")
+          collect_script=/vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py
+          defaults_file=/vllm-workspace/vllm-ascend/.github/workflows/configs/log_download_defaults.json
+          resolved=$(python3 "$collect_script" "$REQUESTED_PATHS" --defaults-file "$defaults_file" --path-for-node)
           [ -n "$resolved" ] || exit 0
-          python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py "$resolved" /tmp/download-artifact.tar.gz
+          python3 "$collect_script" "$REQUESTED_PATHS" /tmp/download-artifact.tar.gz --defaults-file "$defaults_file"
           safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
           echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
 

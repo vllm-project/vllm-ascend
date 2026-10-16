@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sys
 import tarfile
 from pathlib import Path
 
@@ -90,6 +91,31 @@ def parse_request(raw: str) -> dict[str, list[str]]:
     return paths
 
 
+def parse_defaults(raw: str) -> list[str]:
+    """Validate paths shared by every node; missing paths are skipped at archive time."""
+    paths = json.loads(raw)
+    if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+        raise ValueError("default download paths must be a JSON array of strings")
+    for path in paths:
+        validate_path(path, require_exists=False)
+    return paths
+
+
+def paths_for_node(defaults: list[str], requested: list[str], node: str) -> list[Path]:
+    sources = []
+    for raw in defaults:
+        path = validate_path(raw, require_exists=False)
+        if not path.exists():
+            print(f"Default download path missing on {node}, skipping: {path}", file=sys.stderr)
+            continue
+        try:
+            sources.append(validate_path(raw))
+        except ValueError as error:
+            print(f"Default download path unavailable on {node}, skipping: {error}", file=sys.stderr)
+    sources.extend(validate_path(raw) for raw in requested)
+    return list(dict.fromkeys(sources))
+
+
 def archive_path(sources: list[Path], destination: Path) -> None:
     """Compress files without following links or including common credentials."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -130,28 +156,44 @@ def main() -> None:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--path-for-node", action="store_true")
     parser.add_argument("--check-only", action="store_true")
+    defaults_group = parser.add_mutually_exclusive_group()
+    defaults_group.add_argument("--defaults-file", type=Path)
+    defaults_group.add_argument("--defaults-json")
+    parser.add_argument("--print-defaults", action="store_true")
     args = parser.parse_args()
-    paths = parse_request(args.request)
+    defaults_raw = args.defaults_file.read_text(encoding="utf-8") if args.defaults_file else args.defaults_json or "[]"
+    defaults = parse_defaults(defaults_raw)
+    if args.print_defaults:
+        print(json.dumps(defaults, separators=(",", ":")))
+        return
+    paths = parse_request(args.request) if args.request else {}
     if args.node_count is not None:
         if args.node_count < 1 or any(int(node[4:]) >= args.node_count for node in paths):
             parser.error("--log-path references a node outside this job")
     if args.list:
-        for node, node_paths in sorted(paths.items(), key=lambda item: int(item[0][4:])):
-            resolved = [str(validate_path(path, require_exists=False)) for path in node_paths]
+        nodes = set(paths)
+        if defaults:
+            nodes.update(f"node{index}" for index in range(args.node_count or 1))
+        for node in sorted(nodes, key=lambda item: int(item[4:])):
+            resolved = [str(validate_path(path, require_exists=False)) for path in [*defaults, *paths.get(node, [])]]
             print(f"{node}\t{json.dumps(resolved, separators=(',', ':'))}")
         return
     if args.path_for_node:
-        if args.node in paths:
-            resolved = [str(validate_path(path)) for path in paths[args.node]]
+        resolved = [str(path) for path in paths_for_node(defaults, paths.get(args.node, []), args.node)]
+        if resolved:
             print(json.dumps(resolved, separators=(",", ":")))
         return
-    if args.node not in paths:
+    if args.node not in paths and not defaults:
         parser.error(f"--log-path does not specify {args.node}")
-    sources = [validate_path(path, require_exists=not args.check_only) for path in paths[args.node]]
+    if args.check_only:
+        sources = [validate_path(path, require_exists=False) for path in [*defaults, *paths.get(args.node, [])]]
+    else:
+        sources = paths_for_node(defaults, paths.get(args.node, []), args.node)
     if not args.check_only:
         if args.destination is None:
             parser.error("destination is required unless --check-only is used")
-        archive_path(sources, Path(args.destination))
+        if sources:
+            archive_path(sources, Path(args.destination))
 
 
 if __name__ == "__main__":
