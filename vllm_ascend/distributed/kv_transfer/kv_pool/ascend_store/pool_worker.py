@@ -596,12 +596,13 @@ class KVPoolWorker:
                     if entry not in existing:
                         existing.append(entry)
 
-                logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers",
-                    group_id,
-                    len(group_spec.layer_names),
-                    len(phys_to_layer_idx),
-                )
+                if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
+                    logger.info(
+                        "layerwise group %d: %d layer_names, %d unique physical layers",
+                        group_id,
+                        len(group_spec.layer_names),
+                        len(phys_to_layer_idx),
+                    )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -770,6 +771,7 @@ class KVPoolWorker:
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
+                    raise_on_transfer_failure=self.layerwise_offload,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -818,6 +820,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(

@@ -415,3 +415,61 @@ The detailed report will be written to:
 
 - `docs/_build/linkcheck/output.txt`
 - `docs/_build/linkcheck/output.json`
+
+## PR testing requirements
+
+Use this section when preparing or reviewing a pull request to decide which
+test coverage and validation evidence the change needs. See the preceding
+sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+for PR CI.
+
+### Choose coverage for the change
+
+Run the affected tests and required repository checks. Expand coverage when the
+change affects shared behavior, failures expose additional risks, or reviewers
+need more evidence. A full local test-suite run is not required for every change.
+
+| Change | Expected coverage |
+| ------ | ----------------- |
+| New behavior | Unit tests for the happy path, failure modes, and relevant boundary cases, such as empty input, single-element input, sequence-length limits, or overflow. |
+| Bug fix | A regression test that reproduces the original failure and passes with the fix. |
+| Integration behavior | Relevant E2E tests for the affected models, configuration, or distributed execution paths. |
+| NPU performance path | Realistic hardware benchmarks and performance regression coverage, including memory use when affected. Add nightly coverage where appropriate. |
+| Documentation or metadata | Focused checks such as Markdown linting, link validation, or parsing changed configuration. Add runtime tests when the change affects runtime behavior. |
+
+Unit tests live in `tests/ut/`, E2E tests in `tests/e2e/`, and nightly tests in
+`tests/e2e/nightly/`.
+
+### Hardware and performance evidence
+
+NPU-specific behavior requires validation on actual hardware before merge.
+Record the affected hardware, relevant software versions, model, configuration,
+commands, and results so reviewers can assess and reproduce the validation.
+
+If local hardware or dependencies are unavailable, continue preparing the PR
+with the checks that can run. Identify the remaining hardware checks for CI or
+reviewers; CPU mocks and static checks do not establish NPU correctness.
+
+For performance changes, compare the baseline and changed implementation under
+the same workload and environment. Include throughput or latency results and,
+when affected, memory use, fragmentation, and CPU-NPU synchronization behavior.
+
+### Report validation in the PR
+
+Complete the PR template's **How was this patch tested?** section with:
+
+- Tests added or updated, including relevant boundary cases.
+- Commands and observed results for local or manual checks.
+- CI jobs or hardware runs that provide additional evidence.
+- Failed, skipped, or unrun checks, the reason, and the validation still needed.
+
+If no tests were added, explain which existing tests or focused checks cover
+the change, or why validation remains pending. Distinguish code inspection,
+CPU tests, NPU execution, and end-to-end validation when reporting results.
+
+### PR submission checklist
+
+- [ ] The title contains a change-type tag accepted by the [CI title check](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml#L59), such as `[BugFix]`, `[Feature]`, or `[Doc]`.
+- [ ] The applicable test coverage and validation results are recorded in the PR.
+- [ ] Required CI checks pass before merge.
+- [ ] Outstanding NPU hardware or performance validation is completed before merge.

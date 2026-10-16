@@ -344,6 +344,10 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     def _build_empty_local_metadata(self, common: AscendCommonAttentionMetadata) -> AscendDSAV41Metadata:
         # Skip SMLA/QLI metadata ops on ranks with no queries.
         self._device_metadata_tasks = ()
+        self._smla_metadata.zero_()
+        self._qli_metadata.zero_()
+        if self._a5_smla_metadata is not None:
+            self._a5_smla_metadata.zero_()
         num_tokens, num_reqs = common.num_input_tokens, common.num_reqs
         is_state = self._cache_kind == "compressor_state"
         slots = self._slot_mapping if is_state else self._slot_mapping_2d

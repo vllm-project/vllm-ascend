@@ -4,7 +4,7 @@
 
 KVPP (KV pipeline parallelism) distributes historical KV caches that would otherwise be replicated across TP ranks by layer for non-hybrid MLA/SFA models. This reduces persistent cache storage per rank, allowing the same HBM capacity to accommodate more context tokens or concurrent requests.
 
-When a layer executes, the rank responsible for its cache broadcasts the complete cache to the other ranks in the group. Model computation retains its TP/EP/PP configuration. With PP enabled, each stage assigns caches and broadcasts within its own cache-replica group. The group spans TP ranks, or PCP × TP ranks when PCP is enabled on Model Runner V2, and never crosses DP replicas or PP stages.
+KVPP can be combined with TP, EP, and PP. With Model Runner V2, it can also be combined with PCP.
 
 The pipeline parallelism in KVPP refers to KV cache storage and communication, while model computation keeps the parallel configuration described above. For the underlying layer-wise KV storage concept, see **LayerSplit** in Z.ai's [Scaling Pain of Coding Agent Serving: Lessons from Debugging GLM-5 at Scale](https://z.ai/blog/scaling-pain).
 
@@ -33,30 +33,26 @@ The following table lists individual feature combinations with KVPP. It does not
 
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
-| Eager mode | ✅ Supported | Use `--enforce-eager`. |
-| Graph mode | ❌ Not supported | KVPP currently requires eager mode. |
+| Graph mode | ✅ Supported | Eager and PIECEWISE. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
-| PP | ✅ Supported | Each PP stage allocates and broadcasts its caches independently. |
+| PP | ✅ Supported | Can be combined with KVPP. |
 | Chunked prefill | ✅ Supported | Can be combined with KVPP. |
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| Variable-step MTP and other speculative decoding methods | ❌ Not supported | Only fixed-step MTP is supported. |
+| Speculative decoding | ✅ Supported | All speculative decoding methods with fixed K; dynamic K has not been validated. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
-| KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
-| PCP + P/D disaggregation + KVPP | ❌ Not supported | `MooncakeConnectorV2` does not yet support PCP. |
-| PCP + KV pooling + KVPP | ❌ Not supported | PCP and KV pooling are individually supported with KVPP, but the three-way combination is not supported. |
+| KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
 - ❌ **Not supported**: The combination is not currently supported.
 
 ## Usage
 
-Enable KVPP through `enable_kvpp` in `--additional-config`, using eager mode:
+Enable KVPP through `enable_kvpp` in `--additional-config`:
 
 ```bash
 vllm serve <model-path> \
@@ -65,7 +61,7 @@ vllm serve <model-path> \
     --additional-config '{"enable_kvpp": true}'
 ```
 
-Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
+Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
 
@@ -88,28 +84,25 @@ vllm serve <model-path> \
 
 Adjust the token budget and maximum number of sequences to device capacity and workload.
 
-For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks; Model Runner V1 does not support KVPP with PCP.
+For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks.
 
-For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
+For PP, add `enable_kvpp` to the existing PP launch configuration.
 
-Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
+KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle3, with a fixed number of speculative tokens (K). Dynamic K has not been validated.
 
 ## Configuration Parameters
 
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
-| `--enforce-eager` | Not enabled | Required for KVPP; graph execution is not currently supported. |
-
-KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
 
 ## KV Transfer Configuration
 
 ### PD Disaggregation
 
-KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**). The connector code has been merged but has not yet been released.
+KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**).
 
-Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. MTP caches remain replicated and are transferred alongside the persistent target caches.
+Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node.
 
 ```bash
 # Prefill node: include {"enable_kvpp": true} in --additional-config.
@@ -120,6 +113,18 @@ Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consume
 ```
 
 Each worker uses a handshake port derived from `kv_port` and its parallel rank. Choose non-overlapping port ranges when both nodes run on one host.
+
+### Memcache Pooling
+
+KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
+
+Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
+
+```bash
+--kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
+```
+
+The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false` and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
 
 ### Combining Connectors
 
@@ -154,20 +159,6 @@ The pooling backend still requires its own SDK and service configuration.
 }
 ```
 
-### Memcache Pooling
-
-KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
-
-Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
-
-```bash
---kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
-```
-
-The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false`, `load_async=true`, and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
-
-Each TP rank saves one complete object per token block containing its persistent target layers and its own MTP caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
-
 ## Performance
 
 The following measurements of GLM-5.2 on 950DT Products show the impact on cache capacity, time to first token (TTFT), and prefill throughput. The single-node and dual-node deployments use different quantized weights; compare KVPP on and off within each deployment.
@@ -193,7 +184,7 @@ The service calculated capacity automatically without a block-count override. Si
 | Single node | 235,008 | 1,467,904 | 6.25× | 83.99% |
 | Dual-node PP | 555,392 | 2,972,416 | 5.35× | 81.32% |
 
-Equivalent KV memory savings are estimated from the capacity ratio and do not represent the same reduction in total HBM usage. Each rank still needs two scratch buffers and independent MTP caches, so capacity gains depend on layer count, TP size, PP partitioning, and per-layer cache sizes.
+Equivalent KV memory savings are estimated from the capacity ratio and do not represent the same reduction in total HBM usage. Capacity gains depend on the model and parallel configuration.
 
 ### Time to First Token
 
@@ -221,10 +212,10 @@ Each run contained 40 requests at client concurrency 12, with 128K input tokens 
 | Dual-node PP | 0% | 21,395.2 | 18,742.3 | -12.40% |
 | Dual-node PP | 90% | 177,375.4 | 154,717.3 | -12.77% |
 
-The actual hit rate in all 90% scenarios was 89.9414%. Under these workloads, KVPP increased cache capacity while adding broadcast overhead; non-pooling throughput did not improve.
+The actual hit rate in all 90% scenarios was 89.9414%. Under these workloads, KVPP increased cache capacity; non-pooling throughput did not improve.
 
 ## Usage Recommendations
 
 Evaluate KVPP first on workloads limited by KV cache capacity. Compare capacity, TTFT, and throughput with KVPP on and off using realistic input lengths, concurrency, and prefix distributions, then select a configuration that meets the service latency requirements.
 
-Broadcasts transfer all allocated logical blocks of a layer without filtering for active requests, so increasing cache capacity also increases broadcast volume. Prefetching can overlap part of the communication with computation, but the benefit remains workload-dependent. When cache capacity is already sufficient, use measured latency and throughput to decide whether to enable KVPP.
+When cache capacity is already sufficient, use measured latency and throughput to decide whether to enable KVPP.
