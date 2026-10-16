@@ -70,6 +70,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        self._draft_mla_uses_device_lengths = False
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -253,6 +254,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            # Every active draft group must use device KV lengths.
+            # One FlashMLA group does not rule out a mixed FIA group.
+            draft_builders = [group.get_metadata_builder(0) for groups in self.attn_groups for group in groups]
+            self._draft_mla_uses_device_lengths = (
+                self.attn_architecture == "MLA"
+                and bool(draft_builders)
+                and all(getattr(builder, "flashmla_state", None) is not None for builder in draft_builders)
+            )
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
                 self.vllm_config.cache_config.block_size
             )
@@ -262,7 +271,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         if not self.use_dcp:
-            if self.attn_architecture == "MLA":
+            if self.attn_architecture == "MLA" and not self._draft_mla_uses_device_lengths:
                 # FIA consumes a host list of *valid* KV lengths. The target's
                 # optimistic upper bound includes rejected/lookahead tokens;
                 # adding the draft width again exposes unwritten cache slots
