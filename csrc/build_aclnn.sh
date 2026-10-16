@@ -129,7 +129,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "kda_layout_swap12"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -184,7 +183,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_layout_swap12"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -227,7 +225,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_layout_swap12"
         "k2q_csr"
         "sparse_attention_score"
-        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
