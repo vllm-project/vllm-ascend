@@ -297,6 +297,11 @@ class FlashMLAMetadataBuilder:
     def __init__(self, impl, device: torch.device, max_num_reqs: int, attn_mask: torch.Tensor):
         self.dcp_size = getattr(impl, "dcp_size", 1)
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
+        # Materialize once: an integer rank would trigger a blocking H2D copy
+        # inside get_dcp_local_seq_lens on every metadata refresh.
+        self.dcp_rank_tensor = (
+            torch.tensor(self.dcp_rank, dtype=torch.int32, device=device) if self.dcp_size > 1 else None
+        )
         # Keep the DCP execution structure fixed across capture and replay.
         # Ordinary decode reads current KV from its owning rank's cache;
         # speculative causal queries need the replicated current chunk.
@@ -415,7 +420,7 @@ class FlashMLAMetadataBuilder:
                 lengths = get_dcp_local_seq_lens(
                     lengths,
                     dcp_size=self.dcp_size,
-                    dcp_rank=self.dcp_rank,
+                    dcp_rank=self.dcp_rank_tensor,
                     cp_kv_cache_interleave_size=self.cp_interleave,
                 )
             flash.cache_lens[:num_decodes].copy_(lengths)

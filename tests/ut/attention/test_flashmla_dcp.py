@@ -296,6 +296,42 @@ def addresses(flash):
     return {key: value.data_ptr() for key, value in tensors.items()}
 
 
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("rank", [0, 3, 7])
+def test_metadata_refresh_reuses_device_rank(runtime, monkeypatch, causal, rank):
+    builder = runtime.builder(rank=rank, interleave=4)
+    rank_tensors = []
+
+    def partition(lengths, *, dcp_size, dcp_rank, cp_kv_cache_interleave_size):
+        # vLLM's int branch constructs a device tensor and synchronizes H2D.
+        assert isinstance(dcp_rank, torch.Tensor)
+        assert dcp_rank.dtype == torch.int32
+        assert dcp_rank.device == lengths.device
+        assert dcp_rank.ndim == 0
+        assert dcp_rank.item() == rank
+        rank_tensors.append(dcp_rank)
+        return local_lengths(
+            lengths,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
+
+    monkeypatch.setitem(builder.build.__globals__, "get_dcp_local_seq_lens", partition)
+    for step, capacity in enumerate((4, 8, 4)):
+        lengths = [35 + step, 130 + step]
+        inputs = common(lengths, [2, 2], tokens=capacity, causal=causal)
+        # All host inputs and builder constants already exist before refresh.
+        with monkeypatch.context() as guard:
+            guard.setattr(torch, "tensor", Mock(side_effect=AssertionError("tensor construction during refresh")))
+            flash = builder.build(inputs, 2, 4, False, retain_for_graph=True)
+        visible = [length - 2 if causal else length for length in lengths]
+        expected = [sum(token // 4 % 8 == rank for token in range(length)) for length in visible]
+        assert flash.cache_lens[:2].tolist() == expected
+    assert len(rank_tensors) == 3
+    assert all(tensor is rank_tensors[0] for tensor in rank_tensors)
+
+
 def test_inline_refreshes_repeated_and_alternating_captured_capacities(runtime):
     builder = runtime.builder(rank=3, interleave=4, use_rope=True)
     captured = {}
