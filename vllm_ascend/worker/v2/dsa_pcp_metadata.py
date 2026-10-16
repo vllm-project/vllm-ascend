@@ -118,12 +118,12 @@ class PCPMetadataPlan:
             common,
             decode_threshold=self.context_owner.decode_threshold,
         )
-        nd, npref, ndtokens, nptokens = counts
+        num_decode, npref, ndtokens, nptokens = counts
 
         return BatchScope(
             common=common,
             actual_reqs=actual_reqs,
-            num_decodes=nd,
+            num_decodes=num_decode,
             num_prefills=npref,
             num_decode_tokens=ndtokens,
             num_prefill_tokens=nptokens,
@@ -654,7 +654,7 @@ def bind_pcp_metadata_plan(runner) -> None:
                 continue
             if builder.vllm_config is not config:
                 continue
-            
+
             if id(builder) in draft_builder_ids:
                 continue
 
