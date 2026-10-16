@@ -443,7 +443,7 @@ latter is the configuration level required by v0.30.0rc1.
 
 **KV cache configuration:**
 
-- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, does not support context parallelism (DCP/PCP), cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
 
 **A3-specific fused MC2 notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
@@ -2904,8 +2904,9 @@ Key Parameter Descriptions:
   recomputation scheduler. See [Performance Tuning](#9-performance-tuning).
 - `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant
   quantization for the SFA packed main KV cache, as an alternative to
-  `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be
-  combined with the C8 cache, and in Prefill-Decode disaggregation the
+  `--kv-cache-dtype int8`. It requires an A2/A3 device, does not
+  support context parallelism (DCP/PCP), cannot be combined with the C8
+  cache, and in Prefill-Decode disaggregation the
   Mooncake option `"use_ascend_direct"` must be `false`.
 
 ## 6 Functional Verification
