@@ -555,7 +555,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -624,7 +623,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -706,7 +704,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -776,7 +773,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -894,7 +890,7 @@ Before you start, please:
 
     1. Prefill node (4 P nodes share the same script)
 
-        For each P instance, only these two configuration values need to be modified: `kv_port` and `engine_id`. The `engine_id` should start from 0 and increment sequentially, while the `kv_port` (e.g., `30100`) must be unique for each P instance, such as 30000, 30100, etc.
+        For each P instance, set a unique `kv_port` (e.g., 30000, 30100, etc.).
 
         ```shell
         unset ftp_proxy
@@ -957,7 +953,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                             "dp_size": 8,
@@ -1033,7 +1028,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30400",
-            "engine_id": "4",
             "kv_connector_extra_config": {
                         "prefill": {
                             "dp_size": 8,
