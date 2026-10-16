@@ -433,7 +433,7 @@ def test_moe_uses_factory_expert_counts(monkeypatch, enable_eplb):
     factory = MagicMock(return_value=runner)
     monkeypatch.setattr(k3_module, "FusedMoEFactory", factory)
     monkeypatch.setattr(
-        k3_module, "GateLinear", lambda input_size, output_size, **kwargs: nn.Linear(input_size, output_size)
+        k3_module, "KimiK3RouterLinear", lambda input_size, output_size, **kwargs: nn.Linear(input_size, output_size)
     )
 
     moe = k3_module.AscendKimiMoE(config=config, vllm_config=SimpleNamespace(parallel_config=parallel))
