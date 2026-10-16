@@ -153,9 +153,18 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
-        """Cast the weight to NZ format and reshape its scale for NPU inference."""
+        """Cast the weight to NZ format and reshape its scale for NPU inference.
+
+        Records the original shapes and marks the layer transformed so
+        ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
+        """
         if getattr(layer, "_mxfp4_transformed", False):
             return
+        if not hasattr(layer, "_mxfp4_original_shapes"):
+            layer._mxfp4_original_shapes = {
+                "weight": tuple(layer.weight.data.shape),
+                "weight_scale": tuple(layer.weight_scale.data.shape),
+            }
         prefix_padding = suffix_padding = 0
         if isinstance(layer, RowParallelLinear) and layer.tp_size > 1:
             prefix_padding, suffix_padding = get_mxfp_tp_padding(
@@ -175,6 +184,20 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         layer.weight_scale.data = pair_mxfp_scales(layer.weight_scale.data).transpose(-3, -2)
         layer._mxfp4_transformed = True
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Undo the NZ/scale transform so the weight loader can reload ND weights.
+
+        Reverses the transpose, casts the weight back to ND (format 2), and
+        restores the scale's original shape.
+        """
+        if not getattr(layer, "_mxfp4_transformed", False):
+            return
+        layer.weight.data = layer.weight.data.transpose(-1, -2)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
+        orig_scale_shape = layer._mxfp4_original_shapes["weight_scale"]
+        layer.weight_scale.data = layer.weight_scale.data.transpose(-3, -2).reshape(orig_scale_shape)
+        layer._mxfp4_transformed = False
 
 
 @register_scheme("W4A8_MXFP", "moe")
