@@ -407,6 +407,10 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
+        # Bind after both target and draft builders have been initialized.
+        from vllm_ascend.worker.v2.dsa_pcp_metadata import bind_pcp_metadata_plan
+
+        bind_pcp_metadata_plan(self)
         # Recreate along with KV initialization: profiling capture owns a
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
