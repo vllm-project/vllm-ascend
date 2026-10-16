@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FieldKind = Literal["bool", "int", "float", "list_int"]
+FieldKind = Literal["bool", "int", "float", "list_int", "int_or_list_int"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +102,41 @@ def coerce_list_int(raw: Any, field: str) -> list[int]:
     return out
 
 
+def coerce_int_or_list_int(
+    value: Any,
+    field: str,
+    *,
+    min_value: int | None = None,
+) -> int | list[int]:
+    """Coerce an int (scalar) or a list of ints; validate every element.
+
+    A scalar int keeps the legacy single-window meaning; a list enables
+    multi-window detection. The returned value keeps the same shape as the
+    input (int stays int, list stays list) so ``RuntimeConfig.detector_get``
+    round-trips the user's value; detectors normalize to a list themselves.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an int or list of ints, got {value!r}")
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError(f"{field} must be an integer, got {value!r}")
+        iv = int(value)
+        if min_value is not None and iv < min_value:
+            raise ValueError(f"{field} must be >= {min_value}, got {iv}")
+        return iv
+    if isinstance(value, (list, tuple)):
+        out: list[int] = []
+        for i, item in enumerate(value):
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError(f"{field}[{i}] must be int, got {item!r}")
+            iv = int(item)
+            if min_value is not None and iv < min_value:
+                raise ValueError(f"{field}[{i}] must be >= {min_value}, got {iv}")
+            out.append(iv)
+        return out
+    raise ValueError(f"{field} must be an int or list of ints, got {type(value).__name__}")
+
+
 def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -> None:
     """Coerce known fields on ``section`` in place (action override keys untouched)."""
     prefix = f"detector.{schema.section_key}"
@@ -128,5 +163,11 @@ def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -
             )
         elif f.kind == "list_int":
             section[f.name] = coerce_list_int(section[f.name], path)
+        elif f.kind == "int_or_list_int":
+            section[f.name] = coerce_int_or_list_int(
+                section[f.name],
+                path,
+                min_value=int(f.min_value) if f.min_value is not None else None,
+            )
         else:
             raise ValueError(f"unknown ConfigField.kind {f.kind!r} for {path}")

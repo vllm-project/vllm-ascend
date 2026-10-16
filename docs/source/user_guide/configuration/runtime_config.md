@@ -95,11 +95,27 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `window` | int | `32` | Sliding content window |
-| `repeat_sum_threshold` | int | `64` | Alert when sum of repeat scores exceeds this |
-| `min_tokens` | int | `32` | Minimum content tokens before alerting |
+| `window` | int \| list[int] | `32` | Sliding content window size(s); a list enables multi-window detection |
+| `repeat_sum_threshold` | int \| list[int] | `64` | Alert when the sum of repeat scores exceeds this; one per window |
+| `min_tokens` | int \| list[int] | `32` | Minimum content tokens before alerting; one per window |
 | `consecutive_hits` | int | `1` | Required consecutive over-threshold steps |
 | `ignore_token_ids` | list[int] | `[]` | Token ids excluded from window scoring |
+
+`window`, `repeat_sum_threshold`, and `min_tokens` each accept a scalar (the
+legacy single-window form) or a list of equal length (multi-window). A scalar
+`repeat_sum_threshold` / `min_tokens` is broadcast to every window. Any window
+crossing its own threshold arms the incident; the report records which
+window(s) fired. For example, a short window catches tight token runs early
+while a long window catches whole-sentence repeats:
+
+```json
+"token_repeat": {
+  "enabled": true,
+  "window": [8, 32, 128],
+  "repeat_sum_threshold": [8, 64, 64],
+  "min_tokens": [0, 32, 32]
+}
+```
 
 ### logits_finite
 

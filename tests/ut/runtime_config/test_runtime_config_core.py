@@ -205,6 +205,35 @@ def test_token_repeat_window_non_integer_float_rejected():
         validate_runtime_config(data)
 
 
+def test_token_repeat_multi_window_list_accepted():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config.config import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    tr = data["detector"]["token_repeat"]
+    tr["window"] = [8, 128]
+    tr["repeat_sum_threshold"] = [8, 64]
+    tr["min_tokens"] = [0, 32]
+    validate_runtime_config(data)
+    assert tr["window"] == [8, 128]
+    assert tr["repeat_sum_threshold"] == [8, 64]
+    assert tr["min_tokens"] == [0, 32]
+
+
+def test_token_repeat_window_list_bad_element_rejected():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config.config import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["detector"]["token_repeat"]["window"] = [8, "x"]
+    with pytest.raises(ValueError, match="detector.token_repeat.window"):
+        validate_runtime_config(data)
+
+
 def test_report_save_sensitive_wrong_type_rejected():
     from copy import deepcopy
 
