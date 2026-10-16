@@ -132,7 +132,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "950DT Products"
 
-    Start the Docker container on each server.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -640,7 +640,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
         --async-scheduling \
         --no-disable-hybrid-kv-cache-manager \
         --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --trust-remote-code \
         --block-size 32 \
         --kv-cache-dtype fp8 \
@@ -713,7 +713,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
         --async-scheduling \
         --no-disable-hybrid-kv-cache-manager \
         --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --trust-remote-code \
         --block-size 32 \
         --kv-cache-dtype fp8 \
@@ -1678,7 +1678,7 @@ Before you start, make sure that `/etc/hixlep/` is mounted into the container as
             process.join()
     ```
 
-2. Prepare the Prefill startup scripts. There are 2 Prefill instances, and each one is a PP2 engine spread across 2 servers: the master server (`--node-rank 0`) starts the engine and its API server, while the worker server (`--node-rank 1`) joins the same engine with `--headless`. `--master-addr` must point to the master server's service IP so that the worker can join the cross-node process group, and both servers must use identical model, TP, PP, PCP, and `VLLM_PP_LAYER_PARTITION` settings. `--port $2` takes the engine port from the second command-line argument of the script, so start the script with a placeholder first argument, for example `bash run_p_node0.sh 0 8000`.
+2. Prepare the Prefill startup scripts. There are 2 Prefill instances, and each one is a PP2 engine spread across 2 servers: the master server (`--node-rank 0`) starts the engine and its API server, while the worker server (`--node-rank 1`) joins the same engine with `--headless`. `--master-addr` must point to the master server's service IP so that the worker can join the cross-node process group, and both servers must use identical model, TP, PP, PCP, and `VLLM_PP_LAYER_PARTITION` settings. `--port $1` takes the engine port from the first command-line argument of the script, for example `bash run_p_node0.sh 8000`.
 
     1. `run_p_node0.sh` on the master server of Prefill instance 1:
 
@@ -1717,7 +1717,7 @@ Before you start, make sure that `/etc/hixlep/` is mounted into the container as
         vllm serve /root/.cache/DeepSeek-V4-Pro-0813 \
             --host 0.0.0.0 \
             --served-model-name dsv4 \
-            --port $2 \
+            --port $1 \
             --nnodes 2 \
             --node-rank 0 \
             --master-addr $node0_ip \
@@ -1743,7 +1743,6 @@ Before you start, make sure that `/etc/hixlep/` is mounted into the container as
             --reasoning-parser deepseek_v4 \
             --gpu-memory-utilization 0.95 \
             --enforce-eager \
-            --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/profiling", "torch_profiler_with_stack": false}' \
             --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
             --kv-transfer-config '{
                 "kv_connector":"MooncakeConnectorV2",
@@ -1821,7 +1820,6 @@ Before you start, make sure that `/etc/hixlep/` is mounted into the container as
         --gpu-memory-utilization 0.92 \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/profiling", "torch_profiler_with_stack": false}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_consumer",
@@ -1842,30 +1840,30 @@ Before you start, make sure that `/etc/hixlep/` is mounted into the container as
         }'
     ```
 
-4. Start the service. Set `local_ip` in every script to the IP of the current node before starting. For each Prefill instance, start the master server (`--node-rank 0`) before its worker server. The second argument is the engine port passed to `--port $2`.
+4. Start the service. Set `local_ip` in every script to the IP of the current node before starting. For each Prefill instance, start the master server (`--node-rank 0`) before its worker server. The first argument is the engine port passed to `--port $1`.
 
     1. Prefill instance 1, master server:
 
         ```shell
-        bash run_p_node0.sh 0 8000
+        bash run_p_node0.sh 8000
         ```
 
     2. Prefill instance 1, worker server (headless):
 
         ```shell
-        bash run_p_node1.sh 0 8000
+        bash run_p_node1.sh 8000
         ```
 
     3. Prefill instance 2, master server:
 
         ```shell
-        bash run_p_node2.sh 0 8000
+        bash run_p_node2.sh 8000
         ```
 
     4. Prefill instance 2, worker server (headless):
 
         ```shell
-        bash run_p_node3.sh 0 8000
+        bash run_p_node3.sh 8000
         ```
 
     5. Decode node 0
@@ -1909,14 +1907,12 @@ Key Parameter Descriptions:
 - `--kv-cache-dtype fp8` and `--attention_config.indexer_kv_dtype fp8` use FP8 KV cache on both sides. The P and D sides must use the same KV data types so that the transferred KV cache is directly reusable.
 - `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value (`5` here). The nested `enforce_eager` applies to DSpark draft execution: `true` on Prefill (eager) and `false` on Decode (graph mode).
 - `MooncakeConnectorV2`: the KV transfer connector required by the KVPP PD disaggregation path, transferring KV cache between the prefill producer and decode consumer. `kv_connector_extra_config.prefill/decode` must match the actual global topology on both sides.
-- Prefix caching: the Prefill side keeps prefix caching enabled (the default) and sets `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` to retain prefix-cache checkpoints every 4096 tokens. The Decode side uses `--no-enable-prefix-caching` because its KV cache is transferred from the Prefill side and decode-time prefix hits are not expected.
 - `--async-scheduling` enables asynchronous scheduling on the Decode side to overlap CPU scheduling with NPU computation.
 - `--model-loader-extra-config='{"enable_multithread_load":true,"num_threads":128}'` loads weights with 128 threads on both sides.
 - `enable_fused_mc2: 0` disables the Fused MC2 fusion operator on Prefill; `multistream_overlap_shared_expert: true` overlaps shared-expert computation with MoE communication instead, and `enable_shared_expert_dp: true` places shared experts on DP ranks.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler on Decode nodes. When the KV cache of a Decode node is insufficient, preempted requests return to the Prefill side for KV cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key in `--additional-config` still works but `scheduler_config.recompute_scheduler_enable` is the preferred form.
 - `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode; `enable_static_kernel: false` keeps dynamic kernels, which is required for the speculative decode shapes used here.
 - `combine_quant_mode: 4` forces the MoE MC2 combine stage on Decode nodes to use FP8 (MXFP float8_e4m3) communication quantization.
-- `--profiler-config` (optional): writes torch profiler traces to `torch_profiler_dir` for performance analysis. Remove it in production if tracing is not needed.
 
 Deployment Verification:
 
@@ -1991,7 +1987,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | --- | --- | --- | --- | --- |
 | Short Sequence / High Throughput | 1P1D deployment (2 Prefill + 2 Decode A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | Compared with the long-context configuration, use higher DP and concurrency: Prefill uses DP4/TP8 with 16 sequences, while Decode uses DP16/TP2 with 8 sequences. Enable FUSED_MC2 on Prefill to prioritize throughput. |
 | Long Context (~1M Input, Reference) | 1P1D deployment (2 Prefill + 2 Decode A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | Compared with the short-sequence configuration, use DP2/TP16 on both sides, reduce both sides to 2 sequences, and reduce Decode batched tokens to 16 to reserve memory for a 1M-token context. |
-| High Throughput | Multi-node mixed deployment (2 Ascend 950DT servers) | 16 (Ascend 950DT) | DeepSeek-V4-Pro-0813 | Use DP2/TP1 with prefill context parallel (PCP8) on 2 Ascend 950DT servers with the original Hugging Face weights. |
 | Long Context (~1M Input) | 2P1D deployment (4 Prefill + 4 Decode Ascend 950DT servers; each Prefill instance spans 2 servers) | 64 (Ascend 950DT) | DeepSeek-V4-Pro-0813 | Run 2 Prefill instances, each a DP1/TP1/PP2 engine with prefill context parallel (PCP8) over 2 servers, and one Decode pool with DP32/TP1. |
 
 #### Table 2: Detailed Node Configuration
@@ -2002,7 +1997,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | Short Sequence / High Throughput | Decode Pool | 32 (2 A3 nodes) | 2 | 16 | 8 | 96 | 150000 | 5 | Off | On | Off / Off |
 | Long Context (~1M Input, Reference) | Prefill Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 4096 | 1048576 | 5 | Off | On | On / Off |
 | Long Context (~1M Input, Reference) | Decode Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 16 | 1048576 | 5 | Off | On | Off / Off |
-| Multi-node mixed (Ascend 950DT) | Node0 / Node1 | 16 (2 servers) | 1 | 2 | 16 | 8192 | 1048576 | 5 | Off | Off | Off / Off |
 | PD Separation (Ascend 950DT) | Prefill Pool | 32 (4 servers, 2 instances) | 1 | 1 | 16 | 8192 | 1048576 | 5 | Off | Off | Off / Off |
 | PD Separation (Ascend 950DT) | Decode Pool | 32 (4 servers) | 1 | 32 | 32 | 512 | 1048576 | 5 | Off | Off | Off / Off |
 
