@@ -1307,7 +1307,6 @@ def _publish_action_artifacts(
     )
 
     with _file_lock(lock_path):
-        publish_dir.mkdir(parents=True, exist_ok=True)
         owners = _load_publish_state(
             owners_path,
             {
@@ -1325,9 +1324,9 @@ def _publish_action_artifacts(
         if not owners.get("initialized", False):
             if publish_dir.exists():
                 shutil.rmtree(publish_dir)
-            publish_dir.mkdir(parents=True, exist_ok=True)
             owners["initialized"] = True
 
+        publish_dir.mkdir(parents=True, exist_ok=True)
         action_state = _load_publish_state(
             action_state_path,
             {
