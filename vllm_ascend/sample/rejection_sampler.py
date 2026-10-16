@@ -33,6 +33,76 @@ from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 from vllm_ascend.utils import is_310p
 
+# Cache for the MinTokens EOS-suppression mask used by the spec-decode path.
+# Upstream MinTokensLogitsProcessor.apply_with_spec_decode rebuilds the
+# (row, token) mask on the host and copies it H2D from *pageable* memory on
+# EVERY decode step, which serializes the async scheduling pipeline
+# (~30% step-time overhead measured at c=1). During the steady phase of a
+# request (remaining min_tokens >= num_draft_tokens) the mask is constant,
+# so the device tensors are cached and reused; they are only rebuilt when the
+# batch structure changes or a request approaches its min_tokens limit.
+_MIN_TOKENS_MASK_CACHE: dict = {}
+
+
+def _apply_min_tokens_spec_cached(
+    processor: MinTokensLogitsProcessor,
+    logits: torch.Tensor,
+    num_draft_tokens: list[int],
+) -> torch.Tensor:
+    if not processor.min_toks:
+        return logits
+
+    num_reqs = len(num_draft_tokens)
+    steady = True
+    structure: list[tuple[int, int, tuple[int, ...]]] = []
+    for req_idx, (min_tok, out_tok_ids, stop_tok_ids) in processor.min_toks.items():
+        if not stop_tok_ids:
+            continue
+        if req_idx >= num_reqs:
+            # Stale index (batch changed) -> fall back to the safe upstream path.
+            steady = False
+            break
+        remaining = min_tok - len(out_tok_ids)
+        if remaining < num_draft_tokens[req_idx]:
+            # Near the end of min_tokens the per-position mask length shrinks
+            # every step; fall back to the upstream implementation (rare).
+            steady = False
+            break
+        structure.append((req_idx, num_draft_tokens[req_idx], tuple(sorted(stop_tok_ids))))
+
+    if not steady:
+        return processor.apply_with_spec_decode(logits, num_draft_tokens)
+
+    key = (tuple(num_draft_tokens), tuple(structure))
+    cached = _MIN_TOKENS_MASK_CACHE.get(key)
+    if cached is None:
+        rows: list[int] = []
+        toks: list[int] = []
+        offset = 0
+        ndt = list(num_draft_tokens)
+        for i in range(num_reqs):
+            n = ndt[i]
+            entry = next((e for e in structure if e[0] == i), None)
+            if entry is not None:
+                stop_ids = entry[2]
+                for r in range(offset, offset + n):
+                    rows.extend([r] * len(stop_ids))
+                    toks.extend(stop_ids)
+            offset += n
+        rows_t = torch.tensor(rows, dtype=torch.int64, pin_memory=True).to(
+            logits.device, non_blocking=True
+        )
+        toks_t = torch.tensor(toks, dtype=torch.int64, pin_memory=True).to(
+            logits.device, non_blocking=True
+        )
+        cached = (rows_t, toks_t)
+        # Keep the cache small: the key changes whenever the batch changes.
+        _MIN_TOKENS_MASK_CACHE.clear()
+        _MIN_TOKENS_MASK_CACHE[key] = cached
+
+    logits.index_put_(cached, processor.neg_inf_tensor)
+    return logits
+
 
 class AscendRejectionSampler(RejectionSampler):
     """Ascend-optimized rejection sampler for speculative decoding.
@@ -140,7 +210,9 @@ class AscendRejectionSampler(RejectionSampler):
 
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
-                logits = processor.apply_with_spec_decode(logits, metadata.num_draft_tokens)
+                logits = _apply_min_tokens_spec_cached(
+                    processor, logits, metadata.num_draft_tokens
+                )
 
         return logits
 

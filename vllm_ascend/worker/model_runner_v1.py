@@ -248,6 +248,67 @@ def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
 
 
+def _vocab_parallel_argmax_eos_masked(
+    lm_head,
+    hidden_states: torch.Tensor,
+    logits_processor,
+    eos_mask: tuple[torch.Tensor, torch.Tensor] | None,
+) -> torch.Tensor:
+    """Vocab-parallel greedy argmax with EOS suppression (min_tokens).
+
+    Mirrors LogitsProcessor.get_top_tokens of the installed vllm (each TP rank
+    computes a local argmax, then only (value, index) pairs are gathered, so
+    communication is O(batch * 2 * tp_size) instead of O(batch * vocab_size)),
+    but additionally masks the (req_idx, eos_tok_id) entries to -inf before the
+    argmax, keeping MinTokensLogitsProcessor semantics without the full-vocab
+    all-gather.
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+
+    logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=None)
+    soft_cap = getattr(logits_processor, "soft_cap", None)
+    scale = getattr(logits_processor, "scale", 1.0)
+    if soft_cap is not None:
+        logits = torch.tanh(logits / soft_cap) * soft_cap
+    if scale != 1.0:
+        logits = logits * scale
+
+    # Mask out padding entries beyond org_vocab_size on this shard.
+    num_pad = lm_head.shard_indices.num_org_vocab_padding
+    if num_pad > 0:
+        logits[..., -num_pad:] = -float("inf")
+
+    # EOS suppression: same effect as MinTokensLogitsProcessor.apply's
+    # index_put_(logits_slice, -inf), restricted to this rank's vocab shard.
+    if eos_mask is not None:
+        req_idx, eos_tok = eos_mask
+        vocab_start = lm_head.shard_indices.org_vocab_start_index
+        vocab_end = lm_head.shard_indices.org_vocab_end_index
+        eos_tok = eos_tok.to(torch.int64)
+        valid = (eos_tok >= vocab_start) & (eos_tok < vocab_end)
+        if bool(valid.any()):
+            logits[req_idx[valid].to(torch.int64), eos_tok[valid] - vocab_start] = -float("inf")
+
+    local_max_vals, local_max_indices = logits.max(dim=-1)
+
+    # Convert shard-local indices to global vocab indices.
+    vocab_start = lm_head.shard_indices.org_vocab_start_index
+    global_indices = local_max_indices + vocab_start
+
+    if tp_size == 1:
+        return global_indices
+
+    # All-gather (value, index) pairs, then reduce to global argmax.
+    local_pair = torch.stack([local_max_vals.float(), global_indices.float()], dim=-1)
+    # [batch, 2] -> [batch, 2 * tp_size]
+    gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
+    # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
+    gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
+    max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+    top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
+    return top_tokens.squeeze(-1).to(torch.int64)
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -2406,13 +2467,18 @@ class NPUModelRunner(GPUModelRunner):
                 # O(batch * vocab_size) to O(batch * 2 * tp_size).
                 sampling_md = self.input_batch.sampling_metadata
                 # Extract EOS mask info from MinTokensLogitsProcessor (if active)
-                # so get_top_tokens can handle EOS masking internally, bypassing
-                # the full-vocab all_gather in _get_logits.
+                # so the vocab-parallel argmax can suppress EOS internally,
+                # bypassing the full-vocab all_gather in _get_logits.
                 _eos_mask = None
+                _eos_mask_supported = True
                 for _proc in (sampling_md.logitsprocs.non_argmax_invariant
                               if sampling_md is not None else []):
-                    if hasattr(_proc, 'logits_slice') and _proc.logits_slice[0].numel() > 0:
-                        _eos_mask = _proc.logits_slice  # (req_idx, eos_tok_id)
+                    if hasattr(_proc, "logits_slice"):
+                        if _proc.logits_slice[0].numel() > 0:
+                            _eos_mask = _proc.logits_slice  # (req_idx, eos_tok_id)
+                    else:
+                        # Some other argmax-changing processor we cannot emulate.
+                        _eos_mask_supported = False
                 _logits_model = getattr(self.get_model(), "language_model", self.get_model())
                 if (
                     sampling_md is not None
@@ -2422,14 +2488,16 @@ class NPUModelRunner(GPUModelRunner):
                     and sampling_md.no_penalties
                     and sampling_md.allowed_token_ids_mask is None
                     and not sampling_md.bad_words_token_ids
+                    and _eos_mask_supported
+                    and _eos_mask is None  # mask path not yet device-safe; use full logits path when active
                     and spec_decode_metadata is None
                     and hasattr(_logits_model, "logits_processor")
                     and hasattr(_logits_model, "lm_head")
                     and hasattr(_logits_model.logits_processor, "get_top_tokens")
                 ):
-                    pre_sampled_tokens = _logits_model.logits_processor.get_top_tokens(
+                    pre_sampled_tokens = _vocab_parallel_argmax_eos_masked(
                         _logits_model.lm_head, sample_hidden_states,
-                        eos_mask=None)
+                        _logits_model.logits_processor, _eos_mask)
                     logits = None
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
