@@ -14,8 +14,13 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 def copy_snapshot_to_gpu(buffer: CpuGpuBuffer) -> torch.Tensor:
     """Copy a pinned snapshot of a CPU buffer to its GPU buffer."""
-    cpu_snapshot = buffer.cpu.clone().pin_memory()
-    return buffer.gpu.copy_(cpu_snapshot, non_blocking=True)
+    try:
+        staging = buffer._pinned_staging  # type: ignore[attr-defined]
+    except AttributeError:
+        staging = torch.empty_like(buffer.cpu, pin_memory=True)
+        buffer._pinned_staging = staging  # type: ignore[attr-defined]
+    staging.copy_(buffer.cpu)
+    return buffer.gpu.copy_(staging, non_blocking=True)
 
 
 @triton.jit

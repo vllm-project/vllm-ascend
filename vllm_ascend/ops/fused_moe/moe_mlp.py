@@ -207,7 +207,7 @@ def quant_apply_mlp(
                 activate_left=True,
                 quant_mode=1,
             )
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = None if _EXTRA_CTX.skip_dispatch_combine_events else torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -246,7 +246,7 @@ def quant_apply_mlp(
             hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = None if _EXTRA_CTX.skip_dispatch_combine_events else torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -338,7 +338,7 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = None if _EXTRA_CTX.skip_dispatch_combine_events else torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,

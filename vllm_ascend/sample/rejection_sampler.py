@@ -33,6 +33,153 @@ from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 from vllm_ascend.utils import is_310p
 
+# Cache for the MinTokens EOS-suppression mask used by the spec-decode path.
+# Upstream MinTokensLogitsProcessor.apply_with_spec_decode rebuilds the
+# (row, token) mask on the host and copies it H2D from *pageable* memory on
+# EVERY decode step, which serializes the async scheduling pipeline
+# (~30% step-time overhead measured at c=1). During the steady phase of a
+# request (remaining min_tokens >= num_draft_tokens) the mask is constant,
+# so the device tensors are cached and reused; they are only rebuilt when the
+# batch structure changes or a request approaches its min_tokens limit.
+_MIN_TOKENS_MASK_CACHE: dict = {}
+
+
+def _min_tokens_spec_steady_structure(
+    processor: MinTokensLogitsProcessor,
+    num_draft_tokens: list[int],
+) -> list[tuple[int, int, tuple[int, ...]]] | None:
+    """Detect whether the MinTokens EOS mask is in its steady phase.
+
+    Returns a structure list of ``(req_idx, num_draft_tokens, stop_token_ids)``
+    describing which (row, stop_token) pairs must be masked, or ``None`` when
+    the mask changes every step (tail of min_tokens or stale batch indices) and
+    the caller must fall back to the upstream per-step implementation.
+    An empty list means no masking is needed at all.
+    """
+    if not processor.min_toks:
+        return []
+
+    num_reqs = len(num_draft_tokens)
+    structure: list[tuple[int, int, tuple[int, ...]]] = []
+    for req_idx, (min_tok, out_tok_ids, stop_tok_ids) in processor.min_toks.items():
+        if not stop_tok_ids:
+            continue
+        if req_idx >= num_reqs:
+            # Stale index (batch changed) -> fall back to the safe upstream path.
+            return None
+        remaining = min_tok - len(out_tok_ids)
+        if remaining < num_draft_tokens[req_idx]:
+            # Near the end of min_tokens the per-position mask length shrinks
+            # every step; fall back to the upstream implementation (rare).
+            return None
+        structure.append((req_idx, num_draft_tokens[req_idx], tuple(sorted(stop_tok_ids))))
+    return structure
+
+
+def _get_min_tokens_spec_mask_indices(
+    processor: MinTokensLogitsProcessor,
+    num_draft_tokens: list[int],
+    structure: list[tuple[int, int, tuple[int, ...]]],
+    device: torch.device,
+    shard_range: tuple[int, int] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Cached device-side (row, token) mask indices for the steady-phase
+    MinTokens mask.
+
+    Returns ``(rows_t, toks_t, bonus_rows_t, bonus_toks_t)`` where the first
+    pair addresses target-logits rows (target-row space, i.e. rows of the
+    flattened draft positions) and the second pair addresses bonus rows
+    (indexed by request). All tensors are int64 on ``device``. Returns
+    ``None`` when there is nothing to mask.
+
+    With ``shard_range=(vocab_start, vocab_end)`` the entries are filtered on
+    the HOST at build time to the stop tokens owned by this TP shard and
+    ``toks`` are returned as shard-local column indices. This keeps the
+    per-step application free of boolean indexing / host-device syncs
+    (masked_select compiles to NonZero on Ascend, which synchronizes).
+    """
+    if not structure:
+        return None
+
+    key = (tuple(num_draft_tokens), tuple(structure), shard_range)
+    cached = _MIN_TOKENS_MASK_CACHE.get(key)
+    if cached is None:
+        num_reqs = len(num_draft_tokens)
+        rows: list[int] = []
+        toks: list[int] = []
+        offset = 0
+        ndt = list(num_draft_tokens)
+        for i in range(num_reqs):
+            n = ndt[i]
+            entry = next((e for e in structure if e[0] == i), None)
+            if entry is not None:
+                stop_ids = entry[2]
+                for r in range(offset, offset + n):
+                    rows.extend([r] * len(stop_ids))
+                    toks.extend(stop_ids)
+            offset += n
+        # Bonus rows are ordered by request; the upstream sampler also applies
+        # the MinTokens mask to the bonus token while remaining >= 1, which
+        # holds for every masked request in the steady phase.
+        bonus_rows: list[int] = []
+        bonus_toks: list[int] = []
+        for req_idx, _, stop_ids in structure:
+            bonus_rows.extend([req_idx] * len(stop_ids))
+            bonus_toks.extend(stop_ids)
+        if shard_range is not None:
+            vocab_start, vocab_end = shard_range
+            kept = [
+                (r, t - vocab_start)
+                for r, t in zip(rows, toks)
+                if vocab_start <= t < vocab_end
+            ]
+            rows = [r for r, _ in kept]
+            toks = [c for _, c in kept]
+            kept_bonus = [
+                (r, t - vocab_start)
+                for r, t in zip(bonus_rows, bonus_toks)
+                if vocab_start <= t < vocab_end
+            ]
+            bonus_rows = [r for r, _ in kept_bonus]
+            bonus_toks = [c for _, c in kept_bonus]
+        rows_t = torch.tensor(rows, dtype=torch.int64, pin_memory=True).to(
+            device, non_blocking=True
+        ) if rows else torch.empty(0, dtype=torch.int64, device=device)
+        toks_t = torch.tensor(toks, dtype=torch.int64, pin_memory=True).to(
+            device, non_blocking=True
+        ) if toks else torch.empty(0, dtype=torch.int64, device=device)
+        bonus_rows_t = torch.tensor(bonus_rows, dtype=torch.int64, pin_memory=True).to(
+            device, non_blocking=True
+        ) if bonus_rows else torch.empty(0, dtype=torch.int64, device=device)
+        bonus_toks_t = torch.tensor(bonus_toks, dtype=torch.int64, pin_memory=True).to(
+            device, non_blocking=True
+        ) if bonus_toks else torch.empty(0, dtype=torch.int64, device=device)
+        cached = (rows_t, toks_t, bonus_rows_t, bonus_toks_t)
+        # Keep the cache small: the key changes whenever the batch changes.
+        _MIN_TOKENS_MASK_CACHE.clear()
+        _MIN_TOKENS_MASK_CACHE[key] = cached
+    return cached
+
+
+def _apply_min_tokens_spec_cached(
+    processor: MinTokensLogitsProcessor,
+    logits: torch.Tensor,
+    num_draft_tokens: list[int],
+) -> torch.Tensor:
+    structure = _min_tokens_spec_steady_structure(processor, num_draft_tokens)
+    if structure is None:
+        return processor.apply_with_spec_decode(logits, num_draft_tokens)
+
+    cached = _get_min_tokens_spec_mask_indices(
+        processor, num_draft_tokens, structure, logits.device
+    )
+    if cached is None:
+        return logits
+
+    rows_t, toks_t, _, _ = cached
+    logits.index_put_((rows_t, toks_t), processor.neg_inf_tensor)
+    return logits
+
 
 class AscendRejectionSampler(RejectionSampler):
     """Ascend-optimized rejection sampler for speculative decoding.
@@ -43,6 +190,75 @@ class AscendRejectionSampler(RejectionSampler):
     - Distributed top-k/top-p sampling
     - Efficient batch expansion operations
     """
+
+    def forward_greedy_presampled(
+        self,
+        metadata: SpecDecodeMetadata,
+        presampled_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
+        """Greedy spec-decode verification with precomputed argmax ids.
+
+        ``presampled_ids`` holds the global argmax token id for every selected
+        row (same row space as ``metadata.logits_indices``, i.e. target draft
+        rows + one bonus row per request), computed via vocab-parallel argmax
+        so that the full-vocab logits never have to be all-gathered across TP
+        ranks nor materialized in fp32. Only valid for all-greedy batches
+        without logprobs/penalties/bad-words; the caller is responsible for
+        applying the steady-state MinTokens EOS mask before the argmax.
+        """
+        bonus_token_ids = presampled_ids[metadata.bonus_logits_indices].to(torch.int32).view(-1, 1)
+        target_argmax = presampled_ids[metadata.target_logits_indices].contiguous()
+
+        batch_size = len(metadata.num_draft_tokens)
+        device = presampled_ids.device
+        output_token_ids = torch.empty(
+            (batch_size, metadata.max_spec_len + 1),
+            dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
+            device=device,
+        )
+        output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+
+        if HAS_TRITON:
+            grid, block_size = cal_grid_and_block_size(batch_size)
+            rejection_greedy_sample_with_triton(
+                output_token_ids,
+                metadata.num_draft_tokens,
+                metadata.cu_num_draft_tokens,
+                metadata.draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                None,  # is_greedy: all_greedy batch
+                metadata.max_spec_len,
+                grid,
+                block_size,
+            )
+        else:
+            if (
+                min(metadata.num_draft_tokens) == 1
+                and max(metadata.num_draft_tokens) == 1
+            ):
+                rejection_greedy_sample_spec_len_1_pytorch(
+                    output_token_ids,
+                    metadata.draft_token_ids,
+                    target_argmax,
+                    bonus_token_ids,
+                )
+            else:
+                rejection_greedy_sample_pytorch(
+                    output_token_ids,
+                    metadata.cu_num_draft_tokens,
+                    metadata.draft_token_ids,
+                    target_argmax,
+                    bonus_token_ids,
+                    metadata.num_draft_tokens,
+                    metadata.max_spec_len,
+                    None,  # is_greedy
+                )
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=None,
+        )
 
     @staticmethod
     def apply_penalties(
@@ -140,7 +356,9 @@ class AscendRejectionSampler(RejectionSampler):
 
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
-                logits = processor.apply_with_spec_decode(logits, metadata.num_draft_tokens)
+                logits = _apply_min_tokens_spec_cached(
+                    processor, logits, metadata.num_draft_tokens
+                )
 
         return logits
 

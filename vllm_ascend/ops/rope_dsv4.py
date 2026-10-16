@@ -283,8 +283,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
         x = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode="interleave")
 
-        y.copy_(x.view(ori_shape))
-        return y
+        return x.view(ori_shape)
 
     def extra_repr(self) -> str:
         return f"layername={self.layername}, rotary_dim={self.rotary_dim}"

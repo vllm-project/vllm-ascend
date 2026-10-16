@@ -37,6 +37,17 @@ from vllm_ascend.utils import is_310p
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
+_RMSNORM_WEIGHT_CACHE: dict = {}
+
+
+def _get_weight_plus_one(norm):
+    key = id(norm)
+    cached = _RMSNORM_WEIGHT_CACHE.get(key)
+    if cached is None:
+        cached = (1.0 + norm.weight).contiguous()
+        _RMSNORM_WEIGHT_CACHE[key] = cached
+    return cached
+
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
@@ -50,8 +61,8 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=_get_weight_plus_one(self.q_norm),
+                k_weight=_get_weight_plus_one(self.k_norm),
                 cos_sin=cos_sin,
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
