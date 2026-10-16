@@ -3,8 +3,8 @@
 # ==========================================
 
 test_cases:
-  - name: "Qwen3-32B-QuaRot-eagle3-PCP-DCP"
-    model: "vllm-ascend/Qwen3-32B-W8A8-QuaRot"
+  - name: "Qwen3-30B-A3B-VWN-eagle3-PCP-DCP"
+    model: "Qwen/Qwen3-30B-A3B"
     envs:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
@@ -13,8 +13,6 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--quantization"
-      - "ascend"
       - "--data-parallel-size"
       - "2"
       - "--tensor-parallel-size"
@@ -34,6 +32,7 @@ test_cases:
       - "--block-size"
       - "128"
       - "--trust-remote-code"
+      - "--enable-expert-parallel"
       - "--distributed-executor-backend"
       - "mp"
       - "--gpu-memory-utilization"
@@ -42,17 +41,18 @@ test_cases:
       - "--enable-prefix-caching"
       - "--async-scheduling"
       - "--speculative-config"
-      - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model": "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model", "num_speculative_tokens": 3}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
-      # Keep the accuracy baseline from Qwen3-32B-Int8.yaml for the same QuaRot checkpoint.
+      # Initial GSM8K-lite reference from test_qwen3_30b_acc.py.
+      # Recalibrate this BF16 + VWN combination in CI.
       acc:
         case_type: accuracy
         dataset_path: vllm-ascend/gsm8k-lite
         request_conf: vllm_api_general_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_noncot_chat_prompt
-        max_out_len: 10240
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
         batch_size: 32
-        baseline: 100
-        threshold: 2
+        baseline: 95
+        threshold: 5

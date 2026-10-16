@@ -217,7 +217,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |
 | `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |
 | `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |
-| `Qwen3-32B-QuaRot-eagle3-PCP-DCP` | Qwen3-32B W8A8 QuaRot + Eagle3 + PCP + DCP |
+| `Qwen3-30B-A3B-VWN-eagle3-PCP-DCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP + DCP |
 
 ## Examples
 
@@ -242,7 +242,7 @@ Run two specific tests at once (one per SoC):
 Run the MLA, GQA and SFA context-parallel tests on A3-560T:
 
 ```text
-/nightly Kimi-K2.6-W4A8-PCP-DCP Qwen3-32B-QuaRot-eagle3-PCP-DCP glm-5.2-W4A8C8-DSpark-PCP --a3-560t
+/nightly Kimi-K2.6-W4A8-PCP-DCP Qwen3-30B-A3B-VWN-eagle3-PCP-DCP glm-5.2-W4A8C8-DSpark-PCP --a3-560t
 ```
 
 Run a single accuracy group (with all of its models):
