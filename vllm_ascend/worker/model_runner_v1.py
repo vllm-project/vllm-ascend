@@ -237,6 +237,7 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.structured_output import build_invalid_draft_mask
 from vllm_ascend.worker.utils import (
     AscendKVBlockZeroer,
     copy_kv_cache_blocks_inplace,
@@ -2801,8 +2802,20 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
+        invalid_drafts = None
+        if grammar_output is not None and spec_decode_metadata is not None:
+            invalid_drafts = build_invalid_draft_mask(
+                self.input_batch.req_ids,
+                grammar_output.structured_output_request_ids,
+                scheduler_output.scheduled_spec_decode_tokens,
+                spec_decode_metadata.num_draft_tokens,
+                logits.device,
+            )
+
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(
+                logits, spec_decode_metadata, invalid_drafts
+            )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2962,7 +2975,7 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata):
+    def _sample(self, logits, spec_decode_metadata, invalid_drafts=None):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
         sampling_metadata = self.input_batch.sampling_metadata
@@ -2982,6 +2995,7 @@ class NPUModelRunner(GPUModelRunner):
             draft_probs,
             logits,
             sampling_metadata,
+            invalid_drafts=invalid_drafts,
         )
         return sampler_output
 
