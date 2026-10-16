@@ -411,49 +411,6 @@ def _spec_lmhead(enabled):
     return patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=enabled)
 
 
-def _call_sample_draft(spec, hidden_states, draft_logits=None):
-    """Args beyond hidden_states are opaque upstream state; MagicMock covers them."""
-    return spec.sample_draft(hidden_states, *(MagicMock() for _ in range(5)), draft_logits)
-
-
-@pytest.mark.parametrize(
-    "max_num_reqs, num_rows, lmhead_enabled",
-    [(8, 3, True), (4, 8, True), (8, 3, False)],
-)
-def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enabled):
-    """The draft choke point mirrors the runner contract: below capacity,
-    zero-pad up to the group-agreed capacity and trim back; at capacity and
-    feature-off, untouched passthrough; above capacity, fail fast instead of
-    desyncing the collectives."""
-    spec = _make_speculator(max_num_reqs=max_num_reqs, num_speculative_steps=1)
-    # Row-projective greedy logits: argmax of row i is i % 4.
-    spec.model.compute_logits.side_effect = lambda hs: torch.nn.functional.one_hot(
-        torch.arange(hs.shape[0]) % 4, 4
-    ).float()
-    hidden_states = torch.randn(num_rows, 5)
-    capacity = spec._lmhead_tp_max_num_logits()
-
-    with _spec_lmhead(lmhead_enabled):
-        draft_tokens = _call_sample_draft(spec, hidden_states)
-    compute_input = spec.model.compute_logits.call_args.args[0]
-    if not lmhead_enabled or num_rows == capacity:
-        assert compute_input is hidden_states  # untouched, no copy
-    else:
-        assert compute_input.shape == (capacity, 5)
-        torch.testing.assert_close(compute_input[:num_rows], hidden_states)
-        assert torch.all(compute_input[num_rows:] == 0)
-    assert draft_tokens.shape[0] == num_rows
-    torch.testing.assert_close(draft_tokens, (torch.arange(num_rows) % 4).to(draft_tokens.dtype))
-
-    over = _make_speculator(max_num_reqs=4, num_speculative_steps=1)  # capacity 8
-    with (
-        _spec_lmhead(True),
-        pytest.raises(ValueError, match="group-agreed"),
-    ):
-        _call_sample_draft(over, torch.randn(9, 5))
-    over.model.compute_logits.assert_not_called()
-
-
 @pytest.mark.parametrize(
     "draft_method, bypass, argmax, adaptive, match",
     [
@@ -558,6 +515,20 @@ def test_sample_uses_step_capacity():
     torch.testing.assert_close(compute_input[3:], hidden_states[0].expand(12 - 3, 4))
 
 
+def _patch_super_run_model(spec_cls):
+    """Patch the nearest MRO ancestor that defines ``_run_model``.
+
+    Families resolve ``super()._run_model`` differently (EAGLE to the
+    Ascend autoregressive base, DSpark/DFlash to their upstream parents),
+    and ``__bases__[0]`` can be the sampling mixin, which never defines
+    ``_run_model`` — patching it would raise AttributeError.
+    """
+    for cls in spec_cls.__mro__[1:]:
+        if "_run_model" in cls.__dict__:
+            return patch.object(cls, "_run_model")
+    raise AssertionError(f"no ancestor of {spec_cls.__name__} defines _run_model")
+
+
 def test_dspark_run_model_publishes_draft_capacity():
     """``AscendDSparkSpeculator._run_model`` must publish the draft-head
     capacity derived from the DP-synced query rows: query rows are
@@ -575,20 +546,23 @@ def test_dspark_run_model_publishes_draft_capacity():
     def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
         return ("hidden", "sample_hidden")
 
-    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+    with _patch_super_run_model(AscendDSparkSpeculator) as super_run_model:
+        super_run_model.side_effect = fake_run_model
         # query rows = 3 reqs * 4 = 12; draft capacity = 3 * 4 = 12
         spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
     assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12
 
     # No sync value this round -> the previous round's dynamic capacity is
     # dropped so the static lmhead_tp_capacity stays authoritative.
-    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+    with _patch_super_run_model(AscendDSparkSpeculator) as super_run_model:
+        super_run_model.side_effect = fake_run_model
         spec._run_model(4, None, None, None)
     assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
 
     # Non-divisible query rows fail fast.
     with (
-        patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model),
+        _patch_super_run_model(AscendDSparkSpeculator) as super_run_model,
         pytest.raises(ValueError, match="num_query_per_req"),
     ):
+        super_run_model.side_effect = fake_run_model
         spec._run_model(5, None, None, torch.tensor([5], dtype=torch.int32))

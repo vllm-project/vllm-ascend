@@ -4,15 +4,22 @@
 
 from typing import Any
 
-import torch
-
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
+from vllm_ascend.utils import lmhead_tp_enable
 
 
 class LmheadTPDraftSamplingMixin:
-    """Group-aligned draft LM-head sampling for lmhead TP (V1 parity): pad
-    the greedy hidden states to the ``lmhead_tp_max_num_logits`` capacity and
-    trim back; probabilistic sampling (fixed-size buffers) is rejected at init."""
+    """Construction-time validation for draft sampling under lmhead TP.
+
+    The row alignment itself lives in the LM-head forward
+    (``AscendLogitsProcessor._get_logits_lmheadtp``): every vocab-sharded
+    draft head pads its hidden states up to the head-level capacity
+    (per-step dynamic value published by the speculator, falling back to
+    the static constructor capacity) and trims the logits back. What this
+    mixin guards are the sampling shapes that padding cannot align:
+    probabilistic sampling writes into fixed-size draft buffers, local
+    argmax reduces over the local vocab shard only, and paths that bypass
+    the LM head entirely (top-k on the sharded head) never see the pad.
+    """
 
     # Attributes injected by the hosting speculator; annotated for standalone
     # mypy analysis.
@@ -23,12 +30,9 @@ class LmheadTPDraftSamplingMixin:
     enable_adaptive_verification: bool
 
     # Speculators whose sampling bypasses sample_draft cannot be row-aligned;
-    # they opt out and are rejected at construction (DSpark:
-    # compute_draft_logits, DFlash2: get_top_k_tokens on the sharded head).
+    # they opt out and are rejected at construction (DFlash2:
+    # get_top_k_tokens on the sharded head).
     _lmhead_tp_sample_draft_supported = True
-
-    def _lmhead_tp_max_num_logits(self) -> int:
-        return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
 
     def _lmhead_tp_validate_draft_sampling(self) -> None:
         """Fail unsupported draft sampling at construction, not first use."""
@@ -60,36 +64,3 @@ class LmheadTPDraftSamplingMixin:
                 "confidence buffers by it, so the group-aligned padding rows "
                 "read the request mapping and write those buffers out of bounds."
             )
-
-    def sample_draft(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
-    ):
-        if not lmhead_tp_enable():
-            return super().sample_draft(  # type: ignore[misc]
-                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
-            )
-        if draft_logits is not None:
-            raise NotImplementedError(
-                "lmhead TP does not support draft_sample_method='probabilistic': "
-                "the gumbel path writes into fixed-size draft buffers that cannot "
-                "hold the group-aligned padding rows."
-            )
-        num_logits = hidden_states.shape[0]
-        # Shared pad primitive (the runner's sample() pads the target head the
-        # same way); zero rows carry no draft token and are trimmed back off.
-        padded = lmhead_tp_pad_rows(
-            hidden_states,
-            self._lmhead_tp_max_num_logits(),
-            "max_num_reqs * (num_speculative_steps + 1)",
-        )
-        out = super().sample_draft(  # type: ignore[misc]
-            padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
-        )
-        return out[:num_logits]
