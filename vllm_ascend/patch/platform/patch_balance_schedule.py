@@ -78,7 +78,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import normalize_encoder_schedule_result, vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -262,12 +262,14 @@ class BalanceScheduler(Scheduler):
                     num_new_tokens,
                     new_encoder_compute_budget,
                     external_load_encoder_input,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                ) = normalize_encoder_schedule_result(
+                    self._try_schedule_encoder_inputs(
+                        request,
+                        request.num_computed_tokens,
+                        num_new_tokens,
+                        encoder_compute_budget,
+                        shift_computed_tokens=1 if self.use_eagle else 0,
+                    )
                 )
 
             if self.need_mamba_block_aligned_split:
@@ -581,12 +583,14 @@ class BalanceScheduler(Scheduler):
                             num_new_tokens,
                             new_encoder_compute_budget,
                             external_load_encoder_input,
-                        ) = self._try_schedule_encoder_inputs(
-                            request,
-                            num_computed_tokens,
-                            num_new_tokens,
-                            encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                        ) = normalize_encoder_schedule_result(
+                            self._try_schedule_encoder_inputs(
+                                request,
+                                num_computed_tokens,
+                                num_new_tokens,
+                                encoder_compute_budget,
+                                shift_computed_tokens=1 if self.use_eagle else 0,
+                            )
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.

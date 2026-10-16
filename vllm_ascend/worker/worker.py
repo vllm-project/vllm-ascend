@@ -110,6 +110,7 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -599,7 +600,11 @@ class NPUWorker(WorkerBase):
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            # Mirror vLLM's gpu_worker: profiling must run under the active
+            # vLLM config so memory measurement (and the derived KV budget)
+            # matches the configured batch shapes.
+            with set_current_vllm_config(getattr(self, "vllm_config", None)):
+                self.model_runner.profile_run()
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -617,10 +622,16 @@ class NPUWorker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            # Mirror vLLM's gpu_worker: profiling must run under the active
+            # vLLM config so memory measurement (and the derived KV budget)
+            # matches the configured batch shapes.
+            set_current_vllm_config(getattr(self, "vllm_config", None)),
+        ):
             self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
@@ -987,7 +998,13 @@ class NPUWorker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        if vllm_version_is("0.31.0"):
+            set_random_seed(self.model_config.seed)
+        else:
+            # Offset by the DP engine index so data-parallel ranks do not sample
+            # unseeded requests identically (bare test workers may omit the config).
+            parallel_config = getattr(self, "parallel_config", None)
+            set_random_seed(self.model_config.seed, getattr(parallel_config, "data_parallel_index", 0))
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
@@ -1242,7 +1259,14 @@ class NPUWorker(WorkerBase):
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
             self.model_runner._init_kv_zero_meta()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1261,11 +1285,17 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
-                self.profiler.start()  # type: ignore[attr-defined]
+            # vLLM main threads per-session iteration bounds into the profiler;
+            # the 0.31.0 release keeps the zero-arg start(). `Any` keeps the
+            # call signature-clean under both trees' mypy passes.
+            profiler: Any = self.profiler
+            if vllm_version_is("0.31.0"):
+                profiler.start()
             else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+                profiler.start(
+                    delay_iterations=delay_iterations,
+                    max_iterations=max_iterations,
+                )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")

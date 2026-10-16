@@ -745,6 +745,18 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def normalize_encoder_schedule_result(result: Any) -> Any:
+    """Adapt ``Scheduler._try_schedule_encoder_inputs`` return arity across versions.
+
+    vLLM main appends a 5th ``duplicate_encoder_inputs`` element; the 0.31.0
+    release returns a 4-tuple. Ascend's forked schedulers consume the 4-tuple
+    contract, so drop the extra element when running against main.
+    """
+    if vllm_version_is("0.31.0"):
+        return result
+    return result[:4]
+
+
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 

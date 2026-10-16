@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
@@ -154,6 +155,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = dp_sync
@@ -165,6 +167,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
         with build_attn_metadata_wrapper():
+            propose_kwargs = {}
+            if not vllm_version_is("0.31.0"):
+                propose_kwargs["num_speculative_tokens"] = num_speculative_tokens
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -182,6 +187,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                **propose_kwargs,
             )
 
 

@@ -59,53 +59,90 @@ def _pack_sampling_mask_kernel_ascend(
     tl.store(counts_ptr + req_idx, count)
 
 
-def sampling_mask_from_logits_npu(
-    cls: type[SamplingMaskTensors],
+def _pack_sampling_mask_logits(
     logits: torch.Tensor,
-    num_sampled_tokens: torch.Tensor,
-    max_num_kept: int | None = None,
-) -> SamplingMaskTensors:
-    """Pack sampling masks after making strided vocab loads NPU-friendly."""
+    source_rows: torch.Tensor | None,
+    active_rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Pack one row per output slot; return (token_ids, packed_mask, counts, vocab)."""
     if logits.stride(1) != 1:
         logits = logits.contiguous()
+    if source_rows is not None:
+        # vLLM main maps each output slot to its source logits row; rows align
+        # one-to-one with requests on the v0.31.0 release.
+        logits = logits.index_select(0, source_rows)
 
-    num_reqs, vocab_size = logits.shape
+    num_rows, vocab_size = logits.shape
     packed_width = (vocab_size + 7) // 8
     packed_mask = torch.empty(
-        (num_reqs, packed_width),
+        (num_rows, packed_width),
         dtype=torch.uint8,
         device=logits.device,
     )
-    counts = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
-    _pack_sampling_mask_kernel_ascend[(num_reqs,)](
+    counts = torch.empty(num_rows, dtype=torch.int32, device=logits.device)
+    _pack_sampling_mask_kernel_ascend[(num_rows,)](
         logits,
         logits.stride(0),
         logits.stride(1),
-        num_sampled_tokens,
+        active_rows,
         packed_mask,
         packed_mask.stride(0),
         counts,
         vocab_size,
         BLOCK_SIZE=_BLOCK_SIZE,
     )
+    # The compact token-ID path is unsupported on Ascend: keep token_ids
+    # zero-width so upstream tolists() falls back to the exact packed mask for
+    # every non-empty row. This avoids the cumsum-based dynamic scatter that
+    # hangs on TA 3.2.2.
+    logger.warning_once(
+        "The SamplingMaskTensors compact token-ID path is temporarily "
+        "unsupported on Ascend; falling back to packed-mask decoding. "
+        "Sampling results remain unchanged, but CPU decoding may be slower.",
+        scope="process",
+    )
+    token_ids = torch.empty((num_rows, 0), dtype=torch.int32, device=logits.device)
+    return token_ids, packed_mask, counts, vocab_size
 
-    if max_num_kept is not None:
-        # The four-field API normally returns compact token IDs in addition to
-        # the packed mask. Keep token_ids zero-width so upstream tolists()
-        # falls back to the exact packed mask for every non-empty row. This
-        # avoids the cumsum-based dynamic scatter that hangs on TA 3.2.2.
-        logger.warning_once(
-            "The four-field SamplingMaskTensors compact token-ID path is "
-            "temporarily unsupported on Ascend; falling back to packed-mask "
-            "decoding. Sampling results remain unchanged, but CPU decoding "
-            "may be slower.",
-            scope="process",
-        )
-        token_ids = torch.empty(
-            (num_reqs, 0),
-            dtype=torch.int32,
-            device=logits.device,
-        )
-        return cls(token_ids, packed_mask, counts, vocab_size)
 
-    return cls(packed_mask, counts, vocab_size)
+def _main_sampling_mask_slots(
+    logits: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    rows_per_request: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build per-output-slot source rows and active counts for vLLM main."""
+    if rows_per_request == 1:
+        return cu_num_logits[: num_sampled_tokens.shape[0]], num_sampled_tokens
+    num_reqs = num_sampled_tokens.shape[0]
+    device = logits.device
+    slot = torch.arange(num_reqs * rows_per_request, device=device, dtype=torch.int64) % rows_per_request
+    req_idx = torch.repeat_interleave(torch.arange(num_reqs, device=device, dtype=torch.int64), rows_per_request)
+    active = (slot < num_sampled_tokens.to(torch.int64)[req_idx]).to(torch.int32)
+    source_rows = (cu_num_logits.to(torch.int64)[req_idx] + slot).clamp(max=logits.shape[0] - 1)
+    return source_rows, active
+
+
+def sampling_mask_from_logits_npu(
+    cls: type[SamplingMaskTensors],
+    logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    max_num_kept: int | None = None,
+) -> SamplingMaskTensors:
+    """Pack sampling masks for the v0.31.0 release from_logits signature."""
+    token_ids, packed_mask, counts, vocab_size = _pack_sampling_mask_logits(logits, None, num_sampled_tokens)
+    return cls(token_ids, packed_mask, counts, vocab_size)
+
+
+def sampling_mask_from_logits_npu_main(
+    cls: type[SamplingMaskTensors],
+    logits: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    max_num_kept: int | None = None,
+    rows_per_request: int = 1,
+) -> SamplingMaskTensors:
+    """Pack sampling masks for the vLLM main from_logits signature."""
+    source_rows, active = _main_sampling_mask_slots(logits, cu_num_logits, num_sampled_tokens, rows_per_request)
+    token_ids, packed_mask, counts, vocab_size = _pack_sampling_mask_logits(logits, source_rows, active)
+    return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)

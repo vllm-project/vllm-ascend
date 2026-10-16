@@ -1038,7 +1038,9 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
-            if self.cache_config.mamba_cache_mode == "all":
+            # Mamba cache mode "all" (and postprocess_mamba_all) was removed on
+            # vLLM main; it still exists on the v0.31.0 release.
+            if vllm_version_is("0.31.0") and self.cache_config.mamba_cache_mode == "all":
                 mamba_utils.postprocess_mamba_all(
                     scheduler_output,
                     self.kv_cache_config,
@@ -4447,10 +4449,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(
                     mc2_tokens_capacity, with_prefill=True, is_profile=True, randomize_inputs=randomize_inputs
                 )
-        if vllm_version_is("0.31.0"):
-            super().profile_run(randomize_inputs=randomize_inputs)
-        else:
-            super().profile_run()
+        super().profile_run(randomize_inputs=randomize_inputs)
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:

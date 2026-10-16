@@ -30,7 +30,7 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
@@ -123,12 +123,19 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     max_query_len=desc.max_query_len or desc.uniform_token_count,
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
+                # vLLM main threads the dynamic-K step count into the captured
+                # call so its `_multi_step_decode` (which now requires it) is
+                # happy; the 0.31.0 release keeps the legacy signature.
+                forward_kwargs: dict = {}
+                if not vllm_version_is("0.31.0"):
+                    forward_kwargs["num_speculative_steps"] = getattr(self.vllm_config, "num_speculative_tokens", 0)
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
                     BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                     num_tokens_across_dp,
                     seq_lens_cpu_upper_bound,
+                    **forward_kwargs,
                 )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
