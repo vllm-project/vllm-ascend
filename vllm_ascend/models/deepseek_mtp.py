@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe.utils import is_model_fused_shared_expert_compatible
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -16,6 +17,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -91,6 +93,9 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 
 class AscendDSACPDecoderLayer(DeepseekV2DecoderLayer):
+    input_is_sequence_parallel: bool = False
+    gather_sequence_parallel_output: bool = False
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -98,37 +103,40 @@ class AscendDSACPDecoderLayer(DeepseekV2DecoderLayer):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_is_sequence_parallel = (
-            self.use_sequence_parallel_moe and residual is not None and hidden_states.shape[0] != positions.shape[0]
-        )
         if (
-            not input_is_sequence_parallel
+            not self.input_is_sequence_parallel
             or llama_4_scaling is not None
             or not self.self_attn.mla_attn.supports_sequence_parallel_input
         ):
             # Preserve the first replicated -> SP transition and configurations
             # whose attention/projection contract requires the upstream path.
-            return super().forward(positions, hidden_states, residual, llama_4_scaling)
-
-        # Attention and MoE share the same contiguous TP token shard. The
-        # backend owns any head reduction; a second model-level RS is invalid.
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        output_scale = 1.0 / self.routed_scaling_factor if hidden_states.dtype == torch.float16 else 1.0
-        hidden_states = self.self_attn.mla_attn.forward_sequence_parallel(
-            positions, hidden_states, output_scale=output_scale
-        )
-        # The backend scales partial projections before TP reduction to
-        # preserve upstream's FP16 overflow protection.
-        if hidden_states.dtype == torch.float16 and self.layer_idx == 0:
-            residual *= 1.0 / self.routed_scaling_factor
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+            hidden_states, residual = super().forward(positions, hidden_states, residual, llama_4_scaling)
+        else:
+            # Attention and MoE share the same contiguous TP token shard. The
+            # backend owns any head reduction; a second model-level RS is invalid.
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            output_scale = 1.0 / self.routed_scaling_factor if hidden_states.dtype == torch.float16 else 1.0
+            hidden_states = self.self_attn.mla_attn.forward_sequence_parallel(
+                positions, hidden_states, output_scale=output_scale
+            )
+            # The backend scales partial projections before TP reduction to
+            # preserve upstream's FP16 overflow protection.
+            if hidden_states.dtype == torch.float16 and self.layer_idx == 0:
+                residual *= 1.0 / self.routed_scaling_factor
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+            hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        if self.gather_sequence_parallel_output:
+            # A one-token shard can have the global row count. The producer's
+            # layout, rather than tensor shape, determines boundary restoration.
+            combined = tensor_model_parallel_all_gather(torch.cat([hidden_states, residual], dim=-1), 0)
+            hidden_states, residual = combined[: positions.shape[0]].chunk(2, dim=-1)
+            hidden_states, residual = hidden_states.contiguous(), residual.contiguous()
         return hidden_states, residual
 
 
 @support_torch_compile
 class AscendDSACPModel(DeepseekV2Model):
-    """GLM V1/PP=1 model with a shared SP and DSA-CP token layout."""
+    """GLM V1 model retaining SP/DSA-CP shards across compatible layers."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # The upstream constructor hardcodes its decoder class. Construct the
@@ -156,8 +164,12 @@ class AscendDSACPModel(DeepseekV2Model):
             if topk_indices_buffer is not None
             else None
         )
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size, self.hidden_size, quant_config=quant_config, prefix=f"{prefix}.embed_tokens"
+        self.embed_tokens = (
+            VocabParallelEmbedding(
+                self.vocab_size, self.hidden_size, quant_config=quant_config, prefix=f"{prefix}.embed_tokens"
+            )
+            if get_pp_group().is_first_rank
+            else PPMissingLayer()
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -169,8 +181,30 @@ class AscendDSACPModel(DeepseekV2Model):
             ),
             prefix=f"{prefix}.layers",
         )
+        # Only MoE layers with a supported projection can share SP token shards.
+        local_layers = self.layers[self.start_layer : self.end_layer]
+        for layer in local_layers:
+            o_proj = layer.self_attn.o_proj
+            o_proj.reduce_results = False
+            layer.use_sequence_parallel_moe = (
+                isinstance(layer.mlp, DeepseekV2MoE)
+                and layer.mlp.is_sequence_parallel
+                and getattr(config, "llama_4_scaling", None) is None
+                and layer.self_attn.mla_attn.supports_sequence_parallel_input
+            )
+            o_proj.reduce_results = not layer.use_sequence_parallel_moe
+        # Restore full states before a non-SP consumer or the local layer exit.
+        for index, layer in enumerate(local_layers):
+            layer.input_is_sequence_parallel = (
+                layer.use_sequence_parallel_moe and index > 0 and local_layers[index - 1].use_sequence_parallel_moe
+            )
+            layer.gather_sequence_parallel_output = layer.use_sequence_parallel_moe and (
+                index + 1 == len(local_layers) or not local_layers[index + 1].use_sequence_parallel_moe
+            )
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(self.layers, DeepseekV2MoE, "mlp")
-        self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        self.norm = (
+            RMSNorm(self.hidden_size, eps=config.rms_norm_eps) if get_pp_group().is_last_rank else PPMissingLayer()
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.hidden_size
         )
@@ -197,7 +231,6 @@ class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         if (
             not vllm_config.use_v2_model_runner
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
             and vllm_config.parallel_config.use_sequence_parallel_moe
             and enable_dsa_cp()
         ):
