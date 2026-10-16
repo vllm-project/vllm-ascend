@@ -29,6 +29,16 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import (
+    ASSETS as GLM53FLASH_ASSETS,
+)
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import (
+    initialize_tensor as initialize_glm53flash_tensor,
+)
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import (
+    load_parameter_metadata,
+)
+
 
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
@@ -42,6 +52,9 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    parameter_metadata_file: Path | None = None
+    tensor_initializer: Callable[[str, torch.Tensor], torch.Tensor] | None = None
+    server_env: tuple[tuple[str, str], ...] = ()
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -147,6 +160,26 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
 
 
 MODEL_CASES = (
+    WeightUpdateModelCase(
+        id="glm-5.3-flash-kda-sfa-mhc",
+        model=str(GLM53FLASH_ASSETS.resolve()),
+        hf_overrides={},
+        # The published architecture is downstream of Transformers, so use
+        # checkpoint header metadata instead of AutoModelForCausalLM. The local
+        # config keeps production widths, the first 4 layers and 8 experts.
+        parameter_metadata_file=GLM53FLASH_ASSETS / "parameter_metadata.json",
+        tensor_initializer=initialize_glm53flash_tensor,
+        server_env=(("VLLM_USE_V2_MODEL_RUNNER", "0"),),
+        extra_server_args=(
+            "--block-size",
+            "128",
+            "--max-num-seqs",
+            "1",
+            "--max-num-batched-tokens",
+            "512",
+            "--no-enable-prefix-caching",
+        ),
+    ),
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
         model="Qwen/Qwen3.5-35B-A3B",
@@ -264,7 +297,16 @@ def pytest_model_cases() -> list[Any]:
     """Return model params with per-checkpoint CI discovery markers."""
     import pytest
 
-    return [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in MODEL_CASES]
+    return [
+        pytest.param(
+            case,
+            id=case.id,
+            # Offline header fixtures must not be sent to the checkpoint
+            # downloader as if their absolute paths were remote model IDs.
+            marks=() if case.parameter_metadata_file is not None else pytest.mark.e2e_model(case.model),
+        )
+        for case in MODEL_CASES
+    ]
 
 
 _ENGINES_REGISTERED = False
@@ -304,8 +346,9 @@ FIXED_WEIGHT_SEED = 20260915
 class FixedRandomWeightSource(WeightSource):
     """Generate every reduced-model parameter deterministically on demand.
 
-    A meta-device Transformers model provides the complete checkpoint-facing
-    name and shape set without allocating model storage. Each iteration derives
+    A meta-device Transformers model, or a case's published-header metadata,
+    provides the checkpoint-facing name and shape set without allocating model
+    storage. Each iteration derives
     a stable per-parameter seed and regenerates the same BF16 values, avoiding
     both checkpoint weight downloads and a persistent second model copy.
 
@@ -316,6 +359,12 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
+        if case.parameter_metadata_file is not None:
+            self._case = case
+            self._parameters = load_parameter_metadata(case.parameter_metadata_file)
+            self._device = device
+            self._num_experts = 0  # This BF16 fixture has no integer routing tables.
+            return
         config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
@@ -400,6 +449,9 @@ class FixedRandomWeightSource(WeightSource):
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)
         tensor = torch.empty(shape, dtype=dtype, device=self._device)
+        if self._case.tensor_initializer is not None:
+            tensor.uniform_(-0.02, 0.02)
+            return self._case.tensor_initializer(name, tensor)
         if name.endswith("norm.weight"):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)
@@ -436,12 +488,18 @@ class FixedRandomWeightSource(WeightSource):
         published file nor survives vLLM's config validation once
         ``num_hidden_layers`` is reduced.
         """
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import save_file
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        local_config = Path(self._case.model) / "config.json"
+        if local_config.is_file():
+            config_path = local_config
+        else:
+            from huggingface_hub import hf_hub_download
+
+            config_path = hf_hub_download(self._case.model, "config.json")
+        shutil.copyfile(config_path, target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
@@ -676,6 +734,9 @@ def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...
         choice = response.choices[0]
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
+        assert all(value is not None and math.isfinite(value) for value in token_logprobs), (
+            f"{model}: generation returned non-finite token logprobs"
+        )
         signature.append((choice.text, token_logprobs))
     return signature
 

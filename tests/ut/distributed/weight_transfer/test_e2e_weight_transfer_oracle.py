@@ -27,6 +27,8 @@ caching contract are pinned here.
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from safetensors.torch import load_file
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
@@ -187,3 +189,41 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+def test_offline_flash_source_does_not_require_a_transformers_model():
+    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    with (
+        patch.object(utils.AutoConfig, "from_pretrained", side_effect=AssertionError("unexpected config download")),
+        patch.object(utils.AutoModelForCausalLM, "from_config", side_effect=AssertionError("unexpected meta model")),
+    ):
+        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    metadata = source.metadata()
+    assert len(metadata) == 132
+    assert all(meta.dtype == torch.bfloat16 for meta in metadata)
+    assert len({meta.name for meta in metadata}) == len(metadata)
+
+
+def test_offline_flash_checkpoint_and_transfer_use_identical_tensors(tmp_path, monkeypatch):
+    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    # Keep this a serialization-contract check without allocating a 4.64 GiB
+    # payload on CPU. Retain actual shapes for recurrent and mHC parameters.
+    selected = {
+        "model.layers.0.self_attn.A_log",
+        "model.layers.0.self_attn.dt_bias",
+        "model.layers.0.hc_attn_fn",
+        "model.layers.0.hc_attn_scale",
+        "model.layers.0.input_layernorm.weight",
+    }
+    source._parameters = [entry for entry in source._parameters if entry[0] in selected]
+    monkeypatch.setattr(torch, "npu", MagicMock(), raising=False)
+    source.write_checkpoint(tmp_path)
+    assert (tmp_path / "config.json").read_bytes() == (utils.GLM53FLASH_ASSETS / "config.json").read_bytes()
+    checkpoint = load_file(str(tmp_path / "model.safetensors"))
+    first_round = dict(source)
+    second_round = dict(source)
+    assert checkpoint.keys() == first_round.keys() == second_round.keys() == selected
+    for name in selected:
+        assert torch.equal(checkpoint[name], first_round[name])
+        assert torch.equal(first_round[name], second_round[name])

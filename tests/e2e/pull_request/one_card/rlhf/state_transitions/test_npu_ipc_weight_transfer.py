@@ -10,7 +10,7 @@ restoration, derived FP32 routing weights, and SFA source/derived-state
 restoration. Cases whose model is not ready for the transaction are skipped in
 both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
 attention-sink fix that lives in #16355 — so the matrix carries Qwen3.5-35B-A3B
-and GLM-5.1 today.
+and GLM-5.1, plus the offline GLM-5.3-Flash KDA/SFA/mHC fixture.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -91,6 +91,7 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        **dict(case.server_env),
     }
 
     # Independent oracle first: a server that loads exactly this payload at

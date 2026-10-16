@@ -163,6 +163,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        **dict(case.server_env),
     }
 
     # Independent oracle first: a server that loads exactly this payload at
