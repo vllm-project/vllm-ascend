@@ -567,8 +567,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -588,12 +589,11 @@ class AscendConfig:
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
     # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num on P/PD-mixed nodes.
-    # Zero lets CANN MegaMoe calculate receive capacity automatically.
+    # and CANN MegaMoe buffer's max_recv_token_num.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Accepts non-negative values; default 65536.
+    # linearly with this value. Default 65536.
     mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
@@ -939,8 +939,8 @@ class AscendConfig:
         self._validate_mc2_comm_alg(vc)
 
         # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens < 0:
-            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
