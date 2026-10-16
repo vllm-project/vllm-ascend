@@ -50,8 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    AsynchronousBulkWorker,
-    SynchronousBulkWorker,
+    BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import BackendIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io.arguments import BulkBackendArguments
@@ -72,7 +71,7 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
         backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
     )
     binder = compile_bulk_projection_binder(topology, 256, retention_interval=retention_interval)
-    worker = SynchronousBulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = BulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
     cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 2, 16, 1, 1)
     caches = {group.layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups}
@@ -115,12 +114,12 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
 
 @pytest.mark.parametrize("attention_block_size,hit_end,tail_end", ((16, 24, 24), (64, 32, 40)))
 @pytest.mark.parametrize(
-    "worker_type,scheduler_type",
-    ((SynchronousBulkWorker, SynchronousBulkScheduler), (AsynchronousBulkWorker, AsynchronousBulkScheduler)),
+    "load_async,scheduler_type",
+    ((False, SynchronousBulkScheduler), (True, AsynchronousBulkScheduler)),
     ids=("sync", "async"),
 )
 def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_keys(
-    attention_block_size, hit_end, tail_end, worker_type, scheduler_type
+    attention_block_size, hit_end, tail_end, load_async, scheduler_type
 ) -> None:
     topology = make_align_state_topology(
         attention_block_size=attention_block_size, state_block_size=32, hash_block_size=8, tp_size=1
@@ -132,8 +131,12 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     resources = KVPoolResources(
         backend, make_backend_spec(layerwise_access=None, requires_exists_before_put=True), 8, topology.groups
     )
-    worker = worker_type(
-        topology, compile_bulk_projection_binder(topology, 256), resources, source_ready_event_factory=FakeEvent
+    worker = BulkWorker(
+        topology,
+        compile_bulk_projection_binder(topology, 256),
+        resources,
+        load_async=load_async,
+        source_ready_event_factory=FakeEvent,
     )
     # Unequal K/V entries have padding between pages, not inside their payloads.
     backing_pages = [torch.full((8, attention_block_size * width + 4), -999.0) for width in (2, 3)]

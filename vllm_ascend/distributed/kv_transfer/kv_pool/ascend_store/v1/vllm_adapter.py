@@ -51,7 +51,7 @@ from .topology import (
     resolve_group_layers,
 )
 from .worker.base import KVPoolWorker
-from .worker.bulk import AsynchronousBulkWorker, SynchronousBulkWorker
+from .worker.bulk import BulkWorker
 from .worker.layerwise import GVALayerwiseWorker, KeyRangeLayerwiseWorker
 from .worker.resources import GVAObjectLayout, KVPoolResources
 
@@ -199,12 +199,12 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
 
         if not isinstance(projection_binder, BulkProjectionBinder):
             raise TypeError("Bulk route did not compile a Bulk projection binder")
-        worker_type = AsynchronousBulkWorker if extra_config.get("load_async", False) else SynchronousBulkWorker
-        return worker_type(
+        return BulkWorker(
             route_spec.topology,
             projection_binder,
             resources,
             store_enabled=store_enabled,
+            load_async=extra_config.get("load_async", False),
         )
     except BaseException:
         try:

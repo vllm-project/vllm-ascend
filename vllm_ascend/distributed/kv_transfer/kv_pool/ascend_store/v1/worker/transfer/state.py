@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from ...projection.store import StoreCandidateRows
 from ...protocol.transfer import KVTransferStep
-from .batch import KeyAxes, KVGroupBatch, LayerStoreGroup, TransferSource
+from .batch import KeyAxes, TransferSource
+from .evidence import StoreCompletion
 from .rows import BlockRows
 
 
@@ -22,6 +24,15 @@ class KVPoolStepContext:
     failed_block_ids: set[int] = field(default_factory=set)
     failed_sources: list[TransferSource] = field(default_factory=list)
     store_submitted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PendingStore:
+    """Associate one submitted Store result with its requests and source leases."""
+
+    future: Future[tuple[StoreCompletion, ...]]
+    request_ids: frozenset[str]
+    store_job_ids: frozenset[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,14 +57,6 @@ class StoreCandidates:
     """All pre-admission Store objects in canonical group/axis/row order."""
 
     groups: tuple[StoreGroupCandidates, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class MaterializedStoreGroup:
-    """One domain Group plus its optional Layerwise execution operands."""
-
-    batch: KVGroupBatch
-    layer_store: LayerStoreGroup | None
 
 
 def store_candidate_keys(candidates: StoreCandidates) -> tuple[str, ...]:
@@ -166,7 +169,6 @@ def readonly_bool(values: Sequence[bool]) -> np.ndarray:
 
 __all__ = (
     "KVPoolStepContext",
-    "MaterializedStoreGroup",
     "StoreCandidates",
     "StoreGroupCandidates",
 )

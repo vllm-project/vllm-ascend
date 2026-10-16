@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import BrokenExecutor, wait
 from dataclasses import replace
 
 import pytest
@@ -20,9 +21,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     KVTransferStep,
     LoadCommand,
     RangeStoreCommand,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.asynchronous_load import (
-    AsynchronousLoadTimeline,
 )
 
 
@@ -52,7 +50,7 @@ def test_empty_load_does_not_build_batches_or_submit_background_work(route, monk
         pytest.fail("A step without Load commands must not prepare or submit Load work")
 
     monkeypatch.setattr(worker, "_build_load_batch", unexpected_work)
-    monkeypatch.setattr(worker._load_timeline, "submit", unexpected_work)
+    monkeypatch.setattr(worker, "_submit_load", unexpected_work)
     try:
         for _ in range(2):
             begin_step(worker)
@@ -65,34 +63,6 @@ def test_empty_load_does_not_build_batches_or_submit_background_work(route, monk
     assert resources.closed
 
 
-def test_asynchronous_bulk_load_returns_before_copy_and_close_drains_completion(monkeypatch) -> None:
-    backend = FakeBackend()
-    copy_started = threading.Event()
-    allow_copy = threading.Event()
-
-    def blocking_get(keys, addresses, sizes):
-        backend.calls.append(("get", tuple(keys), tuple(map(tuple, addresses)), tuple(map(tuple, sizes))))
-        copy_started.set()
-        assert allow_copy.wait(timeout=5)
-        return [0] * len(keys)
-
-    monkeypatch.setattr(backend, "get", blocking_get)
-    worker, resources, _ = make_worker(backend, async_load=True, store=False)
-    command = LoadCommand("request", TokenRange(0, 4), ((7,),), (b"a",))
-    begin_step(worker, load=(command,))
-
-    worker.start_load()
-    assert copy_started.wait(timeout=2)
-    assert not allow_copy.is_set()
-    allow_copy.set()
-    worker.close()
-
-    result = worker.collect_load_result()
-    assert result.completed_request_ids == {"request"}
-    assert not result.failed_locations
-    assert resources.closed
-
-
 @pytest.mark.parametrize("released_request_ids", (None, frozenset()), ids=("drain", "nonblocking_poll"))
 def test_store_executor_failure_still_blocks_worker_execution(monkeypatch, released_request_ids) -> None:
     worker, resources, _ = make_worker()
@@ -100,30 +70,36 @@ def test_store_executor_failure_still_blocks_worker_execution(monkeypatch, relea
     def fail_executor(*_args):
         raise RuntimeError("unexpected Store executor failure")
 
-    monkeypatch.setattr(worker._asynchronous_store_timeline, "_operation", fail_executor)
+    monkeypatch.setattr(worker, "_execute_bulk_store", fail_executor)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
     worker.finish_step()
-    worker._asynchronous_store_timeline._executor._queue.join()
-    with pytest.raises(RuntimeError, match="KVPoolStoreExecutor failed"):
+    pending = worker._pending_store_batch
+    assert pending is not None
+    _, unfinished = wait((pending.future,), timeout=2)
+    assert not unfinished
+    with pytest.raises(RuntimeError, match="unexpected Store executor failure"):
         worker.fence_previous_store(released_request_ids)
+    assert worker._pending_store_batch is pending
+    assert worker.take_released_store_job_ids() == set()
     worker.end_step()
     with pytest.raises(RuntimeError, match="fatal Store failure"):
         worker.begin_step(KVTransferStep())
     with pytest.raises(RuntimeError, match="fatal Store failure"):
         worker.close()
+    assert worker._store_executor.stopped
     assert not resources.closed
 
 
 def test_completed_store_without_job_evidence_retains_sources_and_blocks_future_steps(monkeypatch) -> None:
     worker, resources, _ = make_worker()
-    monkeypatch.setattr(worker._asynchronous_store_timeline, "_operation", lambda *_args: ())
+    monkeypatch.setattr(worker, "_execute_bulk_store", lambda *_args: ())
     command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
     worker.finish_step()
-    worker._asynchronous_store_timeline._executor._queue.join()
     pending = worker._pending_store_batch
-    assert pending is not None and pending.completed.is_set()
+    assert pending is not None
+    assert pending.future.result(timeout=2) == ()
 
     with pytest.raises(RuntimeError, match="Store source release is missing"):
         worker.fence_previous_store(frozenset())
@@ -267,56 +243,63 @@ def test_released_request_waits_for_its_latest_store_and_recovers_each_earlier_b
     assert resources.closed
 
 
-def test_cache_binding_closes_partially_started_timelines_and_resources(monkeypatch) -> None:
+@pytest.mark.parametrize("failed_initializer", (1, 2), ids=("store", "load"))
+def test_cache_binding_closes_partially_started_executors_and_resources(monkeypatch, failed_initializer) -> None:
     backend = FakeBackend()
     initializer_calls = 0
 
-    def fail_load_initializer() -> None:
+    def fail_initializer() -> None:
         nonlocal initializer_calls
         initializer_calls += 1
         backend.calls.append(("set_device",))
-        if initializer_calls == 2:
-            raise RuntimeError("load thread initialization failed")
+        if initializer_calls == failed_initializer:
+            raise RuntimeError("thread initialization failed")
 
-    monkeypatch.setattr(backend, "set_device", fail_load_initializer)
+    monkeypatch.setattr(backend, "set_device", fail_initializer)
     worker, resources, _ = make_worker(
         backend,
         async_load=True,
         bind=False,
     )
 
-    with pytest.raises(RuntimeError, match="terminated during asynchronous Load"):
+    with pytest.raises(BrokenExecutor, match="initializer"):
         worker.bind_kv_caches({"cache": object()})
 
-    assert initializer_calls == 2
-    assert worker._asynchronous_store_timeline is not None
-    assert worker._asynchronous_store_timeline._executor.closed
-    assert not worker._asynchronous_store_timeline._executor.is_alive()
-    assert worker._asynchronous_load_timeline is not None
-    assert worker._asynchronous_load_timeline._executor.closed
-    assert not worker._asynchronous_load_timeline._executor.is_alive()
+    assert initializer_calls == failed_initializer
+    assert worker._store_executor is not None
+    assert worker._store_executor.stopped
+    assert worker._load_executor is not None
+    assert worker._load_executor.stopped
     assert resources.closed
 
 
-def test_worker_close_keeps_resources_until_interrupted_join_is_retried(monkeypatch) -> None:
-    worker, resources, _ = make_worker(async_load=True)
-    assert worker._asynchronous_load_timeline is not None
-    executor = worker._asynchronous_load_timeline._executor
-    original_join = executor.join
+@pytest.mark.parametrize("channel", ("store", "load"))
+def test_worker_close_keeps_resources_until_interrupted_shutdown_is_retried(channel, monkeypatch) -> None:
+    worker, resources, _ = make_worker(async_load=channel == "load")
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
+    begin_step(worker, store=(command,))
+    worker.finish_step()
+    worker.end_step()
+    executor = worker._store_executor if channel == "store" else worker._load_executor
+    assert executor is not None
+    pool = executor._pool
+    shutdown = pool.shutdown
 
-    def interrupt_join() -> None:
-        raise KeyboardInterrupt("join interrupted")
+    def interrupt_shutdown(*args, **kwargs) -> None:
+        raise KeyboardInterrupt("shutdown interrupted")
 
-    monkeypatch.setattr(executor, "join", interrupt_join)
-    with pytest.raises(KeyboardInterrupt, match="join interrupted"):
+    try:
+        monkeypatch.setattr(pool, "shutdown", interrupt_shutdown)
+        with pytest.raises(KeyboardInterrupt, match="shutdown interrupted"):
+            worker.close()
+
+        assert worker._pending_store_batch is None
+        assert worker.take_released_store_job_ids() == {17}
+        assert not executor.stopped
+        assert not resources.closed
+    finally:
+        monkeypatch.setattr(pool, "shutdown", shutdown)
         worker.close()
-
-    assert executor.closed
-    assert not executor.stopped
-    assert not resources.closed
-
-    monkeypatch.setattr(executor, "join", original_join)
-    worker.close()
 
     assert executor.stopped
     assert resources.closed
@@ -334,8 +317,8 @@ def test_worker_owns_active_step_and_async_completion_lifecycle() -> None:
     worker.start_load()
     worker.end_step()
     begin_step(worker)
-    assert worker._asynchronous_load_timeline is not None
-    worker._asynchronous_load_timeline._executor._queue.join()
+    _, unfinished = wait(worker._pending_loads, timeout=2)
+    assert not unfinished
     result = worker.collect_load_result()
     assert result.completed_request_ids == {"request"}
     assert worker.collect_load_result().completed_request_ids == set()
@@ -360,8 +343,8 @@ def test_async_load_failure_drains_pending_work_and_rejects_overlap(monkeypatch)
     with pytest.raises(RuntimeError, match="already has a pending asynchronous Load"):
         worker.start_load()
     assert worker._pending_load_request_ids == {"request"}
-    assert isinstance(worker._asynchronous_load_timeline, AsynchronousLoadTimeline)
-    worker._asynchronous_load_timeline._executor._queue.join()
+    _, unfinished = wait(worker._pending_loads, timeout=2)
+    assert not unfinished
     result = worker.collect_load_result()
     assert result.completed_request_ids == {"request"}
     assert result.failed_block_ids == {1}

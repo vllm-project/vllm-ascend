@@ -25,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     LoadCommand,
     RangeStoreCommand,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import SynchronousBulkWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import BulkWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import KVPoolResources
 
 
@@ -168,7 +168,7 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
         backend, make_backend_spec(layerwise_access=None), num_cache_blocks, topology.transfer_groups
     )
     binder = compile_bulk_projection_binder(topology, 64, kv_cache_layout=layout)
-    worker = SynchronousBulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = BulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
     worker.bind_kv_caches(caches)
     return worker, caches, expected
 

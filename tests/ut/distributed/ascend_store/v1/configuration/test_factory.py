@@ -40,8 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import (
     KVPoolRouteSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    AsynchronousBulkWorker,
-    SynchronousBulkWorker,
+    BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -51,8 +50,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
 
 def test_worker_factory_selects_one_concrete_route(monkeypatch) -> None:
     cases = (
-        (False, None, False, SynchronousBulkWorker),
-        (False, None, True, AsynchronousBulkWorker),
+        (False, None, False, BulkWorker),
+        (False, None, True, BulkWorker),
         (True, LayerwiseAccessKind.KEY_RANGE, False, KeyRangeLayerwiseWorker),
         (True, LayerwiseAccessKind.GVA, False, GVALayerwiseWorker),
     )
@@ -107,6 +106,8 @@ def test_worker_factory_selects_one_concrete_route(monkeypatch) -> None:
         worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
 
         assert type(worker) is expected_type, (use_layerwise, layerwise_access, load_async)
+        if isinstance(worker, BulkWorker):
+            assert (worker._load_executor is not None) is load_async
         worker.close()
 
 
