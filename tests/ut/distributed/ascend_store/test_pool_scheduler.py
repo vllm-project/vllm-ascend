@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -114,12 +115,16 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 
 
 @pytest.mark.parametrize("cached_hit", [False, True])
-def test_joint_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit):
+@pytest.mark.parametrize("mode", ["dspark", "reuse"])
+def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit, mode):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
-    scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
+    scheduler.dspark_prefix_keys = (
+        DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
+    )
+    scheduler.layerwise_offload = mode == "reuse"
     scheduler.dspark_draft_only_group_ids = frozenset({1})
     scheduler.layerwise_max_transfer_blocks = 0
     scheduler.hash_block_size = 16
@@ -136,14 +141,15 @@ def test_joint_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_h
     )
 
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
-    draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash")
+    draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash") if scheduler.dspark_prefix_keys else []
     readable_keys.update(["target", *draft_keys])
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 16
-    readable_keys.remove(draft_keys[-1])
+    readable_keys.remove(draft_keys[-1] if draft_keys else "target")
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
     assert scheduler._lw_block_hit_cache == original_cache
     scheduler.dspark_prefix_keys = None
+    scheduler.layerwise_offload = False
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == (16 if cached_hit else 0)
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
 
@@ -1083,6 +1089,56 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         output = MagicMock()
         output.kv_connector_worker_meta = MagicMock()  # Not AscendStoreKVConnectorWorkerMetadata
         scheduler.update_connector_output(output)
+        scheduler._block_pool.free_blocks.assert_not_called()
+
+    def test_finished_request_keeps_receive_registration_until_completion(self):
+        scheduler = self._make_scheduler()
+        scheduler._block_pool = None
+        scheduler._loading_req_ids = {"r1", "other"}
+        request = SimpleNamespace(request_id="r1")
+        self.assertEqual(scheduler.request_finished(request, [1]), (False, None))
+        output = SimpleNamespace(
+            finished_req_ids={"r1"},
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        )
+
+        metadata = scheduler.build_connector_meta(output)
+        self.assertEqual(metadata.loading_req_ids, {"r1", "other"})
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
+        output.finished_req_ids.clear()
+        self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
+
+    def test_receive_completion_cleans_only_reported_registrations(self):
+        for completed in (None, set(), {"r1"}, {"r1", "r2"}):
+            with self.subTest(completed=completed):
+                scheduler = self._make_scheduler()
+                scheduler._block_pool = None
+                scheduler._loading_req_ids = {"r1", "r2"}
+                scheduler.update_connector_output(KVConnectorOutput(finished_recving=completed))
+                self.assertEqual(scheduler._loading_req_ids, {"r1", "r2"} - (completed or set()))
+
+    def test_preempted_request_still_clears_receive_registration(self):
+        scheduler = self._make_scheduler()
+        scheduler._loading_req_ids = {"r1", "other"}
+        output = SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids={"r1"},
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        )
+        self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
+
+    def test_receive_completion_preserves_pending_send_events(self):
+        scheduler = self._make_scheduler()
+        scheduler._loading_req_ids = {"r1"}
+        scheduler.sending_events = {7: 1}
+        scheduler.sending_blocks = {7: [1, 2, 3]}
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
+        self.assertFalse(scheduler._loading_req_ids)
+        self.assertEqual(scheduler.sending_events, {7: 1})
+        self.assertEqual(scheduler.sending_blocks, {7: [1, 2, 3]})
         scheduler._block_pool.free_blocks.assert_not_called()
 
 

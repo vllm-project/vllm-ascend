@@ -218,10 +218,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     nic_name="xxxx"
     local_ip="xxxx"
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
     # AIV
     export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -331,10 +327,6 @@ Run the following scripts on two nodes respectively.
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -383,10 +375,6 @@ Run the following scripts on two nodes respectively.
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -506,10 +494,6 @@ Parameter descriptions:
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
@@ -579,10 +563,6 @@ Parameter descriptions:
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
-
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -654,10 +634,6 @@ Parameter descriptions:
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
@@ -727,10 +703,6 @@ Parameter descriptions:
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
-
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name

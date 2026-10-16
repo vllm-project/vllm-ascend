@@ -1,4 +1,3 @@
-#include <optional>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -1624,27 +1623,6 @@ at::Tensor kda_layout_swap12_meta(
     return at::empty_symint(y_sizes, x.options());
 }
 
-void store_kv_block_metadata(
-    const at::Tensor &slot_mapping_npu,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
- {
-    return;
- }
-
-void store_kv_block(
-    const at::Tensor &key_in,
-    const at::Tensor &key_cache_in,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
-{
-    return;
-
-}
 std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -1723,21 +1701,6 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     at::Tensor y = at::empty_symint(y_shape, x.options().dtype(y_dtype));
     at::Tensor mxscale = at::empty_symint(mxscale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
     return {y, mxscale};
-}
-
-std::tuple<at::Tensor, at::Tensor> gmm_dequant_situ_quant_meta(
-    const at::Tensor &x, at::TensorList weight, at::TensorList weight_scale,
-    const at::Tensor &x_scale, const at::Tensor &group_list, at::TensorList weight_assist_matrix,
-    double beta, std::optional<double> linear_beta, int64_t group_list_type)
-{
-    TORCH_CHECK(x.dim() == 2, "x must be [M, K]");
-    TORCH_CHECK(!weight.empty(), "weight list must be non-empty");
-    TORCH_CHECK(weight[0].dim() == 2, "weight[e] must be [K, N/8]");
-    // Each INT32 carrier packs eight INT4 values; SiTU halves the logical width.
-    const auto output_width = weight[0].sym_size(1) * INT4_NUMS_IN_INT32 / 2;
-    auto y = at::empty_symint(c10::SymDimVector{x.sym_size(0), output_width}, x.options().dtype(at::kChar));
-    auto scale = at::empty_symint(c10::SymDimVector{x.sym_size(0)}, x.options().dtype(at::kFloat));
-    return {y, scale};
 }
 
 std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
@@ -1863,7 +1826,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
-    ops.impl("gmm_dequant_situ_quant", &vllm_ascend::meta::gmm_dequant_situ_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
@@ -1958,9 +1920,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
-     // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
-    ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
 }
 }
 #endif

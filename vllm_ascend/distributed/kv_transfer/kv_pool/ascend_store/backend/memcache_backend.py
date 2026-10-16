@@ -427,6 +427,7 @@ class MemcacheBackend(Backend):
         return readable
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
+        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
         self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)

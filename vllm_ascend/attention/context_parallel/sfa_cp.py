@@ -4,6 +4,7 @@ from functools import partial
 from typing import Any, NamedTuple, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
@@ -106,6 +107,35 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self.o_proj_weight_switch_config,
             self.o_proj_weight_load_partition,
         )
+        if self.is_pcp_decode_sharded:
+            compilation_config = self.vllm_config.compilation_config
+            decode_query_len = 1 + self.vllm_config.num_speculative_tokens
+            max_decode_tokens = self.vllm_config.scheduler_config.max_num_seqs * decode_query_len
+            self._pcp_o_proj_token_capacity = max(
+                max_decode_tokens,
+                compilation_config.max_cudagraph_capture_size or 0,
+                max(compilation_config.cudagraph_capture_sizes or [0]),
+            )
+            capacity = self._pcp_o_proj_token_capacity
+            input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+            output_size = self.o_proj.output_size_per_partition
+            dtype = self.vllm_config.model_config.dtype
+            device = self.o_proj.weight.device
+            # Layers execute O-proj collectives sequentially, so compatible
+            # layers can reuse these graph-stable buffers from the weight pool.
+            buffer_shapes = {
+                "_pcp_o_proj_ag_in_buf": (capacity, input_size),
+                "_pcp_o_proj_ag_out_buf": (pcp_size * capacity, input_size),
+                "_pcp_o_proj_rs_in_buf": (pcp_size * capacity, output_size),
+                "_pcp_o_proj_rs_out_buf": (capacity, output_size),
+            }
+            for name, shape in buffer_shapes.items():
+                pool_key = (self.o_proj_weight_switch_pool_key, "decode", name, device, dtype, shape)
+                buffer = self.o_proj_full_pools.get(pool_key)
+                if buffer is None:
+                    buffer = torch.empty(shape, dtype=dtype, device=device)
+                    self.o_proj_full_pools[pool_key] = buffer
+                setattr(self, name, buffer)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
@@ -138,6 +168,20 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self._all_gather_o_proj_full_weight()
         return context
 
+    def _gather_o_proj_decode_tokens(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Exchange rank-local decode rows using graph-stable buffers."""
+        group = self.o_proj_weight_switch_config.group
+        num_tokens = attn_output.shape[0]
+        if num_tokens > self._pcp_o_proj_token_capacity:
+            raise ValueError("PCP O-proj decode rows exceed the configured token/graph capacity.")
+        local_rows = self._pcp_o_proj_ag_in_buf[:num_tokens]
+        local_rows.copy_(attn_output)
+        global_rows = self._pcp_o_proj_ag_out_buf[: group.world_size * num_tokens]
+        # AllToAll reduces payload but adds a channel-packing transpose; measured
+        # small-batch decode showed no clear benefit, so use token AllGather.
+        dist.all_gather_into_tensor(global_rows, local_rows, group=group.device_group)
+        return global_rows
+
     def _finalize_o_proj(
         self,
         attn_output: torch.Tensor,
@@ -150,10 +194,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             with self._use_full_o_proj_weights():
                 return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
 
-        # Decode tokens are replicated on PCP ranks. Each rank projects only
-        # its PCP input slice; PCP all-reduce reconstructs the pre-existing
-        # TP-local result, then the normal row-parallel TP reduction completes
-        # the output when TP is enabled.
+        # Feature-sharded weights must project the same token rows on every
+        # PCP rank. Sharded decode exchanges rows first and scatters the summed
+        # projection back to each owner; replicated decode only needs a sum.
         linear_method = self._get_o_proj_weight_switch_method()
         weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
         if weight_part is None:
@@ -167,6 +210,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
                 f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
             )
+        num_local_tokens = attn_output.shape[0]
+        if self.is_pcp_decode_sharded:
+            attn_output = self._gather_o_proj_decode_tokens(attn_output)
         local_input = WeightSwitchMixin.split_tensor_for_parallel(
             attn_output,
             self.o_proj_weight_switch_config.world_size,
@@ -180,7 +226,15 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None, tp_rank=bias_rank)
         else:
             partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
-        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
+        group = self.o_proj_weight_switch_config.group
+        if self.is_pcp_decode_sharded:
+            scatter_input = self._pcp_o_proj_rs_in_buf[: group.world_size * num_local_tokens]
+            scatter_input.copy_(partial_output)
+            local_output = self._pcp_o_proj_rs_out_buf[:num_local_tokens]
+            dist.reduce_scatter_tensor(local_output, scatter_input, group=group.device_group)
+            partial_output = local_output
+        else:
+            partial_output = group.all_reduce(partial_output)
 
         if self.o_proj.reduce_results and get_tp_group().world_size > 1:
             if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
@@ -326,6 +380,18 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
+
+
 @dataclass
 class DSACPContext:
     num_tokens: int
@@ -410,13 +476,13 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
+            spec_rows = max([max_num_reqs * (spec_token_num + 1), *capture_sizes]) + 1
             self.dsa_cp_spec_actual_seq_lengths_query = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
             self.dsa_cp_spec_actual_seq_lengths_key = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
 
     def _prepare_parallel_metadata(
@@ -504,7 +570,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         context = metadata.dsa_cp_context
         assert context is not None
         assert metadata.positions is not None
-        positions = nn.functional.pad(metadata.positions, (0, context.num_tokens_pad - metadata.positions.shape[0]))
+        positions = metadata.positions
+        if context.num_tokens_pad != positions.shape[0]:
+            positions = nn.functional.pad(positions, (0, context.num_tokens_pad - positions.shape[0]))
         # Preserve the global metadata for KV writes and output restoration.
         # Only the NoPE operator consumes this token-local view.
         local_metadata = replace(
@@ -522,7 +590,6 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
                 self.kv_cache_spec,
                 self.vllm_config,
                 self.device,
-                self.nope_indexer,
                 self.kernel_block_size,
                 num_heads=self.model_config.hf_text_config.num_attention_heads,
             )
@@ -553,6 +620,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
 class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA implementation for DSA-CP token sharding in the TP group."""
 
+    # Both boundaries retain the caller's contiguous TP token shard; this
+    # backend owns any head exchange and projection reduction in between.
+    supports_sequence_parallel_input: bool = True
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
     o_proj_weight_switch_pool_key = "sfa_o_proj"
 
@@ -592,6 +662,32 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if actual_tokens < context.num_tokens_pad:
             hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
         return hidden_states[context.local_start : context.local_end_with_pad]
+
+    def _prepare_sequence_parallel_hidden_states(self, hidden_states, attn_metadata):
+        context = attn_metadata.dsa_cp_context
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
+        tp_group = get_tp_group()
+        local_tokens = hidden_states.shape[0]
+        expected_start = tp_group.rank_in_group * local_tokens
+        if (
+            context.num_tokens != attn_metadata.num_input_tokens
+            or context.num_tokens_pad != local_tokens * self.tp_size
+            or context.local_start != expected_start
+            or context.local_end_with_pad != expected_start + local_tokens
+        ):
+            raise RuntimeError(
+                "SFA DSA-CP input does not match its sequence-parallel shard: "
+                f"rank={tp_group.rank_in_group}, local_tokens={local_tokens}, "
+                f"metadata_range=[{context.local_start}, {context.local_end_with_pad}), "
+                f"num_tokens_pad={context.num_tokens_pad}."
+            )
+        # Match gather -> trim -> pad; never clear padding in the residual's
+        # shared storage. Graph/DP padding inside num_input_tokens is retained.
+        valid_tokens = max(0, min(local_tokens, context.num_tokens - context.local_start))
+        if valid_tokens < local_tokens:
+            hidden_states = hidden_states.clone()
+            hidden_states[valid_tokens:].zero_()
+        return hidden_states
 
     def _get_parallel_forward_context(
         self,
@@ -809,6 +905,44 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 f"{tuple(output.shape)}."
             )
         output[...] = projected_output[: output.shape[0]]
+        return output
+
+    def _finalize_sequence_parallel_o_proj(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        gather_full_o_proj: bool,
+        attn_metadata: AscendSFADSACPMetadata,
+        output_scale: float,
+    ) -> torch.Tensor:
+        if gather_full_o_proj:
+            # Full heads and full weights already produce complete local tokens.
+            with self._use_full_o_proj_weights():
+                output.copy_(self._apply_o_proj_full_weight(attn_output))
+            if output_scale != 1.0:
+                output.mul_(output_scale)
+        else:
+            # Convert [local tokens, all heads] to [all tokens, local heads].
+            # The row-parallel projection is unreduced; scale its partial sums
+            # before the single RS restores the caller's local token shard.
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+            sharded_output = torch.empty_like(send)
+            tp_group = get_tp_group()
+            torch.distributed.all_to_all_single(sharded_output, send, group=tp_group.device_group)
+            projected_output = self.o_proj(sharded_output)[0]
+            if output_scale != 1.0:
+                projected_output.mul_(output_scale)
+            torch.distributed.reduce_scatter_tensor(output, projected_output.contiguous(), group=tp_group.device_group)
+
+        context = attn_metadata.dsa_cp_context
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
+        valid_tokens = max(0, min(output.shape[0], context.num_tokens - context.local_start))
+        if valid_tokens < output.shape[0]:
+            output[valid_tokens:].zero_()
         return output
 
 
@@ -1265,6 +1399,9 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
+    # DCP restores query/head axes separately and does not expose the same
+    # contiguous TP token layout at both model-facing boundaries.
+    supports_sequence_parallel_input: bool = False
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
@@ -1370,7 +1507,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
-        kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
+        kv = _index_select_kv_blocks(kv_cache[0], valid_block_ids)
         split_sizes: tuple[int, ...]
         if self.uses_packed_sfa_main_cache:
             # Packed SFA formats store nope, rope, and quantization data in one
@@ -1381,7 +1518,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         else:
             if len(kv_cache) < 2:
                 raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
-            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            key_rope = _index_select_kv_blocks(kv_cache[1], valid_block_ids)
             if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
                 raise RuntimeError(
                     "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
@@ -1401,7 +1538,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dim: int,
         split_sizes: tuple[int, ...],
     ) -> DCPGatherContext:
-        gathered, handle, restore_perm = self._all_gather_dim_async(x, dim)
+        # HCCL does not transport FP8 directly; gather the packed cache as bytes.
+        transport = as_byte_view(x)
+        gathered, handle, restore_perm = self._all_gather_dim_async(transport, dim)
+        if transport.dtype != x.dtype:
+            gathered = gathered.view(x.dtype)
         return DCPGatherContext(
             gathered=gathered,
             handle=handle,

@@ -182,8 +182,11 @@ class LayerBatchBuilder:
         )
         rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
+            # Zero GVAs here are expected: blocks already committed in the
+            # pool or excluded by masks are intentionally not allocated.
+            # Real batch_alloc failures are logged as errors by the caller.
             zero_count = int(np.sum(base_gvas_arr <= 0))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_transfer layer=%d detected %d zero/negative base_gvas "
                 "(base_gvas_sample=%s); these blocks will be skipped in batch_copy",
                 layer_id,
@@ -325,8 +328,12 @@ class LayerBatchBuilder:
         block_gvas_slice = block_gvas_arr[:offset]
         valid_mask = block_gvas_slice > 0
         if not np.all(valid_mask):
+            # Zero GVAs are the designed sentinel for blocks that are not
+            # transfer targets this step (already committed in the pool,
+            # hit-prefix blocks, or masked-out blocks). Real batch_alloc
+            # failures are logged as errors by _alloc_gvas_for_save.
             skip_count = int(np.sum(~valid_mask))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_shared skipping %d blocks with invalid gva (gva<=0)",
                 skip_count,
             )
@@ -1066,24 +1073,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
-                list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
+                store_masks[group_id] if store_masks is not None and group_id < len(store_masks) else None
             )
-            if group_store_mask is not None:
-                skipped_chunks = 0
-                for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * group_block_size
-                    if allowed and should_skip(start, start + group_block_size):
-                        group_store_mask[chunk_id] = False
-                        skipped_chunks += 1
-                if skipped_chunks:
-                    logger.debug(
-                        "KV pool put skipped %d pooled chunks for request %s group %d",
-                        skipped_chunks,
-                        req_id,
-                        group_id,
-                    )
-                if not group_store_mask or not any(group_store_mask):
-                    continue
+            if group_store_mask is not None and not group_store_mask:
+                continue
 
             starts: list[int] = []
             ends: list[int] = []
@@ -1097,14 +1090,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             def chunk_filter(
                 start: int,
                 group_block_size=group_block_size,
-                group_store_mask=group_store_mask,
             ) -> bool:
-                block_idx = start // group_block_size
-                mask_allows = group_store_mask is None or (
-                    block_idx < len(group_store_mask) and group_store_mask[block_idx]
-                )
-                chunk_start = block_idx * group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
+                # Request progress is not a durable save watermark on this branch.
+                return not should_skip(start, start + group_block_size)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
@@ -1122,6 +1110,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_filter=chunk_filter,
                 shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
                 shard_size=self.pcp_size * tp_replicas,
+                chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)
@@ -1653,6 +1642,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         put_started_keys: set[str] | None = None,
         put_started_keys_lock: threading.Lock | None = None,
         session_tracker: LayerwiseSessionTracker | None = None,
+        raise_on_transfer_failure: bool = True,
     ):
         super().__init__(
             m_store,
@@ -1673,6 +1663,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self._put_started_keys = put_started_keys if put_started_keys is not None else set()
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
         self._session_tracker = session_tracker
+        self.raise_on_transfer_failure = raise_on_transfer_failure
         self._active_put_keys: set[str] | None = None
         self._group_put_keys: dict[int, set[str] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
@@ -1870,7 +1861,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_bytes,
             )
             if res != 0:
-                raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
+                logger.error("Layerwise %d pool save batch_copy failed with return code %d", physical_layer, res)
             if all_save_keys:
                 save_keys = list(dict.fromkeys(all_save_keys))
                 for key in save_keys:
@@ -1880,10 +1873,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 results = [self.write_results.pop(key) for key in finish_keys]
                 finish_results = self.m_store.batch_write_finish(finish_keys, results)
                 if len(finish_results) != len(finish_keys) or any(result != 0 for result in finish_results):
-                    raise RuntimeError(
-                        f"Layerwise save batch_write_finish failed: "
-                        f"expected={len(finish_keys)}, results={finish_results}"
-                    )
+                    if self.raise_on_transfer_failure or len(finish_results) != len(finish_keys):
+                        raise RuntimeError(
+                            f"Layerwise save batch_write_finish failed: "
+                            f"expected={len(finish_keys)}, results={finish_results}"
+                        )
+                    logger.error("Layerwise %d pool batch_write_finish failed: %s", physical_layer, finish_results)
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
@@ -1928,6 +1923,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        raise_on_transfer_failure: bool = True,
     ):
         super().__init__(
             m_store,
@@ -1949,6 +1945,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.max_transfer_bytes = max_transfer_bytes
         self.external_slot_release_waiter = external_slot_release_waiter
         self.save_failure_checker = save_failure_checker
+        self.raise_on_transfer_failure = raise_on_transfer_failure
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
@@ -2205,7 +2202,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 res,
             )
         if res != 0:
-            raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
+            if self.raise_on_transfer_failure:
+                raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
+            self._mark_invalid_transfer_task_blocks(transfer_tasks)
+            logger.error("Layerwise %d pool load failed; reporting blocks for scheduler recovery", layer_id)
 
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))

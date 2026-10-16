@@ -23,6 +23,8 @@ from tests.ut.base import TestBase
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import get_cp_local_query_key_lens
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.sfa_v1 import PreprocessType, SFAForwardContext
 from vllm_ascend.weight_switch import (
@@ -184,6 +186,207 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
         with self.assertRaisesRegex(RuntimeError, "weight-switch capable"):
             impl._enable_o_proj_full_weight_switch()
+
+    def test_mixed_sp_input_matches_replicated_path_on_every_rank(self):
+        impl = self._make_impl()
+        impl.tp_size = 4
+        impl.enable_dsa_cp_full_o_proj = True
+        query_starts = torch.tensor([0, 1, 2, 3, 4, 10, 14])
+        seq_lens = torch.tensor([10, 20, 30, 40, 16, 24])
+        # N=14 exercises TP padding; N=16 retains two existing graph/DP rows.
+        for num_tokens in (14, 16):
+            full_input = torch.arange(num_tokens * 4).reshape(num_tokens, 4)
+            padded = torch.nn.functional.pad(full_input, (0, 0, 0, 16 - num_tokens))
+            for rank in range(4):
+                start, end = rank * 4, rank * 4 + 4
+                query_lens, key_lens = get_cp_local_query_key_lens(query_starts, query_starts[1:], seq_lens, start, end)
+                context = SimpleNamespace(
+                    num_tokens=num_tokens,
+                    num_tokens_pad=16,
+                    local_start=start,
+                    local_end_with_pad=end,
+                    actual_seq_lengths_query=query_lens,
+                    actual_seq_lengths_key=key_lens,
+                    slot_mapping_cp=torch.arange(start, end),
+                )
+                metadata = SimpleNamespace(
+                    num_input_tokens=num_tokens,
+                    num_actual_tokens=14,
+                    num_decode_tokens=4,
+                    attn_state=AscendAttentionState.ChunkedPrefill,
+                    dsa_cp_context=context,
+                )
+                local_input = padded[start:end].clone()
+                if num_tokens == 14 and rank == 3:
+                    local_input[2:].fill_(99)
+                original = local_input.clone()
+                with patch(
+                    "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
+                    return_value=SimpleNamespace(rank_in_group=rank),
+                ):
+                    actual = impl._prepare_sequence_parallel_hidden_states(local_input, metadata)
+                expected = impl._prepare_native_hidden_states(full_input, metadata)
+                torch.testing.assert_close(actual, expected)
+                torch.testing.assert_close(local_input, original)
+                forward_context = impl._get_parallel_forward_context(metadata, num_tokens, actual)
+                # Rank 0 owns only decode queries, but must join the global mixed path.
+                self.assertTrue(forward_context.gather_full_o_proj)
+                if rank == 0:
+                    torch.testing.assert_close(query_lens, torch.tensor([1, 2, 3, 4, 4, 4]))
+                if num_tokens == 16 or rank < 3:
+                    self.assertEqual(actual.data_ptr(), local_input.data_ptr())
+
+    def test_local_full_projection_matches_legacy_zero_staging(self):
+        impl = self._make_impl()
+        impl._enable_o_proj_full_weight_switch()
+        impl.enable_dsa_cp_full_o_proj = True
+        impl.o_proj.reduce_results = False
+        original_weight_ptr = impl.o_proj.weight.data_ptr()
+        for rank in range(2):
+            projected = torch.arange(6, dtype=torch.float32).reshape(2, 3) + rank * 10
+            impl._apply_o_proj_full_weight = MagicMock(return_value=projected)
+            group = SimpleNamespace(rank_in_group=rank, all_gather=MagicMock())
+            metadata = SimpleNamespace(dsa_cp_context=SimpleNamespace(num_tokens=3, local_start=rank * 2))
+            with (
+                patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group),
+                patch("torch.distributed.reduce_scatter_tensor") as scatter,
+            ):
+                staged = impl._finalize_o_proj(torch.empty(2, 8), torch.empty(3, 3), True)
+                expected = torch.nn.functional.pad(staged, (0, 0, 0, 1))[rank * 2 : rank * 2 + 2]
+                actual = impl._finalize_sequence_parallel_o_proj(
+                    torch.empty(2, 8), torch.empty(2, 3), True, metadata, 1.0
+                )
+                scaled = impl._finalize_sequence_parallel_o_proj(
+                    torch.empty(2, 8), torch.empty(2, 3), True, metadata, 0.5
+                )
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(scaled, expected * 0.5)
+            group.all_gather.assert_not_called()
+            scatter.assert_not_called()
+            self.assertEqual(impl.o_proj.weight.data_ptr(), original_weight_ptr)
+
+    def test_local_sharded_projection_preserves_tp_sum_and_zero_padding(self):
+        for full_o_proj in (False, True):
+            for tp_size, num_tokens in ((2, 3), (4, 6), (4, 8)):
+                with self.subTest(full_o_proj=full_o_proj, tp_size=tp_size, num_tokens=num_tokens):
+                    self._check_local_sharded_projection(full_o_proj, tp_size, num_tokens)
+
+    def _check_local_sharded_projection(self, full_o_proj, tp_size, num_tokens):
+        impl = self._make_impl()
+        impl.enable_dsa_cp_full_o_proj = full_o_proj
+        impl.tp_size = tp_size
+        impl.num_heads = 1
+        impl.v_head_dim = 2
+        local_tokens = (num_tokens + tp_size - 1) // tp_size
+        padded_tokens = local_tokens * tp_size
+        attention = torch.arange(padded_tokens * tp_size * 2, dtype=torch.float32).reshape(padded_tokens, tp_size * 2)
+        weight = torch.arange(3 * tp_size * 2, dtype=torch.float32).reshape(3, tp_size * 2)
+        complete = attention @ weight.T
+        expected = complete.clone()
+        expected[num_tokens:].zero_()
+        for rank in range(tp_size):
+            local_attention = attention[rank * local_tokens : (rank + 1) * local_tokens]
+            head_shard = attention[:, rank * 2 : rank * 2 + 2]
+            weight_shard = weight[:, rank * 2 : rank * 2 + 2]
+            impl.o_proj = MagicMock(side_effect=lambda x, weight_shard=weight_shard: (x @ weight_shard.T,))
+            impl.o_proj.reduce_results = False
+            impl.o_proj.custom_op = None
+            impl.o_proj.tp_size = tp_size
+            output = torch.empty(local_tokens, 3)
+            metadata = SimpleNamespace(
+                dsa_cp_context=SimpleNamespace(num_tokens=num_tokens, local_start=rank * local_tokens)
+            )
+            group = SimpleNamespace(device_group=object())
+
+            def exchange(recv, send, *, group, local_attention=local_attention, head_shard=head_shard):
+                # Each destination receives its heads from every token owner.
+                torch.testing.assert_close(send, torch.cat(local_attention.split(2, dim=-1), dim=0))
+                recv.copy_(head_shard)
+
+            def scatter(out, input_, *, group, rank=rank, head_shard=head_shard, weight_shard=weight_shard):
+                torch.testing.assert_close(input_, head_shard @ weight_shard.T)
+                out.copy_(complete[rank * local_tokens : (rank + 1) * local_tokens])
+
+            with (
+                patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group),
+                patch("torch.distributed.all_to_all_single", side_effect=exchange) as a2a,
+                patch("torch.distributed.reduce_scatter_tensor", side_effect=scatter) as reduce,
+            ):
+                actual = impl._finalize_sequence_parallel_o_proj(local_attention, output, False, metadata, 1.0)
+            self.assertIs(actual, output)
+            self.assertIs(reduce.call_args.args[0], output)
+            torch.testing.assert_close(actual, expected[rank * local_tokens : (rank + 1) * local_tokens])
+            a2a.assert_called_once()
+            reduce.assert_called_once()
+
+    def test_local_fp16_projection_scales_before_tp_sum(self):
+        impl = self._make_impl()
+        impl.enable_dsa_cp_full_o_proj = True
+        impl.num_heads = 1
+        impl.v_head_dim = 2
+        partial = torch.full((4, 3), 50000, dtype=torch.float16)
+        expected = partial.clone()
+        expected[3:].zero_()
+        for rank in range(2):
+            impl.o_proj = MagicMock(return_value=(partial.clone(),))
+            impl.o_proj.reduce_results = False
+            output = torch.empty(2, 3, dtype=torch.float16)
+            metadata = SimpleNamespace(dsa_cp_context=SimpleNamespace(num_tokens=3, local_start=rank * 2))
+
+            def scatter(out, input_, *, group, rank=rank):
+                other = partial * 0.5
+                other[3:].zero_()
+                out.copy_((input_ + other)[rank * 2 : rank * 2 + 2])
+
+            with (
+                patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group"),
+                patch("torch.distributed.all_to_all_single", side_effect=lambda recv, send, **kw: recv.copy_(send)),
+                patch("torch.distributed.reduce_scatter_tensor", side_effect=scatter) as reduce,
+            ):
+                actual = impl._finalize_sequence_parallel_o_proj(torch.ones(2, 4), output, False, metadata, 0.5)
+            torch.testing.assert_close(actual, expected[rank * 2 : rank * 2 + 2])
+            torch.testing.assert_close(reduce.call_args.args[1][0], partial[0] * 0.5)
+
+    def test_legacy_custom_projection_keeps_its_own_communication(self):
+        impl = self._make_impl()
+        impl.enable_dsa_cp_full_o_proj = False
+        hidden = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        expected = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        impl.o_proj = MagicMock(return_value=(expected,))
+        impl.o_proj.custom_op = object()
+        impl.o_proj.tp_size = 2
+        output = torch.empty_like(expected)
+        with (
+            patch("torch.distributed.all_to_all_single") as exchange,
+            patch("torch.distributed.reduce_scatter_tensor") as reduce,
+        ):
+            actual = impl._finalize_o_proj(hidden, output, False)
+        self.assertIs(actual, output)
+        torch.testing.assert_close(actual, expected)
+        impl.o_proj.assert_called_once_with(hidden)
+        exchange.assert_not_called()
+        reduce.assert_not_called()
+
+    def test_local_input_rejects_inconsistent_layout_metadata(self):
+        impl = self._make_impl()
+        for invalid in (
+            {"num_tokens": 2},
+            {"num_tokens_pad": 6},
+            {"local_start": 2},
+            {"local_end_with_pad": 4},
+        ):
+            context = dict(num_tokens=3, num_tokens_pad=4, local_start=0, local_end_with_pad=2)
+            context.update(invalid)
+            metadata = SimpleNamespace(num_input_tokens=3, dsa_cp_context=SimpleNamespace(**context))
+            with (
+                self.subTest(invalid=invalid),
+                patch(
+                    "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
+                    return_value=SimpleNamespace(rank_in_group=0),
+                ),
+                self.assertRaisesRegex(RuntimeError, "sequence-parallel shard"),
+            ):
+                impl._prepare_sequence_parallel_hidden_states(torch.ones(2, 4), metadata)
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)

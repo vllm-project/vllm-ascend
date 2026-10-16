@@ -117,6 +117,18 @@ class IndexerWrapper(nn.Module):
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
+    @property
+    def supports_sequence_parallel_input(self) -> bool:
+        impl = self.mla_attn.impl
+        # The local-layout backend owns the only projection reduction. Custom
+        # communication operators retain their existing forward contract.
+        return (
+            self.output_token_shard_size == 1
+            and getattr(impl, "supports_sequence_parallel_input", False)
+            and impl.o_proj.custom_op is None
+            and not impl.o_proj.reduce_results
+        )
+
     # IndexCache (index_share_for_mtp_iteration): the spec-decode proposer
     # toggles ``skip_topk`` on this wrapper at runtime (set_skip_topk) and
     # compacts the shared top-k buffer (compact_topk_indices). The actual
@@ -281,12 +293,28 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         output = output.view(-1, hidden_dim)
         return output
 
+    def forward_sequence_parallel(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        *,
+        output_scale: float = 1.0,
+    ) -> torch.Tensor:
+        output = torch.empty(
+            (hidden_states.shape[0], self.hidden_size), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix, True, positions.shape[0], output_scale)
+        return output
+
 
 @eager_break_during_capture
 def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    input_is_sequence_parallel: bool = False,
+    num_input_tokens: int = 0,
+    output_scale: float = 1.0,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -295,6 +323,24 @@ def mla_forward(
     else:
         attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache
+    if input_is_sequence_parallel:
+        # Metadata-free SFA fills zeros for DP dummy and profiling batches.
+        # Keep that output local while preserving backend initialization.
+        if attn_metadata is not None and num_input_tokens != attn_metadata.num_input_tokens:
+            raise RuntimeError(
+                f"SFA DSA-CP model/attention token count mismatch for layer={layer_name}: "
+                f"model={num_input_tokens}, attention={attn_metadata.num_input_tokens}."
+            )
+        self.mla_attn.impl.forward(
+            self.mla_attn.layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            output,
+            input_is_sequence_parallel=True,
+            output_scale=output_scale,
+        )
+        return
     self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
     return
 
@@ -303,6 +349,9 @@ def mla_forward_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    input_is_sequence_parallel: bool = False,
+    num_input_tokens: int = 0,
+    output_scale: float = 1.0,
 ) -> None:
     return
 

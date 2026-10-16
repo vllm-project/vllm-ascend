@@ -883,6 +883,37 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
+    def test_topk_buffer_default_is_unset(self):
+        self.assertEqual(SparseKVOffloadConfig().topk_buffer_size, -1)
+
+    def test_topk_buffer_auto_size_and_explicit_override(self):
+        for draft_tokens in (0, 1, 3, 8):
+            vllm_config = SimpleNamespace(
+                speculative_config=(SimpleNamespace(num_speculative_tokens=draft_tokens) if draft_tokens else None)
+            )
+            for user_config in ({}, {"topk_buffer_size": -1}, {"topk_buffer_size": "-1"}):
+                with self.subTest(draft_tokens=draft_tokens, user_config=user_config):
+                    config = SparseKVOffloadConfig.from_additional_config(vllm_config, user_config)
+                    self.assertEqual(config.topk_buffer_size, (1 + draft_tokens) * 2048)
+            config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"topk_buffer_size": 4096})
+            self.assertEqual(config.topk_buffer_size, 4096)
+
+    def test_topk_buffer_rejects_other_nonpositive_sizes(self):
+        for size in (0, -2):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                SparseKVOffloadConfig(topk_buffer_size=size)
+
+    def test_default_operator_selection_requires_enabled_offload(self):
+        self.assertFalse(SparseKVOffloadConfig().use_fused_copy_sfa)
+        config = SparseKVOffloadConfig(enabled=True)
+        self.assertTrue(config.use_fused_copy_sfa)
+        self.assertFalse(config.use_fused_overlap)
+
+    def test_overlap_selects_alternative_operator(self):
+        config = SparseKVOffloadConfig(enabled=True, use_fused_overlap=True)
+        self.assertTrue(config.use_fused_overlap)
+        self.assertFalse(config.use_fused_copy_sfa)
+
     def test_disabled_string_false_does_not_enter_enabled_path(self):
         config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"enabled": "false"})
 
@@ -951,21 +982,19 @@ class TestSparseKVOffloadConfig(TestBase):
             use_v2_model_runner=True,
             speculative_config=None,
         )
-        fused = SparseKVOffloadConfig.from_additional_config(
-            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
-        )
+        fused = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "topk_buffer_size": 4096})
         self.assertTrue(fused.use_fused_copy_sfa)
 
         vllm_config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
         self.assertTrue(SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True}).enabled)
         fused_mtp = SparseKVOffloadConfig.from_additional_config(
-            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
+            vllm_config, {"enabled": True, "topk_buffer_size": 4096}
         )
         self.assertTrue(fused_mtp.use_fused_copy_sfa)
 
         vllm_config.speculative_config.num_speculative_tokens = 2
         fused_mtp2 = SparseKVOffloadConfig.from_additional_config(
-            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 6144}
+            vllm_config, {"enabled": True, "topk_buffer_size": 6144}
         )
         self.assertTrue(fused_mtp2.use_fused_copy_sfa)
 
@@ -984,7 +1013,7 @@ class TestSparseKVOffloadConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
             SparseKVOffloadConfig.from_additional_config(
                 vllm_config,
-                {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+                {"enabled": True, "topk_buffer_size": 8192},
             )
 
         with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
@@ -992,16 +1021,16 @@ class TestSparseKVOffloadConfig(TestBase):
         vllm_config.use_v2_model_runner = True
         fused = SparseKVOffloadConfig.from_additional_config(
             vllm_config,
-            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+            {"enabled": True, "topk_buffer_size": 8192},
         )
         self.assertTrue(fused.use_fused_copy_sfa)
         config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
-        self.assertFalse(config.use_fused_copy_sfa)
+        self.assertTrue(config.use_fused_copy_sfa)
         vllm_config.use_v2_model_runner = False
         vllm_config.speculative_config.method = "mtp"
         config = SparseKVOffloadConfig.from_additional_config(
             vllm_config,
-            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+            {"enabled": True, "topk_buffer_size": 8192},
         )
         self.assertTrue(config.use_fused_copy_sfa)
 
@@ -1846,51 +1875,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
-    @patch("vllm_ascend.utils.model_uses_sfa_sparse")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_c8_reshape_optim_is_initialized_from_sfa_li_c8_and_pd_role(
-        self,
-        mock_fix,
-        mock_uses_sfa,
-    ):
-        cases = (
-            (None, True, True, "kv_producer", True),
-            (False, True, True, "kv_producer", False),
-            (True, False, True, "kv_producer", False),
-            (True, True, False, "kv_producer", False),
-            (True, True, True, "kv_consumer", False),
-            (True, True, True, "kv_both", False),
-            (True, True, True, None, False),
-        )
-        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(
-                reshape_optim=reshape_optim,
-                uses_sfa=uses_sfa,
-                enable_li_c8=enable_li_c8,
-                kv_role=kv_role,
-            ):
-                mock_uses_sfa.return_value = uses_sfa
-                vc = VllmConfig()
-                vc.additional_config = {
-                    "refresh": True,
-                    "enable_sparse_li_c8": enable_li_c8,
-                }
-                if reshape_optim is not None:
-                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
-                # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
-                # init_ascend_config); the per-case flag is expressed there.
-                vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
-                if kv_role is not None:
-                    vc.kv_transfer_config = KVTransferConfig(
-                        kv_connector="MooncakeConnectorV1",
-                        kv_role=kv_role,
-                    )
-
-                config = init_ascend_config(vc)
-
-                self.assertEqual(config.c8_reshape_optim_enabled, expected)
-
-    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()
@@ -2061,6 +2045,46 @@ class TestKVPPConfig(TestBase):
                     with self.assertRaisesRegex(ValueError, "PIECEWISE"):
                         KVPPConfig.from_vllm_config(config).validate(config)
 
+    def test_kv_transfer_connectors(self):
+        from copy import deepcopy
+
+        from vllm.config import KVTransferConfig
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+
+        mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
+
+        def multi(children):
+            return {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {"connectors": children},
+            }
+
+        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                KVPPConfig.from_vllm_config(config).validate(config)
+
+        consumer = {**mooncake, "kv_role": "kv_consumer"}
+        unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
+        cases = (
+            (consumer, "decode-only"),
+            (multi([store, consumer]), "decode-only"),
+            (unsupported, "MooncakeConnectorV1"),
+            (multi([mooncake, unsupported]), "MooncakeConnectorV1"),
+            (multi([]), "non-empty"),
+            (multi([multi([mooncake])]), "MultiConnector"),
+        )
+        for transfer, message in cases:
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                with self.assertRaisesRegex(ValueError, message):
+                    KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -2095,8 +2119,6 @@ class TestKVPPConfig(TestBase):
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "eagle3", "mtp"),
-            ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
         )
         for section, field, value, message in restrictions:
             with self.subTest(field=field):
@@ -2107,17 +2129,15 @@ class TestKVPPConfig(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
 
-    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
+    def test_dspark_accepts_fixed_length_and_dynamic_verification(self):
         config = make_kvpp_config()
         config.speculative_config.method = "dspark"
         KVPPConfig.from_vllm_config(config).validate(config)
         config.speculative_config.enable_adaptive_verification = True
-        with self.assertRaisesRegex(ValueError, "adaptive verification"):
-            KVPPConfig.from_vllm_config(config).validate(config)
+        KVPPConfig.from_vllm_config(config).validate(config)
         config.speculative_config.enable_adaptive_verification = False
         config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
-        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
-            KVPPConfig.from_vllm_config(config).validate(config)
+        KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):

@@ -138,6 +138,8 @@ transfers; explicitly configured values are kept (for example
 warning is logged. Explicitly setting `torch_gloo` or `hixl` also keeps
 your configured limits untouched.
 
+Weight offload and prefetch are incompatible with upstream EPLB on Ascend. Enabling EPLB with `cpu_offload_gb > 0` or `offload_group_size > 0` raises a configuration error.
+
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
 omit it or set it to `stair` to run STAIR.

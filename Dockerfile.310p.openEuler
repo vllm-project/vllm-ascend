@@ -49,7 +49,7 @@ ARG DAILY_DEPS_MODE="torch_npu_only"
 WORKDIR /workspace
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget protobuf protobuf-devel protobuf-compiler curl net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
+    yum install -y python3-pip git vim wget protobuf protobuf-devel protobuf-compiler curl net-tools gcc gcc-c++ make cmake numactl numactl-devel patch && \
     rm -rf /var/cache/yum
 
 # Install modelscope (for fast download) and ray (for multinode)
@@ -92,7 +92,6 @@ RUN cd /vllm-workspace/vllm && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
-RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:/root/aicpu_kernels/0/aicpu_kernels_device/sand_box:$LD_LIBRARY_PATH' >> /root/.bashrc
 

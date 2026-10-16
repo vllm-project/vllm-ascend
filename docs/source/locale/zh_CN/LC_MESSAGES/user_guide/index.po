@@ -53,13 +53,6 @@ msgstr "探索 vLLM Ascend 功能的详细指南，包括图模式、CPU 绑定�
 msgid "## Deployment Guide"
 msgstr "## 部署指南"
 
-msgid ""
-"- **[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — Deploy with Volcano Kthena\n"
-"- **[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy with MindIE Motor"
-msgstr ""
-"- **[使用 Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — 使用 Volcano Kthena 部署\n"
-"- **[使用 MindIE Motor](deployment_guide/using_mindie_motor.md)** — 使用 MindIE Motor 部署"
-
 msgid "## Release Notes"
 msgstr "## 发布说明"
 
@@ -76,3 +69,10 @@ msgstr ""
 "- **[附加配置](configuration/additional_config.md)** — 附加配置选项\n"
 "- **[MS 服务指标](ms_service_metric.md)** — 启用指标并添加 vLLM Ascend 指标点\n"
 "- **[分数编码器缓存管理器](configuration/encoder_cache_manager.md)** — 为在线和离线推理配置基于分数的编码器缓存"
+
+msgid ""
+"- **[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy with MindIE Motor\n"
+"- **[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — Deploy with Volcano Kthena"
+msgstr ""
+"- **[使用 MindIE Motor](deployment_guide/using_mindie_motor.md)** — 使用 MindIE Motor 部署\n"
+"- **[使用 Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — 使用 Volcano Kthena 部署"

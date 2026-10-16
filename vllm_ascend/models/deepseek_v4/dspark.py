@@ -216,7 +216,7 @@ class DeepseekV4DSparkModel(nn.Module):
         from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, write_dsa_cache
 
         dsa_impl = attn.dsa_attn.dsa_attn.impl
-        turboquant = dsa_impl.turboquant
+        turboquant = getattr(dsa_impl, "turboquant", None)
         if turboquant is not None:
             # Draft queries and context KV must use the same rotated basis.
             shared_kv = turboquant.forward(shared_kv)
@@ -329,6 +329,8 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None

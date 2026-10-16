@@ -176,7 +176,6 @@ sysctl kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 # Ensure the model path matches the directory recorded during download
@@ -220,7 +219,6 @@ sysctl kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 # Ensure the model path matches the directory recorded during download
@@ -285,7 +283,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
@@ -342,7 +339,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
@@ -593,7 +589,6 @@ The following optimizations are enabled by default and require no additional con
 | Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": 1}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
 | Balanced Scheduling | High DP scenarios | `--additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`false`). Set to `true` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
-| jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
 
 ## 10 FAQ
 

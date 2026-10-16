@@ -479,6 +479,36 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertEqual(setup_kwargs["global_segment_size"], 0)
                 self.assertEqual(setup_kwargs["local_buffer_size"], 0)
 
+    def test_scheduler_client_skips_ssd_offload(self):
+        for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+            with (
+                self.subTest(use_fabric_mem=use_fabric_mem, use_store_independent_te=use_store_independent_te),
+                tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path,
+            ):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(
+                        tenant_id="tenant-a",
+                        enable_ssd_offload=True,
+                        ssd_offload_path=ssd_path,
+                    ),
+                    use_fabric_mem=use_fabric_mem,
+                    contribute_memory=False,
+                )
+                backend._use_store_independent_te = use_store_independent_te
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                self.assertIs(self._setup_store(backend, store), store)
+
+                store.setup.assert_called_once()
+                setup_kwargs = store.setup.call_args.kwargs
+                self.assertNotIn("enable_ssd_offload", setup_kwargs)
+                self.assertNotIn("ssd_offload_path", setup_kwargs)
+                self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
+                self.assertEqual(setup_kwargs["global_segment_size"], 0)
+                self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+                self.assertEqual(os.listdir(ssd_path), [])
+
     def test_non_default_tenant_preserves_setup_type_error(self):
         setup_error = TypeError("setup(): incompatible function arguments")
         backend = self._make_backend(

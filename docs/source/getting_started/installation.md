@@ -56,6 +56,10 @@ For more information, see the [CANN installation resources](https://www.hiascend
 
 ### Set up the software environment {: #installation-software-environment }
 
+!!! danger "v0.30.0rc2 installation support"
+
+    v0.30.0rc2 currently supports only the [official vLLM Ascend images](#installation-prebuilt-image-selection) or [building an image with `docker build`](#installation-prebuilt-image-build). Installation in a CANN image or a manually prepared CANN environment, including pip/uv wheel and direct source installation, is not yet supported for rc2.
+
 Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed.
 
 | Requirement | Recommended method | Intended users |

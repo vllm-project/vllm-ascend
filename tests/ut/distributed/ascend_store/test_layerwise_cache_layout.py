@@ -8,7 +8,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -639,3 +641,149 @@ def test_out_of_bounds_contiguous_descriptor_is_rejected():
     )
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
         apply_layerwise_kv_cache_plan(config, _make_vllm_config(3, 1))
+
+
+@pytest.mark.parametrize("c8_first", [False, True])
+def test_mixed_indexers_share_max_capacity_without_changing_reuse_order(c8_first):
+    main = _make_full_attention_spec()
+    bf16 = AscendSFAIndexerCacheSpec(block_size=2, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    c8 = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
+    )
+    names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
+    indexers = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
+    specs = dict.fromkeys(names, main)
+    specs.update(zip(indexers, (c8, bf16) if c8_first else (bf16, c8)))
+    config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * spec.page_size_bytes,
+                layers=[name],
+                layer_stride=0,
+                block_stride=spec.page_size_bytes,
+                offset=0,
+            )
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=list(specs),
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
+            )
+        ],
+    )
+    layout = build_layerwise_reuse_layout(specs, 5, {"layerwise_num_shared_buffers": 1})
+    assert layout.prefetch_layer_map == {2: 1, 3: 2, 4: 3}
+    apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+    assert len(config.kv_cache_tensors) == 3  # independent main, shared main, shared indexer
+    shared = next(t for t in config.kv_cache_tensors if t.layers == indexers)
+    assert shared.size == 2 * bf16.page_size_bytes
+    assert shared.layer_stride == 0
+    assert specs[indexers[0]] is (c8 if c8_first else bf16)
+
+
+def _make_generic_indexer_descriptors(replication=1, quantized=True):
+    main = _make_full_attention_spec()
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8 if quantized else torch.bfloat16,
+        scale_dim=1 if quantized else 0,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=quantized,
+        sfa_dcp_replicated_indexer_size=replication,
+    )
+    names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
+    indexer_names = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
+    specs = dict.fromkeys(names, main)
+    specs.update(dict.fromkeys(indexer_names, indexer))
+    num_blocks = 3
+    tensors = []
+    for spec, layers in [(main, names), (indexer, indexer_names)]:
+        layer_stride, block_stride, _, _, _ = compute_layout_strides(
+            spec,
+            num_blocks,
+            len(layers),
+            KVCacheLayout.LBNHC,
+        )
+        tensors.append(
+            KVCacheTensor(
+                size=num_blocks * len(layers) * spec.page_size_bytes,
+                layers=layers,
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+                offset=0,
+            )
+        )
+    return (
+        SimpleNamespace(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=list(specs),
+                    kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
+                )
+            ],
+        ),
+        indexer,
+        indexer_names,
+    )
+
+
+@pytest.mark.parametrize("replication", [1, 2])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(replication, quantized):
+    config, spec, names = _make_generic_indexer_descriptors(replication, quantized)
+    original = config.kv_cache_tensors[-1]
+    # The spec keeps upstream MLA semantics, including outside the reuse path.
+    content_bytes = 128 if quantized else 256
+    assert spec.state_content_size_bytes == content_bytes
+    assert original.block_stride == spec.block_size * content_bytes
+    assert spec.page_size_bytes == spec.block_size * replication * (130 if quantized else 256)
+
+    apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+
+    shared = next(t for t in config.kv_cache_tensors if t.layers == names)
+    assert shared.size == config.num_blocks * spec.page_size_bytes
+    assert shared.block_stride == spec.page_size_bytes
+    assert shared.layer_stride == shared.offset == 0
+    assert spec.state_content_size_bytes == content_bytes
+    assert original.block_stride == spec.block_size * content_bytes
+
+
+@pytest.mark.parametrize("reuse_disabled", [True, False])
+def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
+    config, spec, _ = _make_generic_indexer_descriptors(replication=2)
+    original = config.kv_cache_tensors
+    vllm_config = _make_vllm_config(5, 5)
+    if reuse_disabled:
+        vllm_config.kv_transfer_config = None
+
+    apply_layerwise_kv_cache_plan(config, vllm_config)
+
+    assert config.kv_cache_tensors is original
+    assert spec.state_content_size_bytes == 128
+    assert original[-1].block_stride == 256
+
+
+def test_reuse_rejects_unknown_indexer_stride():
+    config, _, _ = _make_generic_indexer_descriptors()
+    config.kv_cache_tensors[-1].block_stride += 1
+    with pytest.raises(NotImplementedError, match="contiguous per-layer pages"):
+        apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+
+
+def test_reuse_rejects_out_of_bounds_generic_indexer_descriptor():
+    config, _, _ = _make_generic_indexer_descriptors()
+    config.kv_cache_tensors[-1].offset = config.kv_cache_tensors[-1].size - 1
+    with pytest.raises(ValueError, match="exceeds its backing allocation"):
+        apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))

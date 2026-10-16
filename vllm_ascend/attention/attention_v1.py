@@ -22,7 +22,7 @@ from typing import Any
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -64,6 +64,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -144,6 +145,9 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
+        if is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            # Keep 128 as a common kernel block with M3 sparse/indexer caches.
+            return [MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
         return [128]
 
 

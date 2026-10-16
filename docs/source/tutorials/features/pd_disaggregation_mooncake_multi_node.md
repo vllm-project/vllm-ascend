@@ -11,9 +11,11 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
 
 ### Verification Process
+
+The following checks apply to A2/A3 deployments.
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -118,6 +120,72 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
+### Atlas 850/850E/950 SuperPod Communication Configuration
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+
+```bash
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+```
+
+The parameter plane supports UBG, UBoE, and RoCE network protocols. Each protocol requires compatible hardware and network configuration completed in advance. Consult your environment provider or administrator for the required environment and configuration.
+
+For UBG or UBoE network protocols, keep the automatic configuration setting above and select the corresponding protocol before starting the serving processes:
+
+=== "UBG"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_rtp:device"]}'
+    ```
+
+=== "UBoE"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
+    ```
+
+=== "RoCE"
+
+    For RoCE network protocol, current configuration is to prepare endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. For example, with `DP=4` and `TP=1` on each side:
+
+    ```json
+    {
+        "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "ascend_local_comm_res_path": "/etc/hixlep"
+        }
+    }
+    ```
+
+    Merge these fields into your existing `--kv-transfer-config` and adjust the parallelism settings to your deployment.
+
+    When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
+
+    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices. An example file contains:
+
+    ```json
+    {
+        "version": "1.3",
+        "net_instance_id": "superpod_0",
+        "endpoint_list": [
+            {
+                "protocol": "roce",
+                "comm_id": "<host_roce_ip>",
+                "placement": "host"
+            }
+        ]
+    }
+    ```
+
+    Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
+
 ## Run with Docker
 
 Start a Docker container on each node.
@@ -161,6 +229,41 @@ docker run --rm \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
+```
+
+### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+
+```bash
+--device=/dev/ummu \
+--device=/dev/uburma \
+-v /usr/bin/urma_admin:/usr/bin/urma_admin \
+```
+
+Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+
+```bash
+-v /lib/route.conf:/lib/route.conf \
+```
+
+RoCE requires the following device and driver configuration mounts:
+
+```bash
+--device=/dev/infiniband \
+-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
+```
+
+Make the RoCE endpoint directory available inside the container, for example:
+
+```bash
+-v /etc/hixlep:/etc/hixlep:ro \
+```
+
+Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
+
+```bash
+-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
 ```
 
 ## Install Mooncake
@@ -213,6 +316,18 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 ```
 
 ## Prefiller/Decoder Deployment
+
+!!! note "Timeout for long sequences or high concurrency"
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+
+    ```shell
+    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    ```
+
+    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+
+    Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
@@ -976,4 +1091,122 @@ curl http://192.0.0.1:8080/v1/completions \
         "max_completion_tokens": 100,
         "temperature": 0
     }'
+```
+
+## MooncakeConnectorV2 (experimental)
+
+!!! note "Experimental feature"
+
+    MooncakeConnectorV2 is currently experimental. Its configuration and supported feature combinations may change as development continues.
+
+MooncakeConnectorV2 is a refactored version of MooncakeConnectorV1, with design improvements and support for more features. It uses asynchronous, decoder-initiated KV-cache transfers. Its capabilities and restrictions are summarized below; support for an individual feature does not imply that every model and feature combination has been validated.
+
+| Feature | Support and restrictions |
+| --- | --- |
+| Parallel deployment | TP, DP, PP, PCP, and DCP, including per-rank endpoint discovery and PP layer mapping. GQA CP is outside the validated scope below. |
+| Different P/D TP sizes | Cache-layout-aware transfer for MLA, GQA, and Mamba state. Supported TP ratios and head/state shapes depend on the cache type; arbitrary P/D TP combinations are not supported. |
+| KVPP | Supported for **pure MLA models only**. Do not enable KVPP and DCP together on the producer. A KVPP producer can transfer to a DCP decoder. |
+| Hybrid cache groups | Attention KV caches and Mamba convolution/recurrent states, including hybrid model cache-group mapping. |
+| GQA | **Experimental; only the `LBHNC` and `HND` KV-cache layouts are supported.** Validated with Qwen3 pure GQA models and Qwen3.5 GQA + Mamba hybrid models. **GQA CP (PCP/DCP) and GQA C8 (INT8 KV cache) are not included in this validation.** |
+| P/D block sizes and scales | Full-attention/MLA paths can map different logical block sizes/scales when the underlying kernel block size and physical transfer layout are compatible. SWA requires equal P/D logical block sizes. |
+| Prefix-cache reuse | Accounts for local prefix-cache hits when determining the KV blocks to receive, including hybrid cache groups. |
+| Model Runner V2 cache layouts | Includes compressed attention/indexer and hybrid state handling used by GLM-5.3-Flash. This does not imply support for every model-specific cache specification. |
+| Receive failure handling | Reports failed KV loads to the scheduler for the configured `kv_load_failure_policy`, and notifies the producer to release retained blocks. |
+| Completion and cleanup | Decoder completion notifications release producer blocks; timeout cleanup handles requests whose completion notification is missing. |
+| Transfer metrics | Transfer duration, transferred bytes, and failed-transfer metrics. |
+
+### Layout and port configuration
+
+GQA is supported only with the `LBHNC` or `HND` KV-cache layout. Set `VLLM_KV_CACHE_LAYOUT=LBHNC` or `VLLM_KV_CACHE_LAYOUT=HND` in **both** P and D startup scripts, using the same value on both sides. Select `MooncakeConnectorV2`, with `kv_producer` on P and `kv_consumer` on D. Use compatible vLLM/vLLM-Ascend versions and the same model weights on both sides.
+
+If `kv_port` is omitted from `--kv-transfer-config`, MooncakeConnectorV2 derives its endpoints from vLLM's default `kv_port` (currently `14579`). It does not derive the KV endpoints from the HTTP `--port`.
+
+- **Single-host PD or multiple instances on one host:** explicitly configure a different `kv_port` for each instance, and reserve non-overlapping port ranges. Different HTTP ports alone are insufficient.
+- **Multiple hosts with one instance per host:** `kv_port` can be omitted. Each host can use the same default port, provided the required ports are free and reachable.
+- Each instance reserves worker handshake ports starting at `kv_port`, followed by scheduler control ports. Reserve `DP * PP * PCP * TP + DP` consecutive ports per instance. For the TP=DP=PP=PCP=1 examples below, this is two ports per instance. Increase the spacing when scaling parallelism, and keep these ranges separate from API, proxy, and distributed communication ports.
+
+### Complete GQA startup example
+
+Complete the environment and Mooncake installation steps earlier in this guide first. Run the scripts from the vllm-ascend repository root in separate terminals. Replace the model path, host IPs, network interface, and NPU IDs with your deployment values. These examples use Qwen3-8B with one NPU per role; for Qwen3.5, replace the model path on both sides with the same GQA + Mamba model and choose enough NPUs and matching TP settings for that model.
+
+The examples keep CP, KVPP, and KV-cache quantization disabled. To try `HND`, replace `LBHNC` with `HND` in both startup scripts.
+
+This example deploys P on `192.168.0.1` and D on `192.168.0.2`, with one instance per host. Both omit `kv_port` and use the default KV port range on their respective hosts.
+
+#### Prefiller
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ASCEND_RT_VISIBLE_DEVICES=0
+export VLLM_HOST_IP=192.168.0.1
+export HCCL_IF_IP=192.168.0.1
+export GLOO_SOCKET_IFNAME=eth0
+export TP_SOCKET_IFNAME=eth0
+export HCCL_SOCKET_IFNAME=eth0
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_KV_CACHE_LAYOUT=LBHNC
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+
+vllm serve /models/Qwen3-8B \
+    --host 0.0.0.0 \
+    --port 8100 \
+    --served-model-name qwen3 \
+    --tensor-parallel-size 1 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer"}'
+```
+
+#### Decoder
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ASCEND_RT_VISIBLE_DEVICES=0
+export VLLM_HOST_IP=192.168.0.2
+export HCCL_IF_IP=192.168.0.2
+export GLOO_SOCKET_IFNAME=eth0
+export TP_SOCKET_IFNAME=eth0
+export HCCL_SOCKET_IFNAME=eth0
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_KV_CACHE_LAYOUT=LBHNC
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+
+vllm serve /models/Qwen3-8B \
+    --host 0.0.0.0 \
+    --port 8200 \
+    --served-model-name qwen3 \
+    --tensor-parallel-size 1 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer"}'
+```
+
+#### Proxy and verification
+
+After both P and D are ready, start the proxy on `192.168.0.1`:
+
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --prefiller-hosts 192.168.0.1 \
+    --prefiller-ports 8100 \
+    --decoder-hosts 192.168.0.2 \
+    --decoder-ports 8200
+```
+
+Send a request from another terminal:
+
+```bash
+curl http://192.168.0.1:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"qwen3","messages":[{"role":"user","content":"Explain prefill and decode in one paragraph."}],"max_tokens":128,"temperature":0}'
 ```

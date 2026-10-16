@@ -40,6 +40,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -90,14 +91,31 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            output_dtype = x.output_dtype
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+            output_dtype = x.dtype
         need_unsqz = False
         if pertoken_scale.dim() == 2:
             need_unsqz = True
@@ -109,7 +127,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias if self.act_quant_type == torch.int8 else None,
-            output_dtype=x.dtype,
+            output_dtype=output_dtype,
         )
         if need_unsqz:
             output = output.unsqueeze(dim=1)

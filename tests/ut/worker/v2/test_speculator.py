@@ -600,6 +600,7 @@ def test_propose_replicated_pcp_disables_dp_sync():
     """Test replicated PCP disables DP synchronization during propose."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.replicated_pcp = True
+    speculator.pcp_manager = None
     input_batch = object()
     args = [object() for _ in range(10)]
     dp_sync = object()
@@ -623,6 +624,51 @@ def test_propose_replicated_pcp_disables_dp_sync():
     assert speculator.input_batch is input_batch
     assert parent_propose.call_args.args[11] is None
     assert result is expected
+
+
+def test_propose_consumes_restored_global_inputs():
+    # PCP restoration owns the real token extent and request boundaries.
+    # Draft consumes that view without copying or trimming the input buffers.
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.replicated_pcp = True
+    speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        num_tokens=12,
+        num_tokens_after_padding=12,
+        query_start_loc=torch.tensor([0, 4, 8, 12]),
+        query_start_loc_np=np.array([0, 4, 8, 12]),
+        input_ids=torch.arange(16),
+        positions=torch.arange(16),
+        is_padding=torch.arange(16) >= 12,
+    )
+    hidden = torch.randn(12, 8)
+    auxiliary = [torch.randn(12, 4)]
+    args = [object(), object(), hidden, auxiliary, *[object() for _ in range(6)]]
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.torch_gather_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch.object(AutoRegressiveSpeculator, "propose") as parent_propose,
+    ):
+        speculator.propose(input_batch, *args)
+    draft_batch = parent_propose.call_args.args[0]
+    assert draft_batch is input_batch
+    assert draft_batch.num_tokens_after_padding == 12
+    assert draft_batch.input_ids.shape[0] == draft_batch.positions.shape[0] == draft_batch.is_padding.shape[0] == 16
+    assert input_batch.positions.shape[0] == 16
+    assert draft_batch.query_start_loc[-1] == draft_batch.query_start_loc_np[-1] == 12
+    assert parent_propose.call_args.args[3] is hidden
+    assert parent_propose.call_args.args[4] is auxiliary
 
 
 def test_init_dcp_disabled():

@@ -232,10 +232,6 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
     slots[tokens:] = -1
     meta = metadata(num_actual_tokens=tokens, attn_state=state)
     with (
-        patch(
-            "vllm_ascend.ascend_config.get_ascend_config",
-            return_value=SimpleNamespace(c8_enable_reshape_optim=False, c8_reshape_optim_enabled=False),
-        ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.scatter_cache", return_value=None) as store,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
@@ -330,14 +326,11 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
         enable_sparse_li_c4=False,
         enable_sparse_li_quant=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
-        _use_c8_reshape_optim=lambda: False,
     )
     # Non-quantized forward_k produces [tokens, 1, head_dim]. Metadata still
     # describes only the local tokens; write_cache receives the gathered rows.
     k_li = keys[0] if scale_dtype else keys[0].unsqueeze(1)
-    AscendSFAIndexerBackend.write_cache(
-        indexer, k_li, keys[1] if scale_dtype else None, slots, SimpleNamespace(num_actual_tokens=2)
-    )
+    AscendSFAIndexerBackend.write_cache(indexer, k_li, keys[1] if scale_dtype else None, slots)
     expected_sk = fast_available and family == AscendDeviceType.A3
     expected_pa = fast_available and family == AscendDeviceType.A5 and not row_gap
     assert sk.call_count == (len(caches) if expected_sk else 0)
@@ -345,25 +338,3 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     assert pa.call_count == (len(caches) if expected_pa else 0)
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8), reference, rtol=0, atol=0)
-
-
-def test_indexer_grouped_cache_write_keeps_store_kv_block(monkeypatch):
-    key, scale = torch.zeros(4, 128, dtype=torch.int8), torch.ones(4, 1, dtype=torch.float16)
-    caches = (torch.empty(2, 4, 1, 128, dtype=key.dtype), torch.empty(2, 4, 1, 1, dtype=scale.dtype))
-    indexer = SimpleNamespace(
-        enable_sparse_li_c8=True,
-        enable_sparse_li_c4=False,
-        enable_sparse_li_quant=True,
-        k_cache=SimpleNamespace(kv_cache=caches),
-        _use_c8_reshape_optim=lambda: True,
-    )
-    meta = SimpleNamespace(group_len=object(), group_key_idx=object(), group_key_cache_idx=object(), block_size=4)
-    grouped, scatter = Mock(), Mock()
-    monkeypatch.setattr(torch.ops._C_ascend, "store_kv_block", grouped, raising=False)
-    monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter)
-    AscendSFAIndexerBackend.write_cache(indexer, key, scale, torch.arange(4), meta)
-    assert grouped.call_count == 2
-    for call, updates, cache in zip(grouped.call_args_list, (key, scale), caches):
-        assert call.args[0] is updates and call.args[1] is cache
-        assert call.args[2:] == (meta.group_len, meta.group_key_idx, meta.group_key_cache_idx, 4)
-    scatter.assert_not_called()

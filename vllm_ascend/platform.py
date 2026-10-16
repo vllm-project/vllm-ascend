@@ -958,6 +958,13 @@ def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
+    if vllm_config.parallel_config.enable_eplb:
+        offload = vllm_config.offload_config
+        if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
+            raise ValueError(
+                "EPLB is incompatible with weight offload/prefetch on Ascend. "
+                "Set cpu_offload_gb=0 and offload_group_size=0, or disable EPLB."
+            )
     additional_config = vllm_config.additional_config or {}
     eplb_config = additional_config.get("eplb_config", {})
     if not isinstance(eplb_config, dict):
@@ -1673,15 +1680,6 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"dcp_size({parallel_config.decode_context_parallel_size}) "
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
-            )
-        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
-        # support DCP with a replicated indexer. Reject that combination early.
-        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
-            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
-        ):
-            raise NotImplementedError(
-                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
-                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
 
 

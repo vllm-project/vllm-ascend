@@ -32,6 +32,7 @@ import time
 
 import numpy as np
 import torch
+from scipy.optimize import nnls  # type: ignore[import-untyped]
 from vllm.logger import logger
 
 
@@ -163,7 +164,7 @@ class ChunkSizePredictor:
         return True
 
     def fit_chunk(self, chunked_data: list) -> bool:
-        """Fit time with chunks: f(C,H) = a*C(C+H) + b*C + c*H.
+        """Fit batch time: T = a*sum(C(C+H)) + b*sum(C) + c.
 
         Returns:
             True if fitting succeeded, False otherwise
@@ -190,12 +191,12 @@ class ChunkSizePredictor:
         input_x = chunked_data_array[:, :-1]
 
         try:
-            params, _, _, _ = np.linalg.lstsq(input_x, execute_time, rcond=None)
+            params, _ = nnls(input_x, execute_time)
             fitted_a = float(params[0])
             fitted_b = float(params[1])
             fitted_c = float(params[2])
-        except np.linalg.LinAlgError as e:
-            logger.warning("[ProfilingChunk] Failed to fit chunked model: %s", e)
+        except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
+            logger.warning("[ProfilingChunk] Failed to fit non-negative chunked model: %s", e)
             return False
 
         self.quadratic_chunk_a = fitted_a
@@ -246,10 +247,10 @@ class ChunkSizePredictor:
         query_len: int,
         num_computed_tokens: int,
     ) -> float:
-        """Get time T based on current seq_lens, f(C,H) = a*C(C+H) + b*(C+H) + c = T"""
+        """Get time T based on current seq_lens, f(C,H) = a*C(C+H) + b*C + c = T"""
         return (
             self.quadratic_chunk_a * query_len * (query_len + num_computed_tokens)
-            + self.linear_chunk_b * (query_len + num_computed_tokens)
+            + self.linear_chunk_b * query_len
             + self.constant_chunk_c
         )
 
@@ -322,7 +323,7 @@ class ChunkSizePredictor:
         target_time: float = 0,
     ) -> int | None:
         """Predict next chunk size x using the history-aware model
-        f(C,H) = a*C(C+H) + b*C + c*H.
+        f(C,H) = a*C(C+H) + b*C + c.
 
         Args:
             num_computed_tokens: Number of tokens already computed (C),
@@ -346,17 +347,17 @@ class ChunkSizePredictor:
         if not self.with_history_ready:
             return None
 
-        # f(x,H) = a*x*(x+H) + b*x + c*H, solving f(x,H)=T gives:
-        # a*x^2 + (a*H + b)*x + (b*H + c - T) = 0
+        # f(x,H) = a*x*(x+H) + b*x + c, solving f(x,H)=T gives:
+        # a*x^2 + (a*H + b)*x + (c - T) = 0.
         # Standard form: A*x^2 + B*x + C = 0, where H=num_computed_tokens, T=target_latency
         A = self.quadratic_chunk_a
         if A == 0:
             return None
         B = self.quadratic_chunk_a * num_computed_tokens + self.linear_chunk_b
         if target_time > 0:
-            C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - target_time
+            C = self.constant_chunk_c - target_time
         else:
-            C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - self.target_latency
+            C = self.constant_chunk_c - self.target_latency
 
         discriminant = B * B - 4 * A * C
         if discriminant < 0:
@@ -455,7 +456,7 @@ class ProfilingChunkManager:
         x1 = x2 = x3 = 0
         for chunk, hist in request_chunks:
             x1 += (chunk + hist) * chunk
-            x2 += chunk + hist
+            x2 += chunk
             x3 += 1
         self.chunked_fit_data.append([x1, x2, x3, elapsed_time * 1000])
         if not self.predictor.fit_chunk(self.chunked_fit_data):

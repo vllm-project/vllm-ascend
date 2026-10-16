@@ -249,6 +249,15 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_valid_tokens,
             kv_cache_config=self.kv_cache_config,
         )
+        # Shared build_attn_state (#17461) maps MTP verify → ChunkedPrefill.
+        # 310P FULL capture/replay still uses SpecDecoding (splitfuse); promote
+        # so InputBatch matches ACLGraph make_dummy and pad logic (MRv1 parity).
+        attn_state = self._promote_mtp_spec_decoding_attn_state(
+            attn_state,
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_valid_tokens=num_valid_tokens,
+        )
         idx_mapping_np = self._idx_mapping.np[:num_reqs]
         idx_mapping_np[:] = np.fromiter(
             map(self.req_states.req_id_to_index.get, req_ids),
@@ -537,7 +546,45 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
+        # After #17461, uniform MTP verify is ChunkedPrefill in shared helpers.
+        # Without promotion this gate forced CUDAGraphMode.NONE every decode
+        # step and erased the #17278 FULL-replay gains on small 310P models.
+        attn_state = self._promote_mtp_spec_decoding_attn_state(
+            attn_state,
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled,
+            num_valid_tokens=num_valid_tokens,
+        )
         return attn_state != AscendAttentionState.SpecDecoding
+
+    def _promote_mtp_spec_decoding_attn_state(
+        self,
+        attn_state: Any,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        num_valid_tokens: np.ndarray,
+    ) -> Any:
+        """Map uniform MTP verify batches back to SpecDecoding on 310P.
+
+        Upstream #17461 intentionally uses ChunkedPrefill for MTP on 910-class
+        devices. 310P ACLGraph capture still tags SpecDecoding (splitfuse) via
+        ``ModelAclGraphManager310.make_dummy``; keep runtime/eager-gate aligned.
+        """
+        if self.speculative_config is None or num_reqs <= 0:
+            return attn_state
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        if attn_state not in (
+            AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.SpecDecoding,
+        ):
+            return attn_state
+        if not np.all(num_valid_tokens == 1):
+            return attn_state
+        if not np.all(num_scheduled_tokens == self.decode_query_len):
+            return attn_state
+        return AscendAttentionState.SpecDecoding
 
     def _install_pc_eager_cudagraph_dispatch(self) -> None:
         """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""

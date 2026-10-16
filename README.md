@@ -76,7 +76,7 @@ Whether you are a performance tuner looking to deploy vLLM-Ascend in production 
 
 ## Accessing Ascend NPU
 
-If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
+If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the HiDevLab platform to apply for and use them.
 
 ## Getting Started
 
@@ -84,6 +84,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
+| v0.30.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/installation.html) for more details |
 | v0.26.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/installation.html) for more details |
 | v0.23.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
 

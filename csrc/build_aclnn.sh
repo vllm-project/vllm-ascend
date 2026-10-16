@@ -127,8 +127,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
@@ -176,7 +174,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
         "dequant_situ_quant"
-        "gmm_dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
@@ -184,8 +181,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
@@ -204,6 +199,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "sparse_flash_attention"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
@@ -228,8 +224,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "k2q_csr"
         "sparse_attention_score"
         "msa_index_score"

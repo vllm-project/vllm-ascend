@@ -18,6 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -218,12 +219,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+        predicate = MagicMock(return_value=True)
 
         result = list(
             db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
+                chunk_filter=predicate,
             )
         )
 
@@ -235,6 +238,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
+        self.assertEqual(predicate.call_count, 4)
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -296,17 +300,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
+        predicate = MagicMock(return_value=True)
         result = list(
             self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                chunk_filter=lambda start: store_mask[start // 16],
+                chunk_mask=store_mask,
+                chunk_filter=predicate,
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+        self.assertEqual(predicate.call_count, 3)
+
+    def test_lookup_mask_start_and_short_mask_bounds(self):
+        for mask, expected in ((None, [32, 48]), ([], []), ([True, True, True], [32])):
+            with self.subTest(mask=mask):
+                result = list(self.db.process_token_key_strings(64, ["a", "b", "c", "d"], mask_num=17, chunk_mask=mask))
+                self.assertEqual([item[0] for item in result], expected)
 
     def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
         db = ChunkedTokenDatabase(

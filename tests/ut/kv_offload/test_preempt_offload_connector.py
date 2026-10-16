@@ -3,13 +3,14 @@
 
 import sys
 import types
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
 # Clean up stale mock modules installed by other kv offload tests that replace
@@ -24,6 +25,7 @@ for _module_name in list(sys.modules):
 for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager import (  # noqa: E402
     PreemptedRequestState,
@@ -1005,3 +1007,225 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     scheduler.kv_cache_manager.cache_blocks.assert_not_called()
     assert scheduler.failed_recving_kv_req_ids == set()
     assert scheduler.finished_recving_kv_req_ids == set()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("large_scale", [1, 2])
+def test_worker_registers_largest_same_pointer_view(reverse, large_scale):
+    backing = torch.arange(48).to(torch.uint8)
+    small = backing.as_strided((3, 4), (16, 1))
+    large = backing.view(3 * large_scale, 16 // large_scale)
+    caches = {"small": small, "large": large}
+    if reverse:
+        caches = dict(reversed(list(caches.items())))
+    caches["alias"] = small
+    first_name = next(iter(caches))
+    config = SimpleNamespace(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(size=48, layers=list(caches))],
+        kv_cache_groups=[SimpleNamespace(layer_names=list(caches), kv_cache_spec=SimpleNamespace())],
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+    assert list(worker.gpu_kv_caches) == [first_name]
+    assert worker.gpu_kv_caches[first_name].shape == large.shape
+    assert worker.gpu_kv_caches[first_name].stride() == large.stride()
+    assert worker.block_size_scale[first_name] == large_scale
+    assert worker.cpu_kv_caches[first_name].shape == large.shape
+    assert worker.cpu_kv_caches[first_name].numel() == 48
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("attention_scale", [1, 9])
+@pytest.mark.parametrize("alias", [False, True])
+def test_worker_keeps_mamba_views_separate_from_attention(reverse, attention_scale, alias):
+    n, page = 3, 144
+    backing = torch.arange(n * page).to(torch.uint8)
+    k = backing.as_strided((n * attention_scale, 8), (page // attention_scale, 1))
+    v = backing.as_strided((n * attention_scale, 8), (page // attention_scale, 1), 8)
+    conv = backing.view(torch.int32).as_strided((n, 6, 4), (36, 4, 1))
+    ssm = backing.view(torch.int32).as_strided((n, 3, 4), (36, 4, 1), 24)
+    caches: dict[str, torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]] = {
+        "attn": (k, v),
+        "mamba": (conv, ssm),
+    }
+    if alias:
+        caches["mamba_alias"] = (conv.as_strided(conv.shape, conv.stride()), ssm.as_strided(ssm.shape, ssm.stride()))
+    if reverse:
+        caches = dict(reversed(list(caches.items())))
+    mamba_names = [name for name in caches if name.startswith("mamba")]
+    first_mamba = mamba_names[0]
+    # Empty RoPE caches must not enter pointer deduplication.
+    caches["empty_rope"] = torch.empty(n, 0)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((6, 4), (3, 4)),
+        dtypes=(torch.int32, torch.int32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    config = SimpleNamespace(
+        num_blocks=n,
+        kv_cache_tensors=[SimpleNamespace(size=n * page, layers=list(caches))],
+        kv_cache_groups=[SimpleNamespace(layer_names=mamba_names, kv_cache_spec=spec)],
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+        patch(f"{module}.torch.npu.synchronize"),
+        patch(f"{module}.torch.npu.stream", side_effect=lambda stream: nullcontext()),
+        patch(f"{module}.torch.npu.Event"),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+        assert set(worker.gpu_kv_caches) == {"attn.0", "attn.1", f"{first_mamba}.0", f"{first_mamba}.1"}
+        assert len({t.data_ptr() for t in worker.cpu_kv_caches.values()}) == 4
+        assert worker.block_size_scale["attn.0"] == attention_scale
+        assert worker.block_size_scale[f"{first_mamba}.0"] == 1
+        assert list(worker.mamba_conv_cache_bindings) == [f"{first_mamba}.0"]
+        before = backing.clone()
+        worker._submit_transfer([2], [1], 10, is_store=True, sync=True)
+        backing[:page].zero_()
+        worker._submit_transfer([1], [0], 11, is_store=False, sync=True)
+        torch.testing.assert_close(backing[:page], before[2 * page :])
+        worker.num_spec_tokens = 3
+        ssm_before = ssm[0].clone()
+        worker._copy_mamba_conv_loads([MambaConvLoadMeta(0, 1, 2)])
+        torch.testing.assert_close(conv[0, :3], conv[2, 2:5])
+        torch.testing.assert_close(ssm[0], ssm_before)
+
+
+@pytest.mark.parametrize("glm_tail", [False, True])
+@pytest.mark.parametrize("uniform", [False, True])
+@pytest.mark.parametrize("load_start", [0, 48])
+def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_start):
+    if glm_tail:
+        spec = AscendIndexerKPoolTailSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
+            sliding_window=4,
+            compress_ratio=4,
+        )
+    else:
+        spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    if uniform:
+        spec = UniformTypeKVCacheSpecs.from_specs({"ring": spec})
+        assert spec is not None
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.cpu_kv_cache_config = config
+    scheduler._group_is_sliding_window = scheduler._get_group_is_sliding_window(config)
+    scheduler._group_is_mamba = [False]
+    scheduler.enable_offload_prefix_caching = True
+    scheduler._pending_hash_blocks = {}
+    scheduler._preempted_req_states = {}
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={20: SimpleNamespace(block_id=20, block_hash="unused-ring-hash"), 30: "gpu30"},
+        touch=MagicMock(),
+    )
+    scheduler.cpu_block_pool = SimpleNamespace(
+        get_num_free_blocks=MagicMock(return_value=8),
+        get_new_blocks=MagicMock(return_value=[SimpleNamespace(block_id=101, _block_hash=None)]),
+        cached_block_hash_to_block=SimpleNamespace(get_one_block=MagicMock()),
+    )
+    assert scheduler._create_preempt_state("req", ([20],), 64)
+    state = scheduler._preempted_req_states["req"]
+    assert state.cpu_block_ids == ([101],)
+    assert state.store_transfer_meta == TransferMeta([20], [101])
+    scheduler.cpu_block_pool.get_new_blocks.assert_called_once_with(1)
+    scheduler.cpu_block_pool.cached_block_hash_to_block.get_one_block.assert_not_called()
+    state.ready = True
+    state.load_start_tokens = load_start
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req"),
+        ([30],),
+        num_external_tokens=64 - load_start,
+    )
+    assert state.load_transfer_meta == TransferMeta([30], [101])
+    scheduler._gpu_block_pool.touch.assert_called_once_with(["gpu30"])
+
+
+@pytest.mark.parametrize("difference", [None, "shape", "stride", "dtype", "scale", "pointer", "role"])
+def test_worker_only_deduplicates_identical_mamba_state_views(difference):
+    backing = torch.arange(96, dtype=torch.int32)
+    first = backing.as_strided((3, 3, 4), (24, 4, 1))
+    second = first.as_strided(first.shape, first.stride())
+    if difference == "shape":
+        second = backing.as_strided((3, 2, 6), (24, 6, 1))
+    elif difference == "stride":
+        second = backing.as_strided(first.shape, (20, 4, 1))
+    elif difference == "dtype":
+        second = second.view(torch.float32)
+    elif difference == "scale":
+        second = backing.as_strided((6, 3, 4), (12, 4, 1))
+    elif difference == "pointer":
+        second = backing.as_strided(first.shape, first.stride(), 1)
+    caches = {"first": (first,), "second": (second,)}
+    groups = []
+    for name, (tensor,) in caches.items():
+        groups.append(
+            SimpleNamespace(
+                layer_names=[name],
+                kv_cache_spec=MambaSpec(
+                    block_size=16,
+                    shapes=(tuple(tensor.shape[1:]),),
+                    dtypes=(tensor.dtype,),
+                    mamba_type=(
+                        MambaAttentionBackendEnum.SHORT_CONV
+                        if difference == "role" and name == "first"
+                        else MambaAttentionBackendEnum.LINEAR
+                    ),
+                ),
+            )
+        )
+    config = SimpleNamespace(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(size=backing.numel() * backing.element_size(), layers=list(caches))],
+        kv_cache_groups=groups,
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+    expected_names = {"first.0"} if difference is None else {"first.0", "second.0"}
+    assert set(worker.gpu_kv_caches) == expected_names
+    assert set(worker.cpu_kv_caches) == expected_names
+    if difference == "role":
+        assert set(worker.mamba_conv_cache_bindings) == {"first.0"}

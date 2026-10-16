@@ -850,6 +850,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         fast_build: bool = False,
         *,
         can_use_rope_cache: bool = True,
+        full_graph_mode: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -883,7 +884,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else:
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
-            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            # FULL graphs replay fixed shapes, so cos/sin must span the padded
+            # token count. Other modes consume only real tokens; build at the
+            # actual length so consumers never need to re-slice.
+            num_position_tokens = num_input_tokens if full_graph_mode else common_attn_metadata.num_actual_tokens
+            input_positions = common_attn_metadata.positions[:num_position_tokens].long()
             need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
@@ -922,7 +927,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_actual_reqs,
             cos=cos,
             sin=sin,
-            full_graph_mode=kwargs.get("full_graph_mode", False),
+            full_graph_mode=full_graph_mode,
         )
 
         return self.metadata_cls(  # type: ignore
@@ -1787,9 +1792,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     self.vllm_config.scheduler_config.max_num_batched_tokens,
                 )
             if exchange_num_tokens < num_tokens:
+                scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    "oproj static exchange capacity must cover local tokens, "
-                    f"got {exchange_num_tokens} and {num_tokens}."
+                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
+                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
+                    "tokens to max_num_seqs * decode_query_len "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
+                    "raise the largest cudagraph_capture_sizes entry."
                 )
             # Lazily allocate static send/recv buffers on first call. The
             # profiling run hits this path before ACL graph capture, so the

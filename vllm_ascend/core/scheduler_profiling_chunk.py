@@ -318,7 +318,7 @@ class ProfilingChunkScheduler(Scheduler):
         # First, schedule the RUNNING requests.
         req_index = 0
         # >>> PROFILING CHUNK >>>
-        while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
+        while req_index < len(self.running) and token_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
             if input_budget <= draft_slots:
@@ -428,7 +428,7 @@ class ProfilingChunkScheduler(Scheduler):
                 self.profiling_chunk_manager is not None
                 and self.profiling_chunk_manager.is_ready
                 and request.num_computed_tokens < request.num_prompt_tokens
-                and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
+                and request.num_computed_tokens > 0
             ):
                 predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                     num_computed_tokens=request.num_computed_tokens,
@@ -574,12 +574,7 @@ class ProfilingChunkScheduler(Scheduler):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
-            # >>> PROFILING CHUNK >>>
-            # Decode requests (num_new_tokens == 1) have negligible latency;
-            # skip time_budget accounting so they don't starve other requests.
-            if request.num_computed_tokens < request.num_prompt_tokens:
-                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
-            # <<< PROFILING CHUNK <<<
+
             req_index += 1
 
             # Speculative decode related.
@@ -627,7 +622,7 @@ class ProfilingChunkScheduler(Scheduler):
             step_skipped_waiting = create_request_queue(self.policy)
 
             # >>> PROFILING CHUNK >>>
-            while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
+            while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 # <<< PROFILING CHUNK <<<
                 if input_budget <= draft_slots:
                     break
@@ -855,7 +850,7 @@ class ProfilingChunkScheduler(Scheduler):
                         self.profiling_chunk_manager is not None
                         and self.profiling_chunk_manager.is_ready
                         and request.num_computed_tokens < request.num_prompt_tokens
-                        and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
+                        and request.num_computed_tokens > 0
                     ):
                         predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                             num_computed_tokens=num_computed_tokens,
@@ -1042,14 +1037,7 @@ class ProfilingChunkScheduler(Scheduler):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
-                # >>> PROFILING CHUNK >>>
-                # Decode requests (num_new_tokens == 1) have negligible latency;
-                # skip time_budget accounting so they don't starve other requests.
-                if request.num_computed_tokens < request.num_prompt_tokens:
-                    time_budget -= self.profiling_chunk_manager.predict_time(
-                        num_new_tokens, request.num_computed_tokens
-                    )
-                # <<< PROFILING CHUNK <<<
+
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:

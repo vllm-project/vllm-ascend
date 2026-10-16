@@ -2,7 +2,8 @@ The following Qwen3-0.6B example has been validated using the default model load
 
 <!-- doctest: quickstart-standard-online-serve -->
 ```bash
-vllm serve Qwen/Qwen3-0.6B &
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    vllm serve Qwen/Qwen3-0.6B &
 ```
 
 If you see the following logs:

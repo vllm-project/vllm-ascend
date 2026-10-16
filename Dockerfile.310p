@@ -49,7 +49,7 @@ ARG DAILY_DEPS_MODE="torch_npu_only"
 WORKDIR /workspace
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
+    apt-get install -y python3-pip git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev pciutils && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -95,7 +95,6 @@ RUN cd /vllm-workspace/vllm && \
     ./build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:/root/aicpu_kernels/0/aicpu_kernels_device/sand_box:$LD_LIBRARY_PATH' >> /root/.bashrc
 
