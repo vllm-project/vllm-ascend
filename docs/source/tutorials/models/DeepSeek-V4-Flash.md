@@ -32,7 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
-| `DeepSeek-V4-Flash-0731` | 950DT products (96GB × 8); examples cover four-NPU PD-colocated and 4-Prefill/4-Decode PD-separated deployments | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
+| `DeepSeek-V4-Flash-0731` | 950DT products (96GB × 8); examples cover a four-NPU PD-colocated deployment and a PD-disaggregated deployment using four NPUs for Prefill and four NPUs for Decode | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -178,7 +178,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 !!! note
 
@@ -408,7 +408,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --attention_config.indexer_kv_dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --no-disable-hybrid-kv-cache-manager \
-        --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\",\"torch_profiler_with_stack\":false}" \
         --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}'
     ```
@@ -432,7 +431,7 @@ Key Parameter Descriptions:
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
-
+Use the API port configured for the selected deployment. For the 950DT example, use port `8000`.
 ```shell
 curl http://<node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -1187,7 +1186,7 @@ Key Parameter Descriptions:
 
 Deployment Verification:
 
-After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
+After all PD-disaggregated services are ready, send a request through the configured P-D proxy endpoint to verify that the Prefill and Decode nodes work together correctly. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -1211,7 +1210,7 @@ Before you start, please:
         unset http_proxy
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
-        # 自动获取配置
+        # Network configuration
         nic_name="<nic_name>"
         local_ip="<prefill_ip>"
 
@@ -1264,7 +1263,6 @@ Before you start, please:
         --reasoning-parser deepseek_v4 \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV2",
@@ -1289,7 +1287,7 @@ Before you start, please:
         unset http_proxy
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
-        # 自动获取配置
+        # Network configuration
         nic_name="<nic_name>"
         local_ip="<prefill_ip>"
 
@@ -1342,7 +1340,6 @@ Before you start, please:
         --gpu-memory-utilization 0.95 \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_consumer",
@@ -1379,11 +1376,10 @@ Before you start, please:
 
 #### 5.3 Multi-Node PD Separation Deployment with Memcache KV Cache Pool
 
-This section builds on [Section 5.2.3](#523-ascend-950dt-series-pd-separation-deployment). Reuse the same topology, `launch_online_dp.py`, proxy mapping, and DeepSeek-V4 serving flags. Prefill and Decode switch to `MultiConnector` so live P-to-D KV transfer and the Memcache KV Cache Pool work together:
-
-- `MooncakeConnectorV2` transfers KV Cache from Prefill to Decode in real time.
-- `AscendStoreConnector` stores KV Cache in the Memcache KV Cache Pool so later Prefills with the same prefix can reuse it instead of recomputing.
-- The Prefill node performs pool lookup, load, and write in this example. Decode continues to receive live KV Cache from Prefill.
+This section extends the 950DT PD-disaggregated deployment described in Section 5.2.3. It keeps the same topology and proxy mapping while using MultiConnector to combine live P-to-D KV transfer with a Memcache-backed KV cache pool:
+- `MooncakeConnectorV2` transfers newly generated KV cache from Prefill to Decode.
+- `AscendStoreConnector` allows the Prefill service to load and store reusable prefixes in the Memcache-backed KV cache pool.
+- In this example, pool lookup, loading, and writing are performed on the Prefill node. Decode receives KV cache through `MooncakeConnectorV2`.
 
 For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
@@ -1430,7 +1426,7 @@ Use `device_urma` for Ascend 950DT Device UB. For UBOE, replace it with `device_
 
 This example uses the embedded LocalService mode. Each vLLM process initializes a LocalService by loading `mmc-local.conf` from `MMC_LOCAL_CONFIG_PATH`. Therefore, `ock.mmc.local_service.dram.size` must be greater than `0GB`. Do not start a separate standalone LocalService when using this configuration.
 
-In this example, the Prefill instance uses PCP4 together with `AscendStoreConnector` in layerwise mode. The tested configuration sets `use_layerwise` to `true` and `layerwise_prefetch_layers` to `3`.
+In this example, the PCP4 Prefill instance enables layerwise access for `AscendStoreConnector` by setting `use_layerwise` to `true` and `layerwise_prefetch_layers` to `3`.
 
 #### 5.3.2 Prefill Script
 
@@ -1499,7 +1495,6 @@ Prepare `run_prefill_memcache.sh` on the Prefill node.
         --reasoning-parser deepseek_v4 \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
         --kv-transfer-config '{
           "kv_connector": "MultiConnector",
@@ -1605,7 +1600,6 @@ Prepare `run_decode_memcache.sh` on the Decode node.
         --gpu-memory-utilization 0.95 \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path/to/profiling_output", "torch_profiler_with_stack": false}' \
         --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
@@ -1660,7 +1654,10 @@ Start one MetaService and verify that ports 5000, 6000, and 8000 are listening:
 export MMC_META_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-meta.conf"
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
-
+Then, open another terminal and verify that ports 5000, 6000, and 8000 are listening:
+ss -lntp | grep -E ':(5000|6000|8000)\b'
+The output should contain all three ports. Do not start the Decode and Prefill services until the MetaService, ConfigStore, and metrics endpoints are ready.
+```
 Start the remaining services in this order:
 
 ```text
@@ -1692,8 +1689,6 @@ bash run_prefill_memcache.sh
 # Prefill node, after all Decode ranks are ready
 bash run_prefill_memcache.sh
 ```
-
-Use the same proxy mapping as Section 5.2.3. Send a real generation request to `<proxy_ip>:5228` and confirm that the JSON response contains a non-empty `choices` field. Then send two requests with the same reusable prefix and confirm from Prefill logs or metrics that the second request hits the external KV Cache Pool. An HTTP 200 response alone does not prove that pooling is working.
 
 Use the same proxy mapping as Section 5.2.3. First, send a generation request through the P-D proxy and confirm that the response contains a non-empty `choices` field:
 
@@ -1825,9 +1820,14 @@ grep -E \
     /tmp/dsv4_prefill_metrics_after.txt || true
 ```
 
-Compare the value of `vllm:external_prefix_cache_hits_total` before and after the requests. The second request proves external KV Cache Pool reuse only when the metric increases and is greater than zero. Also retain the Prefill logs showing that the first request wrote KV Cache to the external pool.
+Treat external KV Cache Pool reuse as verified only when all of the following conditions are met:
 
-An HTTP 200 response, a healthy process, or lower request latency alone does not prove that KV Cache Pool reuse is working.
+1. Both requests return responses containing a non-empty `choices` field.
+2. `vllm:external_prefix_cache_queries_total` increases between the before and after metric snapshots.
+3. `vllm:external_prefix_cache_hits_total` increases between the before and after metric snapshots and is greater than zero.
+4. The Prefill logs show that the first request stored KV Cache in the external pool and that the second request successfully loaded and reused it without falling back to recomputation.
+
+An increase in the hit metric alone confirms that a cache hit was recorded, but it does not by itself prove that the complete end-to-end KV Cache reuse path worked successfully. An HTTP 200 response, a healthy process, or lower request latency alone is also insufficient evidence.
 
 ## 6 Functional Verification
 
@@ -1835,7 +1835,7 @@ This section verifies basic inference functionality for all deployment modes. Fo
 
 Once your server is started, you can query the model with input prompts:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+For colocated deployments, send the request to `<node_ip>:<service_port>`. For PD-disaggregated deployments, send it to the P-D proxy at `<proxy_ip>:<proxy_port>`.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
