@@ -159,8 +159,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Run the DFlash draft backbone and publish the draft LM-head
         capacity before this step's head call. DFlash drafts
         ``num_query_per_req`` query tokens per request, so the group-agreed
@@ -171,7 +170,6 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
-            mm_inputs,
         )
         self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp, tokens_per_req=self.num_query_per_req)
         return output

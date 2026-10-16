@@ -1,4 +1,4 @@
-﻿"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
+"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
 contract of sample()/_dummy_run (lmhead TP), guard the copied dispatch tail
@@ -170,7 +170,7 @@ def _canary_tail_calls(parent):
 def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     """Main2main canary: with lmhead TP on, the override must drive the
     dispatch tail (grammar bitmask / sampler / rejection sampler) exactly like
-    upstream GPUModelRunner.sample 鈥?same calls, same order, same arguments
+    upstream GPUModelRunner.sample — same calls, same order, same arguments
     (upstream's logits are bitwise identical to the override's trimmed
     logits). If upstream sample() gains a dispatch branch or changes its
     calling contract, this comparison fails and the copied tail in the
@@ -521,7 +521,7 @@ def _patch_super_method(spec_cls, method_name):
     Families resolve ``super()`` differently (EAGLE to the Ascend
     autoregressive base, DSpark/DFlash to their upstream parents), and
     ``__bases__[0]`` can be the sampling mixin, which never defines these
-    methods 鈥?patching it would raise AttributeError.
+    methods — patching it would raise AttributeError.
     """
     for cls in spec_cls.__mro__[1:]:
         if method_name in cls.__dict__:
@@ -543,8 +543,10 @@ def test_dspark_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
-        return ("hidden", "sample_hidden")
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+    ):
+        return "hidden"
 
     with _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model:
         super_run_model.side_effect = fake_run_model
@@ -623,7 +625,9 @@ def test_eagle_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode, mm_inputs
+    ):
         return ("hidden", "sample_hidden")
 
     with (
@@ -682,8 +686,10 @@ def test_dflash_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
-        return ("hidden", "sample_hidden")
+    def fake_run_model(
+        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+    ):
+        return "hidden"
 
     with (
         _spec_lmhead(True),
