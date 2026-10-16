@@ -273,7 +273,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
 === "A3 series(BF16)"
 
@@ -285,10 +285,9 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -322,10 +321,9 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -362,10 +360,9 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -400,10 +397,9 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_IF_IP=$local_ip
-    export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="${NETWORK_INTERFACE}"
+    export GLOO_SOCKET_IFNAME="${NETWORK_INTERFACE}"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -619,20 +615,19 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -698,18 +693,17 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=2048
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -752,7 +746,7 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
         }'
     ```
 
-    Set the short sequence max-num-batched-tokens to 2048.
+    For short-input workloads, tune `--max-num-batched-tokens` using [Section 9.2](#92-tuning-guidelines).
     Once the preparation is done, start the server with the following command on each node:
 
     1. Prefill node
@@ -879,20 +873,20 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
-    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -957,18 +951,19 @@ The following values match the configurations in Sections 5.3 and 5.4. P/D node 
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
+    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    # SuperPod (UB fabric): Mooncake auto-negotiates local endpoints. On RoCE-attached
-    # 950DT products, mount /etc/hixlep and use ascend_local_comm_res_path instead.
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
@@ -1206,6 +1201,8 @@ This section builds on [Section 5.3](#53-prefill-decode-disaggregation). The A3 
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
 - By default the Prefill node performs pool lookup, load, and write.
 
+The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload.
+
 For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3, pay attention to these pooling-only requirements:**
@@ -1213,11 +1210,11 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Item | Normal PD (5.3) | Pooled PD (this section) |
 | ---- | --------------- | ------------------------ |
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
-| Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
-| `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `32GB`; 950DT keeps P=`128GB`, D=`0` |
+| Mooncake Master | Not required | Start `mooncake_master --enable_offload=true` before Decode / Prefill |
+| `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `15GB`; 950DT P and D use `64GB`; enable SSD offload on all nodes |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
-| Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
+| Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf` and the local SSD offload directory; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
@@ -1231,7 +1228,21 @@ Mount the host HCCN config into every container that participates in pooling:
 
 On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3 for Ascend direct KV transfer.
 
-Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. A3 uses the identical `32GB` configuration on P and both D nodes, so workers on all three nodes contribute pool capacity. `global_segment_size` is allocated per worker rank; `32GB` is not the aggregate capacity of one node. A non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is set, it overrides the JSON value; unset it or set it to `32GB` for this A3 example.
+Use a local SSD directory on each Prefill and Decode host. The examples use `/nvme/mooncake_offload`; replace it with a directory on the actual SSD mount. Create it before starting the container:
+
+```bash
+mkdir -p /nvme/mooncake_offload
+```
+
+Add the corresponding bind mount to every model container:
+
+```bash
+-v /nvme/mooncake_offload:/nvme/mooncake_offload
+```
+
+Set `ssd_offload_path` to the absolute directory visible inside the container and make it writable by the vLLM process. The same path refers to separate local SSD storage on each host. The backend creates per-rank subdirectories beneath it. The installed Mooncake package must support the `enable_ssd_offload` and `ssd_offload_path` arguments in `MooncakeDistributedStore.setup()`; use the dependencies in the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+
+Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. `global_segment_size` is allocated per worker rank, not per node; a non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is already exported, update it to the intended size or unset it before startup because it overrides the JSON value.
 
 A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` with the actual Master IP):
 
@@ -1241,64 +1252,75 @@ A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` wi
   "protocol": "ascend",
   "device_name": "",
   "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
-  "global_segment_size": "32GB",
-  "preferred_segment": true,
+  "global_segment_size": "15GB",
+  "preferred_segment": false,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
 
-950DT Prefill `mooncake.json`:
+The A3 example uses `15GB` per worker rank on P and both D nodes. Adjust this value to each machine's available allocatable memory and fragmentation after reserving memory for vLLM and other processes. Allow additional space for the SSD I/O buffer and allocation headroom, and account for all contributing worker ranks on the node.
+
+950DT Prefill `mooncake.json` (replace `<MOONCAKE_MASTER_IP>`):
 
 ```json
 {
   "metadata_server": "P2PHANDSHAKE",
   "protocol": "ascend",
   "device_name": "",
-  "master_server_address": "xxxx:50088",
-  "global_segment_size": "128GB",
-  "preferred_segment": true,
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "64GB",
+  "preferred_segment": false,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
 
-950DT Decode `mooncake.json` (same Master and `tenant_id`, no donated segment; A3 D uses the `32GB` JSON above):
+950DT Decode `mooncake.json` (same Master and `tenant_id`; both P and D contribute memory and enable SSD offload):
 
 ```json
 {
   "metadata_server": "P2PHANDSHAKE",
   "protocol": "ascend",
   "device_name": "",
-  "master_server_address": "xxxx:50088",
-  "global_segment_size": 0,
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "64GB",
   "preferred_segment": true,
   "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/mooncake_offload",
   "tenant_id": "default"
 }
 ```
+
+The 950DT examples use `64GB` per worker rank on both P and D. Adjust the size to the actual available memory and fragmentation on each machine rather than treating `64GB` as a fixed requirement. Budget for all worker ranks on the node, SSD I/O buffers, and other allocations; reduce the segment size if the machine cannot register the requested memory.
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
 ```bash
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH=./mooncake.json
 # Optional: only if Mooncake is installed in a non-standard path (same as Section 5.3).
 if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
     export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
 fi
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+export PYTHONHASHSEED=0
+# SSD I/O buffer per worker: 1GB, aligned for A3 fabric memory.
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 ```
+
+The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB` value above is an aligned starting point; size it for the KV read/write batches and include it in the per-rank memory budget. Set per-rank SSD capacity limits according to the actual disk capacity and number of contributing workers, as described in [Mooncake SSD Offload Parameter Tuning](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#mooncake-ssd-offload-parameter-tuning).
 
 | Hardware | Dependencies | Required pooling exports | Notes |
 | -------- | ------------- | ------------------------ | ----- |
-| 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ACL_OP_INIT_MODE=1` and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
+| 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
 | 800I/T A3 (RoCE) or 800I/T A2 | A2: HDK >= 25.5 recommended | `export HCCL_INTRA_ROCE_ENABLE=1`, plus `HCCL_IF_IP` / socket IFNAME, and `nr_hugepages=200000` | Use the RoCE path from the KV Cache Pool guide. |
 | 950PR/DT (Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
 
@@ -1317,8 +1339,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy
 
-    export VLLM_SERVER_DEV_MODE=1
-
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
@@ -1335,26 +1355,25 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 
-    export VLLM_USE_V2_MODEL_RUNNER=1
+    # Pooling extras: all three A3 nodes use the 15GB mooncake.json in Section 5.4.1.
     export VLLM_PP_LAYER_PARTITION="16,15,15,14"
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
-
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
-    export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -1420,8 +1439,6 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export VLLM_SERVER_DEV_MODE=1
-
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
@@ -1438,25 +1455,24 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Pooling extras: all three A3 nodes use the 15GB mooncake.json in Section 5.4.1.
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
-
-    # Pooling extras: all three A3 nodes use the 32GB mooncake.json below.
-    export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
-
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -1519,7 +1535,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "950DT products"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/`, `/etc/hccn.conf`, and the local SSD directory from Section 5.4.1. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `64GB` on both roles, with SSD offload enabled). Set `master_server_address` to the same reachable Mooncake Master on both nodes.
 
     1. Prefill node
 
@@ -1543,20 +1559,20 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31050}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Runtime environment and pooling extras (Device UB).
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
+    export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1642,20 +1658,20 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     export SERVICE_PORT=${SERVICE_PORT:-31060}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
+    # Runtime environment and pooling extras (Device UB).
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
-    export GLOO_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
-
-    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
-    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1741,7 +1757,7 @@ Proxy (:8009)
     --eviction_high_watermark_ratio 0.9 \
     --eviction_ratio 0.1 \
     --default_kv_lease_ttl 11000 \
-    --enable_offload=false \
+    --enable_offload=true \
     --client_ttl=120
     ```
 
@@ -1842,11 +1858,12 @@ Proxy (:8009)
 
 #### 5.4.5 Verification
 
-1. Confirm Mooncake Master port `50088` is reachable and every node uses the same Master address and `tenant_id`. For A3, confirm P and both D nodes load `global_segment_size="32GB"` and that worker logs show successful segment registration.
+1. Confirm Mooncake Master port `50088` is reachable, Master runs with `--enable_offload=true`, and every node uses the same Master address and `tenant_id`. For A3, confirm P and both D nodes load `global_segment_size="15GB"`; for 950DT, confirm P and D both load `"64GB"`. Check worker logs for successful segment registration.
 2. Confirm every Decode engine port is ready, then every Prefill engine port. A3 has nine APIs (one P plus eight D); 950DT has four (two P plus two D).
 3. Send requests only to the proxy on port `8009`.
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
+6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
@@ -1889,6 +1906,187 @@ FLASHCOMM1 and language-model-only mode can be enabled at the same time: the ver
 # Enable language-model-only mode.
 --language-model-only
 ```
+
+### 5.6 1M-Token Context Deployment
+
+MiniMax-M3 supports a 1M-token context on a single Atlas 800 A3 node with W8A8 weights or a single 950DT node with MXFP8 weights. The following configurations were verified for long-context functional deployment. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
+
+| Platform / weights | NPUs per node | TP / PP / DP | `max-model-len` | `max-num-batched-tokens` | KV cache dtype |
+| --- | --- | --- | --- | --- | --- |
+| Atlas 800 A3 / W8A8 | 16 × 64GB | 4 / 4 / 1 | 1049600 | 8192 | `auto` (default) |
+| 950DT / MXFP8 | 8 × 96GB | 8 / 1 / 1 | 1048576 | 2048 | `fp8`, excluding layers 0–2 |
+| 950DT / MXFP8 | 8 × 96GB | 4 / 2 / 1 | 1048576 | 8192 | `fp8`, excluding layers 0–2 |
+
+All three configurations use Model Runner V2, `max-num-seqs=1`, eager execution, and chunked prefill. Prefix caching, asynchronous scheduling, and static kernels are disabled; no speculative model is loaded. The smaller batched-token budget controls the size of each prefill chunk rather than the total context length.
+
+Prepare the container and weights as described in Sections 3 and 4. Replace `<MODEL_PATH>` (A3) or `<WEIGHT_PATH>` (950DT) with the local weight directory. Replace `<NIC_NAME>` in both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` with the same local communication interface. The commands use the CANN environment-script paths from the deployment configurations; adjust these paths to the installed CANN directory. The 950DT examples also require the matching `experimental_950_transformer` vendor package before sourcing its environment script.
+
+#### 5.6.1 Atlas 800 A3 (W8A8)
+
+Use one 16-NPU node with TP4/PP4/DP1. This long-context configuration splits the 60 transformer layers evenly as `15,15,15,15`. The `1049600` context limit leaves room for 1,048,576 input tokens and up to 1024 generated tokens. `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` permits the configured limit when it exceeds the checkpoint's declared maximum.
+
+```bash
+MODEL_PATH="<MODEL_PATH>"  # MiniMax-M3 W8A8 weights
+
+source /usr/local/Ascend/cann-9.1.0/set_env.sh
+
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+export VLLM_PP_LAYER_PARTITION="15,15,15,15"
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_BUFFSIZE=256
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --language-model-only \
+    --reasoning-parser minimax_m3 \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 4 \
+    --data-parallel-size 1 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --block-size 128 \
+    --max-model-len 1049600 \
+    --max-num-batched-tokens 8192 \
+    --long-prefill-token-threshold 8192 \
+    --max-num-seqs 1 \
+    --enable-chunked-prefill \
+    --no-enable-prefix-caching \
+    --enforce-eager \
+    --no-async-scheduling \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode":"NONE"}' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+            "enable_static_kernel": false,
+            "fuse_norm_quant": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "enable_shared_expert_dp": false,
+        "weight_nz_mode": 2,
+        "enable_flashcomm1": true,
+        "enable_reduce_sample": false
+    }' > ./minimax-m3-1m-a3.log 2>&1 &
+```
+
+#### 5.6.2 950DT Products (MXFP8)
+
+Choose either of the following single-node layouts on eight NPUs. Both use FP8 KV cache while keeping layers 0, 1, and 2 in the default KV dtype. The total input and generated tokens must fit within 1,048,576 tokens; for example, reserve 1024 output tokens by limiting the input to at most 1,047,552 tokens.
+
+=== "TP8 / PP1 / DP1"
+
+    ```bash
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
+
+    vllm serve "$WEIGHT_PATH" \
+        --host 0.0.0.0 \
+        --port 31050 \
+        --served-model-name minimax-m3 \
+        --trust-remote-code \
+        --distributed-executor-backend mp \
+        --tensor-parallel-size 8 \
+        --pipeline-parallel-size 1 \
+        --data-parallel-size 1 \
+        --dtype bfloat16 \
+        --quantization mxfp8 \
+        --max-model-len 1048576 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 2048 \
+        --gpu-memory-utilization 0.92 \
+        --kv-cache-dtype fp8 \
+        --kv-cache-dtype-skip-layers 0 1 2 \
+        --limit-mm-per-prompt '{"image":0,"video":0}' \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
+        --enforce-eager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_qknorm_rope": false,
+                "fuse_norm_quant": false,
+                "enable_static_kernel": false
+            },
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": false,
+            "enable_flashcomm1": false
+        }' > ./minimax-m3-1m-950dt-tp8.log 2>&1 &
+    ```
+
+=== "TP4 / PP2 / DP1"
+
+    ```bash
+    export WEIGHT_PATH="<WEIGHT_PATH>"  # MiniMax-M3 MXFP8 weights
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=256
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="<NIC_NAME>"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="<NIC_NAME>"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/bin/set_env.bash
+
+    vllm serve "$WEIGHT_PATH" \
+        --host 0.0.0.0 \
+        --port 31050 \
+        --served-model-name minimax-m3 \
+        --trust-remote-code \
+        --distributed-executor-backend mp \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --dtype bfloat16 \
+        --quantization mxfp8 \
+        --max-model-len 1048576 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.92 \
+        --kv-cache-dtype fp8 \
+        --kv-cache-dtype-skip-layers 0 1 2 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
+        --enforce-eager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_qknorm_rope": false,
+                "fuse_norm_quant": false,
+                "enable_static_kernel": false
+            },
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": false,
+            "enable_flashcomm1": false
+        }' > ./minimax-m3-1m-950dt-tp4pp2.log 2>&1 &
+    ```
+
+Wait for `Application startup complete` in the log file at the end of the selected command before sending requests. Check the reported KV cache capacity against the configured context length. These examples demonstrate the verified long-context deployment shapes; tune concurrency and performance separately for the target workload.
 
 ## 6 Thinking and Parser Configuration
 
@@ -1949,6 +2147,8 @@ The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the t
 The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
 
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 vllm serve ${WEIGHT_PATH} \
   --reasoning-parser minimax_m3 \
   ...
@@ -1978,6 +2178,8 @@ MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with 
 When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
 
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 vllm serve ${WEIGHT_PATH} \
   --reasoning-parser minimax_m3 \
   --enable-auto-tool-choice \
@@ -2227,6 +2429,15 @@ The recommended configurations are the same as those specified in Chapter 5, "On
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Workload-Specific Tuning
+
+Use the following adjustments as starting points for the target workload. Recheck memory usage, latency, and throughput after each change.
+
+| Scenario | Parameter | Example Adjustment | Tuning Goal |
+| --- | --- | --- | --- |
+| Device-memory-bound workloads where KV cache capacity limits concurrency | `HCCL_BUFFSIZE` | Reduce from `2048` to `1024` (MB). | Reduce HCCL communication-buffer memory usage to make more device memory available for KV cache and allow higher concurrency. |
+| Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
 
