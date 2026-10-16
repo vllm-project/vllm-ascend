@@ -958,7 +958,6 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
-        self._queue_c8_mxfp_v_scale_pages(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -2593,7 +2592,7 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            self._restore_pending_c8_mxfp_v_scales()
+            self._restore_c8_mxfp_loaded_v_scales(scheduler_output)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -4714,13 +4713,10 @@ class NPUModelRunner(GPUModelRunner):
         the scheduler assigns that physical page to full attention again.
         """
         self._c8_mxfp_v_scale_caches = []
-        self._c8_mxfp_v_scale_caches_by_group: dict[
-            int, list[tuple[torch.Tensor, torch.Tensor, int]]
-        ] = {}
-        self._c8_mxfp_pending_v_scale_pages: dict[str, dict[int, set[int]]] = {}
+        kv_cache_config = getattr(self, "kv_cache_config", None)
         group_by_layer = {
             name: group_id
-            for group_id, group in enumerate(getattr(self.kv_cache_config, "kv_cache_groups", ()))
+            for group_id, group in enumerate(getattr(kv_cache_config, "kv_cache_groups", ()))
             for name in group.layer_names
         }
         for layer_name, cache in kv_caches.items():
@@ -4729,72 +4725,46 @@ class NPUModelRunner(GPUModelRunner):
                 value_scale_cache = cache[3]
                 assert value_scale_cache.shape[0] % self.kv_cache_config.num_blocks == 0
                 kernel_blocks_per_page = value_scale_cache.shape[0] // self.kv_cache_config.num_blocks
-                entry = (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page)
-                self._c8_mxfp_v_scale_caches.append(entry)
-                group_id = group_by_layer.get(layer_name)
-                if group_id is not None:
-                    self._c8_mxfp_v_scale_caches_by_group.setdefault(group_id, []).append(entry)
+                self._c8_mxfp_v_scale_caches.append(
+                    (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page, group_by_layer.get(layer_name))
+                )
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
-
-    def _queue_c8_mxfp_v_scale_pages(self, scheduler_output: "SchedulerOutput") -> None:
-        """Keep C8 page preparation independent of asynchronous-load zeroing."""
-        groups = getattr(self, "_c8_mxfp_v_scale_caches_by_group", None)
-        if not groups:
+    def _restore_c8_mxfp_loaded_v_scales(self, scheduler_output: "SchedulerOutput") -> None:
+        """Prepare admitted Pull pages after receives and Mamba copies finish."""
+        caches = getattr(self, "_c8_mxfp_v_scale_caches", ())
+        if not caches:
+            return
+        req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
+        req_ids.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        row_updates = scheduler_output.block_table_updates or {}
+        req_ids.update(row_updates)
+        if not req_ids or scheduler_output.has_sync_kv_loads:
             return
         transfer_config = self.vllm_config.kv_transfer_config
-        if transfer_config is None or not transfer_config.is_kv_consumer:
+        if transfer_config is None or not transfer_config.is_kv_consumer or not has_kv_transfer_group():
             return
 
-        pending = self._c8_mxfp_pending_v_scale_pages
-        for req_id in scheduler_output.finished_req_ids:
-            pending.pop(req_id, None)
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+
+        # Pull admits requests only after asynchronous receives complete.
+        # Other connectors/subclasses may defer loads until individual layers.
+        if type(get_kv_transfer_group()) is not MooncakePullConnector:
+            return
+        blocks_by_group: dict[int, set[int]] = {}
+        for req_id in req_ids:
+            if req_id in self.input_batch.req_id_to_index:
+                block_ids = row_updates.get(req_id, self.requests[req_id].block_ids)
+                for group_id, blocks in enumerate(block_ids):
+                    blocks_by_group.setdefault(group_id, set()).update(blocks)
         zeroed = set(scheduler_output.new_block_ids_to_zero or ())
-
-        def record(req_id: str, block_ids: tuple[list[int], ...]) -> None:
-            for group_id in groups:
-                if group_id >= len(block_ids):
-                    continue
-                blocks = {block_id for block_id in block_ids[group_id] if block_id > 0} - zeroed
-                if blocks:
-                    pending.setdefault(req_id, {}).setdefault(group_id, set()).update(blocks)
-
-        for request in scheduler_output.scheduled_new_reqs:
-            # A resumed/new request replaces any previously reserved pages.
-            pending.pop(request.req_id, None)
-            record(request.req_id, request.block_ids)
-
-        cached = scheduler_output.scheduled_cached_reqs
-        for req_id, block_ids in zip(cached.req_ids, cached.new_block_ids):
-            if req_id in cached.resumed_req_ids:
-                pending.pop(req_id, None)
-            if block_ids is not None:
-                record(req_id, block_ids)
-        for req_id, block_ids in (scheduler_output.block_table_updates or {}).items():
-            pending.pop(req_id, None)
-            record(req_id, block_ids)
-
-
-    def _restore_pending_c8_mxfp_v_scales(self) -> None:
-        """Restore static scales after KV loading without clearing KV payloads.
-
-        Async loads suppress zeroing for the whole destination manager page.
-        Unequal P/D page ratios can leave destination kernel pages unwritten.
-        Those pages still need checkpoint V scales before decode reaches them.
-        """
-        pending = getattr(self, "_c8_mxfp_pending_v_scale_pages", None)
-        if not pending:
-            return
-        for req_id in self.input_batch.req_ids:
-            group_blocks = pending.pop(req_id, None)
-            if not group_blocks:
+        for value_scale, cache, ratio, group_id in caches:
+            if group_id is None:
                 continue
-            for group_id, block_ids in group_blocks.items():
-                for value_scale, cache, ratio in self._c8_mxfp_v_scale_caches_by_group[group_id]:
-                    for block_id in sorted(block_ids):
-                        start = block_id * ratio
-                        fill_mxfp_v_scale_cache(value_scale, cache[start : start + ratio])
-
+            for block_id in sorted(blocks_by_group.get(group_id, set()) - zeroed):
+                if block_id > 0:
+                    start = block_id * ratio
+                    fill_mxfp_v_scale_cache(value_scale, cache[start : start + ratio])
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Prepare freshly assigned attention pages, including static C8 scales."""
@@ -4802,7 +4772,7 @@ class NPUModelRunner(GPUModelRunner):
         # MRV1 can receive new attention block IDs without a KV zeroer. Scale
         # restoration must still run: Mamba owns the same physical pages while
         # those IDs are assigned to its cache groups.
-        for value_scale, value_scale_cache, ratio in getattr(self, "_c8_mxfp_v_scale_caches", ()):
+        for value_scale, value_scale_cache, ratio, _ in getattr(self, "_c8_mxfp_v_scale_caches", ()):
             for block_id in block_ids:
                 start = block_id * ratio
                 fill_mxfp_v_scale_cache(value_scale, value_scale_cache[start : start + ratio])
