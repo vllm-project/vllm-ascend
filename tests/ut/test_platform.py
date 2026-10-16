@@ -199,6 +199,7 @@ def test_parallel_config_rejects_partial_tp_pcp_groups(dcp_size):
 
 def test_pcp_dcp_rejects_unequal_sizes_for_gqa_draft():
     config = SimpleNamespace(
+        use_v2_model_runner=False,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
             prefill_context_parallel_size=2,
@@ -239,6 +240,7 @@ def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
         draft_tensor_parallel_size=None,
     )
     vllm_config = SimpleNamespace(
+        use_v2_model_runner=False,
         speculative_config=speculative_config,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=4,
@@ -391,6 +393,46 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_type, "npu")
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
+
+    def test_kimi_k3_gqa_dspark_uses_replicated_draft_dcp_config(self):
+        target_parallel = SimpleNamespace(
+            decode_context_parallel_size=8,
+            tensor_parallel_size=8,
+        )
+        draft_parallel = SimpleNamespace(
+            decode_context_parallel_size=1,
+            tensor_parallel_size=8,
+        )
+        draft_model = SimpleNamespace(
+            use_mla=False,
+            hf_config=SimpleNamespace(
+                model_type="qwen3",
+                architectures=["DSparkDraftModel"],
+            ),
+        )
+        config = SimpleNamespace(
+            use_v2_model_runner=True,
+            parallel_config=target_parallel,
+            model_config=SimpleNamespace(
+                architectures=["KimiLinearForCausalLM"],
+                architecture="KimiK3ForConditionalGeneration",
+                hf_config=SimpleNamespace(
+                    architectures=["KimiK3ForConditionalGeneration"],
+                    model_type="kimi_k3",
+                ),
+            ),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens_per_batch_size=None,
+                draft_model_config=draft_model,
+                draft_parallel_config=draft_parallel,
+                use_dspark=lambda: True,
+            ),
+        )
+
+        _validate_draft_decode_context_parallel_config(config)
+
+        draft_parallel.tensor_parallel_size = 4
+        _validate_draft_decode_context_parallel_config(config)
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)

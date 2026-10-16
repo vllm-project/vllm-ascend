@@ -277,13 +277,30 @@
 #       implements context parallelism for MLA and SWA-MLA layers separately.
 #    How：
 #       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
-#       + DCP case by returning lcm(block_sizes) * dcp as scheduler_block_size
-#       instead of raising ValueError.
+#       + DCP case by returning the LCM of each group's token span as
+#       scheduler_block_size. The upstream dcp_sharded flag determines whether
+#       a group's block size is multiplied by DCP.
 #    Related PR (if no, explain why):
 #       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`
+#      `vllm.v1.core.kv_cache_utils.pool_bytes_per_block`
+#    Why:
+#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
+#       draft pages cannot alias block-strided target/Mamba pages with different
+#       scheduler block IDs in hybrid DCP models.
+#    How:
+#       Use dcp_sharded to identify replicated dense attention groups, then
+#       delegate each physical pool's descriptors to the upstream planner.
+#       Sum the pools' bytes per block to keep allocation within the budget.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
+#       the remaining physical-layout restriction is specific to Ascend.
+#    Future Plan:
+#       Remove pool separation when Ascend dense attention supports the
+#       upstream block-strided shared-pool layout.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

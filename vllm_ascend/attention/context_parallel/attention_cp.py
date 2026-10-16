@@ -129,6 +129,14 @@ class AscendAttentionDCPMetadataBuilder(
 
     metadata_cls = AscendAttentionDCPMetadata
 
+    def __new__(cls, kv_cache_spec=None, *args, **kwargs):
+        # The target runner also creates builders for replicated draft groups,
+        # while the current config still describes the target's DCP topology.
+        # Use the upstream per-group flag to keep their metadata unsharded.
+        if kv_cache_spec is not None and not kv_cache_spec.dcp_sharded:
+            return AscendAttentionMetadataBuilder(kv_cache_spec, *args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.use_dcp = is_dcp_enabled()

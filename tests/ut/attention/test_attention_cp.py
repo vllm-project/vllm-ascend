@@ -34,6 +34,24 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert not hasattr(AscendMetadata(), "prefill")
 
 
+@pytest.mark.parametrize("dcp_sharded", [False, True])
+def test_gqa_builder_respects_group_sharding(dcp_sharded) -> None:
+    spec = SimpleNamespace(dcp_sharded=dcp_sharded)
+    with (
+        patch.object(AscendAttentionMetadataBuilder, "__init__", return_value=None) as base_init,
+        patch.object(AscendAttentionDCPMetadataBuilder, "__init__", return_value=None) as dcp_init,
+    ):
+        builder = AscendAttentionDCPMetadataBuilder(spec, ["draft.attn"], "config", "device")
+    if dcp_sharded:
+        assert type(builder) is AscendAttentionDCPMetadataBuilder
+        dcp_init.assert_called_once_with(spec, ["draft.attn"], "config", "device")
+        base_init.assert_not_called()
+    else:
+        assert type(builder) is AscendAttentionMetadataBuilder
+        base_init.assert_called_once_with(spec, ["draft.attn"], "config", "device")
+        dcp_init.assert_not_called()
+
+
 def test_gqa_tp_only_dcp_still_gathers_heads() -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
     impl.pcp_group = SimpleNamespace(world_size=1)
