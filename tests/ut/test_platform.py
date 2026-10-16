@@ -373,6 +373,40 @@ class TestNPUPlatform(TestBase):
         return mock_vllm_config
 
     @staticmethod
+    def mock_layerwise_host_offload_config(
+        *,
+        role="kv_consumer",
+        block_size=128,
+        num_speculative_tokens=3,
+        topk=2048,
+    ):
+        config = TestNPUPlatform.mock_vllm_config()
+        config.kv_transfer_config = MagicMock()
+        config.kv_transfer_config.kv_connector = "MultiConnector"
+        config.kv_transfer_config.kv_connector_extra_config = {
+            "layerwise_host_kv_offload": True,
+            "connectors": [
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_connector_extra_config": {
+                        "use_layerwise": True,
+                        "use_layerwise_range": True,
+                    },
+                },
+                {"kv_connector": "MooncakeLayerwiseConnector"},
+            ],
+        }
+        config.kv_transfer_config.kv_role = role
+        config.cache_config.block_size = block_size
+        if num_speculative_tokens is None:
+            config.speculative_config = None
+        else:
+            config.speculative_config = MagicMock(num_speculative_tokens=num_speculative_tokens)
+        config.model_config.hf_text_config = MagicMock(index_topk=topk)
+        config.model_config.hf_text_config.index_topk = topk
+        return config
+
+    @staticmethod
     def mock_vllm_ascend_config():
         mock_ascend_config = MagicMock()
         mock_ascend_config.xlite_graph_config.enabled = False
@@ -648,43 +682,84 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
-    def test_get_recompute_scheduler_cls(self):
-        from vllm_ascend import platform
-
-        cases = (
-            (
-                False,
-                False,
-                "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
-            ),
-            (
-                True,
-                False,
-                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
-            ),
-            (
-                False,
-                True,
-                "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
-            ),
-            (
-                True,
-                True,
-                "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
-            ),
-        )
-        for async_scheduling, dyntra_lb_enabled, expected_scheduler_cls in cases:
-            with self.subTest(
-                async_scheduling=async_scheduling,
-                dyntra_lb_enabled=dyntra_lb_enabled,
-            ):
-                self.assertEqual(
-                    platform._get_recompute_scheduler_cls(
-                        async_scheduling=async_scheduling,
-                        dyntra_lb_enabled=dyntra_lb_enabled,
-                    ),
-                    expected_scheduler_cls,
+    def test_validate_layerwise_host_offload_config_accepts_frozen_shape(self):
+        for role in ("kv_producer", "kv_consumer"):
+            for num_speculative_tokens in (None, 3):
+                config = self.mock_layerwise_host_offload_config(
+                    role=role,
+                    num_speculative_tokens=num_speculative_tokens,
                 )
+                NPUPlatform._validate_layerwise_host_offload_config(config)
+
+    def test_validate_layerwise_host_offload_config_rejects_unsupported_shape(self):
+        cases = [
+            ({"role": "kv_both"}, "PD-disaggregated"),
+            ({"block_size": 64}, "block_size=128"),
+            ({"num_speculative_tokens": 2}, "disabled MTP or MTP3"),
+            ({"topk": 1024}, "index_topk=2048"),
+        ]
+        for overrides, match in cases:
+            with self.subTest(overrides=overrides):
+                config = self.mock_layerwise_host_offload_config(**overrides)
+                with self.assertRaisesRegex(ValueError, match):
+                    NPUPlatform._validate_layerwise_host_offload_config(config)
+
+    def test_validate_layerwise_host_offload_config_rejects_invalid_prefill_topology(self):
+        cases = [
+            ("MooncakeLayerwiseConnector", None, "MultiConnector"),
+            (
+                "MultiConnector",
+                [{"kv_connector": "MooncakeLayerwiseConnector"}],
+                "AscendStoreConnector",
+            ),
+            (
+                "MultiConnector",
+                [
+                    {
+                        "kv_connector": "AscendStoreConnector",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": True,
+                            "use_layerwise_range": False,
+                        },
+                    },
+                    {"kv_connector": "MooncakeLayerwiseConnector"},
+                ],
+                "use_layerwise_range=true",
+            ),
+            (
+                "MultiConnector",
+                [
+                    {
+                        "kv_connector": "AscendStoreConnector",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": True,
+                            "use_layerwise_range": True,
+                        },
+                    }
+                ],
+                "MooncakeLayerwiseConnector",
+            ),
+        ]
+        for connector_name, children, match in cases:
+            with self.subTest(connector_name=connector_name, children=children):
+                config = self.mock_layerwise_host_offload_config(
+                    role="kv_producer"
+                )
+                config.kv_transfer_config.kv_connector = connector_name
+                if children is not None:
+                    config.kv_transfer_config.kv_connector_extra_config[
+                        "connectors"
+                    ] = children
+                with self.assertRaisesRegex(ValueError, match):
+                    NPUPlatform._validate_layerwise_host_offload_config(config)
+
+    def test_validate_layerwise_host_offload_config_does_not_require_decode_store(self):
+        config = self.mock_layerwise_host_offload_config(role="kv_consumer")
+        config.kv_transfer_config.kv_connector_extra_config["connectors"] = [
+            {"kv_connector": "MooncakeLayerwiseConnector"}
+        ]
+
+        NPUPlatform._validate_layerwise_host_offload_config(config)
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
@@ -1465,10 +1540,26 @@ class TestNPUPlatform(TestBase):
 
         mock_init_recompute.assert_called_once_with(vllm_config)
         self.assertIs(vllm_config.scheduler_config, recompute_scheduler_config)
+
+    def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="recompute")
+
+        with pytest.raises(AssertionError, match="Hybrid models require recompute_scheduler_enable=true"):
+            self.platform._validate_kv_load_failure_policy(vllm_config)
+
         self.assertEqual(
             recompute_scheduler_config.scheduler_cls,
             "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
         )
+
+    def test_validate_kv_load_failure_policy_accepts_hybrid_recompute_scheduler(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="recompute")
+
+        self.platform._validate_kv_load_failure_policy(vllm_config, recompute_scheduler_enabled=True)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

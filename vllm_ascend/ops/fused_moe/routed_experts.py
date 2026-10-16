@@ -322,11 +322,18 @@ def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_in
 
 
 def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
-    """Build the minimal config view consumed by init_eplb_config."""
+    """Build the minimal config view consumed by init_eplb_config.
+
+    The omni-eplb fields are read defensively so this also accepts callers
+    that hand in a partial view without them.
+    """
     return SimpleNamespace(
         expert_map_path=eplb_config.expert_map_path,
         dynamic_eplb=eplb_config.dynamic_eplb,
         num_redundant_experts=num_redundant_experts,
+        enable_omni_eplb=bool(getattr(eplb_config, "enable_omni_eplb", False)),
+        omni_config_file=getattr(eplb_config, "omni_config_file", None),
+        expert_map_record_path=getattr(eplb_config, "expert_map_record_path", None),
     )
 
 

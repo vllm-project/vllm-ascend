@@ -26,7 +26,7 @@ KV Cache supports the following three external storage backends, choose the stor
 | :--- | :--- |
 | Hardware | Supported hardware A2/A3/950PR&950DT Products. |
 | Software Dependencies | For HDK/CANN requirements of each series, see the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference). |
-| Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
+| Model | `kv_load_failure_policy=recompute`: for hybrid attention models (e.g., DeepSeekV4, Qwen 3.5), block-level rollback is not available. On PD-disaggregated Decode nodes, enable `recompute_scheduler_enable` so the complete request is returned to the load-balancing proxy for retry. |
 | Feature Mutex | `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends. |
 
 **Backend-specific**

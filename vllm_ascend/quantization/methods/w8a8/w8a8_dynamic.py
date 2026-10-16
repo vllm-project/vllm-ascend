@@ -167,7 +167,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def __init__(self):
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.convert_weight_to_list
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )

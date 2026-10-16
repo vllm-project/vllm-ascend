@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -85,6 +86,9 @@ class NPUInputBatch(InputBatch):
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
+        self._dsa_row_change_callback: Callable[
+            [list[tuple[int, int]], list[int]], None
+        ] | None = None
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -256,3 +260,60 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+
+    def set_dsa_row_change_callback(
+        self,
+        callback: Callable[
+            [list[tuple[int, int]], list[int]], None
+        ] | None,
+    ) -> None:
+        """Attach the Decode DSA resident-row lifecycle sink."""
+        self._dsa_row_change_callback = callback
+
+    def _notify_dsa_row_change(
+        self,
+        *,
+        moves: list[tuple[int, int]] | None = None,
+        invalidated: list[int] | None = None,
+    ) -> None:
+        if self._dsa_row_change_callback is not None:
+            self._dsa_row_change_callback(moves or [], invalidated or [])
+
+    def add_request(self, request):
+        req_index = super().add_request(request)
+        # Graph warmup/capture runs DSA Install with dummy inputs and can leave
+        # resident metadata in an otherwise empty InputBatch row. Always clear
+        # the row before a real request occupies it.
+        self._notify_dsa_row_change(invalidated=[req_index])
+        return req_index
+
+    def remove_request(self, req_id: str) -> int | None:
+        req_index = self.req_id_to_index.get(req_id)
+        result = super().remove_request(req_id)
+        if result is not None and req_index is not None:
+            self._notify_dsa_row_change(invalidated=[req_index])
+        return result
+
+    def swap_states(self, i1: int, i2: int) -> None:
+        old_ids = (self._req_ids[i1], self._req_ids[i2])
+        super().swap_states(i1, i2)
+        if i1 != i2:
+            invalidated = []
+            for row, req_id in zip((i1, i2), old_ids[::-1]):
+                if req_id is None:
+                    # A swap with an empty row must clear the old resident
+                    # metadata at the source row.
+                    invalidated.append(row)
+            self._notify_dsa_row_change(
+                moves=[(i1, i2), (i2, i1)],
+                invalidated=invalidated,
+            )
+
+    def condense(self) -> None:
+        before = {req_id: index for index, req_id in enumerate(self._req_ids) if req_id is not None}
+        super().condense()
+        after = {req_id: index for index, req_id in enumerate(self._req_ids) if req_id is not None}
+        moves = [(old, after[req_id]) for req_id, old in before.items() if req_id in after and after[req_id] != old]
+        if moves:
+            self._notify_dsa_row_change(moves=moves)

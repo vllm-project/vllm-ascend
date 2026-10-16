@@ -55,6 +55,11 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.npu = _npu  # type: ignore[attr-defined]
     sys.modules["torch"] = _torch
     sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
+else:
+    import torch as _runtime_torch
+
+    if not hasattr(_runtime_torch, "npu"):
+        _runtime_torch.npu = MagicMock()  # type: ignore[attr-defined]
 
 _torch_module = sys.modules.get("torch") or importlib.import_module("torch")
 if not hasattr(_torch_module, "npu"):
@@ -111,6 +116,7 @@ _vllm_mock_modules = [
     "vllm.v1.request",
     "vllm.v1.serial_utils",
     "vllm.v1.worker",
+    "vllm.v1.worker.utils",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
@@ -120,6 +126,9 @@ if _MOCK_VLLM_DEPS:
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+    sys.modules["vllm.v1.worker.utils"].extract_layer_index = (  # type: ignore[attr-defined]
+        lambda layer_name: int(str(layer_name).split(".")[-1])
+    )
 
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
@@ -444,6 +453,14 @@ for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
+_attention_pkg = _make_pkg("vllm_ascend.attention")
+sys.modules["vllm_ascend.attention"] = _attention_pkg
+_cache_layout = types.ModuleType("vllm_ascend.attention.cache_layout")
+_cache_layout.stable_model_fingerprint = (  # type: ignore[attr-defined]
+    lambda payload: str(payload)
+)
+sys.modules["vllm_ascend.attention.cache_layout"] = _cache_layout
+
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
@@ -453,6 +470,26 @@ _distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # 
     return_value=1
 )
 sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
+
+_kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
+_kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+_workspace_fence = types.ModuleType(
+    "vllm_ascend.distributed.kv_transfer.layer_workspace_fence"
+)
+
+
+class _FakeRequestChunkKey:
+    def __init__(self, request_id, request_generation, chunk_id):
+        self.request_id = request_id
+        self.request_generation = request_generation
+        self.chunk_id = chunk_id
+
+
+_workspace_fence.RequestChunkKey = _FakeRequestChunkKey  # type: ignore[attr-defined]
+sys.modules[
+    "vllm_ascend.distributed.kv_transfer.layer_workspace_fence"
+] = _workspace_fence
 
 # mooncake_backend imports get_global_rank from the real
 # vllm_ascend.distributed.parallel_state, whose import chain pulls in vllm.
