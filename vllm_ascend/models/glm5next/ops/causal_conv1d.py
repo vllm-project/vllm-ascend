@@ -26,7 +26,8 @@ def causal_conv1d(
     if cache_indices.shape[0] == 0:
         return output
     kernel_state = conv_state
-    # Match Kimi K3: pass one contiguous cache index per request to AscendC.
+    # GLM metadata shares a contiguous vector across this group's layers.
+    # Standalone callers can still pass a matrix, using its first column.
     kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
     null_block_id = 0
     # AscendC updates page- and row-strided SD states in place. Keep staging

@@ -20,6 +20,8 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
+    AscendGDNContiguousConvMetadataBackend,
+    AscendGDNContiguousConvMetadataBuilder,
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
@@ -342,7 +344,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNContiguousConvMetadataBackend
+    assert AscendGDNContiguousConvMetadataBackend.get_builder_cls() is AscendGDNContiguousConvMetadataBuilder
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -1459,3 +1462,86 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
+
+
+def test_contiguous_conv_indices_are_shared_by_prefill_and_decode_within_each_group(monkeypatch):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    builders = [
+        _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=0,
+            builder_cls=AscendGDNContiguousConvMetadataBuilder,
+        )
+        for _ in range(2)
+    ]
+    common = create_common_attn_metadata(BatchSpec([5, 12], [1, 8]), 16, torch.device("cpu"))
+    indices_by_group = []
+    for builder, slots in zip(builders, ([10, 20], [100, 200])):
+        common.block_table_tensor = torch.tensor([[slot, slot + 1] for slot in slots], dtype=torch.int32)
+        metadata = builder.build(0, common)
+        prefill_indices = metadata.non_spec_prefill_metadata.causal_conv1d.cache_indices
+        decode_indices = metadata.non_spec_decode_metadata.causal_conv1d.cache_indices
+        assert prefill_indices.shape == (2,)
+        assert prefill_indices.is_contiguous()
+        assert prefill_indices.data_ptr() == decode_indices.data_ptr() == builder._non_spec_conv_indices.data_ptr()
+        assert prefill_indices.tolist() == slots
+        assert metadata.non_spec_state_indices_tensor.tolist() == slots
+        assert metadata.non_spec_state_indices_tensor.data_ptr() == common.block_table_tensor.data_ptr()
+        indices_by_group.append(prefill_indices)
+
+    assert indices_by_group[0].data_ptr() != indices_by_group[1].data_ptr()
+    common.block_table_tensor = torch.tensor([[30, 31], [40, 41]], dtype=torch.int32)
+    refreshed = builders[0].build(0, common)
+    assert refreshed.non_spec_prefill_metadata.causal_conv1d.cache_indices.data_ptr() == indices_by_group[0].data_ptr()
+    assert indices_by_group[0].tolist() == [30, 40]
+    assert indices_by_group[1].tolist() == [100, 200]
+
+
+def test_contiguous_spec_conv_indices_reuse_graph_buffer_and_clear_without_drafts():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        builder_cls=AscendGDNContiguousConvMetadataBuilder,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([4, 4, 0, 0], [4, 4, 0, 0]), 16, torch.device("cpu"))
+    captured_conv = None
+    for offset in (10, 30):
+        common.block_table_tensor = torch.arange(16, dtype=torch.int32).view(4, 4) + offset
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=torch.tensor([2, 4, 99, 99], dtype=torch.int32),
+            num_decode_draft_tokens_cpu=torch.tensor([3, 3, -1, -1], dtype=torch.int32),
+            num_actual_reqs=2,
+        )
+        conv = metadata.spec_decode_metadata.spec_causal_conv1d
+        assert conv.cache_indices.shape == (4,)
+        assert conv.cache_indices.is_contiguous()
+        assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+        assert conv.cache_indices.tolist() == [offset, offset + 4, NULL_BLOCK_ID, NULL_BLOCK_ID]
+        assert metadata.spec_state_indices_tensor.shape == (4, 4)
+        assert torch.equal(metadata.spec_state_indices_tensor[:2], common.block_table_tensor[:2])
+        assert torch.all(metadata.spec_state_indices_tensor[2:] == NULL_BLOCK_ID)
+        if captured_conv is not None:
+            assert conv.cache_indices.data_ptr() == captured_conv.cache_indices.data_ptr()
+            assert captured_conv.cache_indices.tolist() == conv.cache_indices.tolist()
+        captured_conv = conv
+
+    no_drafts = create_common_attn_metadata(BatchSpec([1, 1, 0, 0], [1, 1, 0, 0]), 16, torch.device("cpu"))
+    metadata = builder.build(
+        0,
+        no_drafts,
+        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
+    )
+    assert metadata.spec_decode_metadata is None
+    assert torch.all(captured_conv.cache_indices == PAD_SLOT_ID)
+    assert torch.count_nonzero(captured_conv.query_start_loc) == 0
+    # Ordinary graph decode already owns a contiguous vector; reuse it directly.
+    assert (
+        metadata.non_spec_decode_metadata.causal_conv1d.cache_indices.data_ptr()
+        == metadata.non_spec_state_indices_tensor.data_ptr()
+    )
