@@ -66,7 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -145,6 +145,8 @@ class NPUModelRunner(GPUModelRunner):
     max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Keep exact host counts until all active consumers are known.
+        self._skip_spec_cpu_length_sync = False
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.sparse_kv_offload_manager = None
@@ -421,6 +423,8 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        # Reinitialization can change the active attention backends.
+        self._skip_spec_cpu_length_sync = False
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
         kv_cache_config = deepcopy(kv_cache_config)
@@ -531,6 +535,8 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+        self._skip_spec_cpu_length_sync = self._can_skip_spec_cpu_length_sync()
+        logger.info("Speculative CPU length synchronization bypass enabled: %s", self._skip_spec_cpu_length_sync)
 
         self._fill_c8_mxfp_v_scale_caches()
 
@@ -1228,6 +1234,25 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
+    def _can_skip_spec_cpu_length_sync(self) -> bool:
+        """Use device lengths only for the audited K3/DSpark backends."""
+        parallel = self.vllm_config.parallel_config
+        if (
+            self.model_config.architecture not in {"KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
+            or not getattr(self.speculator, "_draft_mla_uses_device_lengths", False)
+            # Other parallel/offload paths have not been audited for host readers.
+            or parallel.pipeline_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or self.adaptive_verification is not None
+            or self.ascend_config.sparse_kv_offload_config.enabled
+            or self.ascend_config.kvpp_config.size != 1
+        ):
+            return False
+
+        # K3's non-MLA attention uses the KDA device-length path.
+        return all_mla_use_flashmla(self.model)
+
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -1236,10 +1261,7 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
+        """Refresh rejection-corrected host counts when a consumer needs them."""
         if (
             self.use_pp
             and not self.is_last_pp_rank
@@ -1258,9 +1280,8 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # TODO: Gate CPU length synchronization by backend requirements, not
-        # speculative decoding alone. V4.1 uses device lengths; extend this
-        # exemption to other backends that do not need exact CPU seq_lens.
+        # The copy helper skips D2H only when both target and draft
+        # backends are on the audited device-length path.
         # Non-last PP stages receive rejections without owning a speculator.
         if (
             self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
@@ -1274,6 +1295,8 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
+        if self._skip_spec_cpu_length_sync:
+            return
         # Attention metadata still needs exact CPU lengths. This non-blocking
         # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
         # sync point that can break asynchronous scheduling overlap.
@@ -1295,12 +1318,12 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # Speculative decoding needs corrected num_computed_tokens after rejection.
-        # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
-        # so this update also corrects the num_computed_tokens_np used by PCP.
-        if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
-        ) or self.sync_spec_pp_cpu_counts:
+        # Keep the exact host mirror for consumers such as FIA and PCP.
+        # Device-length backends retain the scheduler's CPU upper bound.
+        if not self._skip_spec_cpu_length_sync and (
+            (self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config))
+            or self.sync_spec_pp_cpu_counts
+        ):
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
