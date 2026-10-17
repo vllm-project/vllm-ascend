@@ -251,7 +251,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
     return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
 
-def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig, *, min_workspace_size: int = 0) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
@@ -267,10 +267,20 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     # 4 pages of cache per request
     requested_size = max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size)
     # Every running request still needs room for at least one cache block.
-    min_workspace_size = scheduler_config.max_num_seqs * cache_config.block_size
+    base_min_workspace_size = scheduler_config.max_num_seqs * cache_config.block_size
+    min_workspace_size = max(min_workspace_size, base_min_workspace_size)
     chunked_prefill_workspace_size = max(min(requested_size, capacity), min_workspace_size)
 
-    if requested_size > capacity:
+    if min_workspace_size > max(capacity, base_min_workspace_size):
+        logger.warning_once(
+            "MLA chunked-prefill context-parallel minimum of %d token rows overrides the %d-row capacity from %s; "
+            "the workspace is raised to %d rows to fit one aligned chunk per local fragment.",
+            min_workspace_size,
+            capacity,
+            capacity_source,
+            chunked_prefill_workspace_size,
+        )
+    elif requested_size > capacity:
         if min_workspace_size > capacity:
             logger.warning_once(
                 "MLA chunked-prefill workspace demand of %d token rows exceeds the %d-row capacity from %s, "

@@ -1112,6 +1112,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.scheduler_config.enable_chunked_prefill = True
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.cache_config.block_size = 16
