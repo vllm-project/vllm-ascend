@@ -41,6 +41,22 @@ from vllm_ascend.utils import (
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
 
+# Metadata limits of the fused gmm_dequant_situ_quant kernel. Must stay in
+# sync with the hard limits enforced in
+# csrc/gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h
+# (GMSQ_BM, GMSQ_MAX_M_BLOCKS, GMSQ_MAX_EXPERTS). The Python-side fusion gate
+# mirrors them so oversized batches take the npu_grouped_matmul fallback
+# instead of raising inside the kernel and killing the engine.
+_GMSQ_BM = 128
+_GMSQ_MAX_M_BLOCKS = 256
+_GMSQ_MAX_EXPERTS = 128
+
+
+def _gmm_dequant_situ_quant_padded_m_blocks(num_rows: int, num_experts: int) -> int:
+    """Padded M-block count exactly as the fused kernel computes it."""
+    active_upper_bound = min(num_experts, num_rows)
+    return active_upper_bound + (num_rows - active_upper_bound) // _GMSQ_BM
+
 
 def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
     """Normalize W4A8 weights into one packed tensor per expert."""
@@ -95,6 +111,16 @@ def _gmm_dequant_situ_quant_fusion_supported(
     expert_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
     num_experts = len(expert_weights)
     if not expert_weights or group_list.numel() < num_experts:
+        return False
+    # Reject inputs the fused kernel's metadata TORCH_CHECK would reject, so
+    # oversized batches (e.g. chunked-prefill or preempt-recompute steps where
+    # routed rows ~= tokens * top_k) fall back to npu_grouped_matmul below
+    # instead of crashing the engine. Observed in the wild: a 8064-token
+    # recompute step with top-8 routing produced 64512 padded rows -> 511
+    # M-blocks, far above the kernel's 256-block limit.
+    if num_experts > _GMSQ_MAX_EXPERTS:
+        return False
+    if _gmm_dequant_situ_quant_padded_m_blocks(hidden_states.shape[0], num_experts) > _GMSQ_MAX_M_BLOCKS:
         return False
     expert_scales = w1_scale if isinstance(w1_scale, list) else [w1_scale]
     if len(expert_scales) == 1 and expert_scales[0].dim() >= 2 and expert_scales[0].shape[0] == num_experts:
