@@ -55,9 +55,7 @@ class AddRMSNormQuantPattern(BasePattern):
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                rms_norm_input, residual, rms_norm_weight, None, self.eps
-            )
+            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
@@ -383,12 +381,12 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         profile = get_current_hardware_profile()
 
         for eps in common_epsilons:
+            AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION):
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():
-                AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
 
