@@ -24,7 +24,7 @@
 
 - **Algorithm flow**:
     1. Return without launching a kernel when the block-index tensor is empty.
-    2. Reinterpret source scales as uint8 and make the source contiguous. Read head/group counts and all six destination strides from cache metadata.
+    2. Reinterpret source scales as uint8 and make the source contiguous. Read head/group counts and all six destination strides from cache metadata. Validate the source element count before launching the kernel.
     3. Launch one Triton program per 256 flattened source bytes, masking elements beyond `T * H * G * 2`.
     4. Decompose each flattened index into token, head, group, and pair coordinates. Load block/segment/fragment indices using their actual strides.
     5. Promote address coordinates to int64, calculate the destination offset, and store the unchanged source byte directly. No cache-wide temporary view or writeback is created.
@@ -48,7 +48,7 @@ All three arguments are required. The Python function returns `None` and updates
 ## Constraints
 
 - Source, destination, and all index tensors must reside on the same NPU. CPU tensors are handled by the attention backend's separate reference path; they are not inputs to this Triton entry point.
-- Source shape and element size must satisfy `key_scale.view(torch.uint8).numel() == T * H * G * 2`. The current C8 caller uses `B=512`, `D=256`, and local KV-head counts of 1 or 2. The test allocation may use fewer pages than a model deployment while preserving these model layout dimensions.
+- Source shape and element size must satisfy `key_scale.view(torch.uint8).numel() == T * H * G * 2`. For a nonempty index batch, a mismatched source element count raises `ValueError` before kernel launch, including under `python -O`. The current C8 caller uses `B=512`, `D=256`, and local KV-head counts of 1 or 2. The test allocation may use fewer pages than a model deployment while preserving these model layout dimensions.
 - The cache must be a valid, non-overlapping PA_NZ byte view. Its last dimension is 2 and its token-fragment dimension is 16. Actual page strides may include K/V payloads, V scales, and padding; the kernel uses the supplied strides rather than assuming contiguous pages.
 - Indices must already be valid: `0 <= block_ids < num_blocks`, `0 <= segment_ids < B // 16`, and `0 <= fragment_ids < 16`. The kernel does not clamp or bounds-check their values. The attention caller clamps padded slot `-1` to the reserved null slot before constructing these indices.
 - Real tokens must not target the same destination element. Padded rows may target the reserved null slot, whose final value is ignored. Deterministic ordering for overlapping writes is N/A.
@@ -82,11 +82,12 @@ pytest --confcutdir=tests/e2e/nightly/single_node/ops -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
 ```
 
-The suite defines 52 NPU cases covering:
+The suite defines 58 NPU cases covering:
 
 - Model layout dimensions `B=512`, `D=256`, and `H=1/2`, with 1, 64, and 65 token rows. Page padding of 0/256 bytes, storage offsets of 0/4096 bytes, and contiguous/noncontiguous sources yield 48 combinations. Both uint8 and E8M0 source views are exercised, including partial 256-byte programs.
 - Eager and ACL graph replay in each combination, changing source values and slot indices in the captured buffers. The complete raw allocation, including unrelated cache components and padding, is checked against a CPU reference.
 - An empty source/index batch preserving the complete cache allocation.
+- Six source-size mismatch cases for `H=1/2` and zero, too few, or too many source rows. Each requires `ValueError`, no kernel launch, and unchanged cache bytes. These cases can also run under `python -O`.
 - Two compilation-reuse cases with `H=1/2`, checking byte-exact results at token counts 1, 2, 31, 32, 33, 63, 64, 65, and 129. Prefix slices keep buffer addresses and strides fixed, and a JIT compilation hook verifies that changing only the token count does not trigger further compilation after the first call.
 - An independently scheduled ACL SDMA transfer of a 4096-byte marker into an unselected page during graph replay. Two submission orders, five delays, and four repetitions exercise 40 interleavings. The scatter addresses block 1 and the transfer addresses block 50.
 

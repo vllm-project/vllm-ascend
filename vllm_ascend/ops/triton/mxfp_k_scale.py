@@ -59,8 +59,10 @@ def scatter_k_scales(
         return
     num_heads, num_groups = cache.shape[1], cache.shape[3]
     source = key_scale.view(torch.uint8).contiguous()
-    assert source.numel() == block_ids.numel() * num_heads * num_groups * 2
     num_elements = source.numel()
+    expected_elements = block_ids.numel() * num_heads * num_groups * 2
+    if num_elements != expected_elements:
+        raise ValueError(f"K-scale source contains {num_elements} elements; expected {expected_elements}.")
     block_size = 256
     _scatter_k_scale_kernel[(triton.cdiv(num_elements, block_size),)](
         source,

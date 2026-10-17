@@ -3,6 +3,7 @@
 """Packed K-scale writes must preserve bytes owned by other requests."""
 
 import ctypes
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -104,6 +105,27 @@ def test_empty_scatter_preserves_cache():
     before = raw.cpu()
     indices = mxfp_k_scale_slot_index(torch.empty(0, dtype=torch.int64, device="npu"), 512)
     scatter_mxfp_k_scale_cache(torch.empty((0, 1, 4, 2), dtype=torch.uint8, device="npu"), cache, indices)
+    torch.testing.assert_close(raw.cpu(), before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("heads", [1, 2])
+@pytest.mark.parametrize("source_tokens", [0, 1, 3])
+def test_mismatched_source_size_is_rejected_before_launch(heads, source_tokens, monkeypatch):
+    blocks, dim = 2, 256
+    raw = torch.full((blocks * mxfp_packet_size_bytes(heads, 512, dim, dim),), 13, dtype=torch.int8, device="npu")
+    cache = mxfp_paged_cache_views(raw, blocks, heads, dim, dim, 512)[2]
+    before = raw.cpu()
+    slots = torch.tensor([512, 527], dtype=torch.int64, device="npu")
+    indices = mxfp_k_scale_slot_index(slots, 512)
+    source = torch.full((source_tokens, heads, dim // 64, 2), 120, dtype=torch.uint8, device="npu")
+    kernel = MagicMock()
+    monkeypatch.setattr("vllm_ascend.ops.triton.mxfp_k_scale._scatter_k_scale_kernel", kernel)
+
+    message = f"K-scale source contains {source.numel()} elements; expected {2 * heads * 8}."
+    with pytest.raises(ValueError, match=message):
+        scatter_mxfp_k_scale_cache(source, cache, indices)
+
+    kernel.__getitem__.assert_not_called()
     torch.testing.assert_close(raw.cpu(), before, rtol=0, atol=0)
 
 
