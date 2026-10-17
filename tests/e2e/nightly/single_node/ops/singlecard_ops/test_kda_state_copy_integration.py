@@ -31,12 +31,13 @@ def _forbid_compilation(monkeypatch):
 
 
 @pytest.mark.parametrize("to_cache", [False, True])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
-def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
-    """Direct launches preserve the complete Triton-bound kernel signature."""
+def test_direct_compiled_launch_uses_only_runtime_arguments(to_cache, index_dtype):
+    """Compiled launchers reject constexpr values already bound by prepare."""
     state = torch.empty((8, 1, 1, 1), dtype=torch.float32, device="npu")
     packed = torch.empty((2, 1, 1, 1), dtype=torch.float32, device="npu")
-    indices = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+    indices = torch.tensor([0, 1], dtype=index_dtype, device="npu")
     flags = torch.ones(2, dtype=torch.bool, device="npu")
     launches = []
 
@@ -44,24 +45,23 @@ def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
         def __getitem__(self, grid):
             assert grid == (2, 3, 1)
 
-            def launch(*args):
-                launches.append(args)
+            def launch(cache, packed, indices, flags, rows, page_stride, payload, index_stride, flag_stride):
+                launches.append((cache, packed, indices, flags, rows, page_stride, payload, index_stride, flag_stride))
 
             return launch
 
     plan = KDAStateCopyPlan()
     plan._tiles = 3
     plan._scalars = (8, 1, 1, 1)
-    plan._compiled = {(torch.int32, to_cache): RecordingKernel()}
+    plan._compiled = {(index_dtype, to_cache): RecordingKernel()}
     plan._launch(state, packed, indices, flags, to_cache=to_cache)
 
     (args,) = launches
-    assert len(args) == 12
+    assert len(args) == 9
     for actual, expected in zip(args[:3], (state, packed, indices)):
         assert actual is expected
     assert args[3] is (indices if to_cache else flags)
     assert args[4:9] == (*plan._scalars, 0 if to_cache else 1)
-    assert args[9:] == (to_cache, not to_cache, lowlevel.DEFAULT_KDA_BLOCK_SIZE)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
