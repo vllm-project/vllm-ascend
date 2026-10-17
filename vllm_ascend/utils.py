@@ -1042,10 +1042,15 @@ def enable_dense_sp(vllm_config=None) -> bool:
         return False
 
     parallel_config = vllm_config.parallel_config
-    if parallel_config.tensor_parallel_size <= 1 or parallel_config.pipeline_parallel_size != 1:
+    tp_size = getattr(parallel_config, "tensor_parallel_size", 0)
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 0)
+    if tp_size <= 1 or pp_size != 1:
         return False
 
-    hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
     if getattr(hf_text_config, "model_type", None) not in DENSE_SP_MODEL_TYPES:
         return False
 
