@@ -45,6 +45,8 @@ from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import maybe_trans_nz
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
+NZ_WEIGHT_ALIGNMENT = 16
+
 
 def unquantized_gemm(
     x: torch.Tensor,
@@ -106,6 +108,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        is_batched_wo_a = isinstance(layer.prefix, str) and layer.prefix.endswith("wo_a")
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
@@ -115,7 +118,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # keep the captured graph's weight reference to the updated weight
             # during RL weight updates.
             replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
-        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
+        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion and not is_batched_wo_a:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
@@ -129,6 +132,14 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             layer.weight.data = (
                 layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
             )
+
+        if is_batched_wo_a and layer.weight.data.ndim == 3:
+            # Convert after grouping, including weights marked to skip the
+            # generic 2D conversion. A3/A5 BF16 WeightNz uses this 3D layout;
+            # mode 2 enables NZ for floating-point weights, mode 0/1 keeps ND.
+            # A3 requires both matrix dimensions to be multiples of 16.
+            if layer.weight.shape[-2] % NZ_WEIGHT_ALIGNMENT == 0 and layer.weight.shape[-1] % NZ_WEIGHT_ALIGNMENT == 0:
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
 
     def apply(
         self,
