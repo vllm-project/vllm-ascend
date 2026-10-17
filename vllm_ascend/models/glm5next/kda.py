@@ -28,6 +28,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -35,6 +36,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.models.glm5next.recoverssm import KDARecoverSSMAdapter, validate_recoverssm_config
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 
 
@@ -240,13 +242,22 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.g_b_proj",
         )
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        # Ascend MXFP8 checkpoints include o_proj scales even though the input
+        # KDA projections above use BF16. Retain their quantization loader.
+        o_proj_quant_config = self.quant_config
+        if saved_quant_config is not None and saved_quant_config.get_name() == "ascend":
+            o_proj_quant_config = saved_quant_config
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=o_proj_quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.recoverssm_adapter: KDARecoverSSMAdapter | None = None
+        if ascend_envs.VLLM_ASCEND_ENABLE_EXPERIMENTAL_KDA_RECOVERSSM:
+            validate_recoverssm_config(vllm_config)
+            self.recoverssm_adapter = KDARecoverSSMAdapter(num_spec + 1)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -475,20 +486,37 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if not direct_output:
             core_attn_out.zero_()
         if use_spec:
-            spec_output = recurrent_kda(
-                rearrange(q_spec),
-                rearrange(k_spec),
-                rearrange(v_spec),
-                g1_spec,
-                beta_spec,
-                recurrent_state,
-                spec_query_start_loc[: num_spec_decodes + 1],
-                spec_state_indices_tensor,
-                self.A_log,
-                self.dt_bias,
-                lower_bound,
-                num_accepted_tokens,
-            )
+            if self.recoverssm_adapter is not None:
+                spec_output = self.recoverssm_adapter.verify(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    recurrent_state,
+                    spec_query_start_loc[: num_spec_decodes + 1],
+                    spec_state_indices_tensor,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                    num_accepted_tokens,
+                    spec_sequence_masks,
+                )
+            else:
+                spec_output = recurrent_kda(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    recurrent_state,
+                    spec_query_start_loc[: num_spec_decodes + 1],
+                    spec_state_indices_tensor,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                    num_accepted_tokens,
+                )
             core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:

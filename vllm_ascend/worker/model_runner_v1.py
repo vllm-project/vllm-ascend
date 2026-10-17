@@ -387,6 +387,7 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
         self.lookback_token_ids: CpuGpuBuffer | None = None
+        self.kda_recoverssm_adapters = ()
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
@@ -2905,6 +2906,11 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        # Commit the target layers before MTP drafting or the next state copy.
+        # Adapters own only this synchronous step's pending vector records.
+        for adapter in self.kda_recoverssm_adapters:
+            adapter.commit(sampler_output.sampled_token_ids)
+
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
@@ -4582,6 +4588,16 @@ class NPUModelRunner(GPUModelRunner):
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_memory
+        self.kda_recoverssm_adapters = tuple(
+            module.recoverssm_adapter
+            for module in self.model.modules()
+            if getattr(module, "recoverssm_adapter", None) is not None
+        )
+        if self.kda_recoverssm_adapters:
+            logger.info(
+                "Experimental KDA RecoverSSM enabled for %d target layers; native cache allocation retained.",
+                len(self.kda_recoverssm_adapters),
+            )
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()

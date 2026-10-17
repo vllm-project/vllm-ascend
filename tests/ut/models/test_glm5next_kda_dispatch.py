@@ -11,13 +11,17 @@ import vllm_ascend.models.glm5next.kda as model_kda
 
 @pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
+@pytest.mark.parametrize("recover", [False, True])
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, dim_first, recover
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
     layer.local_num_heads = 1
     layer.head_dim = layer.local_projection_size = 128
     layer.kda_lower_bound = -4.0
+    layer.recoverssm_adapter = None
     state_shape = (8, 384, 6) if dim_first else (8, 6, 384)
     layer.kv_cache = (torch.zeros(state_shape, dtype=torch.bfloat16), torch.zeros(8, 1, 128, 128))
     layer._conv_state_dim_first = dim_first
@@ -173,6 +177,15 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
+    if recover:
+
+        def verify(*args):
+            assert args[-1] is metadata.spec_sequence_masks
+            result = recurrent(*args[:-1])
+            calls[-1] = "recover"
+            return result
+
+        layer.recoverssm_adapter = SimpleNamespace(verify=verify)
     qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
     layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
@@ -180,7 +193,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
     assert torch.count_nonzero(out[:, tokens:]) == 0
-    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    expected_recurrence = "recover" if recover and speculative else "recurrent"
+    assert calls == ([expected_recurrence] if spec_only else [expected_recurrence, "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
 
