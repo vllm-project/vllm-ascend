@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -197,6 +198,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         return self.logits_processor.get_top_tokens(mtp_layer.shared_head.head, hidden_states)
 
 
+@support_torch_compile
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
