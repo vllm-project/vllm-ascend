@@ -55,7 +55,6 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -112,8 +111,22 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402

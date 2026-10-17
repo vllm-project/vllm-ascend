@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
@@ -52,6 +51,11 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
+# that prefix caching requires `mamba_cache_mode="align"`; the v0.31.0 lane still
+# allowed `"none"` together with `enable_caching=True`.
+_MAMBA_CACHING_MODE = "none" if vllm_version_is("0.31.0") else "align"
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -1016,7 +1020,8 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
         upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
-    assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    live_module = kv_cache_utils_patch._kv_cache_planning
+    assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
     expected_num_blocks = 7
     replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
@@ -1310,7 +1315,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         block_size=16,
         shapes=((1,),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="none",
+        mamba_cache_mode=_MAMBA_CACHING_MODE,
     )
     block_pool = BlockPool(
         10,

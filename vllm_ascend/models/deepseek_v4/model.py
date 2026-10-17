@@ -72,7 +72,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -97,6 +96,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -106,6 +106,14 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.31.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+else:
+    from transformers import DeepseekV4Config
 
 sequence_parallel_chunk = sp_shard
 

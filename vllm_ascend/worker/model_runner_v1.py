@@ -199,7 +199,6 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -267,6 +266,18 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+
+# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.31.0 lane
+# still ships `AscendMedusaProposer`. On main a placeholder keeps the drafter
+# type union and the dispatch isinstance resolving; the config rejects
+# `method="medusa"` before the proposer could be constructed.
+if vllm_version_is("0.31.0"):
+    from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
+else:
+
+    class AscendMedusaProposer:
+        pass
+
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]

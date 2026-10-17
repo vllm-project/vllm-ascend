@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
@@ -50,8 +49,17 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.utils import (
     npu_stream_switch,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.31.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+else:
+    from transformers import DeepseekV4Config
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
