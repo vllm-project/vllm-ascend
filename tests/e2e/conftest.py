@@ -62,7 +62,6 @@ from tests.e2e.coverage_taxonomy import (
     validate_coverage_marker,
 )
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.process_cleanup import shutdown_engine
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -1204,7 +1203,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
-            shutdown_engine(self.model.llm_engine.engine_core)
+            self.model.llm_engine.engine_core.shutdown()
         finally:
             del self.model
             clear_ascend_config()
