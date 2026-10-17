@@ -133,6 +133,20 @@ def test_kimi_routed_nz_fallback_preserves_batched_input_shape():
     with patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=False):
         actual = kimi_k3.AscendKimiK3RoutedLinear.apply_projection(layer, torch.randn(1, 4, 128))
     assert actual is output
+def test_kimi_k3_router_linear_declares_fp32_output(monkeypatch):
+    """The external-router dtype contract must match its FP32 matmul output."""
+
+    def fake_ascend_linear_init(self, *args, **kwargs):
+        nn.Module.__init__(self)
+
+    monkeypatch.setattr(
+        kimi_k3.AscendReplicatedLinear,
+        "__init__",
+        fake_ascend_linear_init,
+    )
+    gate = kimi_k3.KimiK3RouterLinear(16, 8)
+
+    assert gate.out_dtype is torch.float32
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -189,7 +203,8 @@ def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
         assert cast.call_count == (0 if fa_quant_layer else 2)
 
 
-def test_kimi_moe_leaves_routed_input_transform_to_runner():
+@pytest.mark.parametrize("internal_router", [False, True])
+def test_kimi_moe_leaves_routed_input_transform_to_runner(internal_router):
     moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
     nn.Module.__init__(moe)
     hidden_states = torch.randn(4, 8)
@@ -197,13 +212,18 @@ def test_kimi_moe_leaves_routed_input_transform_to_runner():
     output = torch.randn(4, 8)
     moe.gate = MagicMock(return_value=(router_logits, None))
     moe.experts = MagicMock(return_value=output)
+    moe.experts.is_internal_router = internal_router
 
     result = moe.forward(hidden_states)
 
     moe.experts.assert_called_once()
     call_kwargs = moe.experts.call_args.kwargs
     torch.testing.assert_close(call_kwargs["hidden_states"], hidden_states)
-    torch.testing.assert_close(call_kwargs["router_logits"], router_logits)
+    torch.testing.assert_close(
+        call_kwargs["router_logits"],
+        hidden_states if internal_router else router_logits,
+    )
+    assert moe.gate.call_count == (0 if internal_router else 1)
     torch.testing.assert_close(result, output)
 
 
