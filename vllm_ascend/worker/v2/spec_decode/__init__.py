@@ -61,6 +61,12 @@ def init_speculator(
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
+    if speculative_config.use_gemma4_mtp():
+        from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
+            AscendGemma4Speculator,
+        )
+
+        return AscendGemma4Speculator(vllm_config, device)
     if (
         speculative_config.method == "mtp"
         and not speculative_config.use_gemma4_mtp()
