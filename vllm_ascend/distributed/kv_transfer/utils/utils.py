@@ -19,6 +19,17 @@ QOS_KEY = "comm_resource_config.qos"
 PD_QOS_DEFAULT = 1
 QOS_MAX = 4
 
+# HCCL encodes its RDMA timeout as an exponent: the effective timeout of a single
+# attempt is HCCL_RDMA_TIMEOUT_UNIT_US * 2**HCCL_RDMA_TIMEOUT microseconds. The
+# defaults mirror HCCL's own (20 -> ~4.29s per attempt, 7 retries).
+HCCL_RDMA_TIMEOUT_UNIT_US = 4.096
+HCCL_RDMA_TIMEOUT_DEFAULT = 20
+HCCL_RDMA_RETRY_CNT_DEFAULT = 7
+US_PER_MS = 1000
+# Extra headroom (ms) added on top of the worst-case RDMA timeout, so that a
+# legitimately slow transfer is not aborted exactly at the HCCL limit.
+TRANSFER_TIMEOUT_HEADROOM_MS = 3000
+
 
 def inject_qos(qos: int) -> None:
     """Merge P/D QoS before engine initialization, preserving all other fields."""
@@ -88,9 +99,10 @@ def get_transfer_timeout_value():
     ascend_transfer_timeout = os.getenv("ASCEND_TRANSFER_TIMEOUT", "")
     if len(ascend_transfer_timeout) > 0:
         return int(ascend_transfer_timeout)
-    hccl_rdma_timeout = int(os.getenv("HCCL_RDMA_TIMEOUT", "20"))  # type: ignore
-    hccl_rdma_retry_cnt = int(os.getenv("HCCL_RDMA_RETRY_CNT", "7"))  # type: ignore
-    return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 + 3000)
+    hccl_rdma_timeout = int(os.getenv("HCCL_RDMA_TIMEOUT", str(HCCL_RDMA_TIMEOUT_DEFAULT)))  # type: ignore
+    hccl_rdma_retry_cnt = int(os.getenv("HCCL_RDMA_RETRY_CNT", str(HCCL_RDMA_RETRY_CNT_DEFAULT)))  # type: ignore
+    hccl_rdma_timeout_us = HCCL_RDMA_TIMEOUT_UNIT_US * (2**hccl_rdma_timeout) * hccl_rdma_retry_cnt
+    return int(hccl_rdma_timeout_us // US_PER_MS + TRANSFER_TIMEOUT_HEADROOM_MS)
 
 
 @dataclass
