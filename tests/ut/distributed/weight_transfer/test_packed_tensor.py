@@ -889,3 +889,28 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
 
     ptrs = [w[1].storage().data_ptr() for w in weights]
     assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
+
+
+def test_packed_consumer_survives_the_producer_reusing_the_buffer():
+    """The producer reuses one IPC buffer across chunks, so every returned tensor
+    must already own its storage by the time the consumer returns."""
+    expected = torch.arange(4, dtype=torch.float32)
+    packed = expected.view(torch.uint8).clone()
+    source_ptr = packed.storage().data_ptr()
+
+    with _install_fake_rebuild_npu_tensor(packed):
+        weights = packed_npu_ipc_consumer(
+            ipc_handle={"node-0": ("uuid", 16, 0, 0, 0, 0, 0, None)},
+            physical_npu_id="node-0",
+            names=["w"],
+            shapes=[[4]],
+            dtype_names=["float32"],
+            tensor_sizes=[16],
+            device_index=0,
+        )
+        pointers = [t.storage().data_ptr() for _name, t in weights]
+        # The producer starts writing the next chunk immediately.
+        packed.zero_()
+
+    assert torch.equal(weights[0][1], expected)
+    assert source_ptr not in pointers

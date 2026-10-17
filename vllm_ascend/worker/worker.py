@@ -20,7 +20,7 @@
 import copy
 import gc
 import logging
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from types import NoneType
 from typing import Any
 
@@ -298,6 +298,14 @@ class NPUWorker(WorkerBase):
                 "automatically."
             )
         allocator = CaMemAllocator.get_instance()
+        # Free any ordinary-allocator cache blocks (e.g. layerwise reload
+        # temporaries, packed IPC consumer clones) BEFORE re-mapping the
+        # sleep-mode allocations.  Without this, ``wake_up(tags=['kv_cache'])``
+        # after a weight update hits aclrtMallocPhysical OOM (207001) because
+        # the physical memory is still held by the reclaimable cache.
+        gc.collect()
+        with suppress(Exception):  # pluggable allocator may reject it
+            torch.npu.empty_cache()
         allocator.wake_up(tags=tags)
 
         # Restore the buffers after level 2 sleep
@@ -867,7 +875,11 @@ class NPUWorker(WorkerBase):
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
-            context = allocator.use_memory_pool(tag="weights")
+            # DSV4 fix(rl-weight-update): keep the weights pool persistently
+            # mapped across sleep/wake so the ACL graph (captured against the
+            # boot addresses) stays valid after a weight update; the update
+            # loader writes in-place into the original storage.
+            context = allocator.use_memory_pool(tag=CaMemAllocator.sleep_persistent_tag)
         else:
             from contextlib import nullcontext
 

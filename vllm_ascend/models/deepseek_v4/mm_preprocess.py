@@ -385,15 +385,43 @@ class DeepseekV4VLDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekV4VLProcessi
 
 
 class DeepseekV4VLMultiModalProcessor(BaseMultiModalProcessor[DeepseekV4VLProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Combine the local image transform with v0.27 tokenization."""
-        processor = self.info.get_hf_processor(**mm_kwargs)
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str | None:
+        """Dummy prompt for the profiler's multi-modal pass.
+
+        ``DeepseekV4VLProcessor.__call__`` takes ``text`` alongside ``images``,
+        so vLLM has to supply it; the default implementation returns ``None``
+        and the processor then raises "You need to specify either `text` or
+        `text_target`".
+        """
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(self, *args, **kwargs) -> BatchFeature:
+        """Combine the local image transform with tokenization.
+
+        Accepts both call conventions of the base class: the current
+        ``(hf_data, hf_kwargs)`` form -- where ``hf_data`` is
+        ``{"text": <prompt>, "images": [...]}`` -- and the older
+        ``(prompt, mm_data, mm_kwargs, tok_kwargs)`` form, so the same override
+        works against either vLLM revision.
+        """
+        hf_data = args[0] if args else kwargs.pop("hf_data")
+        hf_kwargs = args[1] if len(args) > 1 else kwargs.pop("hf_kwargs", {})
+
+        if isinstance(hf_data, str):
+            # Legacy per-part convention.
+            prompt: str | None = hf_data
+            mm_data: Mapping[str, object] = args[1] if len(args) > 1 else {}
+            tok_kwargs: Mapping[str, object] = args[3] if len(args) > 3 else {}
+        else:
+            # Current convention: the base class folds the prompt into
+            # ``hf_data["text"]``.  ``hf_kwargs`` carries tokenization options
+            # (notably ``truncation=False``) that the processor must not see --
+            # ``DeepseekV4VLProcessingInfo.get_hf_processor`` rejects kwargs.
+            prompt = hf_data.get("text")
+            mm_data = hf_data
+            tok_kwargs = {k: v for k, v in (hf_kwargs or {}).items() if k != "text"}
+
+        processor = self.info.get_hf_processor()
         processed = processor(
             text=prompt,
             images=cast(Sequence[Image.Image] | None, mm_data.get("images")),

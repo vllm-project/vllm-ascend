@@ -333,16 +333,23 @@ class DeepseekV4MoE(nn.Module):
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         self.gate.bias_vl = None
         if getattr(config, "vision_n_layers", 0) > 0:
+            # Deterministic zeros: this VL correction bias is not part of the
+            # checkpoint or the weight-update payload, so ``torch.empty`` would
+            # leave uninitialized memory that differs between two servers
+            # loading the very same weights (and is invisible to the layerwise
+            # coverage report, since ``bias_vl`` is a SKIP_LOAD_TENSORS entry).
             self.gate.bias_vl = nn.Parameter(
-                torch.empty(
+                torch.zeros(
                     config.n_routed_experts,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
             )
         if self.hash:
-            # MC2 dispatch/combine fails
-            # in the dummy profile run if a token repeats an expert id
+            # MC2 dispatch/combine fails in the dummy profile run if a token
+            # repeats an expert id, so spread the hash-router table
+            # deterministically instead of using empty/zero storage (zeros also
+            # route every token to the same expert set).
             token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
             expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
             token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
@@ -667,6 +674,33 @@ class DeepseekV4Attention(nn.Module):
     ) -> torch.Tensor:
         return self.dsa_attn(positions, hidden_states, llama_4_scaling)
 
+    def reinitialize_runtime_params(self) -> None:
+        """Restore weightless-norm identity weights and attention scale mirrors.
+
+        ``q_norm_without_weight`` is an ``RMSNorm(has_weight=False)`` whose
+        ``weight`` stays a plain (non-Parameter) tensor of ones used as the
+        identity multiplier by the A5 q-RMS kernel path.  After a level-2
+        sleep (and layerwise reload that never refills it, since it is absent
+        from the checkpoint) the storage comes back zeroed, which makes the
+        served-side attention output collapse to zeros.  The attention scale
+        mirrors live on the DSA attention module (``dsa_attn``), so sweep them
+        there as well: a ``getattr`` on this module would never see them.
+        """
+        qnw = getattr(self, "q_norm_without_weight", None)
+        if qnw is not None:
+            w = getattr(qnw, "weight", None)
+            if w is not None and not isinstance(w, torch.nn.Parameter) and w.numel() > 0:
+                with torch.no_grad():
+                    w.fill_(1.0)
+        for _owner in (self, getattr(self, "dsa_attn", None)):
+            if _owner is None:
+                continue
+            for _name in ("_k_scale_cpu", "_v_scale_cpu"):
+                _s = getattr(_owner, _name, None)
+                if isinstance(_s, torch.Tensor) and _s.numel() > 0:
+                    with torch.no_grad():
+                        _s.fill_(1.0)
+
 
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
@@ -806,6 +840,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
+        # CPU snapshot of checkpoint-supplied runtime tensors (hash-router
+        # tid2eid, VL bias_vl, e-score correction bias, attention sinks),
+        # captured by AscendDeepseekV4ForCausalLM.load_weights at boot.  It
+        # survives level-2 sleeps (CPU memory is not discarded) and lets
+        # reinitialize_runtime_params() restore the exact trained values after
+        # a weight update instead of clobbering them with constructor values.
+        self._runtime_tensor_backup: dict[str, torch.Tensor] | None = None
+        self._runtime_tensor_backup_done = False
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -894,6 +936,103 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
+
+    def reinitialize_runtime_params(self) -> None:
+        """Restore served-side runtime tensors after sleep + layerwise reload.
+
+        The level-2 sleep discards every device allocation, and the layerwise
+        reload only streams checkpoint weights, so the runtime-derived tensors
+        (hash-router ``tid2eid``, ``bias_vl``, ``e_score_correction_bias``,
+        attention sinks, weightless-norm identity weights, DSA RoPE caches)
+        would otherwise stay uninitialized or zero-filled.  Checkpoint-supplied
+        values are restored from the boot-time CPU snapshot; the rest are
+        recomputed from the constructor formulas.
+        """
+        backup = getattr(self, "_runtime_tensor_backup", None) or {}
+        cfg = self.config
+        for li, layer in enumerate(getattr(self, "layers", ()) or ()):  # type: ignore[attr-defined]
+            lidx = getattr(layer, "layer_idx", li)
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                continue
+            gate = getattr(mlp, "gate", None)
+            if gate is None:
+                continue
+
+            tid2eid = getattr(gate, "tid2eid", None)
+            if tid2eid is not None and tid2eid.numel() == cfg.vocab_size * cfg.num_experts_per_tok:
+                saved = backup.get(f"L{lidx}.tid2eid")
+                with torch.no_grad():
+                    if saved is not None and saved.numel() == tid2eid.numel():
+                        tid2eid.copy_(saved.to(tid2eid.device))
+                    else:
+                        token_ids = torch.arange(cfg.vocab_size, dtype=torch.int32, device=tid2eid.device).unsqueeze(1)
+                        expert_offsets = torch.arange(
+                            cfg.num_experts_per_tok, dtype=torch.int32, device=tid2eid.device
+                        ).unsqueeze(0)
+                        tid2eid.copy_((token_ids + expert_offsets) % cfg.n_routed_experts)
+
+            for name in ("bias_vl", "e_score_correction_bias"):
+                param = getattr(gate, name, None)
+                if isinstance(param, torch.nn.Parameter):
+                    saved = backup.get(f"L{lidx}.{name}")
+                    with torch.no_grad():
+                        if saved is not None and saved.numel() == param.numel():
+                            param.copy_(saved.to(param.device))
+                        else:
+                            param.zero_()
+
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None:
+                sink = getattr(attn, "attn_sink", None)
+                if isinstance(sink, torch.nn.Parameter):
+                    saved = backup.get(f"L{lidx}.attn_sink")
+                    with torch.no_grad():
+                        if saved is not None and saved.numel() == sink.numel():
+                            sink.copy_(saved.to(sink.device))
+                        else:
+                            sink.zero_()
+                # The DSA RoPE tables are module buffers of the rotary embedding
+                # and are re-derived in place by its own hook.
+                rotary = getattr(attn, "rotary_emb", None)
+                if rotary is not None and callable(getattr(rotary, "reinitialize_runtime_params", None)):
+                    rotary.reinitialize_runtime_params()
+
+                attention_reinit = getattr(attn, "reinitialize_runtime_params", None)
+                if callable(attention_reinit):
+                    attention_reinit()
+
+        # Generic sweep: every weightless RMSNorm keeps its identity weight as a
+        # plain tensor (has_weight=False -> no nn.Parameter, absent from the
+        # checkpoint); after sleep+wake / layerwise reload the storage is
+        # zeroed and nothing refills it.  Restore the constructor value (ones).
+        for _mod in self.modules():
+            if not getattr(_mod, "has_weight", True) and hasattr(_mod, "weight"):
+                _w = getattr(_mod, "weight", None)
+                if isinstance(_w, torch.Tensor) and not isinstance(_w, torch.nn.Parameter) and _w.numel() > 0:
+                    with torch.no_grad():
+                        _w.fill_(1.0)
+        # The generic attention glue registers ``_k_scale``/``_v_scale``/
+        # ``_q_scale``/``_prob_scale`` as constants (``torch.tensor(1.0)``), but
+        # a dummy/meta-started engine materialises those scalar buffers from
+        # uninitialised storage, so the live-update lane can end up with a
+        # garbage descale factor while a startup-loaded server keeps 1.0.  They
+        # are not weight-derived in a bf16-KV configuration, so restore the
+        # default (skipping meta tensors, whose values cannot be read).
+        for _mod in self.modules():
+            _buffers = getattr(_mod, "_buffers", None)
+            if not _buffers:
+                continue
+            for _sname in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+                _buf = _buffers.get(_sname)
+                if (
+                    isinstance(_buf, torch.Tensor)
+                    and _buf.numel() == 1
+                    and _buf.device.type != "meta"
+                    and float(_buf.detach().cpu()) != 1.0
+                ):
+                    with torch.no_grad():
+                        _buf.fill_(1.0)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1093,6 +1232,10 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def reinitialize_runtime_params(self) -> None:
+        """Delegate to the backbone (hash-router tables, VL bias, sinks)."""
+        self.model.reinitialize_runtime_params()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1167,6 +1310,99 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         # Attention heads per rank
         heads_per_rank = self.config.num_attention_heads // tp_size
         head_start = tp_rank * heads_per_rank
+
+        # ---- HF checkpoint -> served-model name translation (weight update) ----
+        # On a live weight update the trainer enumerates an HF
+        # ``DeepseekV4ForCausalLM`` ``from_config`` model, so the incoming
+        # parameter names follow the HF layout (``q_a_proj``, ``sinks``,
+        # ``mlp.experts.gate_up_proj`` fused tensors, ...) that the served model
+        # does not use.  Translate every incoming name onto the served-model
+        # layout and expand fused routed-expert tensors into per-expert weights
+        # before the normal loading pipeline below.  ``<old,new>`` pairs mirror
+        # the HF -> served rename table in
+        # ``tests/e2e/pull_request/rlhf/weight_transfer_test_utils.py``.
+        _dsv4_self_attn_renames = (
+            ("self_attn.compressor.position_bias", "self_attn.compressor.ape"),
+            ("self_attn.compressor.kv_proj.weight", "self_attn.compressor.wkv.weight"),
+            ("self_attn.compressor.gate_proj.weight", "self_attn.compressor.wgate.weight"),
+            ("self_attn.compressor.kv_norm.weight", "self_attn.compressor.norm.weight"),
+            ("self_attn.q_a_proj.weight", "self_attn.wq_a.weight"),
+            ("self_attn.q_a_norm.weight", "self_attn.q_norm.weight"),
+            ("self_attn.q_b_proj.weight", "self_attn.wq_b.weight"),
+            ("self_attn.kv_proj.weight", "self_attn.wkv.weight"),
+            ("self_attn.o_a_proj.weight", "self_attn.wo_a.weight"),
+            ("self_attn.o_b_proj.weight", "self_attn.wo_b.weight"),
+        )
+        # HF nests the served indexer under the compressor
+        # (``self_attn.compressor.indexer.*``); the served model keeps the
+        # indexer as a sibling of the compressor, with its own nested
+        # ``compressor`` module.
+        _dsv4_indexer_renames = (
+            ("self_attn.compressor.indexer.position_bias", "self_attn.indexer.compressor.ape"),
+            ("self_attn.compressor.indexer.kv_proj.weight", "self_attn.indexer.compressor.wkv.weight"),
+            ("self_attn.compressor.indexer.gate_proj.weight", "self_attn.indexer.compressor.wgate.weight"),
+            ("self_attn.compressor.indexer.kv_norm.weight", "self_attn.indexer.compressor.norm.weight"),
+            ("self_attn.compressor.indexer.q_b_proj.weight", "self_attn.indexer.wq_b.weight"),
+            ("self_attn.compressor.indexer.scorer.weights_proj.weight", "self_attn.indexer.weights_proj.weight"),
+        )
+        # HC (hash-constrained) aug-head parameters: HF ``attn_hc/ffn_hc``
+        # versus served ``hc_attn/hc_ffn``.
+        _dsv4_hc_renames = (
+            (".attn_hc.fn", ".hc_attn_fn"),
+            (".attn_hc.base", ".hc_attn_base"),
+            (".attn_hc.scale", ".hc_attn_scale"),
+            (".ffn_hc.fn", ".hc_ffn_fn"),
+            (".ffn_hc.base", ".hc_ffn_base"),
+            (".ffn_hc.scale", ".hc_ffn_scale"),
+        )
+
+        def _dsv4_translate_hf_name(name: str) -> str:
+            if name.startswith("model.hc_head.hc_"):
+                # HF keeps the HC-aug-head parameters under a nested
+                # ``model.hc_head`` module (``model.hc_head.hc_fn``), while the
+                # served model registers them directly on ``DeepseekV4Model``
+                # (``model.hc_head_fn``).  Drop the intermediate ``hc_head``
+                # module segment so the mapped name exists in params_dict.
+                suffix = name[len("model.hc_head.hc_") :]  # fn / base / scale
+                return f"model.hc_head_{suffix}"
+            for old, new in _dsv4_indexer_renames:
+                if old in name:
+                    name = name.replace(old, new)
+            for old, new in _dsv4_self_attn_renames:
+                if name.endswith(old):
+                    name = name[: -len(old)] + new
+            for old, new in _dsv4_hc_renames:
+                if old in name:
+                    name = name.replace(old, new)
+            if name.endswith(".self_attn.sinks"):
+                name = name[: -len(".sinks")] + ".attn_sink"
+            return name
+
+        def _dsv4_expand(out: list, name: str, loaded_weight: torch.Tensor) -> None:
+            # HF keeps routed experts fused into one tensor per projection.
+            # gate_up_proj: (num_experts, 2*intermediate, hidden)
+            # down_proj:    (num_experts, hidden, intermediate)
+            if name.endswith(".mlp.experts.gate_up_proj"):
+                num_experts, two_inter, hidden = loaded_weight.shape
+                inter = two_inter // 2
+                prefix = name[: -len("mlp.experts.gate_up_proj")]
+                for e in range(num_experts):
+                    out.append((f"{prefix}mlp.experts.{e}.gate_proj.weight", loaded_weight[e, :inter, :].contiguous()))
+                    out.append((f"{prefix}mlp.experts.{e}.up_proj.weight", loaded_weight[e, inter:, :].contiguous()))
+                return
+            if name.endswith(".mlp.experts.down_proj"):
+                num_experts, hidden, inter = loaded_weight.shape
+                prefix = name[: -len("mlp.experts.down_proj")]
+                for e in range(num_experts):
+                    out.append((f"{prefix}mlp.experts.{e}.down_proj.weight", loaded_weight[e].contiguous()))
+                return
+            out.append((name, loaded_weight))
+
+        # expand fused experts and translate names in one pass
+        _normalized_weights: list[tuple[str, torch.Tensor]] = []
+        for _name, _weight in weights:
+            _dsv4_expand(_normalized_weights, _dsv4_translate_hf_name(_name), _weight)
+        weights = _normalized_weights
 
         for name, loaded_weight in weights:
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
@@ -1376,5 +1612,43 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+
+        # ---- CPU backup of checkpoint-supplied runtime tensors ----
+        # DeepSeek-V4's checkpoint ships *trained* values for the hash-router
+        # ``tid2eid`` table, the VL ``bias_vl``, ``e_score_correction_bias`` and
+        # the attention ``attn_sink``, and the IPC trainer streams the same
+        # tensors every update.  After a level-2 sleep + layerwise reload these
+        # params hold freshly-woken storage, and the finish-time reinit hook
+        # must restore the checkpoint values -- NOT constructor formula/zeros --
+        # or post-update inference diverges from the pre-update baseline
+        # (idempotency broken).  Snapshot them on the FIRST (boot) load and
+        # keep the CPU copy; it survives level-2 sleeps and every later update
+        # rewrites the same values.
+        try:
+            _inner = getattr(self, "model", None)
+            if _inner is not None and not getattr(_inner, "_runtime_tensor_backup_done", False):
+                _backup: dict[str, torch.Tensor] = {}
+                for _li, _layer in enumerate(getattr(_inner, "layers", ()) or ()):
+                    _lidx = getattr(_layer, "layer_idx", _li)
+                    _mlp = getattr(_layer, "mlp", None)
+                    if _mlp is None:
+                        continue
+                    _gate = getattr(_mlp, "gate", None)
+                    if _gate is None:
+                        continue
+                    for _n in ("tid2eid", "bias_vl", "e_score_correction_bias"):
+                        _p = getattr(_gate, _n, None)
+                        if isinstance(_p, torch.nn.Parameter):
+                            _backup[f"L{_lidx}.{_n}"] = _p.detach().cpu().clone()
+                    _attn = getattr(_layer, "self_attn", None)
+                    if _attn is not None:
+                        _sink = getattr(_attn, "attn_sink", None)
+                        if isinstance(_sink, torch.nn.Parameter):
+                            _backup[f"L{_lidx}.attn_sink"] = _sink.detach().cpu().clone()
+                if _backup:
+                    _inner._runtime_tensor_backup = _backup
+                    _inner._runtime_tensor_backup_done = True
+        except Exception:  # noqa: BLE001 - best effort, never break loading
+            pass
 
         return loaded_params
