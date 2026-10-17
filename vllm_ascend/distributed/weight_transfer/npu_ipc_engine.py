@@ -4,28 +4,27 @@
 
 import os
 import socket
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
-    WeightTransferEngine,
-    WeightTransferInitInfo,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
     IPCTrainerWeightTransferEngine,
+    IPCWeightTransferEngine,
+    IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -38,13 +37,8 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class NPUIPCWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NPU IPC weight transfer backend.
-
-    No initialization needed for NPU IPC.
-    """
-
-    packed: bool = False
+class NPUIPCWeightTransferInitInfo(IPCWeightTransferInitInfo):
+    """Worker-side NPU IPC wire parameters, shared with upstream IPC."""
 
 
 @lru_cache(maxsize=1)
@@ -103,15 +97,13 @@ class NPUIPCTrainerInitInfo(IPCTrainerInitInfo):
 
 
 @dataclass
-class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):  # type: ignore[no-redef]
+class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):
     """NPU IPC variant — inherits all fields and validation from the CUDA IPC
     base class.  No overrides needed; the field types and ``__post_init__`` are
     identical."""
 
 
-class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
-    WeightTransferEngine[NPUIPCWeightTransferInitInfo, NPUIPCWeightTransferUpdateInfo],
-):
+class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     """
     Weight transfer engine using NPU IPC for communication between
     trainer and workers.
@@ -138,7 +130,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
             "source=...) and drive it with send_weights()."
         )
 
-    def __init__(  # type: ignore[misc]
+    def __init__(
         self,
         config: WeightTransferConfig,
         vllm_config: VllmConfig,
@@ -146,30 +138,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        # Set from the trainer-supplied init info at the handshake; defaults
-        # are only for the (unreachable) receive-before-init case.
-        self.packed = False
+        # The inherited finish/shutdown methods close this mapping.
+        self._packed_importer = NPUPackedBufferImporter()
 
-    def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
-        """Record the trainer-supplied wire params so the worker decodes
-        exactly as the trainer encoded."""
-        self.packed = init_info.packed
-
-    def start_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
-
-    def finish_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
-
-    def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
+    def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
         Args:
@@ -182,10 +154,11 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # device is not guaranteed to match ``self.device``. The IPC tensors
         # must be rebuilt on the device the model lives on.
         device_index = self.device.index
-        physical_npu_id = npu_generate_uuid()
+        physical_npu_id = npu_generate_uuid(device_index)
 
         if self.packed:
-            assert update_info.tensor_sizes is not None
+            if update_info.tensor_sizes is None:
+                raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
             weights = packed_npu_ipc_consumer(
                 ipc_handle=update_info.ipc_handles,
@@ -195,6 +168,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -225,26 +199,25 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
 
-    def shutdown(self) -> None:
-        pass
+        with disable_mtp_completeness_check():
+            self.model.load_weights(weights)
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
 
-    Mirrors upstream ``IPCTrainerWeightTransferEngine`` but swaps the
-    GPU-side primitives for their NPU counterparts (``torch.npu`` instead
-    of ``torch.cuda``, ``npu_generate_uuid`` instead of the GPU UUID, the
-    NPU packed producer/consumer). HTTP/JSON transport is delegated to
-    ``HTTPVLLMWeightSyncClient`` so the handles are serialized there
-    rather than in this engine.
+    Inherits the handshake, send lifecycle, unpacked sender and payload
+    construction. Only CUDA-specific initialization, collectives, packing
+    and cleanup need NPU implementations.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
 
-    def __init__(  # type: ignore[misc]
+    def __init__(
         self,
         *,
         client: "VLLMWeightSyncClient",
@@ -253,6 +226,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
+        # IPCTrainerWeightTransferEngine.__init__ queries CUDA properties.
+        # Initialize its device-independent base, then supply NPU identity.
         TrainerWeightTransferEngine.__init__(
             self,
             client=client,
@@ -262,44 +237,9 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
-        self.npu_uuid = npu_generate_uuid()
-
-    @classmethod
-    def trainer_init(
-        cls,
-        init_info: NPUIPCTrainerInitInfo,
-        *,
-        client: "VLLMWeightSyncClient",
-        source: "WeightSource",
-    ) -> "NPUIPCTrainerWeightTransferEngine":
-        engine = cls(
-            client=client,
-            source=source,
-            is_sender=init_info.is_sender,
-            packed=init_info.packed,
-            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
-        )
-        # IPC needs no data-plane rendezvous. The sender ships the must-agree
-        # ``packed`` flag so the worker decodes exactly as this trainer encodes.
-        if engine.is_sender:
-            engine.client.init_weight_transfer_engine({"packed": init_info.packed})
-        return engine
-
-    def send_weights(self) -> None:
-        source = self.source
-        if self.is_sender:
-            self.client.start_weight_update()
-        weight_refs = self._send(source)
-        if self.is_sender:
-            self.client.finish_weight_update()
-        self._post_send_sync()
-        del weight_refs
-
-    def _send(self, source: "WeightSource") -> list[torch.Tensor] | None:
-        if self.packed:
-            self._send_packed(source)
-            return None
-        return self._send_unpacked(source)
+        self.npu_uuid = npu_generate_uuid(self.device_index)
+        # Upstream's unpacked sender treats gpu_uuid as an opaque wire key.
+        self.gpu_uuid = self.npu_uuid
 
     def _all_gather_and_merge_handles(
         self,
@@ -335,57 +275,17 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
 
     @staticmethod
     def _post_send_sync() -> None:
-        """Barrier + synchronize after a send; no-op if single-NPU."""
+        """Synchronize each send and keep all trainer ranks in step."""
         if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             torch.distributed.barrier()
         torch.npu.synchronize()
 
-    def _send_unpacked(self, source: "WeightSource") -> list[torch.Tensor]:
-        """Iterate the source, build one IPC handle per param, all-gather
-        the handles across ranks, and (sender) ship them in one update call.
-
-        Returns the strong refs to every contiguous copy. ``reduce_tensor``'s
-        args do NOT keep storage alive, and non-contiguous inputs allocate
-        fresh storage in ``.contiguous()``; the caller must keep these alive
-        until the post-send barrier (past ``finish``) so the consumer's IPC
-        views stay valid.
-        """
-        names: list[str] = []
-        dtype_names: list[str] = []
-        shapes: list[list[int]] = []
-        ipc_handles: list[dict[str, tuple]] = []
-        weight_refs: list[torch.Tensor] = []
-
-        for name, tensor in source:
-            names.append(name)
-            dtype_names.append(str(tensor.dtype).split(".")[-1])
-            shapes.append(list(tensor.shape))
-
-            weight = tensor.detach().contiguous()
-            weight_refs.append(weight)
-            # Store only the rebuild args (drop the func); the consumer
-            # rebuilds with the well-known ``rebuild_npu_tensor``, mirroring
-            # upstream's CUDA IPC engine.
-            _, ipc_args = reduce_tensor(weight)
-            ipc_handles.append({self.npu_uuid: ipc_args})
-
-        ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
-        self._do_send(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            ipc_handles=ipc_handles,
-        )
-        return weight_refs
-
     def _send_packed(self, source: "WeightSource") -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        post_iter_func: Callable = lambda item: item[1]
-
         for chunk in packed_npu_ipc_producer(
             iterator=iter(source),
             npu_uuid=self.npu_uuid,
-            post_iter_func=post_iter_func,
+            post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
             ipc_handle = self._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
@@ -402,31 +302,3 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             # colocated worker is still reading the current chunk, silently
             # corrupting the transfer.
             self._post_send_sync()
-
-    def _do_send(
-        self,
-        names: list[str],
-        dtype_names: list[str],
-        shapes: list[list[int]],
-        ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
-        tensor_sizes: list[int] | None = None,
-    ) -> None:
-        """Build one update payload and ship it via the client. Only the
-        sender ships (non-sender ranks already contributed to the handle
-        all-gather). Emits raw ``ipc_handles``; transports that cannot carry
-        them natively (HTTP/JSON) pickle them in their client (see
-        ``HTTPVLLMWeightSyncClient``).
-        """
-        if not self.is_sender:
-            return
-        update_fields: dict[str, Any] = {
-            "names": names,
-            "dtype_names": dtype_names,
-            "shapes": shapes,
-            "ipc_handles": ipc_handles,
-        }
-        if tensor_sizes is not None:
-            update_fields["tensor_sizes"] = tensor_sizes
-
-        update_info = NPUIPCWeightTransferUpdateInfo(**update_fields)
-        self.client.update_weights(asdict(update_info))

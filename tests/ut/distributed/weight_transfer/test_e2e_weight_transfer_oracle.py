@@ -95,6 +95,9 @@ def test_reference_and_lane_share_the_measurement_conditions():
         "--dtype",
         "--compilation-config",
         "--max-model-len",
+        "--kv-cache-memory-bytes",
+        "--max-num-seqs",
+        "--max-num-batched-tokens",
         "--gpu-memory-utilization",
         "--tensor-parallel-size",
         "--additional-config",
@@ -111,6 +114,9 @@ def test_reference_and_lane_share_the_measurement_conditions():
     # same allocation pool instead of a differently-allocated one; the reference
     # itself never sleeps.
     assert lane["--enable-sleep-mode"] is reference["--enable-sleep-mode"] is True
+    assert lane["--kv-cache-memory-bytes"] == str(512 * 1024 * 1024)
+    assert lane["--max-num-seqs"] == "2"
+    assert lane["--max-num-batched-tokens"] == "1024"
 
 
 @pytest.fixture
