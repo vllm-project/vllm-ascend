@@ -602,6 +602,8 @@
             "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8",
             "Eco-Tech/Qwen3.6-27B-w8a8-mxfp8",
             "Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8",
+            "Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4",
+            "Eco-Tech/gemma-4-31B-it-w4a4-mxfp4",
             "LLM-Research/original",
             "Qwen/Qwen3-235B-A22B",
             "Qwen/Qwen3-30B-A3B",
