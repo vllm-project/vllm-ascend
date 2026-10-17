@@ -7,7 +7,7 @@ Covers the three adaptations introduced for decode-context parallel:
 - ``KVPoolWorker._is_layerwise_save_leader``: exactly one rank per
   (pcp, dcp, head_or_tp) group must save/allocate; the plain
   ``tp_rank % put_step`` dedup drops every non-zero DCP shard.
-- ``KVPoolWorker._global_group_alloc_size``: with DCP>1 and put_step>1
+- ``KVPoolWorker._group_alloc_size``: with DCP>1 and put_step>1
   the shared region must cover all shards, using a per-shard stride
   aligned up to the GVA hugepage size (hybrid DSA groups have
   non-uniform per-layer bytes).
@@ -62,7 +62,7 @@ class TestSaveLeader:
             assert worker._is_layerwise_save_leader() is True, f"rank {r}"
 
 
-class TestGlobalGroupAllocSize:
+class TestGroupAllocSize:
     def _sized_worker(self, block_len: list[int], put_step: int, dcp_size: int) -> KVPoolWorker:
         return _bare_worker(
             group_block_len={0: block_len},
@@ -76,20 +76,20 @@ class TestGlobalGroupAllocSize:
         )
 
     def test_dcp1_unchanged(self):
-        # Uniform 4 layers x 32KB -> plain per_layer * n_global.
+        # Uniform 4 local layers x 32KB -> exact stage payload.
         worker = self._sized_worker([32768] * 4, put_step=4, dcp_size=1)
-        assert worker._global_group_alloc_size(0) == 32768 * 4
+        assert worker._group_alloc_size(0) == 32768 * 4
 
     def test_put_step1_no_shard_inflation(self):
         # GQA/MHA: every rank owns a distinct region key -> no x cp_scale.
         worker = self._sized_worker([32768] * 4, put_step=1, dcp_size=8)
-        assert worker._global_group_alloc_size(0) == 32768 * 4
+        assert worker._group_alloc_size(0) == 32768 * 4
 
     def test_dcp2_shard_major_region(self):
         worker = self._sized_worker([32768] * 4, put_step=4, dcp_size=2)
         # sum=128KB -> stride aligned to 2MB; region = stride * cp_scale.
         expected = GVA_ALIGN * 2
-        assert worker._global_group_alloc_size(0) == expected
+        assert worker._group_alloc_size(0) == expected
 
     def test_nonuniform_layers_align_stride(self):
         # Hybrid DSA layout with an odd-sized trailing entry: the group byte
@@ -99,7 +99,7 @@ class TestGlobalGroupAllocSize:
         total = sum(block_len)
         assert total % 16 != 0, "test premise: unaligned group total"
         worker = self._sized_worker(block_len, put_step=8, dcp_size=8)
-        region = worker._global_group_alloc_size(0)
+        region = worker._group_alloc_size(0)
         stride = region // 8
         assert stride % GVA_ALIGN == 0, "shard stride must be GVA-aligned"
         assert stride >= total, "aligned stride must still cover the shard"

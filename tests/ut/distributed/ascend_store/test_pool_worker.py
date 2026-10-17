@@ -565,16 +565,120 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         return KVPoolWorker
 
-    def test_global_group_alloc_size_rounds_up(self):
+    def test_group_alloc_size_uses_exact_stage_descriptors(self):
+        cls = self._make_worker_class()
+        for pp_rank, lengths in ((0, [8, 4, 2, 8]), (1, [8, 2, 1])):
+            with self.subTest(pp_rank=pp_rank):
+                worker = cls.__new__(cls)
+                worker.group_block_len = {0: lengths}
+                worker.group_num_layers = {0: 2 if pp_rank == 0 else 1}
+                worker.total_layers = 3
+                worker.num_layers = worker.group_num_layers[0]
+                worker.pp_size = 2
+                worker.pp_rank = pp_rank
+                worker.put_step = 1
+                worker.dcp_size = 1
+
+                self.assertEqual(worker._group_alloc_size(0), sum(lengths))
+
+    def test_group_alloc_size_single_stage_and_empty_group(self):
         cls = self._make_worker_class()
         worker = cls.__new__(cls)
-        worker.group_block_len = {0: [2, 1]}
-        worker.group_num_layers = {0: 2}
-        worker.total_layers = 2
-        worker.num_layers = 2
+        worker.group_block_len = {0: [2, 1], 1: []}
+        worker.page_size_bytes = 128
+        worker.pp_size = 1
         worker.put_step = 1
+        worker.dcp_size = 1
 
-        self.assertEqual(worker._global_group_alloc_size(0), 4)
+        self.assertEqual(worker._group_alloc_size(0), 3)
+        self.assertEqual(worker._group_alloc_size(1), 128)
+
+    def test_pp_builders_use_stage_local_offsets_and_dcp_shards(self):
+        cls = self._make_worker_class()
+        align = 2 * 1024 * 1024
+        for block_key in (False, True):
+            for pp_rank in (0, 1):
+                for dcp_size, put_step in ((1, 1), (2, 1), (2, 2)):
+                    for dcp_rank in range(dcp_size):
+                        with self.subTest(
+                            block_key=block_key,
+                            pp_rank=pp_rank,
+                            dcp_size=dcp_size,
+                            put_step=put_step,
+                            dcp_rank=dcp_rank,
+                        ):
+                            worker = cls.__new__(cls)
+                            worker.num_kv_cache_groups = 1
+                            worker.num_layers = 2
+                            worker.total_layers = 4
+                            worker.pp_size = 2
+                            worker.pp_rank = pp_rank
+                            worker.layerwise_key_layers = 2
+                            worker.layerwise_key_layer_offset = pp_rank * 2
+                            worker.use_block_key_layerwise = block_key
+                            worker.group_num_layers = {0: 2}
+                            # Uneven indexer descriptors cross a hugepage boundary.
+                            worker.group_block_len = {0: [align, 4, 2, 8]}
+                            worker.token_database = MagicMock()
+                            worker.dcp_size = dcp_size
+                            worker.dcp_rank = dcp_rank
+                            worker.put_step = put_step
+                            local_size = align + 14
+                            shared_shards = not block_key and dcp_size > 1 and put_step > 1
+                            expected_size = 2 * align * dcp_size if shared_shards else local_size
+                            expected_offset = dcp_rank * 2 * align if shared_shards else 0
+                            module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+                            with patch(f"{module}.LayerBatchBuilder") as builder:
+                                worker._build_group_layer_builders()
+                            self.assertEqual(builder.call_args.args[1], expected_size)
+                            self.assertEqual(builder.call_args.kwargs["layer_byte_offset"], expected_offset)
+                            self.assertLessEqual(expected_offset + local_size, expected_size)
+                            # Global physical layer identity is not a host byte offset.
+                            self.assertEqual(worker.layerwise_key_layer_offset, pp_rank * 2)
+
+    def test_pp_transfer_arrays_fit_stage_allocation(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, KeyMetadata
+
+        cls = self._make_worker_class()
+        for pp_rank, lengths, offsets in ((0, [8, 4, 2, 8], [0, 3, 4]), (1, [8, 2, 1], [0, 3])):
+            with self.subTest(pp_rank=pp_rank):
+                worker = cls.__new__(cls)
+                worker.num_kv_cache_groups = 1
+                worker.num_layers = len(offsets) - 1
+                worker.total_layers = 3
+                worker.pp_size = 2
+                worker.pp_rank = pp_rank
+                worker.layerwise_key_layers = worker.num_layers
+                worker.layerwise_key_layer_offset = pp_rank * 2
+                worker.use_block_key_layerwise = False
+                worker.group_num_layers = {0: worker.num_layers}
+                worker.group_block_len = {0: lengths}
+                worker.dcp_size = worker.put_step = 1
+                database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
+                database.set_group_buffers(
+                    {0: [1000 * (i + 1) for i in range(len(lengths))]},
+                    {0: lengths},
+                    {0: [128] * len(lengths)},
+                    group_num_layers=worker.group_num_layers,
+                    group_layer_cache_entry_offsets={0: offsets},
+                )
+                worker.token_database = database
+                builder = worker._build_group_layer_builders()[0]
+                self.assertIsInstance(builder, LayerBatchBuilder)
+                ends = []
+                for layer_id in range(worker.num_layers):
+                    _, sizes, gvas = builder._build_transfer_arrays(
+                        np.asarray([1]),
+                        np.asarray([4096]),
+                        layer_id=layer_id,
+                    )
+                    start, end = offsets[layer_id : layer_id + 2]
+                    np.testing.assert_array_equal(sizes, lengths[start:end])
+                    expected = 4096 + sum(lengths[:start])
+                    self.assertEqual(int(gvas[0]), expected)
+                    ends.extend((gvas + sizes).tolist())
+                self.assertEqual(max(ends), 4096 + worker._group_alloc_size(0))
 
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
