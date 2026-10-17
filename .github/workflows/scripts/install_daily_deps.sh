@@ -41,15 +41,15 @@ if [ ! -f "mf_version.json" ]; then
     echo "ERROR: download mf_version.json failed" >&2
     exit 1
 fi
-MF_RAW=$(cat ./mf_version.json)
-MF_VAL=$(echo "${MF_RAW}" | sed -n "s/.*\"${CANN_VERSION}\": \"\([^\"]*\)\".*/\1/p")
-if [[ -z "${MF_VAL}" ]]; then
-    echo "ERROR: CANN_VERSION=${CANN_VERSION} not found in mf_version.json" >&2
+
+MF_VAL=$(jq -r ".MEMFABRIC_VERSION" mf_version.json)
+if [[ "${MF_VAL}" == "null" || -z "${MF_VAL}" ]]; then
+    echo "ERROR: MEMFABRIC_VERSION not found in mf_version.json" >&2
     exit 1
 fi
-# split PATH_PART 和 VERSION（这里MF_VAL格式：mf/release/1.3/20261017.1:1.3.0）
+
 PATH_PART="${MF_VAL%%:*}"
-MF_VER_PARSED="${MF_VAL#*:}"
+WHL_NAME_MF="${MF_VAL#*:}"
 MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/${PATH_PART}/${WHL_NAME_MF}"
 echo "Install memfabric_hybrid: ${MEMFABRIC_URL}"
 python3 -m pip install "$MEMFABRIC_URL" --force-reinstall --no-deps
@@ -62,12 +62,13 @@ if [ ! -f "mc_version.json" ]; then
     echo "ERROR: download mc_version.json failed" >&2
     exit 1
 fi
-MC_RAW=$(cat ./mc_version.json)
-MC_VAL=$(echo "${MC_RAW}" | sed -n "s/.*\"${CANN_VERSION}\": \"\([^\"]*\)\".*/\1/p")
-if [[ -z "${MC_VAL}" ]]; then
-    echo "ERROR: CANN_VERSION=${CANN_VERSION} not found in mc_version.json" >&2
+
+MC_VAL=$(jq -r ".MEMCACHE_VERSION" mc_version.json)
+if [[ "${MC_VAL}" == "null" || -z "${MC_VAL}" ]]; then
+    echo "ERROR: MEMCACHE_VERSION not found in mc_version.json" >&2
     exit 1
 fi
+
 PATH_PART="${MC_VAL%%:*}"
 WHL_NAME_MC="${MC_VAL#*:}"
 MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/${PATH_PART}/${WHL_NAME_MC}"
