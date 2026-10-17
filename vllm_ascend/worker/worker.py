@@ -81,6 +81,7 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
+from vllm_ascend.core.preflow_profile import attach_preflow_profile_timing
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -861,6 +862,7 @@ class NPUWorker(WorkerBase):
             self.model_runner,
             output,
         )
+        attach_preflow_profile_timing(self.model_runner, output)
         return output
 
     def load_model(self) -> None:

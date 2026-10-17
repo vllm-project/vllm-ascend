@@ -287,6 +287,9 @@ from vllm_ascend.core.kv_cache_interface import (
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.core.preflow_profile import (
+    start_preflow_profile_timing,
+)
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -2324,6 +2327,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._preflow_profile_start_time = start_preflow_profile_timing(scheduler_output)
         self._cpp_execution_time_ms = None
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
