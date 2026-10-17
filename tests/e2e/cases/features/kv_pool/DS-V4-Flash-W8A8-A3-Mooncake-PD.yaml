@@ -1,7 +1,9 @@
-# A3 two-node PD pooling smoke test: one DP1 x TP16 instance per node.
-# Full-node visibility avoids external-DP device remapping with Fabric Memory.
+# Based on the official A3 DSpark PD deployment: P DP4 x TP4, D DP16 x TP1.
+# https://docs.vllm.ai/projects/ascend/zh-cn/latest/tutorials/models/DeepSeek-V4-Flash.html
 # MooncakeHybridConnector transfers P-to-D KV; AscendStoreConnector provides pooling.
 # The framework manages mooncake_master and MOONCAKE_CONFIG_PATH.
+# Keep the model ID as the served name for AISBench; disable P's local prefix
+# cache to exercise pool reads during replay instead of local cache reuse.
 test_name: "DS-V4-Flash-W8A8-A3-Mooncake-PD"
 model: "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8"
 num_nodes: 2
@@ -18,13 +20,14 @@ env_common: &env_common
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   PYTHONHASHSEED: "0"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 routing:
   type: "disaggregated_prefill"
@@ -48,30 +51,31 @@ kv_pool:
 config:
   - node_index: 0
     port_start: 7100
-    dp_rpc_port: 12332
-    dp_size: 1
-    dp_size_local: 1
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
     dp_rank_start: 0
-    tp_size: 16
+    tp_size: 4
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     port_start: 7100
-    dp_rpc_port: 12332
-    dp_size: 1
-    dp_size_local: 1
+    dp_rpc_port: 12321
+    dp_size: 16
+    dp_size_local: 16
     dp_rank_start: 0
-    tp_size: 16
+    tp_size: 1
     dp_address: "${NODE_1_IP}"
 
 env_prefill: &env_prefill
   <<: *env_common
-  HCCL_BUFFSIZE: "2560"
+  HCCL_BUFFSIZE: "1800"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
   <<: *env_common
-  HCCL_BUFFSIZE: "1024"
-  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_BUFFSIZE: "2400"
 
 templates:
   - node_index: 0
@@ -125,9 +129,9 @@ templates:
       - "ascend"
       - "--enforce-eager"
       - "--additional-config"
-      - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true, "enable_flashcomm1":true}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 16}, "decode": {"dp_size": 1, "tp_size": 16}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": false, "lookup_rpc_port": "0"}}]}, "engine_id": "0"}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": false, "lookup_rpc_port": "0"}}]}, "engine_id": "0"}'
 
   - node_index: 1
     envs:
@@ -151,11 +155,12 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "131072"
+      - "1048576"
       - "--max-num-batched-tokens"
-      - "256"
+      - "480"
       - "--max-num-seqs"
-      - "16"
+      - "60"
+      - "--async-scheduling"
       - "--block-size"
       - "32"
       - "--attention_config.indexer_kv_dtype"
@@ -173,17 +178,17 @@ templates:
       - "--reasoning-parser"
       - "deepseek_v4"
       - "--gpu-memory-utilization"
-      - "0.9"
+      - "0.95"
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}'
       - "--quantization"
       - "ascend"
       - "--speculative-config"
       - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable":true, "enable_mlapo":true}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable":true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 16}, "decode": {"dp_size": 1, "tp_size": 16}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": false, "lookup_rpc_port": "0"}}]}, "engine_id": "1"}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": false, "lookup_rpc_port": "0"}}]}, "engine_id": "1"}'
 
 benchmarks:
   # Run the same 32K-input workload twice: populate, then replay the pool.
