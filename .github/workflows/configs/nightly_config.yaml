@@ -97,6 +97,12 @@ a2:
           - Hunyuan-A13B-Instruct
 
 a3:
+  single_node:
+    test_config:
+      - name: DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP
+        os: linux-aarch64-a3-800t-16
+        config_file_path: DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP.yaml
+        config_base_path: tests/e2e/cases/features/context_parallel
   multi_node:
     test_config:
       - name: GLM-5.3-W8A8C8-A3-200k-PP-PD
@@ -205,10 +211,6 @@ a3-560t:
       - name: glm-5.2-W4A8C8-DSpark-PCP
         os: linux-aarch64-a3-800i-16
         config_file_path: glm-5.2-W4A8C8-DSpark-PCP.yaml
-        config_base_path: tests/e2e/cases/features/context_parallel
-      - name: DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP
-        os: linux-aarch64-a3-800i-16
-        config_file_path: DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
       - name: Qwen3.5-397B-A17B-w8a8-mtp
         os: linux-aarch64-a3-800i-16

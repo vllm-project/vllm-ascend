@@ -178,6 +178,12 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
     A3 will queue a large number of jobs — prefer targeting specific test names when
     possible.
 
+**Single-node tests** (`a3.single_node.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP` | DeepSeek-V4.1-Flash W8A8, MRV2 + DP2 + TP2 + PCP4 + EP + DSpark, GPQA accuracy and DSpark acceptance, 16 NPUs |
+
 ### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
 
 **Single-node tests** (`a3-560t.single_node.test_config`):
@@ -196,7 +202,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
 | `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |
 | `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |
-| `DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP` | DeepSeek-V4.1-Flash W8A8, MRV2 + DP2 + TP2 + PCP4 + EP + DSpark, GPQA accuracy and DSpark acceptance, 16 NPUs |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
 | `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
 | `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
