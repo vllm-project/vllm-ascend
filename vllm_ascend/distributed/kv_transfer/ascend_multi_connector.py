@@ -52,6 +52,10 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             for connector in self._connectors
         )
 
+        self.requires_mamba_state_copy_after_load = any(
+            getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
+        )
+
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
         providers = []
