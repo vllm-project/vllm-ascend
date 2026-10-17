@@ -3,6 +3,7 @@
 """State gather for CANN KeyPool."""
 
 import torch
+import torch_npu
 
 
 def _cache_rows(cache):
@@ -27,3 +28,9 @@ def prepare_keypool_state(tail, starts, tail_metadata, pool):
 
 def gather_retained_hidden(hidden, indices):
     return torch.index_select(hidden, 0, indices.flatten())
+
+
+def quantize_keypool_query(query):
+    result, scale = torch_npu.npu_dynamic_quant(query, dst_type=torch.float8_e4m3fn)
+    scale.masked_fill_(scale == 0, 1.0)
+    return result, scale

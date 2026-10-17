@@ -9,9 +9,11 @@ classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
 from dataclasses import dataclass
+from math import lcm
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import (
     create_kv_cache_group_specs,
     may_override_num_blocks,
@@ -26,7 +28,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    get_kv_cache_compression_ratio,
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,17 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(spec.page_size_bytes for spec in small_candidates),
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )
+    # CANN addresses tails in whole K/gate rows; scale views must also stay
+    # aligned when a scheduler page is split into indexer kernel blocks.
+    small_page_alignment = lcm(
+        *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs),
+        *(
+            spec.block_size // get_kv_cache_compression_ratio(spec) * get_dtype_size(spec.scale_dtype)
+            for spec in indexer_specs
+            if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
+        ),
+    )
+    small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
     for spec in main_candidates:
         object.__setattr__(spec, "page_size_padded", main_page_size)
