@@ -131,6 +131,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        # Opt in only for synchronous bulk loads, not background retrieval.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
