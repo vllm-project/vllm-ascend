@@ -1112,6 +1112,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.scheduler_config.enable_chunked_prefill = True
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.cache_config.block_size = 16
@@ -1119,8 +1120,13 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.max_num_batched_tokens = 4096
         mock_vllm_config.model_config.max_model_len = 4096
 
-        result = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(mock_vllm_config)
-        self.assertGreater(result, 0)
+        with patch(
+            "vllm_ascend.attention.utils.get_ascend_config",
+            return_value=SimpleNamespace(chunked_prefill_workspace_size=128 * 1024),
+        ):
+            result = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(mock_vllm_config)
+        # max(8 * max_model_len, 4 * max_num_seqs * block_size) stays below the 128K default cap.
+        self.assertEqual(result, 32768)
 
     def test_get_cudagraph_support(self):
         mock_vllm_config = MagicMock()
