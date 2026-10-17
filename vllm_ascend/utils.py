@@ -38,7 +38,11 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    is_mega_moe_supported,
+    validate_additional_config_bool,
+)
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -994,6 +998,76 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+_DENSE_SP_MODEL_TYPES = frozenset({"qwen3_5_text"})
+
+
+def flashcomm1_enabled(vllm_config=None) -> bool:
+    """Return whether FlashComm1 was explicitly requested."""
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            return False
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    return validate_additional_config_bool(
+        additional_config.get("enable_flashcomm1", False),
+        "additional_config.enable_flashcomm1",
+    ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in (
+        "1",
+        "true",
+    )
+
+
+def enable_dense_sp(vllm_config=None) -> bool:
+    """Whether an opt-in FlashComm dense-model implementation is available."""
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            return False
+
+    if not flashcomm1_enabled(vllm_config):
+        return False
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is None or getattr(hf_text_config, "model_type", None) not in _DENSE_SP_MODEL_TYPES:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.tensor_parallel_size <= 1
+        or parallel_config.pipeline_parallel_size != 1
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or getattr(vllm_config, "use_v2_model_runner", False)
+    ):
+        return False
+
+    finegrained_tp = additional_config.get("finegrained_tp_config", {})
+    return not (
+        isinstance(finegrained_tp, dict)
+        and any(
+            finegrained_tp.get(name, 0)
+            for name in (
+                "oproj_tensor_parallel_size",
+                "mlp_tensor_parallel_size",
+            )
+        )
+    )
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -1006,7 +1080,7 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe or enable_dense_sp(vllm_config))
 
 
 # TODO remove it after vllm has this func
