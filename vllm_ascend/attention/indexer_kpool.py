@@ -3,6 +3,7 @@
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
 from dataclasses import dataclass
+from functools import partial
 from importlib import import_module
 from typing import Any
 
@@ -621,7 +622,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._prepare_keypool_state = adapters.prepare_keypool_state
             self._write_keypool_caches = fused.write_keypool_caches
             self._key_pool = torch.ops.cann_ops_transformer.key_pool
-            self._pool_key_indexer = torch.ops.cann_ops_transformer.pool_key_indexer
+            self._pool_key_indexer = partial(
+                adapters.pool_key_indexer_nonempty,
+                torch.ops.cann_ops_transformer.pool_key_indexer,
+            )
         except (ImportError, AttributeError) as exc:
             raise RuntimeError(
                 "GLM-5.3-Flash KPool requires cann_ops_transformer with key_pool and pool_key_indexer, "
