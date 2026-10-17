@@ -5,6 +5,8 @@ Rejection-sampler / penalty / RMS JIT is host work. Starting it at the
 beginning of ``NPUModelRunner.load_model`` overlaps the compile with
 safetensors load. That method joins this thread before it returns, before
 memory profiling, so the regular kernel_warmup hits the Triton cache.
+Both ``model_runner_v1`` and ``worker/v2`` start it; the v1-only
+rejection-sampler and penalty kernels are skipped by the v2 runner.
 
 Enable with ``ascend_warmup_config.enable_early_kernel_warmup``. Imports
 that the thread needs are done on the main thread first so a concurrent import
@@ -14,6 +16,7 @@ cannot walk sys.modules mid-registration.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import torch
@@ -44,31 +47,27 @@ class _WarmupShim:
         self.model_runner = None
 
 
-def _preimport() -> None:
+def _preimport(use_v2_model_runner: bool) -> None:
     import vllm.triton_utils  # noqa: F401
 
-    import vllm_ascend.ops.triton.penalty  # noqa: F401
-    import vllm_ascend.ops.triton.reject_sample  # noqa: F401
+    if not use_v2_model_runner:
+        import vllm_ascend.ops.triton.penalty  # noqa: F401
+        import vllm_ascend.ops.triton.reject_sample  # noqa: F401
+        from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (  # noqa: F401
+            penalties_triton_warmup,
+        )
+        from vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup import (  # noqa: F401
+            rejection_sampler_triton_warmup,
+        )
+
     import vllm_ascend.ops.triton.rms_norm  # noqa: F401
     import vllm_ascend.ops.triton.spec_decode.utils  # noqa: F401
-    from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (  # noqa: F401
-        penalties_triton_warmup,
-    )
-    from vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup import (  # noqa: F401
-        rejection_sampler_triton_warmup,
-    )
     from vllm_ascend.model_executor.warmup.rms_triton_warmup import (  # noqa: F401
         triton_rms_warmup,
     )
 
 
 def _run(shim: _WarmupShim, device_index: int) -> None:
-    from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (
-        penalties_triton_warmup,
-    )
-    from vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup import (
-        rejection_sampler_triton_warmup,
-    )
     from vllm_ascend.model_executor.warmup.rms_triton_warmup import triton_rms_warmup
 
     try:
@@ -77,14 +76,29 @@ def _run(shim: _WarmupShim, device_index: int) -> None:
         logger.warning("Early kernel warmup set_device failed; regular warmup still runs", exc_info=True)
         return
 
-    items = (
-        ("rejection_sampler", lambda: rejection_sampler_triton_warmup(shim)),
-        ("penalties", lambda: penalties_triton_warmup(shim)),
-        ("rms", lambda: triton_rms_warmup(shim, assume_used=True)),
-    )
+    items: tuple[tuple[str, Any], ...] = ()
+    # MRv2 samples through worker/v2 kernels, so the v1-only rejection-sampler
+    # and penalty Triton kernels are never launched there (mirrors
+    # kernel_warmup, which skips them for use_v2_model_runner). Only rms is
+    # shared by both runners.
+    if not getattr(shim.vllm_config, "use_v2_model_runner", False):
+        from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (
+            penalties_triton_warmup,
+        )
+        from vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup import (
+            rejection_sampler_triton_warmup,
+        )
+
+        items += (
+            ("rejection_sampler", lambda: rejection_sampler_triton_warmup(shim)),
+            ("penalties", lambda: penalties_triton_warmup(shim)),
+        )
+    items += (("rms", lambda: triton_rms_warmup(shim, assume_used=True)),)
     for name, fn in items:
+        start = time.perf_counter()
         try:
             fn()
+            logger.info("Early kernel warmup %s complete in %.3fs.", name, time.perf_counter() - start)
         except Exception:
             logger.warning("Early kernel warmup item %s failed; regular warmup will compile it", name, exc_info=True)
 
@@ -107,7 +121,7 @@ def start_early_kernel_warmup() -> None:
 
         device_index = torch.npu.current_device()
         shim = _WarmupShim(vllm_config, torch.device(f"npu:{device_index}"))
-        _preimport()
+        _preimport(getattr(vllm_config, "use_v2_model_runner", False))
 
         def _target() -> None:
             try:
