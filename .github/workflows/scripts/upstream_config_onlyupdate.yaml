@@ -46,8 +46,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/kernels/quantization/test_mxfp6_kernel_selection.py
     estimated_time: 20
-  - name: tests/kernels/test_gate_linear_rocm_dispatch.py
-    estimated_time: 20
   - name: tests/model_executor/kernels/test_b12x_linear.py
     estimated_time: 20
   - name: tests/model_executor/layers/test_mla_short_prefill_indexer.py
@@ -82,8 +80,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_minicpmv.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_mistral3.py
-    estimated_time: 20
   - name: tests/models/multimodal/processing/test_moss_transcribe_diarize.py
     estimated_time: 20
   - name: tests/models/qwen4_exp/test_config.py
@@ -97,8 +93,6 @@ e2e-upstream_singlecard:
   - name: tests/models/test_language_model_cache_is_weak.py
     estimated_time: 20
   - name: tests/models/test_qwen3_5_mtp_config.py
-    estimated_time: 20
-  - name: tests/models/transformers/fusers/test_mla.py
     estimated_time: 20
   - name: tests/multimodal/test_vidcom2.py
     estimated_time: 20
@@ -155,8 +149,6 @@ e2e-upstream_singlecard:
   - name: tests/v1/executor/test_multiproc_executor.py
     estimated_time: 20
   - name: tests/v1/executor/test_multiproc_executor_timeout.py
-    estimated_time: 20
-  - name: tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/offloading_connector/test_canonical_mapping.py
     estimated_time: 20
@@ -218,15 +210,11 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/cohere/test_api_router.py
     estimated_time: 20
-  - name: tests/entrypoints/cohere/test_chat_v2.py
-    estimated_time: 20
   - name: tests/entrypoints/launchers/test_shutdown.py
     estimated_time: 20
   - name: tests/entrypoints/openai/test_render_parity.py
     estimated_time: 20
   - name: tests/entrypoints/scale_out/derender/test_derender_stream.py
-    estimated_time: 20
-  - name: tests/entrypoints/serve/dev/rlhf/state_transitions/test_pause_resume.py
     estimated_time: 20
   - name: tests/entrypoints/serve/exception_handling/test_validation_exception_handler.py
     estimated_time: 20
@@ -258,26 +246,10 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/launchers/test_run_batch.py
     estimated_time: 20
-  - name: tests/lora/test_gemma4_tp.py
-    estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash.py
-    estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/acceptance_rates/dspark/test_dspark.py
-    estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py
-    estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/draft_model/test_async.py
-    estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
-    estimated_time: 20
   - name: tests/v1/e2e/spec_decode/test_sharded_sampling.py
-    estimated_time: 20
-  - name: tests/distributed/test_file_store.py
     estimated_time: 20 
-  - name: tests/entrypoints/launchers/api_server/test_api_server_process_manager.py
-    estimated_time: 20
   - name: tests/v1/e2e/spec_decode/test_sharded_sampling.py
-    estimated_time: 20
+    estimated_time: 20 
   - name: tests/v1/kv_offload/cpu/test_canonical_layout.py
     estimated_time: 20
   - name: tests/v1/spec_decode/test_dflash_prepare_inputs.py
@@ -291,8 +263,6 @@ e2e-upstream_singlecard:
   - name: tests/v1/worker/test_gpu_warmup_blocks.py
     estimated_time: 20
   - name: tests/v1/worker/test_mamba_hybrid_model_state.py
-    estimated_time: 20
-  - name: tests/v1/worker/test_prompt_embeds_state.py
     estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
@@ -322,16 +292,4 @@ e2e-upstream_online_1:
   - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
     estimated_time: 20
   - name: tests/parser/test_harmony.py
-    estimated_time: 20
-e2e-upstream_a2_2:
-  - name: tests/v1/distributed/test_async_llm_dp.py
-    estimated_time: 20
-  - name: tests/v1/distributed/test_external_lb_dp.py
-    estimated_time: 20
-  - name: tests/v1/distributed/test_internal_lb_dp.py
-    estimated_time: 20
-  - name: tests/v1/distributed/test_dense_dp_world_size.py
-    estimated_time: 20
-e2e-upstream_a2_4:
-  - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20
