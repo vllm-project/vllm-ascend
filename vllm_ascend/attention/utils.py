@@ -12,6 +12,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
@@ -249,30 +250,57 @@ def needs_layer_aware_fia_graph_replay() -> bool:
     return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
 
-def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig, *, min_workspace_size: int = 0) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
 
-    chunked_prefill_workspace_size = min(
-        # Make sure there is enough for 8 full length request or at least
-        # 4 pages of cache per request
-        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
-        # For long-context models try not to over-allocate limiting
-        # kv-cache space, limiting it to 128k tokens,
-        # which would result in the workspace being:
-        #   2*(576)*(128*1024) = 288mb
-        # (assuming 576 MLA head dim, and fp16)
-        # which would result in up-projected context being
-        #   2*(192*128)*(128*1024) = 6gb
-        # (assuming 192 QK head dim, 128 heads, and fp16)
-        128 * 1024,
-    )
+    # Bound long-context models so the workspace does not take too much
+    # KV-cache space. The latent workspace holds one
+    # (kv_lora_rank + qk_rope_head_dim)-wide row per token: 128K rows of a
+    # 576-wide FP16 latent take 144 MiB. Context chunks up-projected from it
+    # also scale with the row count.
+    capacity = get_ascend_config().chunked_prefill_workspace_size
+    capacity_source = "additional_config.chunked_prefill_workspace_size"
+    # Make sure there is enough for 8 full length request or at least
+    # 4 pages of cache per request
+    requested_size = max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size)
+    # Every running request still needs room for at least one cache block.
+    base_min_workspace_size = scheduler_config.max_num_seqs * cache_config.block_size
+    min_workspace_size = max(min_workspace_size, base_min_workspace_size)
+    chunked_prefill_workspace_size = max(min(requested_size, capacity), min_workspace_size)
 
-    chunked_prefill_workspace_size = max(
-        chunked_prefill_workspace_size,
-        scheduler_config.max_num_seqs * cache_config.block_size,
-    )
+    if min_workspace_size > max(capacity, base_min_workspace_size):
+        logger.warning_once(
+            "MLA chunked-prefill context-parallel minimum of %d token rows overrides the %d-row capacity from %s; "
+            "the workspace is raised to %d rows to fit one aligned chunk per local fragment.",
+            min_workspace_size,
+            capacity,
+            capacity_source,
+            chunked_prefill_workspace_size,
+        )
+    elif requested_size > capacity:
+        if min_workspace_size > capacity:
+            logger.warning_once(
+                "MLA chunked-prefill workspace demand of %d token rows exceeds the %d-row capacity from %s, "
+                "so the capacity clamps it; max_num_seqs * block_size = %d rows then raises the workspace "
+                "to %d rows, above the capacity. Context parallelism may raise the size further.",
+                requested_size,
+                capacity,
+                capacity_source,
+                min_workspace_size,
+                chunked_prefill_workspace_size,
+            )
+        else:
+            logger.warning_once(
+                "MLA chunked-prefill workspace demand of %d token rows exceeds the %d-row capacity from %s, "
+                "so the capacity clamps the workspace to %d rows. Long prefixes are processed in more context "
+                "chunks; context parallelism may raise the size further.",
+                requested_size,
+                capacity,
+                capacity_source,
+                chunked_prefill_workspace_size,
+            )
 
     return chunked_prefill_workspace_size
 
