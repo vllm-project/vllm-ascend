@@ -24,7 +24,7 @@ import torch.nn as nn
 from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.xlite.xlite import XliteWrapper
 
 

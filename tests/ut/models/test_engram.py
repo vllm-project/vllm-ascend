@@ -114,7 +114,7 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(

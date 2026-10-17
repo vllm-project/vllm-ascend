@@ -322,7 +322,7 @@ class AscendModelState(DefaultModelState):
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
-            # Same wiring as model_runner_v1
+            # Same wiring as the V1 model runner
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,

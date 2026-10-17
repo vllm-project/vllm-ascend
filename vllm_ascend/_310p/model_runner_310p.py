@@ -61,7 +61,7 @@ from vllm_ascend.utils import (
     is_rc_device,
     lmhead_tp_enable,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128

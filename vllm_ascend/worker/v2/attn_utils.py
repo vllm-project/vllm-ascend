@@ -1481,7 +1481,7 @@ def _reshape_kv_cache_v2(
                 continue
 
             if layer_name in layer_tuple_strides:
-                # Same view construction as model_runner_v1
+                # Same view construction as the V1 model runner
                 block_stride = layer_tuple_strides[layer_name]
                 initial_offset = 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(

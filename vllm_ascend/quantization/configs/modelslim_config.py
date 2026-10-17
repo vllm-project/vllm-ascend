@@ -852,7 +852,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         # Note: C8-MXFP models never reach this hook — its only caller in
-        # model_runner_v1 is gated by enable_fa_quant(), and the C8-MXFP
+        # the V1 model runner is gated by enable_fa_quant(), and the C8-MXFP
         # cache dtype comes from the rebuilt fp8 spec in get_kv_cache_spec.
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
