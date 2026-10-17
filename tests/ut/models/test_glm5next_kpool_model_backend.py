@@ -425,6 +425,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             pool_tail=torch.zeros(2, dtype=torch.int64),
         )
     query_metadata = metadata.query_metadata or metadata
+    original_query_lens = query_metadata.cum_query_lens.clone()
+    original_seq_lens = query_metadata.seq_lens.clone()
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
     cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
@@ -441,6 +443,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             compute_topk=compute_topk,
         )
     names = [call[0] for call in calls.mock_calls]
+    torch.testing.assert_close(query_metadata.cum_query_lens, original_query_lens)
+    torch.testing.assert_close(query_metadata.seq_lens, original_seq_lens)
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
     assert op._key_pool.call_args.args[1:3] == (op._key_weight, op._gate_weight)
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
@@ -465,8 +469,12 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
         assert op._pool_key_indexer.call_args.args[1] is cache
         assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is query_metadata.cum_query_lens
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
+        selection = op._pool_key_indexer.call_args.kwargs
+        expected_query = query_metadata.cum_query_lens
+        if actual_query_tokens == 0:
+            expected_query = torch.ones_like(expected_query)
+        torch.testing.assert_close(selection["actual_seq_q"], expected_query)
+        torch.testing.assert_close(selection["actual_seq_k"], query_metadata.seq_lens.clamp_min(1))
         assert op._pool_key_indexer.call_args.args[3] is query_metadata.pool_tail
         assert op._pack_keypool_indices.call_args.args[1] is query_metadata
     else:

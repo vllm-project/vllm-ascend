@@ -741,13 +741,24 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         query = q_values.to(indexer_cache.dtype)
+        # CANN's all-empty TND path clears B*T output rows instead of T.
+        # Keep one harmless pool/query available so selection never enters
+        # that path, including an idle shard replaying a FULL graph. Packing
+        # below still uses the original lengths/positions: it discards the
+        # placeholder history and reconstructs the real unpooled tail.
+        selection_seq_lens = query_metadata.seq_lens.clamp_min(1)
+        selection_query_lens = torch.where(
+            query_metadata.cum_query_lens[-1:] > 0,
+            query_metadata.cum_query_lens,
+            torch.ones_like(query_metadata.cum_query_lens),
+        )
         indices, _ = self._pool_key_indexer(
             query,
             indexer_cache,
             weights.to(torch.bfloat16),
             query_metadata.pool_tail,
-            actual_seq_q=query_metadata.cum_query_lens,
-            actual_seq_k=query_metadata.seq_lens,
+            actual_seq_q=selection_query_lens,
+            actual_seq_k=selection_seq_lens,
             block_table=indexer_metadata.block_table,
             layout_q="TND",
             layout_k="PA_BBND",
