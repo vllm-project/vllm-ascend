@@ -371,10 +371,14 @@ def scatter_mxfp_k_scale_cache(
     belongs to block 0, the null block BlockPool never hands to a request, so
     only dummy padding requests (whose output is discarded) read it back.
     """
-    block_ids, seg_ids, frag_ids = slot_index
-    if block_ids.numel() == 0:
+    if slot_index[0].numel() == 0:
         return
-    key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :] = key_scale
+
+    # NPU IndexPut can copy back this strided view, overwriting asynchronous
+    # KV transfers to other requests' cache pages. Write only addressed bytes.
+    from vllm_ascend.ops.triton.mxfp_k_scale import scatter_k_scales
+
+    scatter_k_scales(key_scale, key_scale_cache, slot_index)
 
 
 class AscendC8MXFPAttentionBackend(AscendAttentionBackend):

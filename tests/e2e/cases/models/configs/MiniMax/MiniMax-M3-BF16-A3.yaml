@@ -71,6 +71,19 @@ test_cases:
         temperature: 1.0
         top_p: 0.95
         threshold: 2
+      # Identical to perf. The scored case is a single request, so its TTFT
+      # is the first time V2 sees this prefill shape unless this runs first.
+      perf_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in256-bs1-Minimax
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 1
+        max_out_len: 128
+        batch_size: 1
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in256-bs1-Minimax

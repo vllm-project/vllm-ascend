@@ -49,29 +49,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 2. File: platform/patch_deepseek_v4_vision.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
-#    Why:
-#       The supported vLLM revision has the generic DeepSeek-V4 text config
-#       conversion but does not identify a checkpoint with `vision_n_layers`
-#       as the multimodal conditional-generation architecture. Without this
-#       distinction, vllm-ascend cannot select its DeepSeek-V4 vision wrapper
-#       or enable bidirectional attention over the image prefix.
-#    How:
-#       Register an Ascend DeepSeek-V4 config conversion handler. For vision checkpoints
-#       it selects `DeepseekV4ForConditionalGeneration`, enables multimodal
-#       prefix-LM attention, and records the prefix-padding constraints used by
-#       the Ascend DSA path. Text-only DeepSeek-V4 behavior is unchanged.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/54566
-#    Future Plan:
-#       Remove this patch once the supported vLLM revision natively maps
-#       DeepSeek-V4 vision checkpoints to the conditional-generation model and
-#       exposes the required multimodal prefix-LM and padding metadata without
-#       replacing `MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"]`.
-#
-# ** 3. File: platform/patch_distributed.py**
+# ** 2. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
@@ -237,44 +215,6 @@
 #    Future Plan:
 #       Remove this patch and its platform import once all supported vLLM
 #       release tags and verified main pins include the upstream fix.
-#
-# ** 7. File: platform/patch_glm5next_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
-#    Why:
-#       The GLM-5.3-Flash architecture is maintained in vllm-ascend
-#       (`vllm_ascend/models/glm5next/`) rather than upstream, so its config
-#       classes are not in vLLM's `model_type` lookup table. Without an entry,
-#       loading a GLM-5.3-Flash checkpoint fails to resolve `glm5_next`.
-#    How：
-#       Insert `Glm5NextConfig` / `Glm5NextTextConfig` / `Glm5NextVisionConfig`
-#       into `_CONFIG_REGISTRY`. The registry is a `LazyConfigDict` whose values
-#       may be either a module attribute name or the class itself, so the
-#       downstream classes are inserted directly.
-#    Related PR (if no, explain why):
-#       No. The upstream GLM-5.3-Flash PR (vllm-project/vllm#53906) is not
-#       merged, and vllm-ascend carries the architecture downstream instead of
-#       depending on it.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version registers the
-#       GLM-5.3-Flash configs itself.
-#
-#   2. `vllm.config.model.ModelConfig.is_deepseek_mla`
-#    Why:
-#       GLM-5.3-Flash uses MLA, but upstream decides `is_deepseek_mla` from a
-#       hard-coded `model_type` tuple that cannot know about a downstream
-#       architecture. Answering False routes the model down the non-MLA KV cache
-#       and quantization paths.
-#    How：
-#       Wrap the property so it additionally returns True for `glm5_next` /
-#       `glm5_next_text` when the text config carries `kv_lora_rank`, preserving
-#       upstream behavior for every other model type.
-#    Related PR (if no, explain why):
-#       No, see above.
-#    Future Plan:
-#       Remove this patch once upstream either includes the GLM-5.3-Flash
-#       model types or resolves MLA from the config contents instead of a
-#       model_type whitelist.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -845,26 +785,31 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Upstream vLLM enables the v2 model runner not only via the
-#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
-#       architecture whitelists, Triton availability, and feature
-#       compatibility checks. On Ascend the NPU v2 runner is not yet
-#       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       Ascend uses the NPU v2 runner by default. Features that are not
+#       V2-ready (pooling KV, VL encoder disaggregation,
+#       draft_window_size, enable_dsa_cp, suffix
+#       speculative decoding, ngram speculative decoding, draft_model
+#       speculative decoding, dflash2 graph, and p-eagle)
+#       default to v1.
+#       Upstream GPU-specific architecture, feature, and Triton gates must not
+#       silently switch an
+#       Ascend request back to v1. VLLM_USE_V2_MODEL_RUNNER=0 remains the
+#       explicit v1 escape hatch.
 #    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       Call apply_v2_model_runner_config_patch() to install the Ascend
+#       default-v2 use_v2_model_runner property (with the V2 feature
+#       blacklist) and neutralize upstream V2 validation. Spec+PP is
+#       native upstream, so this patch no longer rewrites that unsupported
+#       list. Keep the Ascend-supported V1 feature allowlist
+#       (dspark / dflash2).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner and can rely on upstream's default enablement heuristics
-#       (model architecture, Triton, feature checks) without crashes or
-#       degraded functionality.
+#       Remove this patch once upstream exposes a platform-specific default
+#       runner-selection hook.
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
@@ -875,6 +820,18 @@
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
 #       Re-add only if a supported pin rejects PCP+DP.
+#
+#   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
+#    Why:
+#       vLLM 0.31 rejects V1 PP with async scheduling for a GPU runner
+#       limitation. Ascend has separate PP communication and scheduler patches.
+#    How:
+#       Add this feature to the existing Ascend V1 allowlist, preserving
+#       unrelated upstream restrictions.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/45014 describes the GPU issue.
+#    Future Plan:
+#       Remove with the V1 runner compatibility patch when Ascend uses V2 only.
 #
 # * Worker Patch:
 # ========#
@@ -1502,7 +1459,8 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
+#       in `platform/patch_use_v2_model_runner.py` (default-v2 selection plus
+#       remaining V2/V1 feature patches).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.

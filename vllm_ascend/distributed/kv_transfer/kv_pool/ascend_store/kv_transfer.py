@@ -182,8 +182,11 @@ class LayerBatchBuilder:
         )
         rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
+            # Zero GVAs here are expected: blocks already committed in the
+            # pool or excluded by masks are intentionally not allocated.
+            # Real batch_alloc failures are logged as errors by the caller.
             zero_count = int(np.sum(base_gvas_arr <= 0))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_transfer layer=%d detected %d zero/negative base_gvas "
                 "(base_gvas_sample=%s); these blocks will be skipped in batch_copy",
                 layer_id,
@@ -325,8 +328,12 @@ class LayerBatchBuilder:
         block_gvas_slice = block_gvas_arr[:offset]
         valid_mask = block_gvas_slice > 0
         if not np.all(valid_mask):
+            # Zero GVAs are the designed sentinel for blocks that are not
+            # transfer targets this step (already committed in the pool,
+            # hit-prefix blocks, or masked-out blocks). Real batch_alloc
+            # failures are logged as errors by _alloc_gvas_for_save.
             skip_count = int(np.sum(~valid_mask))
-            logger.warning(
+            logger.debug(
                 "[KVPOOL] build_shared skipping %d blocks with invalid gva (gva<=0)",
                 skip_count,
             )
@@ -1231,13 +1238,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         )
         save_start_token = self.get_saved_offset(req_id)
 
-        def should_skip(start: int, end: int) -> bool:
+        def should_skip(start: int, end: int, group_save_start: int) -> bool:
             # This is the worker's durable high-water mark and intentionally
             # may lag ReqMeta.save_start_token. In Decode-only mode the first
             # job therefore checks the complete prefix and can restore missing
             # ancestors of the new Decode block. After a successful store it
             # advances, avoiding a full-prefix lookup on later boundaries.
-            if end <= save_start_token:
+            if end <= group_save_start:
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
@@ -1245,24 +1252,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
-                list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
+                store_masks[group_id] if store_masks is not None and group_id < len(store_masks) else None
             )
-            if group_store_mask is not None:
-                skipped_chunks = 0
-                for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * group_block_size
-                    if allowed and should_skip(start, start + group_block_size):
-                        group_store_mask[chunk_id] = False
-                        skipped_chunks += 1
-                if skipped_chunks:
-                    logger.debug(
-                        "KV pool put skipped %d pooled chunks for request %s group %d",
-                        skipped_chunks,
-                        req_id,
-                        group_id,
-                    )
-                if not group_store_mask or not any(group_store_mask):
-                    continue
+            if group_store_mask is not None and not group_store_mask:
+                continue
 
             starts: list[int] = []
             ends: list[int] = []
@@ -1272,18 +1265,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             block_ids = req_meta.block_ids_by_group[group_id]
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
             align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+            # Align-state slots below the saved extent can become valid later.
+            save_start = 0 if align_state_group else save_start_token
 
             def chunk_filter(
                 start: int,
                 group_block_size=group_block_size,
-                group_store_mask=group_store_mask,
+                save_start=save_start,
             ) -> bool:
-                block_idx = start // group_block_size
-                mask_allows = group_store_mask is None or (
-                    block_idx < len(group_store_mask) and group_store_mask[block_idx]
-                )
-                chunk_start = block_idx * group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
+                return not should_skip(start, start + group_block_size, save_start)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
@@ -1301,6 +1291,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_filter=chunk_filter,
                 shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
                 shard_size=self.pcp_size * tp_replicas,
+                chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)

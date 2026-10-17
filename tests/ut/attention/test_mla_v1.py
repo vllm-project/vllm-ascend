@@ -76,6 +76,78 @@ def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
     torch.testing.assert_close(result, expected)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 3], ids=["one-token", "multi-token"])
+@pytest.mark.parametrize("head_padding", [0, 2], ids=["no-padding", "padded-layer"])
+@pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16], ids=["cast", "same-dtype"])
+@pytest.mark.parametrize("layout", ["TND", "BNSD"])
+@pytest.mark.parametrize("strided", [False, True], ids=["contiguous", "strided-view"])
+@pytest.mark.parametrize("use_fused", [False, True], ids=["at-size-limit", "below-size-limit"])
+def test_shared_v_projection_preserves_dcp_contract(num_tokens, head_padding, input_dtype, layout, strided, use_fused):
+    """FP8 decode guards must not narrow the projection shared with DCP."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.num_heads = 2
+    impl.head_padding = head_padding
+    impl.num_heads_padded = impl.num_heads + head_padding
+    impl.kv_lora_rank = 4
+    impl.v_head_dim = 3
+    impl.W_UV = (
+        torch.arange(impl.num_heads * impl.kv_lora_rank * impl.v_head_dim, dtype=torch.float32)
+        .reshape(impl.num_heads, impl.kv_lora_rank, impl.v_head_dim)
+        .div(4)
+        .sub(1)
+        .bfloat16()
+    )
+    values = (
+        torch.arange(num_tokens * impl.num_heads * impl.kv_lora_rank, dtype=torch.float32)
+        .reshape(num_tokens, impl.num_heads, impl.kv_lora_rank)
+        .div(8)
+        .sub(1)
+        .to(input_dtype)
+    )
+    if strided:
+        backing = torch.full((num_tokens, impl.num_heads, impl.kv_lora_rank * 2), -99, dtype=input_dtype)
+        x = backing[..., 1::2]
+        x.copy_(values)
+    else:
+        x = values.clone()
+    if layout == "BNSD":
+        x = x.unsqueeze(2)
+    original = x.clone()
+    original_stride, original_offset, original_ptr = x.stride(), x.storage_offset(), x.data_ptr()
+    weight_snapshot = impl.W_UV.clone()
+    # Accumulate independently in FP32, after the shared helper's required
+    # conversion to the loaded weights' dtype, then round the result to BF16.
+    expected = torch.einsum("thl,hlv->thv", values.to(impl.W_UV.dtype).float(), impl.W_UV.float())
+    expected = expected.to(impl.W_UV.dtype).reshape(num_tokens, impl.num_heads * impl.v_head_dim)
+
+    def fused_bmm(input, weight, *, perm_x1, perm_y):
+        assert perm_x1 == perm_y == (1, 0, 2)
+        assert input.shape == (num_tokens, impl.num_heads, impl.kv_lora_rank)
+        assert input.dtype == weight.dtype == impl.W_UV.dtype
+        assert weight is impl.W_UV
+        if input_dtype == impl.W_UV.dtype:
+            assert input.data_ptr() == original_ptr
+            assert input.untyped_storage() is x.untyped_storage()
+        return torch.bmm(input.permute(perm_x1), weight).permute(perm_y)
+
+    # Retain ordinary tensor sizes while exercising both sides of the same
+    # exclusive limit; the existing tests above also cover the real 65536 edge.
+    limit = impl.num_heads * impl.kv_lora_rank + int(use_fused)
+    with (
+        patch("vllm_ascend.attention.mla_v1.TRANSPOSE_BMM_MAX_SUPPORTED_DIM", limit),
+        patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm) as fused,
+    ):
+        result = impl._v_up_proj_batch_major(x)
+
+    assert fused.call_count == int(use_fused)
+    assert result.dtype == impl.W_UV.dtype
+    assert x.dtype == input_dtype
+    assert (x.stride(), x.storage_offset(), x.data_ptr()) == (original_stride, original_offset, original_ptr)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    torch.testing.assert_close(x, original, rtol=0, atol=0)
+    torch.testing.assert_close(impl.W_UV, weight_snapshot, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "enable_mlapo,fa_quant_layer,is_draft,disable_after_init,uses_fused_weights",
     [
@@ -159,7 +231,10 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
         assert cast.call_count == (0 if uses_fused_weights else 2)
         source_ptrs = [layer.weight.data_ptr() for layer in projections]
         cast.reset_mock()
-        with patch.object(impl, "_load_fa_quant_scales"):
+        with (
+            patch.object(impl, "_load_fa_quant_scales"),
+            patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
+        ):
             impl.process_weights_after_loading(torch.bfloat16)
         assert [layer.weight.data_ptr() for layer in projections] == source_ptrs
         if not uses_fused_weights:
@@ -239,6 +314,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
         patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
         patch.object(impl, "_process_weights_for_fused") as fused,
+        patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
     ):
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo == enable_mlapo
@@ -272,6 +348,7 @@ def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_en
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
         patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
         patch.object(impl, "_process_weights_for_fused") as fused,
+        patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
     ):
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo is expected_enabled
