@@ -20,7 +20,7 @@ vLLM Ascend currently supports two types of connectors for handling KV cache man
 - **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
 
 For step-by-step deployment and configuration, refer to the following guide:  
-[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
+[PD disaggregation multi-node deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
 
 ---
 
@@ -33,8 +33,8 @@ Under the disaggregated-prefill, a global proxy receives external requests, forw
 ### 2. Implementation Design
 
 Our design diagram is shown below, illustrating the pull and push schemes respectively.
-![alt text](../../assets/disaggregated_prefill_pull.png)
-![alt text](../../assets/disaggregated_prefill_push.png)
+![Disaggregated prefill pull](../../assets/disaggregated_prefill_pull.png)
+![Disaggregated prefill push](../../assets/disaggregated_prefill_push.png)
 
 #### Mooncake Connector
 
@@ -52,6 +52,14 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy's `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 5. During processing, the P node's scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
+
+##### Sparse SFA C8 cache transfer
+
+For SFA models, `MooncakeLayerwiseConnector` can transfer the contiguous packed C8 main cache directly. Attention writes the quantized NoPE data, BF16 RoPE data and dynamic scales before recording the cache-write event. The connector waits for that event and copies the bytes without applying the legacy K/V INT8 quantization again. Indexer K and its scale tensor are transferred as separate components of the same physical layer.
+
+For FP8 main and indexer caches, configure both P and D with `--kv-cache-dtype fp8 --attention_config.indexer_kv_dtype fp8`. Both ends must use matching cache layouts. This path requires main and indexer components to share one KV cache group with the same block-size scale. Noncontiguous packed main caches, TurboQuant, and DCP-replicated indexer layouts with different component block-size scales remain unsupported.
+
+This transfer path still requires end-to-end validation on Ascend hardware, including configurations that combine it with `AscendStoreConnector` through `MultiConnector`.
 
 ### 3. Interface Design
 
@@ -86,7 +94,7 @@ This feature is flexible and supports various configurations, including setups w
 
 ### 1. Config Parameter Validation
 
-Validate KV transfer config by checking whether the kv_connector type is supported and whether kv_connector_module_path exists and is loadable. On transfer failures, emit clear error logs for diagnostics.
+Validate KV transfer config by checking whether the kv_connector type is supported. On transfer failures, emit clear error logs for diagnostics.
 
 ### 2. Port Conflict Detection
 
@@ -100,6 +108,6 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 ## Limitations
 
-- Heterogeneous P and D nodes are not supported—for example, running P nodes on A2 and D nodes on A3.
+- Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
 - In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).

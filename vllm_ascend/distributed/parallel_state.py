@@ -1,9 +1,18 @@
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
+from vllm.distributed import parallel_state as vllm_parallel_state
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
+
+if TYPE_CHECKING:
+    from vllm.config import EngramConfig
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -14,21 +23,45 @@ _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
 
-# flashcomm specific groups
-_FLASHCOMM2_OTP: GroupCoordinator | None = None
-_FLASHCOMM2_ODP: GroupCoordinator | None = None
-_FC3_QUANT_X: GroupCoordinator | None = None
-
-# shard_weight across rank groups
-_SHARD_WEIGHT: GroupCoordinator | None = None
-
 _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
+_KVPP: GroupCoordinator | None = None
+
+
+class ReplicatedGroup:
+    """A no-communication stand-in for a TP group of world_size 1.
+
+    Used to replicate a parameter across ranks (e.g. a disable_tp layer such
+    as the DSpark Markov lm_head): every rank holds the full weight, so there
+    is nothing to all-reduce / all-gather. Unlike a real ``GroupCoordinator``,
+    constructing this does **not** call ``hcclCommInitRootInfoConfig`` — it is
+    a pure logical object exposing just the attributes
+    ``AscendVocabParallelEmbedding`` reads (``world_size``, ``rank_in_group``)
+    plus no-op comm methods for safety.
+    """
+
+    world_size = 1
+    rank_in_group = 0
+    device_group = None
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        return input_
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        return input_
+
+    def destroy(self) -> None:
+        pass
+
+
+# Singleton: identical on every rank, no HCCL comm created.
+_REPLICATED = ReplicatedGroup()
 
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
+    engram_config: "EngramConfig | None" = None,
 ):
     if model_parallel_initialized():
         return
@@ -50,6 +83,42 @@ def init_ascend_model_parallel(
         global_pcp_size,
         global_tp_size,
     )
+
+    if engram_config is not None and global_pcp_size > 1:
+        # Worker initialization defers the upstream DP-only group so the final
+        # DP x PCP group is created once. Upstream owns its getter and teardown.
+        assert vllm_parallel_state.get_engram_dp_group() is None
+        # Reuse upstream node boundaries and shard-size fallback for DP x PCP.
+        engram_size = vllm_parallel_state._engram_dp_shard_size(
+            world_size,
+            global_dp_size * global_pcp_size,
+            global_tp_size * global_pp_size,
+        )
+        if engram_size > 1:
+            group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(-1, engram_size).unbind(0)
+            shared = engram_config.dp_shared_memory
+            vllm_parallel_state._ENGRAM_DP = init_model_parallel_group(
+                [ranks.tolist() for ranks in group_ranks],
+                get_world_group().local_rank,
+                "gloo" if shared else backend,
+                group_name="edp",
+                use_device_communicator=not shared,
+            )
+
+    kvpp_size = get_ascend_config().kvpp_config.size
+    global _KVPP
+    assert _KVPP is None, "KV layer parallel group is already initialized"
+    if kvpp_size > 1:
+        # One cache-replica domain per DP replica and PP stage. PCP's
+        # prefill gather replicates MLA KV across PCP as well as TP ranks.
+        assert kvpp_size == global_pcp_size * global_tp_size
+        kvpp_group_ranks = all_ranks.flatten(-2).reshape(-1, kvpp_size).unbind(0)
+        _KVPP = init_model_parallel_group(
+            [ranks.tolist() for ranks in kvpp_group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="kvpp",
+        )
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -101,12 +170,6 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
-        )
-
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
@@ -148,83 +211,6 @@ def init_ascend_model_parallel(
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
-    # TODO: Extract and unify the logic across different communication group.
-    flashcomm2_otp_group_ranks = []
-    if flashcomm2_enable():
-        flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-        num_fc2_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-        global _FLASHCOMM2_OTP
-        global _FLASHCOMM2_ODP
-
-        _FLASHCOMM2_OTP = None
-        _FLASHCOMM2_ODP = get_tp_group()
-
-        if flashcomm2_otp_size > 1:
-            odp_group_ranks: list[list[int]] = [
-                [] for _ in range(flashcomm2_otp_size * global_dp_size * global_pp_size)
-            ]
-            for dp_group_index in range(global_dp_size):
-                for pp_group_index in range(global_pp_size):
-                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
-                    tp_base_rank = dp_pp_serial_index * global_tp_size
-                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
-
-                    for i in range(num_fc2_oproj_tensor_parallel_groups):
-                        ranks = []
-                        for j in range(flashcomm2_otp_size):
-                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
-                            assert tp_local_rank < global_tp_size
-                            global_rank = tp_base_rank + tp_local_rank
-                            ranks.append(global_rank)
-
-                            odp_group_index = odp_base_index + j
-                            odp_group_ranks[odp_group_index].append(global_rank)
-                        flashcomm2_otp_group_ranks.append(ranks)
-
-            _FLASHCOMM2_OTP = init_model_parallel_group(
-                flashcomm2_otp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_otp"
-            )
-            _FLASHCOMM2_ODP = init_model_parallel_group(
-                odp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_odp"
-            )
-
-    def create_shard_weight_group(module_tp_group_ranks: None) -> GroupCoordinator:
-        # Argument module_tp_group_ranks: The module specific tensor parallel group.
-        # There are three situations.
-        # 1. If it is None, then the TP_size of the specific module is 1 and is replicated linear layer.
-        # 2. If it is not None, and the module tp_group is same as the global tp_group.
-        # 3. If it is not None, and the module tp_group is different from the global tp_group.(eg. flashcomm2_otp)
-        group_ranks = []
-        pp_group_ranks = all_ranks.transpose(2, 4).reshape(-1, global_pp_size)
-        if module_tp_group_ranks is None:
-            # If it is None, then the TP_size of this shard weight is 1.
-            shard_weight_group_ranks = pp_group_ranks.transpose(0, 1).unbind(0)
-            group_ranks = [x.tolist() for x in shard_weight_group_ranks]
-        else:
-            # combine standard tp group and non-standard tp group to build  shard_weight comm_group
-            module_tp_tanspose_ranks = module_tp_group_ranks.transpose(0, 1)
-            G = world_size // (global_pp_size * module_tp_group_ranks.size(1))
-            shard_weight_group_ranks = torch.stack([t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1)
-            group_ranks = shard_weight_group_ranks.view(-1, G).tolist()
-        return init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="shard_weight")
-
-    # Create shard weight group if enabled
-    if get_ascend_config().layer_sharding is not None:
-        global _SHARD_WEIGHT
-        if flashcomm2_enable():
-            if len(flashcomm2_otp_group_ranks) == 0:
-                FC2_group_ranks = None
-            else:
-                FC2_group_ranks = torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
-            _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
-        elif enable_dsa_cp_with_layer_shard():
-            # For dsa_cp, all shard layers are replicated.
-            _SHARD_WEIGHT = create_shard_weight_group(None)
-        else:
-            # For standard tp, use global tp group_ranks
-            tp_group_ranks = all_ranks.view(-1, global_tp_size)
-            _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
-
 
 def model_parallel_initialized():
     return _MC2 is not None
@@ -255,18 +241,8 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
-def get_flashcomm2_otp_group() -> GroupCoordinator:
-    return _FLASHCOMM2_OTP
-
-
-def get_flashcomm2_odp_group() -> GroupCoordinator:
-    assert _FLASHCOMM2_ODP is not None, "output data parallel group for flashcomm2 is not initialized"
-    return _FLASHCOMM2_ODP
-
-
-def get_shard_weight_group() -> GroupCoordinator:
-    assert _SHARD_WEIGHT is not None, "output shard weight parallel group for flashcomm2 is not initialized"
-    return _SHARD_WEIGHT
+def get_replicated_group() -> ReplicatedGroup:
+    return _REPLICATED
 
 
 def get_p_tp_group() -> GroupCoordinator:
@@ -274,17 +250,22 @@ def get_p_tp_group() -> GroupCoordinator:
     return _P_TP
 
 
-def get_fc3_quant_x_group() -> GroupCoordinator:
-    assert _FC3_QUANT_X is not None, "fc3 quant x group is not initialized"
-    return _FC3_QUANT_X
-
-
 def get_dynamic_eplb_group() -> GroupCoordinator:
     assert _DYNAMIC_EPLB is not None, "Dynamic eplb group is not initialized"
     return _DYNAMIC_EPLB
 
 
+def get_kvpp_group() -> GroupCoordinator:
+    assert _KVPP is not None, "KV layer parallel group is not initialized"
+    return _KVPP
+
+
 def destroy_ascend_model_parallel():
+    global _KVPP
+    if _KVPP:
+        _KVPP.destroy()
+    _KVPP = None
+
     global _MC2
     if _MC2:
         _MC2.destroy()
@@ -315,27 +296,40 @@ def destroy_ascend_model_parallel():
         _P_TP.destroy()
     _P_TP = None
 
-    global _FLASHCOMM2_OTP
-    if _FLASHCOMM2_OTP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
-        _FLASHCOMM2_OTP.destroy()
-        _FLASHCOMM2_OTP = None
-
-    global _FLASHCOMM2_ODP
-    if _FLASHCOMM2_ODP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
-        _FLASHCOMM2_ODP.destroy()
-        _FLASHCOMM2_ODP = None
-
-    global _SHARD_WEIGHT
-    if _SHARD_WEIGHT:
-        _SHARD_WEIGHT.destroy()
-    _SHARD_WEIGHT = None
-
-    global _FC3_QUANT_X
-    if _FC3_QUANT_X:
-        _FC3_QUANT_X.destroy()
-    _FC3_QUANT_X = None
-
     global _DYNAMIC_EPLB
     if _DYNAMIC_EPLB:
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
+
+
+def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:
+    """Return a globally unique rank for the current worker across all parallel
+     dimensions (TP/PP/CP/DP), compatible with both dense and MoE models.
+
+     vLLM does not expose a single ready-to-use cross-DP global rank:
+       - For dense models each DP rank is launched as an independent DP=1 engine,
+         so ``data_parallel_rank`` is reset to 0 and ``get_world_group()`` only
+         spans one replica (``rank_in_group`` is the local rank in the replica).
+       - For MoE DP / external_launcher the world group spans all DP ranks, so
+         ``rank_in_group`` already encodes the DP offset.
+
+     ``data_parallel_index`` always keeps the true DP rank (it is never reset),
+     and ``rank_in_group % replica_size`` yields the local rank within a replica
+     in both cases, so the formula below is correct everywhere. It mirrors vLLM's
+     own ``data_parallel_rank * world_size + rank`` (see
+     vllm/distributed/parallel_state.py).
+
+    Note: DCP (decode context parallel) reuses the TP NPUs and EP overlays
+    TP/DP, so neither adds new ranks and they are intentionally excluded from
+    ``replica_size``.
+    """
+    if parallel_config is None:
+        parallel_config = get_current_vllm_config().parallel_config
+    # Number of NPUs in a single DP replica (TP * PP * prefill-CP).
+    replica_size = (
+        parallel_config.tensor_parallel_size
+        * parallel_config.pipeline_parallel_size
+        * parallel_config.prefill_context_parallel_size
+    )
+    rank_in_replica = get_world_group().rank_in_group % replica_size
+    return parallel_config.data_parallel_index * replica_size + rank_in_replica

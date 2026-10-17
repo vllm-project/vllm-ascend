@@ -1,0 +1,250 @@
+# InternVL3.5(38B/241B-A28B)
+
+## 1 Introduction
+
+[InternVL3.5](https://huggingface.co/papers/2508.18265), a new family of open-source multimodal models that significantly advances versatility, reasoning capability, and inference efficiency along the InternVL series.
+
+The `InternVL3.5` model is first supported in `vllm-ascend:v0.20.2`
+
+This document will show the main verification steps of both `InternVL3_5-38B` and `InternVL3_5-241B-A28B` model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+
+## 2 Supported Features
+
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## 3 Prerequisites
+
+### 3.1 Model Weight
+
+|  Weight Version                       | Hardware Requirements           | Download Links |
+|---------------------------------------|---------------------------------|----------------|
+| `InternVL3_5-38B-w8a8`                | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8) |
+| `InternVL3_5-241B-A28B-w8a8`          | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8) |
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
+## 4 Installation
+
+### 4.1 Docker Image Installation
+
+You can use our official docker image to run InternVL3_5 directly.
+
+``` bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+export NAME=vllm-ascend
+
+# Run the container using the defined variables
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
+
+### 4.2 Source Code Installation
+
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+
+## 5 Online Service Deployment {: #5-online-service-deployment }
+
+### 5.1 Single-Node Online Deployment
+
+=== "InternVL3_5-38B"
+
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
+
+    Run the following script to execute online inference.
+
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
+
+    ```bash
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
+
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export VLLM_USE_V1=1
+    export VLLM_TORCH_PROFILER_WITH_STACK=0
+    export HCCL_BUFFSIZE=1536
+    
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ \
+        --port 2002 \
+        --served-model-name internvl3_5 \
+        --trust-remote-code \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --tensor-parallel-size 4 \
+        --max-num-seqs 32 \
+        --gpu-memory-utilization 0.9 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
+        --mm-processor-cache-gb 0 \
+        --enable-chunked-prefill \
+        --safetensors-load-strategy 'prefetch' \
+        --allowed-local-media-path "/"
+
+    ```
+
+=== "InternVL3_5-241B-A28B"
+
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
+
+    Run the following script to execute online inference.
+
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
+
+    ```bash
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
+
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export VLLM_USE_V1=1
+    export VLLM_TORCH_PROFILER_WITH_STACK=0
+    export HCCL_BUFFSIZE=1536
+    
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-w8a8/ \
+        --port 2001 \
+        --served-model-name internvl3_5 \
+        --trust-remote-code \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 4096 \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 2 \
+        --max-num-seqs 70 \
+        --gpu-memory-utilization 0.9 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
+        --mm-processor-cache-gb 0 \
+        --enable-chunked-prefill \
+        --enable-expert-parallel \
+        --safetensors-load-strategy 'prefetch' \
+        --allowed-local-media-path "/"
+    ```
+
+**Notice:**
+
+Some configurations for optimization are shown below:
+
+- `additional_config.enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
+- For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
+
+### 5.2 Multi-Node PD Separation Deployment
+
+Not support yet.
+
+## 6 Functional Verification
+
+Once your server is started, you can query the model with input prompts:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "internvl3_5",
+    "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/tiger.jpeg"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+    ]}
+    ]
+    }'
+```
+
+Expected Result:
+
+```bash
+{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"internvl3_5","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **a tiger**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
+```
+
+## 7 Accuracy Evaluation
+
+### 7.1 Using AISBench
+
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result.
+
+## 8 Performance Evaluation
+
+### 8.1 Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### 8.2 Using vLLM Benchmark
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+#### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
+| ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
+| InternVL3_5-241B-A28B-w8a8 High Throughput | Single node deployment | 8 (A3) | InternVL3_5-241B-A28B-w8a8 | For short-sequence high throughput, try tp4dp2 |
+| InternVL3_5-38B-w8a8 High Throughput | Single node deployment | 4 (A3) | InternVL3_5-38B-w8a8 | For short-sequence high throughput, try tp4 |
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|
+|--------|-------------|-----|--|--|------------|----------------------|--------------|
+|Single-Node (A3)|InternVL3_5-38B-w8a8 High Throughput|2|4|1|32|16384|135000|
+|Single-Node (A3)|InternVL3_5-241B-A28B-w8a8 High Throughput|4|4|2|32|4096|40960|
+
+### 9.2 Tuning Guidelines
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 9 FAQ
+
+- Common Issues Tip: If you encounter issues, refer to [Public FAQs](../../faqs.md).

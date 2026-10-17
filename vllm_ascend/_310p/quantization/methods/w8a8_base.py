@@ -31,7 +31,7 @@ class AscendW8A8Linear310pScheme(AscendLinearScheme):
     ) -> dict[str, Any]:
         return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         return {
             "input_scale": torch.empty(1, dtype=params_dtype),
             "input_offset": torch.empty(1, dtype=torch.int8),

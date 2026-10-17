@@ -12,29 +12,77 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import contextlib
+import weakref
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import AscendMetadata, AscendMetadataForDecode
-from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPImpl
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
-from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.attention.context_parallel import mla_cp
+from vllm_ascend.attention.context_parallel.attention_cp import (
+    AscendAttentionDCPMetadata,
+    AscendMetadataForDecode,
+    DCPFIAParamProvider,
+)
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
+from vllm_ascend.attention.context_parallel.mla_cp import (
+    AscendMLADCPDecodeMetadata,
+    AscendMlaDCPImpl,
+    MLASplitAttentionGraphParams,
+)
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
     ACLGraphWrapper,
+    GraphParams,
     get_draft_graph_params,
     get_graph_params,
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
+    update_full_graph_params,
 )
+from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
+from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+
+
+@patch("vllm_ascend.compilation.acl_graph.use_updatable_graph", return_value=False)
+def test_update_full_graph_params_dispatches_draft_metadata_by_keyword(mock_use_updatable):
+    impl_cls = MagicMock()
+    attn_backend = MagicMock()
+    attn_backend.get_impl_cls.return_value = impl_cls
+    update_stream = MagicMock()
+    forward_context = MagicMock()
+    vllm_config = MagicMock()
+    speculative_config = MagicMock()
+    draft_attn_metadatas = MagicMock()
+
+    update_full_graph_params(
+        attn_backend,
+        update_stream,
+        forward_context,
+        8,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
+
+    impl_cls.update_graph_params.assert_called_once_with(
+        update_stream,
+        forward_context,
+        8,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
 
 
 class TestACLGraphEntry(TestBase):
@@ -77,6 +125,17 @@ class TestACLGraphWrapper(TestBase):
     def setUp(self):
         """Set up test fixtures"""
         super().setUp()
+
+        self.get_ascend_config_patcher = patch("vllm_ascend.compilation.acl_graph.get_ascend_config")
+        self.mock_get_ascend_config = self.get_ascend_config_patcher.start()
+        self.addCleanup(self.get_ascend_config_patcher.stop)
+        self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = False
+
+        self.exit_stack = contextlib.ExitStack()
+        self.addCleanup(self.exit_stack.close)
+        self.mock_updatable_graph = self.exit_stack.enter_context(
+            patch("vllm_ascend.compilation.acl_graph.UpdatableGraph")
+        )
 
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -239,7 +298,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -271,7 +330,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
 
@@ -286,6 +345,69 @@ class TestACLGraphWrapper(TestBase):
 
         # Should return the original output (not weak ref)
         self.assertEqual(result, "test_output")
+
+    @patch("vllm_ascend.compilation.acl_graph.torch")
+    @patch("vllm_ascend.utils.torch")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    @patch("vllm_ascend.compilation.acl_graph.compilation_counter")
+    @patch("vllm_ascend.compilation.acl_graph.weak_ref_tensors")
+    def test_capture_respects_super_kernel_setting(
+        self,
+        mock_weak_ref_tensors,
+        mock_compilation_counter,
+        mock_envs,
+        mock_current_platform,
+        mock_get_forward_context,
+        mock_get_forward_context_2,
+        mock_validate_cudagraph_capturing_enabled,
+        mock_utils_torch,
+        mock_torch,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
+        mock_torch.Tensor = torch.Tensor
+
+        for enabled in (False, True):
+            with self.subTest(enable_super_kernel=enabled):
+                mock_torch.reset_mock()
+                mock_utils_torch.reset_mock()
+                mock_validate_cudagraph_capturing_enabled.reset_mock()
+                self.mock_runnable.reset_mock()
+                mock_compilation_counter.num_cudagraph_captured = 0
+                self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = enabled
+
+                mock_npu_graph = MagicMock()
+                self.mock_updatable_graph.return_value = mock_npu_graph
+                mock_graph_context = MagicMock()
+                mock_torch.npu.graph.return_value = mock_graph_context
+                mock_graph_context.__enter__ = Mock(return_value=None)
+                mock_graph_context.__exit__ = Mock(return_value=None)
+
+                wrapper = ACLGraphWrapper(
+                    runnable=self.mock_runnable,
+                    vllm_config=self.mock_vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    cudagraph_options=self.mock_cudagraph_options,
+                )
+                wrapper(torch.tensor([1, 2, 3]), "arg2")
+
+                if enabled:
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_called_once_with("full_model")
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
+                    mock_npu_graph.super_kernel_optimize.assert_called_once_with(
+                        optimize_options={"dcci_after_kernel_end": [".*"]},
+                    )
+                else:
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_not_called()
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_not_called()
+                    mock_npu_graph.super_kernel_optimize.assert_not_called()
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
     @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
@@ -317,7 +439,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -349,7 +471,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened during first call
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once()
 
         # Reset mock to track second call
@@ -396,7 +518,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -457,7 +579,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -528,7 +650,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -570,7 +692,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
         # Should return the original output (not weak ref) since weak_ref_output is not enabled
@@ -607,7 +729,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
-        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
         mock_graph_context = MagicMock()
@@ -644,7 +766,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        mock_torch.npu.NPUGraph.assert_called_once()
+        self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
         # Should return the weak ref output when weak_ref_output option is enabled
@@ -673,7 +795,7 @@ class TestACLGraphWrapper(TestBase):
         with patch("vllm_ascend.compilation.acl_graph.torch") as mock_torch:
             # Mock torch.npu.NPUGraph
             mock_npu_graph = MagicMock()
-            mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+            self.mock_updatable_graph.return_value = mock_npu_graph
 
             # Mock torch.npu.graph context manager
             mock_graph_context = MagicMock()
@@ -758,6 +880,51 @@ class TestACLGraphWrapper(TestBase):
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
 
+    def test_acl_graph_wrappers_use_weak_refs(self):
+        self.assertIsInstance(acl_graph._acl_graph_wrappers, weakref.WeakSet)
+
+
+class TestSleepGraphParams(TestBase):
+    def test_clear_attention_workspaces_preserves_capture_size_keys(self):
+        graph_params = GraphParams(
+            events={4: [], 8: []},
+            workspaces={4: torch.empty(1), 8: torch.empty(2)},
+            handles={4: [], 8: []},
+            attn_params={4: [], 8: []},
+        )
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph._graph_params", graph_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
+        ):
+            AclGraphSleepWakeupManager.clear_all_attention_workspaces()
+
+        self.assertEqual(set(graph_params.workspaces), {4, 8})
+        self.assertIsNone(graph_params.workspaces[4])
+        self.assertIsNone(graph_params.workspaces[8])
+
+    def test_reset_graph_params_for_sleep_clears_registered_wrappers(self):
+        wrapper = MagicMock()
+        wrapper.concrete_aclgraph_entries = {"entry": object()}
+        wrapper.first_run_finished = True
+        empty_params = GraphParams(
+            events={},
+            workspaces={},
+            handles={},
+            attn_params={},
+        )
+        with (
+            patch("vllm_ascend.compilation.acl_graph._graph_params", empty_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", empty_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", empty_params),
+            patch("vllm_ascend.compilation.acl_graph._acl_graph_wrappers", [wrapper]),
+        ):
+            AclGraphSleepWakeupManager.reset_all_graph_params()
+
+        self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+        self.assertFalse(wrapper.first_run_finished)
+
 
 class TestDraftGraphParams(TestBase):
     def test_set_draft_graph_params(self):
@@ -779,9 +946,13 @@ class TestDraftGraphParams(TestBase):
         self.assertIs(draft_graph_params_mock, graph_params)
 
 
-class TestPCPDCPGraphParams(TestBase):
+class TestDCPGraphParams(TestBase):
     def setUp(self):
         self.update_stream = MagicMock(name="FakeStream")
+        import vllm_ascend.compilation.acl_graph as acl_graph_mod
+
+        self._prev_graph_params = acl_graph_mod._graph_params
+        acl_graph_mod._graph_params = None
         graph_params = get_graph_params()
         if graph_params is None:
             set_graph_params(set([4]))
@@ -795,13 +966,22 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.events[4].append(mock_event)
         self.graph_params.handles[4].append(MagicMock())
 
+    def tearDown(self):
+        import vllm_ascend.compilation.acl_graph as acl_graph_mod
+
+        acl_graph_mod._graph_params = self._prev_graph_params
+
+    @patch("vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_begin", MagicMock())
     @patch(
-        "torch.npu.graph_task_update_end",
+        "vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score_v2.out",
     )
-    @patch("torch.npu.graph_task_update_begin", MagicMock())
-    @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.stream")
+    def test_update_mla_dcp_params(self, mock_stream, mock_fia, _mock_graph_task_end, mock_context, mock_extra_ctx):
+        mock_extra_ctx.is_draft_model = False
+        mock_extra_ctx.is_draft_model_prefill = False
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
         seq_lens = torch.tensor([4, 4])
@@ -812,15 +992,19 @@ class TestPCPDCPGraphParams(TestBase):
         query_start_loc = torch.tensor([0, 4])
         block_tables = torch.zeros(2, 5, dtype=torch.long)
 
-        decode = AscendMLADecodeMetadata(
+        decode = AscendMLADCPDecodeMetadata(
             input_positions, block_table, seq_lens, max_seq_lens, seq_lens_list, cp_seq_len=cp_seq_len
         )
         metadata = AscendMLAMetadata(
-            8, 8, slot_mapping, query_start_loc, seq_lens, seq_lens, block_tables, 4, 4, 0, decode=decode
+            8, slot_mapping, query_start_loc, seq_lens, seq_lens, block_tables, 4, 4, 0, decode=decode
         )
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
+        forward_context.additional_kwargs = {
+            "is_draft_model": False,
+            "is_draft_model_prefill": False,
+        }
         mock_context.return_value = forward_context
 
         num_heads = 256
@@ -862,66 +1046,164 @@ class TestPCPDCPGraphParams(TestBase):
         )
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendMlaCPImpl.update_graph_params(self.update_stream, forward_context, 4)
+            AscendMlaDCPImpl.update_graph_params(self.update_stream, forward_context, 4)
 
         _mock_graph_task_end.assert_called_once()
+        mock_fia.assert_called_once_with(
+            q_nope,
+            k_nope,
+            k_nope,
+            query_rope=q_pe,
+            key_rope=k_pe,
+            num_query_heads=num_heads,
+            num_key_value_heads=num_kv_heads,
+            input_layout=input_layout,
+            atten_mask=None,
+            sparse_mode=0,
+            softmax_scale=scale,
+            return_softmax_lse=True,
+            block_table=block_table,
+            block_size=128,
+            actual_seq_kvlen=[2, 2, 0, 0],
+            actual_seq_qlen=None,
+            workspace=self.graph_params.workspaces.get(4),
+            out=[out, lse],
+        )
 
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch(
-        "torch.npu.graph_task_update_end",
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_begin")
+    def test_update_attn_dcp_params(self, mock_begin, mock_end):
+        """Update GQA DCP tasks with the provider's runtime parameters."""
+        block_table = torch.zeros(2, 5, dtype=torch.int32)
+        decode = AscendMetadataForDecode(
+            num_computed_tokens_of_dcp=np.array([[3, 2], [4, 3]]),
+            actual_seq_lengths_q=[1, 2],
+            block_tables=block_table,
+        )
+        metadata = AscendAttentionDCPMetadata(decode=decode)
+        provider = DCPFIAParamProvider("attn_layer_0", 1, CPKVScope.FULL)
+        operation, handle, event = MagicMock(), MagicMock(), MagicMock()
+        query = torch.randn(2, 4, 8)
+        task = GraphUpdateTask(operation, {"query": query, "actual_seq_lengths_kv": [1, 1]}, provider, 0, handle, event)
+        params = provider.resolve({"attn_layer_0": metadata})
+        task.bind(params).apply(self.update_stream)
+        operation.assert_called_once_with(
+            query=query,
+            actual_seq_lengths=[1, 2],
+            actual_seq_lengths_kv=[2, 3],
+            block_table=block_table,
+        )
+        mock_begin.assert_called_once_with(self.update_stream, handle)
+        mock_end.assert_called_once_with(self.update_stream)
+        event.record.assert_called_once_with(self.update_stream)
+        assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]
+
+
+@pytest.mark.parametrize("graph_kind", ["main", "draft", "draft_prefill"])
+def test_mla_dcp_split_graph_update_preserves_cache_and_refreshes_lengths(graph_kind, monkeypatch):
+    """Replay must use the same FIA API as capture and refresh each split task."""
+    is_draft = graph_kind != "main"
+    monkeypatch.setattr(
+        mla_cp,
+        "_EXTRA_CTX",
+        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=graph_kind == "draft_prefill"),
     )
-    @patch("torch.npu.graph_task_update_begin", MagicMock())
-    @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
-        block_table = torch.zeros(2, 5, dtype=torch.long)
-        num_heads = 256
-        scale = 0.1
-        num_kv_heads = 8
-        qk_head_dim = 96
-        qk_nope_head_dim = 64
-        query = torch.randn(4, num_heads, qk_head_dim)
-        q_nope = query[..., :qk_nope_head_dim]
-        k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
-        actual_seq_lengths_kv = [1, 1]
-        actual_seq_lengths_q = np.array([1, 1])
-        out = torch.randn(2, 16, 128)
-        lse = torch.randn(2, 16, 8)
-
-        num_computed_tokens_of_pcp_dcp = np.array([[[1, 1], [1, 1]], [[1, 1], [1, 1]]])
-        decode = AscendMetadataForDecode(num_computed_tokens_of_pcp_dcp)
-        metadata = AscendMetadata(
-            num_actual_tokens_pcp_padded=[1, 1],
-            actual_seq_lengths_q=actual_seq_lengths_q,
-            num_decode_tokens=1,
-            decode_meta=decode,
+    query, query_rope = torch.randn(4, 2, 4), torch.randn(4, 2, 2)
+    backing = torch.zeros(100)
+    cache = backing.as_strided((3, 1, 2, 4), (24, 8, 4, 1), storage_offset=7)
+    cache_rope = backing.as_strided((3, 1, 2, 2), (24, 4, 2, 1), storage_offset=15)
+    current, current_rope = torch.randn(4, 1, 4), torch.randn(4, 1, 2)
+    mask = torch.ones(4, 4, dtype=torch.bool).triu(1)
+    workspace = torch.empty(64, dtype=torch.uint8)
+    metadata, tasks, expected = [], [], []
+    for step in range(2 if is_draft else 1):
+        table = torch.tensor([[0, 1], [2, 0]], dtype=torch.int32)
+        decode = SimpleNamespace(
+            actual_seq_lengths_q=[2 - step, 4], cp_history_seq_len=[3 + step, 2], block_table=table
         )
-        forward_context = MagicMock()
-        forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_draft_model = False
-        mock_context.return_value = forward_context
-
-        self.graph_params.attn_params[4] = []
-        self.graph_params.attn_params[4].append(
-            (
-                q_nope,
-                k_nope,
-                k_nope,
-                num_heads,
-                num_kv_heads,
-                scale,
-                block_table,
-                128,
-                actual_seq_lengths_kv,
-                actual_seq_lengths_q,
-                out,
-                lse,
-                2,
-                0,
-                0,
+        metadata.append({"layer": SimpleNamespace(decode=decode)})
+        for scope in (CPKVScope.HISTORY, CPKVScope.CURRENT):
+            history = scope is CPKVScope.HISTORY
+            key, rope = (cache, cache_rope) if history else (current, current_rope)
+            output, lse = torch.empty_like(query), torch.empty(4, 2, 1, dtype=torch.float32)
+            tasks.append(
+                MLASplitAttentionGraphParams(
+                    (
+                        query,
+                        key,
+                        query_rope,
+                        rope,
+                        2,
+                        1,
+                        "TND",
+                        None if history else mask,
+                        0 if history else 3,
+                        0.5,
+                        None,
+                        2 if history else 0,
+                        [0, 0],
+                        [0, 0],
+                        output,
+                        lse,
+                    ),
+                    scope,
+                    "layer",
+                )
             )
-        )
+            expected.append((decode, history, key, rope, output, lse))
+    handles, events = [object() for _ in tasks], [Mock() for _ in tasks]
+    graph = SimpleNamespace(workspaces={4: workspace}, attn_params={4: tasks}, handles={4: handles}, events={4: events})
+    getter = {
+        "main": "get_graph_params",
+        "draft": "get_draft_graph_params",
+        "draft_prefill": "get_draft_graph_prefill_params",
+    }
+    monkeypatch.setattr(mla_cp, getter[graph_kind], lambda: graph)
+    op = Mock()
+    monkeypatch.setattr(mla_cp.torch_npu.npu_fused_infer_attention_score_v2, "out", op)
+    begin, end = Mock(), Mock()
+    monkeypatch.setattr(torch.npu, "graph_task_update_begin", begin)
+    monkeypatch.setattr(torch.npu, "graph_task_update_end", end)
+    monkeypatch.setattr(torch.npu, "stream", lambda _stream: contextlib.nullcontext())
+    stream = object()
 
-        with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendAttentionCPImpl.update_graph_params(self.update_stream, forward_context, 4, None)
+    AscendMlaDCPImpl.update_graph_params(
+        stream,
+        SimpleNamespace(attn_metadata=metadata[0]),
+        4,
+        draft_attn_metadatas=metadata if is_draft else None,
+    )
 
-        _mock_graph_task_end.assert_called_once()
+    assert op.call_count == len(expected)
+    for call, (decode, history, key, rope, output, lse) in zip(op.call_args_list, expected):
+        assert all(actual is wanted for actual, wanted in zip(call.args, (query, key, key)))
+        kwargs = call.kwargs
+        assert kwargs["key_rope"] is rope
+        assert kwargs["query_rope"] is query_rope
+        assert kwargs["workspace"] is workspace
+        assert kwargs["out"][0] is output and kwargs["out"][1] is lse
+        assert kwargs["block_table"] is (decode.block_table if history else None)
+        assert kwargs["atten_mask"] is (None if history else mask)
+        assert kwargs["actual_seq_qlen"] == decode.actual_seq_lengths_q
+        assert kwargs["actual_seq_kvlen"] == (decode.cp_history_seq_len if history else decode.actual_seq_lengths_q)
+        assert kwargs["return_softmax_lse"] is True
+        assert kwargs["num_query_heads"] == 2 and kwargs["num_key_value_heads"] == 1
+        assert kwargs["softmax_scale"] == 0.5 and kwargs["input_layout"] == "TND"
+        assert kwargs["sparse_mode"] == (0 if history else 3)
+        assert kwargs["block_size"] == (2 if history else 0)
+        assert {
+            "num_heads",
+            "scale",
+            "softmax_lse_flag",
+            "actual_seq_lengths",
+            "actual_seq_lengths_kv",
+            "antiquant_mode",
+            "antiquant_scale",
+        }.isdisjoint(kwargs)
+        if history:
+            assert key.stride(0) == rope.stride(0) == 24
+            assert key.storage_offset() == 7 and rope.storage_offset() == 15
+    assert [call.args for call in begin.call_args_list] == [(stream, handle) for handle in handles]
+    assert end.call_count == len(tasks)
+    for event in events:
+        event.record.assert_called_once_with(stream)

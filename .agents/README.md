@@ -14,9 +14,6 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
     - [Quick start](#quick-start)
     - [Key constraints](#key-constraints)
     - [Two-stage validation](#two-stage-validation)
-  - [vLLM Ascend main2main Skill](#vllm-ascend-main2main-skill)
-    - [What it does](#what-it-does-1)
-    - [Quick start](#quick-start-1)
   - [vLLM Ascend Release Note Writer Skill](#vllm-ascend-release-note-writer-skill)
     - [What it does](#what-it-does-2)
     - [File layout](#file-layout-1)
@@ -70,59 +67,6 @@ This skill guides an AI agent through a deterministic workflow to:
 
 Both stages require request-level verification (`/v1/models` + at least one chat request),
 not just startup success.
-
-## vLLM Ascend main2main Skill
-
-Adapt vLLM-Ascend to track upstream vLLM main branch changes incrementally: detect commit drift, plan steps, adapt code, run CI, and commit verified changes.
-
-### What it does
-
-When upstream vLLM changes — function signatures, config fields, module paths, base class methods — vllm-ascend breaks. This skill:
-
-1. Detects the commit drift between the currently adapted vLLM commit and a target upstream commit.
-2. Splits the commit range into manageable steps.
-3. For each step: adapts vllm-ascend code, updates commit references, runs CI, and commits only verified changes.
-4. If a step fails CI, diagnoses the failures and applies fixes in rounds until CI passes or a stop condition is met.
-
-The two hardest parts — figuring out what to adapt and diagnosing CI failures — are guided by reference playbooks. The rest (commit detection, step planning, CI execution, committing) is handled by scripts.
-
-The skill itself does not create PRs; it produces committed, CI-verified changes in the working tree and a final reviewer-facing summary.
-
-### File layout
-
-| File | Purpose |
-| ---- | ------- |
-| `SKILL.md` | Skill definition, guardrails, and execution playbook |
-| `reference/adapt-guide.md` | Step-by-step adaptation workflow with file mapping tables |
-| `reference/diagnosis-guide.md` | CI failure diagnosis workflow with error→fix mappings |
-| `reference/error-pattern-examples.md` | Concrete upstream-change-to-fix pattern examples |
-| `reference/final-summary.md` | Template for the final reviewer-facing summary |
-| `scripts/detect_commits.py` | Detect base and target commits in both repos |
-| `scripts/plan_steps.py` | Split the commit range into manageable steps |
-| `scripts/per_ci_check.py` | Pre-CI checks: version guards, version string consistency, temp files |
-| `scripts/run_main2main_ci.py` | Run CI suites and produce structured result summaries |
-| `scripts/check_and_commit.py` | Verify preconditions and commit changes |
-| `scripts/update_commit_reference.py` | Update the vLLM commit reference in vllm-ascend |
-
-### Quick start
-
-1. Open a conversation with the AI agent inside the vllm-ascend dev container.
-2. Invoke the skill (e.g. `/main2main`).
-3. The agent detects drift, plans steps, and iterates through each step:
-   - Adapt code following `reference/adapt-guide.md`
-   - Update commit references via `scripts/update_commit_reference.py`
-   - Run CI via `scripts/run_main2main_ci.py`
-   - Commit via `scripts/check_and_commit.py`
-4. Output: committed changes per step, per-step summaries in `/tmp/main2main/steps/`, and a final summary.
-
-### Key guidance
-
-- Only modify vllm-ascend, never the upstream vLLM repo.
-- Intermediate files go in `/tmp/main2main/` — never in the repo.
-- Every step runs CI, including no-op adapt steps where no code changed.
-- Use `vllm_version_is()` guards (not `hasattr()` or `try/except`) for code that must work with both the release version and upstream main.
-- Never read raw CI logs directly — use the `round-N-summary.json` produced by the CI wrapper.
-- Do not stop because a run is long; the only valid stop reasons are in `reference/diagnosis-guide.md` Step 4.
 
 ## vLLM Ascend Release Note Writer Skill
 

@@ -3,9 +3,13 @@ from collections.abc import Callable
 
 import torch
 import torch._inductor.pattern_matcher as pm
-import torchair
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
+
+try:
+    import npugraph_ex as nge
+except ImportError:
+    import torchair as nge
 
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
@@ -34,9 +38,12 @@ class BasePattern(ABC):
     def get_extra_stream_scope_check(self):
         return extra_stream_scope_check
 
+    def pattern_key(self) -> str:
+        return f"{self.__class__.__name__}_{self.eps}"
+
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        # Create a unique identifier for this pattern based on class name and eps
-        pattern_id = f"{self.__class__.__name__}_{self.eps}"
+        # Create a unique identifier for this pattern
+        pattern_id = self.pattern_key()
 
         # Skip registration if this pattern has already been registered globally
         if pattern_id in _registered_patterns:
@@ -48,7 +55,7 @@ class BasePattern(ABC):
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 
-        torchair.register_replacement(
+        nge.register_replacement(
             search_fn=pattern_fn,
             replace_fn=replacement_fn,
             example_inputs=example_inputs,

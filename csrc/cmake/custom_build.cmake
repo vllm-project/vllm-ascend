@@ -80,13 +80,14 @@ if (BUILD_OPEN_PROJECT)
     target_compile_definitions(cust_opapi PRIVATE
             -DACLNN_LOG_FMT_CHECK
     )
-    if(BUILD_WITH_3_8_PACKAGE)  #3~8包 依赖opapi, 不依赖opbase
+    if(BUILD_WITH_3_8_PACKAGE)  # 3~8 package links opapi_math and does not depend on opsbase.
     target_link_libraries(cust_opapi PRIVATE
         $<BUILD_INTERFACE:intf_pub>
         -Wl,--whole-archive
         ops_aclnn
         -Wl,--no-whole-archive
-        -lopapi
+        # Avoid exporting CANN built-in ACLNN symbols through libcust_opapi.so.
+        $<$<BOOL:${BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG}>:$<BUILD_INTERFACE:opapi_math>>
         nnopbase
         profapi
         ge_common_base
@@ -187,6 +188,7 @@ if (BUILD_OPEN_PROJECT)
             error_manager
             ascendalog
             unified_dlog
+            ascendcl
             -Wl,--as-needed
             -Wl,--whole-archive
             tiling_api
@@ -736,9 +738,7 @@ foreach (_op_name ${OP_LIST})
     )
 endforeach ()
 
-install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
-        DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
-)
+install_common_kernel_headers("${IMPL_INSTALL_DIR}/ascendc/common")
 
 # install(DIRECTORY ${OPS_ADV_DIR}/mc2/common/inc/kernel
 #         DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common/inc
@@ -869,7 +869,7 @@ if (NOT ENABLE_BUILT_IN AND BUILD_OPEN_PROJECT)
     set(CPACK_PACKAGE_DIRECTORY ${CMAKE_BINARY_DIR})
     set(CPACK_PACKAGE_FILE_NAME "cann-ops-transformer-${VENDOR_NAME}_linux-${ARCH}.run")
     set(CPACK_GENERATOR External)
-    set(CPACK_CMAKE_GENERATOR "Unix Makefiles")
+    set(CPACK_CMAKE_GENERATOR "${CMAKE_GENERATOR}")
     set(CPACK_EXTERNAL_ENABLE_STAGING TRUE)
     if (ENABLE_BUILD_PKG)
       if (EXISTS ${ASCEND_CMAKE_DIR}/makeself.cmake)

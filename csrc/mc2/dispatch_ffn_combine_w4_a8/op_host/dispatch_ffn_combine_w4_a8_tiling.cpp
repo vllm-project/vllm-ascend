@@ -15,7 +15,6 @@
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
 #include "tiling_base/error_log.h"
-#include "hcom_topo_info.h"
 #include "register/op_def_registry.h"
 #include "dispatch_ffn_combine_w4_a8_tiling.h"
 #include <vector>
@@ -33,6 +32,8 @@ namespace {
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
     constexpr uint32_t ATTR_SWIGLU_LIMIT = 4;
+    constexpr uint32_t ATTR_WORLD_SIZE_INDEX = 5;
+    constexpr int64_t MAX_WORLD_SIZE = 768;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -70,9 +71,12 @@ static ge::graphStatus DispatchFFNCombineW4A8CheckAttrAndSetTiling(gert::TilingC
     info.isWeightNz = *weight_nz;
     info.swigluLimit = swiglu_limit != nullptr ? *swiglu_limit : 0.0f;
 
-    int64_t rankSize;
-    (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);
-    info.worldSize = rankSize;
+    auto worldSizePtr = attrs->GetAttrPointer<int64_t>(static_cast<int>(ATTR_WORLD_SIZE_INDEX));
+    OP_TILING_CHECK(worldSizePtr == nullptr || *worldSizePtr <= 0 || *worldSizePtr > MAX_WORLD_SIZE,
+        OP_LOGE(K_INNER_DEBUG, "worldSize is invalid, expect (0, %lld], but is %lld.",
+            static_cast<long long>(MAX_WORLD_SIZE),
+            worldSizePtr == nullptr ? 0L : static_cast<long long>(*worldSizePtr)), return ge::GRAPH_FAILED);
+    info.worldSize = static_cast<uint32_t>(*worldSizePtr);
 
     OP_LOGD(K_INNER_DEBUG, "maxOutputSize=%d ", info.maxOutputSize);
     OP_LOGD(K_INNER_DEBUG, "rankSize=%d ", info.worldSize);
@@ -250,16 +254,15 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
+    // ptrC/ptrC2 alias reuse: allocate max(N, n2), not N + n2
+    // ptrA1Int4/ptrA2Int4 alias reuse: allocate max(K, k2), not K + k2
+    // (lifetimes separated by SyncAll barrier after GMM1 loop, same pattern as W8A8 ptrA/ptrPermutedToken)
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t) +
-                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
+                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * info.N * sizeof(int16_t) * 2 +
-                            info.maxOutputSize * n2 * sizeof(int16_t) * 2 +
-                            info.maxOutputSize * info.K +
-                            info.maxOutputSize * k2 +
+                            info.maxOutputSize * std::max(info.N, n2) * sizeof(int16_t) * 2 +
+                            info.maxOutputSize * std::max(info.K, k2) +
                             info.worldSize * sizeof(int32_t) * 16;
-                            // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 

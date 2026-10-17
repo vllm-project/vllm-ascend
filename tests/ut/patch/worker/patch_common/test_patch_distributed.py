@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import sys
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -94,6 +95,7 @@ def _load_patch_distributed_module():
     communicator_instances: list[object] = []
     unique_name_counter = {"value": 0}
     sequence_counter = {"value": 0}
+    registered_groups = {}
     shared_hccl_options = {"hccl_config": {"hccl_buffer_size": 200}}
 
     torch_module: Any = ModuleType("torch")
@@ -147,9 +149,13 @@ def _load_patch_distributed_module():
         unique_name_counter["value"] += 1
         return f"{group_name}-{unique_name_counter['value']}"
 
+    def _register_group(group):
+        registered_groups[group.unique_name] = weakref.ref(group)
+
     parallel_state_module.GroupCoordinator = BaseGroupCoordinator
     parallel_state_module._get_unique_name = _get_unique_name
-    parallel_state_module._register_group = MagicMock()
+    parallel_state_module._register_group = MagicMock(side_effect=_register_group)
+    parallel_state_module._groups = registered_groups
     parallel_state_module.destroy_distributed_environment = destroy_distributed_environment
 
     shm_broadcast_module: Any = ModuleType("vllm.distributed.device_communicators.shm_broadcast")
@@ -175,7 +181,6 @@ def _load_patch_distributed_module():
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
             self.destroy = MagicMock()
-            self.all_to_all = MagicMock()
             communicator_instances.append(self)
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
@@ -277,6 +282,13 @@ def _calls_with_backend(module_env, backend: str) -> list[dict[str, object]]:
 
 def test_group_coordinator_is_patched(module_env):
     assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
+
+
+def test_group_coordinator_preserves_backend_for_inherited_helpers(module_env):
+    coordinator = _make_group(module_env, backend="hccl")
+
+    assert coordinator.torch_distributed_backend == "hccl"
+    assert "make_sibling_device_group" not in type(coordinator).__dict__
 
 
 def test_same_hccl_group_reuses_device_pg_once(module_env):
@@ -384,14 +396,20 @@ def test_destroy_releases_all_acquired_keys_in_reverse_order(module_env):
 
     cpu_group = group.cpu_group
     shared_device_group = group.device_group
+    communicator = group.device_communicator
     acquired_keys = list(group._acquired_hccl_keys)
+
+    destroy_order = []
+    communicator.destroy.side_effect = lambda: destroy_order.append("communicator")
+    module_env.destroy_process_group.side_effect = lambda group: destroy_order.append(group)
 
     group.destroy()
     group.destroy()
 
     assert len(acquired_keys) == 2
     assert release_mock.call_args_list == [call(acquired_keys[1]), call(acquired_keys[0])]
-    assert module_env.destroy_process_group.call_args_list == [call(cpu_group), call(shared_device_group)]
+    assert module_env.destroy_process_group.call_args_list == [call(shared_device_group), call(cpu_group)]
+    assert destroy_order == ["communicator", shared_device_group, cpu_group]
     assert group.device_communicator is None
     assert group.mq_broadcaster is None
     assert not hasattr(group, "cpu_group")
@@ -486,8 +504,8 @@ def test_shared_hccl_group_is_destroyed_only_after_last_coordinator(module_env):
 
     assert module_env.destroy_process_group.call_args_list == [
         call(cpu_group_first),
-        call(cpu_group_second),
         call(shared_device_group),
+        call(cpu_group_second),
     ]
 
 
@@ -548,12 +566,44 @@ def test_destroy_cleans_up_fail_closed_hccl_device_group(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(cpu_group),
         call(device_group),
+        call(cpu_group),
     ]
     assert group._acquired_hccl_keys == []
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
+    group = _make_group(
+        module_env,
+        group_ranks=[[0, 1]],
+        group_name="tp",
+        use_device_communicator=True,
+    )
+    original_device_group = group.device_group
+    original_communicator = group.device_communicator
+
+    assert len(_calls_with_backend(module_env, "hccl")) == 1
+
+    assert group.destroy_hccl() is True
+
+    original_communicator.destroy.assert_called_once()
+    assert group.device_communicator is None
+    assert group.device_group is None
+    assert group._acquired_hccl_keys == []
+    assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
+
+    assert group.restore_hccl() is True
+
+    assert len(_calls_with_backend(module_env, "hccl")) == 2
+    assert group.device_group is not None
+    assert group.device_group is not original_device_group
+    assert group.device_communicator is not None
+    assert group.device_communicator is not original_communicator
+    assert group.device == "npu:0"
+
+    assert group.restore_hccl() is False
 
 
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
@@ -570,70 +620,8 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(cpu_group),
         call(device_group),
+        call(cpu_group),
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
-
-
-def test_all_to_all_returns_input_when_world_size_is_one(module_env):
-    group = _make_group(module_env)
-    group.world_size = 1
-    input_tensor = module_env.torch.randn(2, 3)
-
-    assert group.all_to_all(input_tensor) is input_tensor
-
-
-def test_all_to_all_raises_assertion_on_invalid_scatter_dim(module_env):
-    group = _make_group(module_env)
-    input_tensor = module_env.torch.randn(2, 3)
-
-    with pytest.raises(AssertionError, match="Invalid scatter dim"):
-        group.all_to_all(input_tensor, scatter_dim=2)
-
-
-def test_all_to_all_raises_assertion_on_invalid_gather_dim(module_env):
-    group = _make_group(module_env)
-    input_tensor = module_env.torch.randn(2, 3)
-
-    with pytest.raises(AssertionError, match="Invalid gather dim"):
-        group.all_to_all(input_tensor, gather_dim=2)
-
-
-def test_all_to_all_calls_device_communicator_with_correct_args(module_env):
-    group = _make_group(module_env)
-    communicator = MagicMock()
-    communicator.all_to_all.return_value = "ok"
-    group.device_communicator = communicator
-
-    input_tensor = module_env.torch.randn(2, 3)
-    output = group.all_to_all(
-        input_tensor,
-        scatter_dim=0,
-        gather_dim=1,
-        scatter_sizes=[1, 1],
-        gather_sizes=[1, 1],
-    )
-
-    communicator.all_to_all.assert_called_once_with(
-        input_tensor,
-        0,
-        1,
-        [1, 1],
-        [1, 1],
-    )
-    assert output == "ok"
-
-
-def test_all_to_all_calls_device_communicator_without_sizes(module_env):
-    group = _make_group(module_env)
-    communicator = MagicMock()
-    communicator.all_to_all.return_value = "ok"
-    group.device_communicator = communicator
-
-    input_tensor = module_env.torch.randn(2, 3)
-    output = group.all_to_all(input_tensor, scatter_dim=0, gather_dim=1)
-
-    communicator.all_to_all.assert_called_once_with(input_tensor, 0, 1, None, None)
-    assert output == "ok"

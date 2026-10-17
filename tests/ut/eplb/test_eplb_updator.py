@@ -34,6 +34,15 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.addCleanup(p3.stop)
         p3.start()
 
+        # mock _PP in vllm.distributed.parallel_state (PP+EPLB support)
+        # Patching the variable directly so that even the real get_pp_group()
+        # (already imported into eplb_updator's namespace) reads a non-None _PP.
+        self.mock_pp = MagicMock()
+        self.mock_pp.rank_in_group = 0
+        p4 = patch("vllm.distributed.parallel_state._PP", self.mock_pp)
+        self.addCleanup(p4.stop)
+        p4.start()
+
         # ====================== 3. Mock EplbUpdator ======================
         self.eplb_config = MagicMock()
         self.loader = MagicMock()

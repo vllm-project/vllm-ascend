@@ -1,0 +1,6 @@
+# Environment failure patterns (network / hardware / infra)
+# One regex per line. Lines starting with # are comments.
+# Used by aop_classify.sh via grep -Ef
+
+RuntimeError: Timeout
+TimeoutError: Timed out waiting for engine core processes to start

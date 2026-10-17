@@ -1,11 +1,12 @@
 import torch
-import torch.nn.functional as F
+
+from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 
 
 def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
     if not enabled:
         return x
-    return F.normalize(x, p=2, dim=-1, eps=1e-6).to(x.dtype)
+    return l2norm_310p(x)
 
 
 def _expand_to_hv(x: torch.Tensor, hv: int) -> torch.Tensor:
@@ -95,10 +96,12 @@ def _run_recurrent_gated_delta_rule(
         if seq_len <= 0:
             continue
 
+        # Match NPU recurrent_gated_delta_rule_v310: num_accepted_tokens only
+        # selects the resume state slot (accepted-1). Do NOT truncate the
+        # current query (MTP verify still has 1+K tokens when prior accept=1).
         accepted = None
         if num_accepted_tokens is not None:
             accepted = int(num_accepted_tokens[seq_idx].item())
-            seq_len = min(seq_len, accepted)
         if seq_len <= 0:
             continue
 

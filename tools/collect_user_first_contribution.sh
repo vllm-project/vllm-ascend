@@ -256,10 +256,10 @@ if [ "$INCREMENTAL" = true ]; then
   CURRENT_COUNT=$(get_current_contributor_count "$CONTRIBUTORS_FILE")
   echo "Current contributor count: ${CURRENT_COUNT}"
 
-  # Generate new rows (sorted by date descending)
+  # Generate new rows (sorted by date descending, newest gets highest number)
   NEW_ROWS=$(mktemp)
-  sort -t'|' -k4 -r "$NEW_CONTRIBUTORS" | awk -F'|' -v start="$CURRENT_COUNT" -v repo="$REPO" '
-  BEGIN { nr = start }
+  sort -t'|' -k4 -r "$NEW_CONTRIBUTORS" | awk -F'|' -v start="$CURRENT_COUNT" -v new_count="$NEW_COUNT" -v repo="$REPO" '
+  BEGIN { nr = start + new_count }
   {
     login = $1
     sha = $2
@@ -267,8 +267,8 @@ if [ "$INCREMENTAL" = true ]; then
     date = $4
 
     # All contributors now have GitHub login
-    printf "| %d | [@%s](https://github.com/%s) | %s | [%s](https://github.com/%s/commit/%s) |\n", nr + 1, login, login, date, short_sha, repo, sha
-    nr++
+    printf "| %d | [@%s](https://github.com/%s) | %s | [%s](https://github.com/%s/commit/%s) |\n", nr, login, login, date, short_sha, repo, sha
+    nr--
   }' > "$NEW_ROWS"
 
   # Update the file
@@ -278,24 +278,25 @@ if [ "$INCREMENTAL" = true ]; then
 
   # Track if we just wrote the table header (to insert new rows after separator)
   WROTE_HEADER=false
+  # Track if we are skipping old header lines (between <!-- last_commit and | Number |)
+  SKIP_OLD_HEADER=false
 
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" == "<!-- last_commit:"* ]]; then
-      # Skip old last_commit line
+      # Start skipping old header lines
+      SKIP_OLD_HEADER=true
       continue
-    elif [[ "$line" == "Updated on "* ]]; then
-      # Skip old update date line
-      continue
-    elif [[ "$line" == "Every release of vLLM Ascend"* ]]; then
-      # Skip old description line
+    elif [[ "$SKIP_OLD_HEADER" == true && "$line" != "| Number | Contributor | Date | Commit ID |" ]]; then
+      # Skip all old header lines (Updated on, Every release, empty lines)
       continue
     elif [[ "$line" == "| Number | Contributor | Date | Commit ID |" ]]; then
+      SKIP_OLD_HEADER=false
       # Insert new content before the table header
       echo "<!-- last_commit: ${CURRENT_HEAD} -->" >> "$TEMP_FILE"
       echo "" >> "$TEMP_FILE"
       echo "Every release of vLLM Ascend would not have been possible without the following contributors:" >> "$TEMP_FILE"
       echo "" >> "$TEMP_FILE"
-      echo "Updated on ${CURRENT_DATE} (from commit ${LAST_COMMIT:0:7} to ${CURRENT_HEAD_SHORT}):" >> "$TEMP_FILE"
+      echo "Updated on ${CURRENT_DATE}:" >> "$TEMP_FILE"
       echo "" >> "$TEMP_FILE"
       echo "$line" >> "$TEMP_FILE"
       WROTE_HEADER=true
@@ -305,20 +306,8 @@ if [ "$INCREMENTAL" = true ]; then
       cat "$NEW_ROWS" >> "$TEMP_FILE"
       WROTE_HEADER=false
     else
-      # Update row numbers in existing rows (increment by NEW_COUNT)
-      if [[ "$line" == "| "* ]]; then
-        # Extract old number and increment
-        # Note: Use || true to prevent pipefail from causing script exit on non-matching lines
-        old_num=$(echo "$line" | grep -o '| [0-9]* |' | head -1 | grep -o '[0-9]*' || true)
-        if [ -n "$old_num" ]; then
-          new_num=$((old_num + NEW_COUNT))
-          echo "$line" | sed "s/| ${old_num} |/| ${new_num} |/" >> "$TEMP_FILE"
-        else
-          echo "$line" >> "$TEMP_FILE"
-        fi
-      else
-        echo "$line" >> "$TEMP_FILE"
-      fi
+      # Existing rows keep their original numbers (new rows are inserted above)
+      echo "$line" >> "$TEMP_FILE"
     fi
   done < "$CONTRIBUTORS_FILE"
 

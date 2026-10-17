@@ -18,9 +18,9 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -31,6 +31,7 @@ def _topk_log_softmax_kernel(
     logits_ptr,
     logits_stride,
     topk_ids_ptr,
+    topk_ids_stride,
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -57,7 +58,7 @@ def _topk_log_softmax_kernel(
 
     k_offset = tl.arange(0, PADDED_TOPK)
     k_mask = k_offset < topk
-    topk_ids = tl.load(topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0)
+    topk_ids = tl.load(topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0)
 
     logits = tl.load(row_ptr + topk_ids, mask=k_mask)
     logits = logits.to(tl.float32)
@@ -75,6 +76,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         logits,
         logits.stride(0),
         token_ids,
+        token_ids.stride(0),
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=12944,
@@ -121,21 +123,22 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
-    logprob_token_ids_state: LogprobTokenIdsState | None = None,
+    logprob_token_ids_state=None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
+
+    if max_per_req_token_ids != 0:
+        logger.warning_once("Custom logprob_token_ids is not supported yet. Falling back to default logprob_token_ids.")
+
     logprob_token_ids = sampled_token_ids.unsqueeze(-1)
     if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-        logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
-
-    # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
-    # logprobs tensor. Instead, we only compute and return the logprobs of
-    # the topk + 1 tokens.
+        logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
     logprobs = compute_token_logprobs(logits, logprob_token_ids)
+
     token_ranks = torch.empty(
         batch_size,
         dtype=torch.int64,

@@ -61,7 +61,7 @@ template <
     class TileMmad_
 >
 struct BlockMmadTla <
-    MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, L1A_STAGES_, 
+    MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, L1A_STAGES_,
         L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>,
     L1TileShape_,
     L0TileShape_,
@@ -74,7 +74,7 @@ struct BlockMmadTla <
 > {
 public:
     // Type Aliases
-    using DispatchPolicy = MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, 
+    using DispatchPolicy = MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_,
         L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using TileCopy = TileCopy_;
@@ -170,10 +170,10 @@ public:
     static_assert(L0_TILE_K * SizeOfBits<ElementB>::value % _32B == 0, "L0TileShape::K must be 32B aligned.");
 #endif
 
-    static_assert((!HAS_BIAS && (L1A_STAGES + L1B_STAGES) <= 8) || (HAS_BIAS && (L1A_STAGES + L1B_STAGES) <= 7), 
+    static_assert((!HAS_BIAS && (L1A_STAGES + L1B_STAGES) <= 8) || (HAS_BIAS && (L1A_STAGES + L1B_STAGES) <= 7),
         "L1 Buffer overflow: Exceeds the supported range of EVENT(0~7)");
 
-    static_assert((!HAS_BIAS && (L0A_STAGES + L0B_STAGES) <= 8) || (HAS_BIAS && (L0A_STAGES + L0B_STAGES) <= 7), 
+    static_assert((!HAS_BIAS && (L0A_STAGES + L0B_STAGES) <= 8) || (HAS_BIAS && (L0A_STAGES + L0B_STAGES) <= 7),
         "L0 Buffer overflow: Exceeds the supported range of EVENT_ID(0~7)");
 
     static constexpr auto L1A_LAYOUT =
@@ -203,7 +203,12 @@ public:
     CATLASS_DEVICE
     BlockMmadTla(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
     {
+#ifdef CATLASS_UNIFIED_CORE
+        resourcePtr = &resource;
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             uint32_t l1AOffset = l1BufAddrStart;
             uint32_t l1BOffset = l1BufAddrStart + L1A_TILE_SIZE * L1A_STAGES;
             // Init buffers
@@ -253,8 +258,11 @@ public:
 
     CATLASS_DEVICE
     void preSetFlags() {
-
+#ifdef CATLASS_UNIFIED_CORE
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             // use HF32 when USE_HF32_MODE is true
             if constexpr (USE_HF32_MODE) {
                 AscendC::SetHF32Mode(true);
@@ -294,7 +302,11 @@ public:
 
     CATLASS_DEVICE
     void finalWaitFlags() {
+#ifdef CATLASS_UNIFIED_CORE
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             if constexpr (USE_HF32_MODE) {
                 AscendC::SetHF32Mode(false);
             }
@@ -328,7 +340,7 @@ public:
     /// Perform a block-scoped matrix multiply-accumulate
     template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
     CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape,
-        TensorBias const &tensorBias = {})
+        TensorBias const &tensorBias = {}, bool clearL1Padding = false)
     {
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
@@ -344,14 +356,15 @@ public:
         using CopyGmToL1B = typename TileCopy_::template CopyGmToL1B<TensorB>;
         CopyGmToL1A copyGmToL1A;
         CopyGmToL1B copyGmToL1B;
-#if (defined (CATLASS_ARCH) && CATLASS_ARCH == 2201)
+#ifdef CATLASS_UNIFIED_CORE
+        // 310P: no Fixpipe, no DataCopyCO12Dst. L0C exits via DataCopy L0C→UB then UB→GM.
+#elif (defined (CATLASS_ARCH) && CATLASS_ARCH == 2201)
         using CopyL0CToGm = typename TileCopy_::template CopyL0CToGm<TensorC>;
         CopyL0CToGm copyL0CToDst;
-#endif        
-#if (defined (CATLASS_ARCH) && CATLASS_ARCH == 3510)
+#elif (defined (CATLASS_ARCH) && CATLASS_ARCH == 3510)
         using CopyL0CToDst = typename TileCopy_::template CopyL0CToDst<TensorC>;
         CopyL0CToDst copyL0CToDst;
-#endif        
+#endif
 
         uint32_t mBlockActual = actualShape.m();
         uint32_t kBlockActual = actualShape.k();
@@ -373,6 +386,12 @@ public:
         uint32_t kL1Actual = min(kBlockActual, L1_TILE_K);
         // load first matrix A tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
+        if (clearL1Padding) {
+            AscendC::InitConstValueParams<ElementA> clearParams(
+                1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
+                static_cast<ElementA>(0));
+            AscendC::InitConstValue(l1ATensorList[l1AListId], clearParams);
+        }
         auto tensorL1A = tla::MakeTensor(l1ATensorList[l1AListId], L1A_LAYOUT, Arch::PositionL1{});
         auto tensorTileA = GetTileA(tensorA, 0, 0, mBlockActual, kL1Actual);
         if constexpr (ENABLE_L1_RESIDENT) {
@@ -382,7 +401,9 @@ public:
                 || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListId].row()
                 || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListId].column()) {
                 copyGmToL1A(tensorL1A, tensorTileA);
-                lastCoordA[l1AListId] = MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
+                lastCoordA[l1AListId] = MatrixCoord{
+                    static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
+                    static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
                 lastAddrA[l1AListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                     tensorTileA.data().GetPhyAddr()
                 );
@@ -394,6 +415,12 @@ public:
 
         // load first matrix B tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
+        if (clearL1Padding) {
+            AscendC::InitConstValueParams<ElementB> clearParams(
+                1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
+                static_cast<ElementB>(0));
+            AscendC::InitConstValue(l1BTensorList[l1BListId], clearParams);
+        }
         auto tensorL1B = tla::MakeTensor(l1BTensorList[l1BListId], L1B_LAYOUT, Arch::PositionL1{});
         auto tensorTileB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(kL1Actual, nBlockActual));
         if constexpr (ENABLE_L1_RESIDENT) {
@@ -401,7 +428,9 @@ public:
                 || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListId].row()
                 || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListId].column()) {
                 copyGmToL1B(tensorL1B, tensorTileB);
-                lastCoordB[l1BListId] = MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
+                lastCoordB[l1BListId] = MatrixCoord{
+                    static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
+                    static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
                 lastAddrB[l1BListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                     tensorTileB.data().GetPhyAddr()
                 );
@@ -451,13 +480,20 @@ public:
 
                 // load next matrix A tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListIdNext]);
+                if (clearL1Padding) {
+                    AscendC::InitConstValueParams<ElementA> clearParams(
+                        1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
+                        static_cast<ElementA>(0));
+                    AscendC::InitConstValue(l1ATensorList[l1AListIdNext], clearParams);
+                }
                 if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrA[l1AListIdNext] != tensorTileA.data().GetPhyAddr()
                         || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].row()
                         || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].column()) {
                         copyGmToL1A(tensorL1A, tensorTileA);
-                        lastCoordA[l1AListIdNext] =
-                            MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
+                        lastCoordA[l1AListIdNext] = MatrixCoord{
+                            static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
+                            static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
                         lastAddrA[l1AListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                                 tensorTileA.data().GetPhyAddr()
@@ -470,13 +506,20 @@ public:
 
                 // load next matrix B tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListIdNext]);
+                if (clearL1Padding) {
+                    AscendC::InitConstValueParams<ElementB> clearParams(
+                        1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
+                        static_cast<ElementB>(0));
+                    AscendC::InitConstValue(l1BTensorList[l1BListIdNext], clearParams);
+                }
                 if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrB[l1BListIdNext] != tensorTileB.data().GetPhyAddr()
                         || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].row()
                         || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].column()) {
                         copyGmToL1B(tensorL1B, tensorTileB);
-                        lastCoordB[l1BListIdNext] =
-                            MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
+                        lastCoordB[l1BListIdNext] = MatrixCoord{
+                            static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
+                            static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
                         lastAddrB[l1BListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                                 tensorTileB.data().GetPhyAddr()
@@ -619,6 +662,60 @@ public:
         }
 
         // copy block out
+#ifdef CATLASS_UNIFIED_CORE
+        {
+            // 310P unified core: L0C→UB via DataCopy, then UB→GM.
+            // No Fixpipe or DataCopyCO12Dst on dav_m200.
+            uint32_t mAligned = (mBlockActual + 15) / 16 * 16;
+            uint32_t nAligned = (nBlockActual + 15) / 16 * 16;
+            uint32_t tileElems = mAligned * nAligned;
+            uint32_t tileBytes = tileElems * sizeof(ElementAccumulator);
+
+            // UB temp for L0C→UB transfer. Offset 0 is safe: on unified core,
+            // the matrix multiply and epilogue run sequentially so UB is not shared concurrently.
+            // The epilogue allocates its own UB regions at higher offsets (≥32KB).
+            AscendC::LocalTensor<ElementAccumulator> co2Temp =
+                resourcePtr->ubBuf.template GetBufferByByte<ElementAccumulator>(0);
+
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // L0C → UB: BLOCK_MODE_MATRIX copies raw NZ fractals to UB
+            // For float: blockLen unit = 1024B (one 16×16 fractal)
+            AscendC::DataCopyParams l0c2ubParams;
+            l0c2ubParams.blockCount = static_cast<uint8_t>(nAligned / 16);
+            l0c2ubParams.blockLen = static_cast<uint16_t>(mAligned / 16);
+            l0c2ubParams.srcStride = 0;
+            l0c2ubParams.dstStride = 0;
+            AscendC::DataCopyEnhancedParams enhParams;
+            enhParams.blockMode = AscendC::BlockMode::BLOCK_MODE_MATRIX;
+            AscendC::DataCopy(co2Temp, l0CTensorList[l0CListId], l0c2ubParams, enhParams);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // UB → GM: fractal-by-fractal with strided DataCopy (NZ→ND deformat)
+            // NZ in UB: [N/16 Z-cols][M/16 fractals][16 rows][16 cols]
+            // ND in GM: [M rows][N cols]
+            auto dstOffset = tensorC.layout()(tensorC.coord());
+            uint32_t gmStride = tla::get<0>(tensorC.stride());
+            uint32_t mFracs = mAligned / 16;
+            uint32_t nFracs = nAligned / 16;
+            for (uint32_t nf = 0; nf < nFracs; nf++) {
+                for (uint32_t mf = 0; mf < mFracs; mf++) {
+                    uint32_t ubOff = (nf * mFracs + mf) * 256;
+                    uint32_t gmRow = mf * 16;
+                    uint32_t gmCol = nf * 16;
+                    uint32_t gmOff = dstOffset + gmRow * gmStride + gmCol;
+                    AscendC::DataCopyParams fracParams;
+                    fracParams.blockCount = 16;
+                    fracParams.blockLen = static_cast<uint16_t>(16 * sizeof(ElementAccumulator) / 32);
+                    fracParams.srcStride = 0;
+                    fracParams.dstStride = static_cast<uint16_t>((gmStride - 16) * sizeof(ElementAccumulator) / 32);
+                    AscendC::DataCopy(tensorC.data()[gmOff], co2Temp[ubOff], fracParams);
+                }
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+            l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
+        }
+#else
         if constexpr (!ENABLE_UNIT_FLAG) {
             AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
             AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
@@ -628,6 +725,7 @@ public:
         } else {
             copyL0CToDst(tensorC, tensorL0C, 0b11);
         }
+#endif
     }
 
 protected:
@@ -649,6 +747,9 @@ protected:
     AscendC::LocalTensor<ElementAccumulator> l0CTensorList[L0C_STAGES];
     AscendC::LocalTensor<uint8_t> l1BiasTensor;
     AscendC::LocalTensor<ElementAccumulator> l0BiasTensor;
+#ifdef CATLASS_UNIFIED_CORE
+    Arch::Resource<ArchTag>* resourcePtr{nullptr};
+#endif
 
     // Multi-stage event id list
     int32_t l1AEventList[L1A_STAGES];
@@ -661,7 +762,7 @@ protected:
     __gm__ typename AscendC::GlobalTensor<ElementB>::PrimType* lastAddrB[L1B_STAGES];
     MatrixCoord lastCoordA[L1A_STAGES];
     MatrixCoord lastCoordB[L1B_STAGES];
-    
+
     // The id of current stage
     uint32_t l1AListId{0};
     uint32_t l1BListId{0};

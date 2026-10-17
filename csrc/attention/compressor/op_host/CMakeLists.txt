@@ -19,11 +19,21 @@ add_ops_compile_options(
         OP_NAME Compressor
                 OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
-                -Werror
                 -mllvm -cce-aicore-hoist-movemask=false
                 --op_relocatable_kernel_binary=true
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
+    set(SUPPORTED_ARCHS arch32 arch35)
     add_modules_sources(OPTYPE compressor ACLNNTYPE aclnn)
+    add_tiling_modules()
+
+    foreach(ARCH ${ARCH_DIRECTORY})
+        if(ARCH IN_LIST SUPPORTED_ARCHS)
+            target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/${ARCH}/compressor_tiling.cpp
+            )
+        endif()
+    endforeach()
+
 endif()

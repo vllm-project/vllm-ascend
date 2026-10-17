@@ -75,6 +75,7 @@ private:
     int64_t tilingKey_ =1;
     bool isAlign_ = false;
     bool isSpecial_ = false;
+    bool isFp32Rope_ = false;
     int64_t oneBlockSize_ = 0;
     int64_t dtypeSize_ = 2;
     int64_t xdim0_ = 0;
@@ -98,6 +99,7 @@ private:
     int64_t ubFactor_ = 0;
     int64_t start_=0;
     int64_t blockFactor_=0;
+    int64_t negateSin_ = 0;
     gert::TilingContext* context_ = nullptr;
     RopeRegbaseTilingData tilingData_;
 };
@@ -134,6 +136,7 @@ void InplacePartialRotaryMulTiling::FillTilingData()
     tilingData_.set_ubFactor(ubFactor_);
     tilingData_.set_start(start_);
     tilingData_.set_blockFactor(blockFactor_);
+    tilingData_.set_negateSin(negateSin_);
 }
 void InplacePartialRotaryMulTiling::PrintTilingData() const
 {
@@ -241,8 +244,16 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
 {
     auto xInput = context_->GetInputShape(0);
     auto inputR1 = context_->GetInputShape(1);
-    auto inputR2 = context_->GetInputShape(1);
-    auto dataDtype = context_->GetInputDesc(0)->GetDataType();
+    auto inputR2 = context_->GetInputShape(2);
+    auto xDesc = context_->GetInputDesc(0);
+    auto r1Desc = context_->GetInputDesc(1);
+    auto r2Desc = context_->GetInputDesc(2);
+    OPS_ERR_IF(xDesc == nullptr || r1Desc == nullptr || r2Desc == nullptr,
+        OPS_LOG_E(context_->GetNodeName(), "get input desc nullptr."),
+        return ge::GRAPH_FAILED);
+    auto dataDtype = xDesc->GetDataType();
+    auto r1Dtype = r1Desc->GetDataType();
+    auto r2Dtype = r2Desc->GetDataType();
     if (dataDtype == ge::DT_FLOAT16 || dataDtype == ge::DT_BF16) {
         dtypeSize_ = FP16_BF16_DTYPE_SIZE;
         oneBlockSize_ = ALIGN_16;
@@ -250,6 +261,13 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
         dtypeSize_ = FP32_DTYPE_SIZE;
         oneBlockSize_ = ALIGN_32;
     }
+    OPS_ERR_IF(r1Dtype != r2Dtype,
+        OPS_LOG_E(context_->GetNodeName(), "cos and sin dtype must be same."),
+        return ge::GRAPH_FAILED);
+    OPS_ERR_IF(r1Dtype != dataDtype && r1Dtype != ge::DT_FLOAT,
+        OPS_LOG_E(context_->GetNodeName(), "cos/sin dtype must be same as x or float32."),
+        return ge::GRAPH_FAILED);
+    isFp32Rope_ = (dataDtype != ge::DT_FLOAT && r1Dtype == ge::DT_FLOAT);
 
     OPS_ERR_IF(xInput == nullptr || inputR1 == nullptr || inputR2 == nullptr, OPS_LOG_E(context_->GetNodeName(), "get input nullptr."),
         return ge::GRAPH_FAILED);
@@ -291,6 +309,7 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
     auto sliceData = static_cast<const int64_t *>(sliceListAttr->GetData());
     start_ = sliceData[0];
     end_ = sliceData[1];
+    negateSin_ = *(attrs->GetAttrPointer<bool>(2)) ? 1 : 0;
     OPS_LOG_I(context_->GetNodeName(), "end_ %ld, end_ %ld",start_, end_);
 
     headDim_ = end_ - start_;
@@ -323,6 +342,9 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
         if (r1dim1_ == dim1_) {
             isBrc_ = false;
             tilingKey_ = tilingKey_ + 1;
+        }
+        if (isFp32Rope_) {
+            tilingKey_ += 10;
         }
     }
     if (xdim3_ % oneBlockSize_ == 0){
@@ -510,7 +532,8 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTiling()
         CheckInput() != ge::GRAPH_SUCCESS,
         OPS_LOG_E(context_->GetNodeName(), "CheckInputShapes is failed"),
         return ge::GRAPH_FAILED);
-    if (CalTilingData() == ge::GRAPH_SUCCESS) {
+    ge::graphStatus calStatus = CalTilingData();
+    if (calStatus == ge::GRAPH_SUCCESS) {
         FillTilingData();
         PrintTilingData();
         context_->SetBlockDim(usedCoreNum_);
@@ -521,6 +544,9 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTiling()
         tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
         context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
         return ge::GRAPH_SUCCESS;
+    } else if (isFp32Rope_) {
+        OPS_LOG_E(context_->GetNodeName(), "float32 cos/sin only supports the special interleave tiling path.");
+        return ge::GRAPH_FAILED;
     } else {
         // 开始走原始的71的逻辑
         tilingKey_ = BASE_KEY;
@@ -535,6 +561,7 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTiling()
         }
         tilingData_.set_allHeadDim(allHeadDim_);
         tilingData_.set_start(start_);
+        tilingData_.set_negateSin(negateSin_);
         OPS_ERR_IF(TilingSplit() != ge::GRAPH_SUCCESS,
                 OPS_LOG_E(context_->GetNodeName(), "TilingSplit fail."), return ge::GRAPH_FAILED);
 

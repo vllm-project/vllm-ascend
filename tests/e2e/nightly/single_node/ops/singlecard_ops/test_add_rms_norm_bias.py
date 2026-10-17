@@ -5,9 +5,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
 seed = 45
 random.seed(seed)
 np.random.seed(seed)

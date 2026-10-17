@@ -1,138 +1,198 @@
-# Prefill-Decode Disaggregation (Deepseek)
+# Prefill-Decode Disaggregation (DeepSeek)
 
 ## Getting Started
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
+Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
-- All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
+- The physical machines must be located on the same LAN, with network connectivity.
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
 
 ### Verification Process
 
+The following checks apply to A2/A3 deployments.
+
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-:::::{tab-set}
-::::{tab-item} A3
+=== "A3"
 
-1. Single Node Verification:
+    1. Single Node Verification:
 
-    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+        Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+
+        ```bash
+        # Check the remote switch ports
+        for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+        # Get the link status of the Ethernet ports (UP or DOWN)
+        for i in {0..15}; do hccn_tool -i $i -link -g ; done
+        # Check the network health status
+        for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
+        # View the network detected IP configuration
+        for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
+        # View gateway configuration
+        for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+        ```
+
+    2. Check NPU HCCN Configuration:
+
+        Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+
+        ```bash
+        cat /etc/hccn.conf
+        ```
+
+    3. Get NPU IP Addresses
+
+        ```bash
+        # Get virtual NPU IP.
+        for i in {0..15}; do hccn_tool -i $i -vnic -g;done
+        ```
+
+    4. Get superpodid and SDID
+
+        ```bash
+        for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+        ```
+
+    5. Cross-Node PING Test
+
+        ```bash
+        # Execute on the target node (replace 'x.x.x.x' with virtual NPU IP address).
+        for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+        ```
+
+    6. Check NPU TLS Configuration
+
+        ```bash
+        # The TLS settings should be consistent across all nodes
+        for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
+        ```
+
+=== "A2"
+
+    1. Single Node Verification:
+
+        Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+
+        ```bash
+        # Check the remote switch ports
+        for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+        # Get the link status of the Ethernet ports (UP or DOWN)
+        for i in {0..7}; do hccn_tool -i $i -link -g ; done
+        # Check the network health status
+        for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+        # View the network detected IP configuration
+        for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+        # View gateway configuration
+        for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+        ```
+
+    2. Check NPU HCCN Configuration:
+
+        Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+
+        ```bash
+        cat /etc/hccn.conf
+        ```
+
+    3. Get NPU IP Addresses
+
+        ```bash
+        for i in {0..7}; do hccn_tool -i $i -ip -g;done
+        ```
+
+    4. Cross-Node PING Test
+
+        ```bash
+        # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+        for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+        ```
+
+    5. Check NPU TLS Configuration
+
+        ```bash
+        # The TLS settings should be consistent across all nodes
+        for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
+        ```
+
+### Atlas 850/850E/950 SuperPod Communication Configuration
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+
+```bash
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+```
+
+The parameter plane supports UBG, UBoE, and RoCE network protocols. Each protocol requires compatible hardware and network configuration completed in advance. Consult your environment provider or administrator for the required environment and configuration.
+
+For UBG or UBoE network protocols, keep the automatic configuration setting above and select the corresponding protocol before starting the serving processes:
+
+=== "UBG"
 
     ```bash
-    # Check the remote switch ports
-    for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
-    # Get the link status of the Ethernet ports (UP or DOWN)
-    for i in {0..15}; do hccn_tool -i $i -link -g ; done
-    # Check the network health status
-    for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
-    # View the network detected IP configuration
-    for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
-    # View gateway configuration
-    for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_rtp:device"]}'
     ```
 
-2. Check NPU HCCN Configuration:
-
-    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+=== "UBoE"
 
     ```bash
-    cat /etc/hccn.conf
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
     ```
 
-3. Get NPU IP Addresses
+=== "RoCE"
 
-    ```bash
-    # Get virtual NPU IP.
-    for i in {0..15}; do hccn_tool -i $i -vnic -g;done
+    For RoCE network protocol, current configuration is to prepare endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. For example, with `DP=4` and `TP=1` on each side:
+
+    ```json
+    {
+        "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "ascend_local_comm_res_path": "/etc/hixlep"
+        }
+    }
     ```
 
-4. Get superpodid and SDID
+    Merge these fields into your existing `--kv-transfer-config` and adjust the parallelism settings to your deployment.
 
-    ```bash
-    for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+    When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
+
+    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices. An example file contains:
+
+    ```json
+    {
+        "version": "1.3",
+        "net_instance_id": "superpod_0",
+        "endpoint_list": [
+            {
+                "protocol": "roce",
+                "comm_id": "<host_roce_ip>",
+                "placement": "host"
+            }
+        ]
+    }
     ```
 
-5. Cross-Node PING Test
-
-    ```bash
-    # Execute on the target node (replace 'x.x.x.x' with virtual NPU IP address).
-    for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
-    ```
-
-6. Check NPU TLS Configuration
-
-    ```bash
-    # The TLS settings should be consistent across all nodes
-    for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
-    ```
-
-::::
-
-::::{tab-item} A2
-
-1. Single Node Verification:
-
-    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
-
-    ```bash
-    # Check the remote switch ports
-    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-    # Get the link status of the Ethernet ports (UP or DOWN)
-    for i in {0..7}; do hccn_tool -i $i -link -g ; done
-    # Check the network health status
-    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-    # View the network detected IP configuration
-    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-    # View gateway configuration
-    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
-    ```
-
-2. Check NPU HCCN Configuration:
-
-    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
-
-    ```bash
-    cat /etc/hccn.conf
-    ```
-
-3. Get NPU IP Addresses
-
-    ```bash
-    for i in {0..7}; do hccn_tool -i $i -ip -g;done
-    ```
-
-4. Cross-Node PING Test
-
-    ```bash
-    # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
-    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
-    ```
-
-5. Check NPU TLS Configuration
-
-    ```bash
-    # The TLS settings should be consistent across all nodes
-    for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
-    ```
-
-::::
-
-:::::
+    Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
 
 ## Run with Docker
 
 Start a Docker container on each node.
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -171,9 +231,44 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+
+```bash
+--device=/dev/ummu \
+--device=/dev/uburma \
+-v /usr/bin/urma_admin:/usr/bin/urma_admin \
+```
+
+Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+
+```bash
+-v /lib/route.conf:/lib/route.conf \
+```
+
+RoCE requires the following device and driver configuration mounts:
+
+```bash
+--device=/dev/infiniband \
+-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
+```
+
+Make the RoCE endpoint directory available inside the container, for example:
+
+```bash
+-v /etc/hixlep:/etc/hixlep:ro \
+```
+
+Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
+
+```bash
+-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
+```
+
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -217,12 +312,82 @@ Set environment variables
 - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
 ```shell
-export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
 ```
 
 ## Prefiller/Decoder Deployment
 
+!!! note "Timeout for long sequences or high concurrency"
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+
+    ```shell
+    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    ```
+
+    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+
+    Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
+
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+
+### QoS Configuration
+
+Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
+This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
+and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
+are integers in **[0, 4]** (booleans are not accepted).
+
+With the HIXL Client/Server transport, the endpoint initiating the connection
+supplies the channel QoS. The peer creates its corresponding channel using
+that received value:
+
+| Transfer mode | Initiator | Operation | QoS configuration used |
+| :--- | :--- | :--- | :--- |
+| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos_priority` |
+| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos_priority` |
+
+Although KV data flows from P to D in both modes, pull uses D's QoS and push
+uses P's QoS. Configuring only the passive endpoint does not override the
+initiator's channel QoS. Both endpoints support the option, but the effective
+value for a connection comes from its initiator.
+
+For example, add `"qos_priority": 1` alongside your existing parallelism settings:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "qos_priority": 1,
+    "prefill": {"dp_size": 1, "tp_size": 2},
+    "decode": {"dp_size": 1, "tp_size": 2}
+  }
+}
+```
+
+Use `kv_producer` for the prefiller and retain the other deployment-specific
+fields in your `--kv-transfer-config`.
+
+No manual QoS environment export is required. Before initializing the transfer
+engine, the connector merges its QoS into the literal top-level JSON key
+`"comm_resource_config.qos"` in `ASCEND_GLOBAL_RESOURCE_CONFIG`, creating the
+environment variable if absent. Other resource settings and the `store`
+configuration are preserved. An explicit QoS value, or the default **1** when
+omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
+resource JSON fail before the environment is modified.
+
+The `Injected comm_resource_config.qos=...` log confirms that the local
+environment configuration was written successfully. It does not by itself
+prove that this value was used for a transfer channel. In pull mode, a passive
+P-side HIXL server may not print a local QoS parsing log; in push mode, the
+same applies to the passive D side. Check the initiator's configuration and
+HIXL channel logs to verify the channel QoS.
+
+With `MultiConnector`, set `qos_priority` in the Mooncake P/D child connector's
+`kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
+it does not configure or validate pooling backends or modify their `store`
+settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 
@@ -233,9 +398,9 @@ On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which
 | 8             | 20000 - 27999       | >= 28000            |
 | 16            | 20000 - 35999       | >= 36000            |
 
-```{warning}
-If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
-```
+!!! warning
+
+    If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
 
 ### launch_online_dp.py
 
@@ -247,490 +412,470 @@ Use `launch_online_dp.py` to launch external dp vllm servers.
 Modify `run_dp_template.sh` on each node.
 [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
+`launch_online_dp.py` starts `dp-size-local` vLLM instances and passes seven positional arguments to `run_dp_template.sh`. The examples below correspond to [Start the service](#start-the-service).
+
+| Launcher option | Template value | Meaning | Example value | Constraints |
+| --- | --- | --- | --- | --- |
+| `--dp-size` | `$3` / `--data-parallel-size` | Total DP ranks in the group. | P: `2`; D: `32` | Positive integer; identical within the same group. Total ranks must cover `[0, dp-size)` without overlap. |
+| `--tp-size` | `$7` / `--tensor-parallel-size` | NPUs used by each instance. | P: `8`; D: `1` | Positive integer; `dp-size-local * tp-size` must not exceed available NPUs on the node.|
+| `--dp-size-local` | Number of template invocations | DP instances on this node. | P: `2`; D: `16` | If set to `-1`, it defaults to `dp-size`. Otherwise, `1 <= dp-size-local <= dp-size`.|
+| `--dp-rank-start` | `$4` / `--data-parallel-rank` = `dp-rank-start + i` | First DP rank on this node. | P: `0`; D: `0` or `16` | Non-negative integer; the assigned rank range must be within `dp-size` and not overlap. |
+| `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
+| `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
+| `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
+| Computed by the launcher | `$1` / `ASCEND_RT_VISIBLE_DEVICES` | NPU IDs assigned to each instance. | P: `0,...,7`, `8,...,15`; D: `0` through `15` | IDs must exist and not overlap; non-contiguous IDs require adapting the launcher. |
+
+!!! note
+
+    - The launcher validates only argument types and required options. Check the remaining constraints before deployment.
+    - If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
+        1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
+        2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
+
 #### Layerwise
 
-:::::{tab-set}
-:sync-group: nodes
+=== "Prefiller node 1"
 
-::::{tab-item} Prefiller node 1
-:sync: prefill node1
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.1"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"enable_shared_expert_dp": true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeLayerwiseConnector",
+      "kv_role": "kv_producer",
+      "kv_port": "36000",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.1"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_role": "kv_producer",
-  "kv_port": "36000",
-  "engine_id": "0",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+=== "Prefiller node 2"
 
-::::
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.2"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"enable_shared_expert_dp": true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeLayerwiseConnector",
+      "kv_role": "kv_producer",
+      "kv_port": "36100",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-::::{tab-item} Prefiller node 2
-:sync: prefill node2
+=== "Decoder node 1"
 
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.2"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_role": "kv_producer",
-  "kv_port": "36100",
-  "engine_id": "1",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.3"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=600
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 40 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.94  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeLayerwiseConnector",
+      "kv_role": "kv_consumer",
+      "kv_port": "36200",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-::::
+=== "Decoder node 2"
 
-::::{tab-item} Decoder node 1
-:sync: decoder node1
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.4"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=600
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 40 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.94  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeLayerwiseConnector",
+      "kv_role": "kv_consumer",
+      "kv_port": "36200",
+      "kv_connector_extra_config": {
 
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.3"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=600
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 40 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.94  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-
-::::
-
-::::{tab-item} Decoder node 2
-:sync: decoder node2
-
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.4"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=600
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 40 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.94  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
-
-::::
-
-:::::
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
 #### Non-layerwise
 
-:::::{tab-set}
-:sync-group: nodes
+=== "Prefiller node 1"
 
-::::{tab-item} Prefiller node 1
-:sync: prefill node1
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.1"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"enable_shared_expert_dp": true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "36000",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.1"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_producer",
-  "kv_port": "36000",
-  "engine_id": "0",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+=== "Prefiller node 2"
 
-::::
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.2"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"enable_shared_expert_dp": true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "36100",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-::::{tab-item} Prefiller node 2
-:sync: prefill node2
+=== "Decoder node 1"
 
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.2"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_producer",
-  "kv_port": "36100",
-  "engine_id": "1",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.3"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=600
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 40 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.94  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "36200",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-::::
+=== "Decoder node 2"
 
-::::{tab-item} Decoder node 1
-:sync: decoder node1
-
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.3"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=600
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 40 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.94  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-
-::::
-
-::::{tab-item} Decoder node 2
-:sync: decoder node2
-
-```shell
-nic_name="eth0"  # network card name
-local_ip="192.0.0.4"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=600
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name ds_r1 \
-  --max-model-len 40000 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 40 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.94  \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
-
-::::
-
-:::::
+    ```shell
+    nic_name="eth0"  # network card name
+    local_ip="192.0.0.4"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=600
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name ds_r1 \
+      --max-model-len 40000 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 40 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.94  \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "36200",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                 },
+                 "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
 ### Start the service
 
@@ -755,130 +900,128 @@ We provide two different proxy implementations with distinct request routing beh
 
 - **`load_balance_proxy_server_example.py`**: Requests are first routed to the P nodes, which then forward to the D nodes for subsequent processing.This proxy is designed for use with the MooncakeConnector.[load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
-:::::{tab-set}
+=== "Layerwise"
 
-::::{tab-item} Layerwise
+    ```shell
+    python load_balance_proxy_layerwise_server_example.py \
+      --port 1999 \
+      --host 192.0.0.1 \
+      --prefiller-hosts \
+        192.0.0.1 \
+        192.0.0.1 \
+        192.0.0.2 \
+        192.0.0.2 \
+      --prefiller-ports  \
+        7100 7101 7100 7101 \
+      --decoder-hosts \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+      --decoder-ports  \
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
+    ```
 
-```shell
-python load_balance_proxy_layerwise_server_example.py \
-  --port 1999 \
-  --host 192.0.0.1 \
-  --prefiller-hosts \
-    192.0.0.1 \
-    192.0.0.1 \
-    192.0.0.2 \
-    192.0.0.2 \
-  --prefiller-ports  \
-    7100 7101 7100 7101 \
-  --decoder-hosts \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-  --decoder-ports  \
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-```
+=== "Non-layerwise"
 
-::::
+    ```shell
+    python load_balance_proxy_server_example.py \
+      --port 1999 \
+      --host 192.0.0.1 \
+      --prefiller-hosts \
+        192.0.0.1 \
+        192.0.0.1 \
+        192.0.0.2 \
+        192.0.0.2 \
+      --prefiller-ports  \
+        7100 7101 7100 7101 \
+      --decoder-hosts \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.3  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+        192.0.0.4  \
+      --decoder-ports  \
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
+    ```
 
-::::{tab-item} Non-layerwise
+Both proxies share the following backend options.
 
-```shell
-python load_balance_proxy_server_example.py \
-  --port 1999 \
-  --host 192.0.0.1 \
-  --prefiller-hosts \
-    192.0.0.1 \
-    192.0.0.1 \
-    192.0.0.2 \
-    192.0.0.2 \
-  --prefiller-ports  \
-    7100 7101 7100 7101 \
-  --decoder-hosts \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.3  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-    192.0.0.4  \
-  --decoder-ports  \
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-```
+| Parameter | Applies to | Default | Example value | Meaning and constraints |
+| --- | --- | --- | --- | --- |
+| `--port` | Both | `8000` | `1999` | Proxy listen port. Must be free, reachable, and between `1` and `65535`. |
+| `--host` | Both | `localhost` | `192.0.0.1` | Proxy listen address. Layerwise mode requires a non-wildcard address reachable by D nodes. |
+| `--prefiller-hosts` | Both | `localhost` | `192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2` | P-instance hosts. Count must equal the number of `--prefiller-ports`. |
+| `--prefiller-ports` | Both | `8001` | `7100 7101 7100 7101` | P-instance ports. Each host-port pair must be unique and reachable. |
+| `--decoder-hosts` | Both | `localhost` | Sixteen `192.0.0.3`, then sixteen `192.0.0.4` | D-instance hosts. Count must equal the number of `--decoder-ports`. |
+| `--decoder-ports` | Both | `8002` | `7100`-`7115` for each D host | D-instance ports. Each host-port pair must be unique and reachable. |
 
-::::
+!!! note
 
-:::::
-
-|Parameter  | meaning |
-| --- | --- |
-| --port | Proxy service Port |
-| --host | Proxy service Host IP|
-| --prefiller-hosts | Hosts of prefiller nodes |
-| --prefiller-ports | Ports of prefiller nodes |
-| --decoder-hosts | Hosts of decoder nodes |
-| --decoder-ports | Ports of decoder nodes |
+    The proxy scripts validate that each host list has the same length as its corresponding port list.
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ## Benchmark
 
-We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
+We recommend use aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark) Execute the following commands to install aisbench
 
 ```shell
 git clone https://github.com/AISBench/benchmark.git
@@ -895,7 +1038,7 @@ unset https_proxy
 ```
 
 - You can place your datasets in the dir: `benchmark/ais_bench/datasets`
-- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for example
+- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the `vllm_api_stream_chat.py` for example
 
 ```python
 models = [
@@ -921,13 +1064,13 @@ models = [
 ]
 ```
 
-- Take gsm8k dataset for example, execute the following commands  to assess performance.
+- Take gsm8k dataset for example, execute the following commands to assess performance.
 
 ```shell
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details for commands and parameters for aisbench, refer to  [aisbench](https://gitee.com/aisbench/benchmark)
+- For more details for commands and parameters for aisbench, refer to  [aisbench](https://github.com/AISBench/benchmark)
 
 ## FAQ
 

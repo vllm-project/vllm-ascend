@@ -162,7 +162,7 @@ def make_replica(
     num_available_replicas: int,
     current_replicas: np.ndarray,
     z_score: float,
-    method: str = "percentage",
+    method: str = "min_max_replica",
 ) -> tuple[np.ndarray, np.ndarray]:
     if method == "percentage":
         return percentage_replica(mu, var, num_available_replicas, current_replicas, z_score)
@@ -473,21 +473,23 @@ class FlashTree:
 
             initial_replicas = (simulation_replicas[:interval_size] - 1).sum()
 
+            def neighbor_score(
+                mid,
+                ci=current_idx,
+                crf=current_replicas_f,
+                ri=remaind_idx,
+                rrf=remaind_replicas_f,
+                nar=num_available_replicas,
+            ):
+                return get_score(_lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid])
+
             best_replica, _, _ = self.neighbor_search(
                 low,
                 high,
                 initial_replicas,
                 width,
-                lambda mid,
-                ci=current_idx,
-                crf=current_replicas_f,
-                ri=remaind_idx,
-                rrf=remaind_replicas_f,
-                nar=num_available_replicas: get_score(
-                    _lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid]
-                ),
+                neighbor_score,
             )
-
             deployed_replicas[current_idx] = current_replicas_f[best_replica]
             num_available_replicas -= best_replica
 
@@ -867,7 +869,7 @@ class FlashLB(EplbPolicy):
                     self.update_threshold_value = 0.9
                     self.true_update = True
             except Exception:
-                logger.info("Dynamic eplb group is not initialized now")
+                logger.info("[eplb/policy] Dynamic eplb group not initialized yet, using default thresholds")
         current_deployment = np.array(current_expert_table)
         expert_workload = np.array(expert_workload)
 
@@ -932,12 +934,13 @@ class FlashLB(EplbPolicy):
             new_average_to_peak_ratio[layer] = 1 / best_score
 
             current_deployment = self.current_deployment.get(layer, None)
-
-            new_deployment[layer] = best_deployment
-            # Minimize redeployment by permuting new deployment
-            new_deployment[layer] = FlashLB.minimize_redeploy_with_inner_permutation(
-                current_deployment, best_deployment
-            )
+            if -1 in best_deployment:
+                new_deployment[layer] = current_deployment
+            else:
+                # Minimize redeployment by permuting new deployment
+                new_deployment[layer] = FlashLB.minimize_redeploy_with_inner_permutation(
+                    current_deployment, best_deployment
+                )
             current_average_to_peak_ratio = 1 / compute_score(
                 buf, self.current_deployed_replicas.get(layer), current_deployment
             )

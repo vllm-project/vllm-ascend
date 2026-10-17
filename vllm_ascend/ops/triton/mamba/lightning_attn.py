@@ -89,6 +89,15 @@ def _fwd_diag_kernel(
 
     # Load query values
     q = tl.load(Q_block_ptr, mask=block_offset + q_index[:, None] < n, other=0.0).to(tl.float32)
+
+    # Re-apply mask to zero out padding elements in the last block.
+    # On Ascend, tl.load(..., other=0.0) may not reliably clear out-of-bound data
+    # due to hardware-specific vector-to-cube loading behavior. If the sequence length
+    # is not a multiple of BLOCK_SIZE, the trailing block may contain garbage values.
+    # These "dirty" elements can cause NaNs during dot-product computation, leading
+    # to corrupted attention outputs and model instability. Explicitly masking here
+    # ensures numerical safety.
+    q = tl.where(block_offset + q_index[:, None] < n, q, 0.0)
     # Initialize output accumulator
     qkv = tl.zeros([CBLOCK, e], dtype=tl.float32)
 
@@ -108,6 +117,9 @@ def _fwd_diag_kernel(
             mask=block_offset + kv_index[:, None] < n,
             other=0.0,
         ).to(tl.float32)
+
+        # Same masking required for k to prevent garbage values in dot product (see above).
+        k = tl.where(block_offset + kv_index[:, None] < n, k, 0.0)
 
         v = tl.load(
             V_block_ptr,

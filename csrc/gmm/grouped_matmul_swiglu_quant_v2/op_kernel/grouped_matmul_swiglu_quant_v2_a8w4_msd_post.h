@@ -194,12 +194,14 @@ __aicore__ inline void GMMA8W4PostProcess::Swiglu(uint32_t loopIdx, VecConfig &v
         _inMMLocal[loopIdx * gmmSwigluQuantV2->tokenLen + gmmSwigluQuantV2->tokenLen / SWIGLU_REDUCE_FACTOR];
     LocalTensor<float> src1Local = _inMMLocal[loopIdx * gmmSwigluQuantV2->tokenLen];
 
-    Mins(src0Local, src0Local, limited, gmmSwigluQuantV2->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
-    Maxs(src0Local, src0Local, (-1.0f * limited), gmmSwigluQuantV2->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
-    Mins(src1Local, src1Local, limited, gmmSwigluQuantV2->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
+    if (limited > 0.0f) {
+        Mins(src0Local, src0Local, limited, gmmSwigluQuantV2->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+        Maxs(src0Local, src0Local, (-1.0f * limited), gmmSwigluQuantV2->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+        Mins(src1Local, src1Local, limited, gmmSwigluQuantV2->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+    }
     SwiGLU<float, false>(workspaceLocal, src0Local, src1Local, beta, gmmSwigluQuantV2->tokenLen / SWIGLU_REDUCE_FACTOR);
     PipeBarrier<PIPE_V>();
     DataCopyParams repeatParams{
@@ -352,12 +354,7 @@ __aicore__ inline void GMMA8W4PostProcess::UpdateAuxiliaryMatrix(uint32_t loopId
                 }
             }
         }
-        LocalTensor<float> weightAuxiliaryMatrixLocal = weightAuxiliaryMatrixInQueue.DeQue<float>();
-        DataCopyExtParams copyParams{1, static_cast<uint32_t>(gmmSwigluQuantV2->tokenLen * sizeof(float)), 0, 0, 0};
-        DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
-        DataCopyPad(weightAuxiliaryMatrixLocal,
-                    weightAuxiliaryMatrixGM[vecConfig.curGroupIdx * gmmSwigluQuantV2->tokenLen], copyParams, padParams);
-        weightAuxiliaryMatrixInQueue.EnQue(weightAuxiliaryMatrixLocal);
+        PreLoadAuxiliaryMatrix(vecConfig);
     }
 }
 

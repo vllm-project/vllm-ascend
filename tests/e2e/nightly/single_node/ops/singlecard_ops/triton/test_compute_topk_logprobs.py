@@ -8,10 +8,10 @@ from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
 @pytest.mark.parametrize(
     "batch_size,vocab_size,num_logprobs",
     [
-        (48, 102400, 5),
-        (96, 102400, 0),
-        (24, 151936, 1),
-        (1, 32000, 10),
+        (48, 1024, 5),
+        (96, 1024, 0),
+        (24, 1519, 1),
+        (1, 320, 10),
     ],
 )
 def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):

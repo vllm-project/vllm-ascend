@@ -279,7 +279,7 @@ __aicore__ inline void InterleavedSplitSPad<T>::Compute(uint32_t loopIdx, LocalT
 
     Mul(x, x, cos, totalCount);
     inQueCos.FreeTensor(cos);
-    InterleavedInversion(x, totalCount);
+    InterleavedInversion(x, totalCount, tiling_->negateSin != 0);
     Add(y, y, x, totalCount);
     inQueX.FreeTensor(x);
     outQueY.EnQue(y);
@@ -315,7 +315,7 @@ InterleavedSplitSPad<T>::ComputeCastFp32(uint32_t loopIdx, LocalTensor<uint32_t>
     inQueCos.FreeTensor(cos);
 
     Mul(tmp32SPadBuf1, tmp32SPadBuf1, tmp32SPadBuf2, totalCount);
-    InterleavedInversion(tmp32SPadBuf1, totalCount);
+    InterleavedInversion(tmp32SPadBuf1, totalCount, tiling_->negateSin != 0);
     Add(tmp32Buf3, tmp32Buf3, tmp32SPadBuf1, totalCount);
 
     LocalTensor<T> y = outQueY.AllocTensor<T>();

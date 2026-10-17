@@ -15,22 +15,214 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import torch
-import torch_npu
+import os
+from functools import lru_cache
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    QUANT_DTYPES,
-    SCALE_DTYPES,
-)
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+import torch
+import torch.nn.functional as F
+import torch_npu
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
+
+if TYPE_CHECKING:
+    from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
+
+ACL_HOST_REG_MAPPED = 0x2
+ACL_HOST_REG_PINNED = 0x10000000
+INT64_MAX = torch.iinfo(torch.int64).max
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+else:
+    triton_q_rms = None  # type: ignore
 
 
 class BaseDeviceAdaptor:
+    @staticmethod
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
+        """Return the packed-cache ABI implementation, or use standard caches."""
+        return None
+
+    @staticmethod
+    def host_register_flags() -> int:
+        """ACL host registration flags for the standard runtime ABI."""
+        # PINNED prevents paging while MAPPED exposes the host allocation to
+        # NPU kernels. Both flags are required by the standard runtime path.
+        # TODO: unify flags when supported CANN runtimes accept the same ABI.
+        return ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
+
+    @staticmethod
+    def rms_norm_cast(x, weight, epsilon):
+        """Return fused rounded/FP32 outputs, or None for the normal RMSNorm path."""
+        from vllm_ascend.utils import enable_custom_op
+
+        if get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST) and enable_custom_op():
+            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
+            if op is not None:
+                return op(x, weight, epsilon)
+        return None
+
+    @staticmethod
+    def apply_partial_rotary_inplace(x, cos, sin, *, start, end, inverse=False):
+        """Adapt rank and inverse-RoPE arguments without copying the destination."""
+        work = x.unsqueeze(-2) if x.ndim == 2 else x
+        work = work.unsqueeze(1) if work.ndim == 3 else work
+        supports_negate_sin = get_current_hardware_profile().supports(
+            HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN
+        )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            work,
+            cos,
+            -sin if inverse and not supports_negate_sin else sin,
+            rotary_mode="interleave",
+            partial_slice=[start, end],
+            **({"negate_sin": inverse} if supports_negate_sin else {}),
+        )
+        return x
+
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu._npu_reshape_and_cache(
-            key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
+    def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
+        """Dispatch a cache scatter with the original operator's arguments.
+
+        Callers retain their existing views and slices. SK and generic scatter
+        receive the original tensors; A5 adapts their layout for PA without
+        copying the destination, truncating updates, or filtering slots.
+        """
+        if cls._is_row_cache(var, indices, updates) and cls._scatter_cache(var, indices, updates):
+            return
+        torch_npu.npu_scatter_nd_update_(var, indices, updates)
+
+    @staticmethod
+    def _is_row_cache(var, indices, updates) -> bool:
+        # This adaptor optimizes row writes: var[N, D], indices[T, 1],
+        # updates[T, D]. These checks bound the cache optimization, not SK's
+        # full shape support. Other inputs retain the original scatter path.
+        if var.ndim != 2 or indices.ndim != 2 or updates.ndim != 2:
+            return False
+        if indices.shape[1] != 1 or updates.shape != (indices.shape[0], var.shape[1]):
+            return False
+        return updates.dtype == var.dtype and indices.dtype in (torch.int32, torch.int64)
+
+    @staticmethod
+    def _scatter_cache(var, indices, updates) -> bool:
+        # Select only available kernels and supported cache dtypes. FP32 is
+        # used by indexer scales; FP8 requires a matching kernel ABI.
+        profile = get_current_hardware_profile()
+        if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+            return False
+        operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
+        if operation is None:
+            return False
+        if updates.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if not profile.supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+                return False
+        elif updates.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
+            return False
+
+        # Write the destination in place: rows must be internally contiguous
+        # and non-overlapping. Never make a contiguous copy of the cache.
+        # Read-only indices/updates are made contiguous inside ACLNN as needed.
+        if var.stride(1) != 1 or var.stride(0) < var.shape[1]:
+            return False
+        # arch35 can drop writes to row-strided destinations. Keep them on
+        # generic scatter until fixed; A2/A3 retain their stride-aware kernel.
+        if not var.is_contiguous() and not profile.supports(HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE):
+            return False
+        operation(var, indices, updates)
+        return True
+
+    @classmethod
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            torch.ops._C_ascend.npu_scatter_pa_kv_cache(
+                key.contiguous(),
+                value.contiguous(),
+                key_cache,
+                value_cache,
+                slot_mapping.contiguous(),
+                cache_mode="Norm",
+                scatter_mode="NHSD",
+            )
+            return
+
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=key.contiguous(),
+            value=value.contiguous(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
+        )
+
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_prefill_no_cache: bool,
+        **kwargs,
+    ):
+        # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
+        # 512-dim global attention heads. The FIA path slices/replaces
+        # query/key/value before this wrapper, so large-head prefill fallback
+        # must use the original current-token K/V.
+        if head_size == device_utils.FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+            return device_utils.npu_large_head_prefill_attention(
+                query,
+                current_key,
+                current_value,
+                attn_metadata,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                num_heads=num_heads,
+                num_kv_heads=num_key_value_heads,
+                head_size=head_size,
+                scale=scale,
+                is_prefill_no_cache=is_prefill_no_cache,
+            )
+
+        if kwargs.get("block_table") is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
         )
 
     @staticmethod
@@ -45,8 +237,9 @@ class BaseDeviceAdaptor:
         expert_tokens_num_flag: bool = True,
         active_expert_range=None,
         quant_mode: int = -1,
+        act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -93,6 +286,35 @@ class BaseDeviceAdaptor:
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "aiv",
+    ):
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -104,7 +326,7 @@ class BaseDeviceAdaptor:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if dynamic_scale is None:
-            return torch_npu.npu_dynamic_quant(hidden_states)
+            return torch_npu.npu_dynamic_quant(hidden_states, dst_type=act_quant_type)
 
         return hidden_states, dynamic_scale
 
@@ -117,10 +339,11 @@ class BaseDeviceAdaptor:
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
-        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        swiglu_limit: float = 0.0,
+        mxfp_quant_dtype: QuantType | None = None,
     ):
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
@@ -134,6 +357,21 @@ class BaseDeviceAdaptor:
             bias=bias,
             swiglu_limit=swiglu_limit,
         )
+
+    @staticmethod
+    def npu_grouped_matmul_situ_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        group_list: torch.Tensor,
+        group_list_type: int,
+        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        x_scale: torch.Tensor,
+        beta: float,
+        linear_beta: float,
+        mxfp_quant_dtype: QuantType | None = None,
+    ):
+        raise RuntimeError("GMM-SiTU quant fusion is only supported on Ascend A5.")
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -172,6 +410,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
@@ -192,134 +431,748 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        return torch_npu.npu_clipped_swiglu(
+            hidden_states,
+            interleaved=False,
+            alpha=swiglu_alpha,
+            limit=swiglu_limit,
+            bias=swiglu_beta,
+        )
+
+    @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
-        torch_npu.atb.npu_paged_cache_load(
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+            return
+        torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu,
-            seq_starts=seq_starts,
+            context_seq_len_npu.contiguous(),
+            seq_offset=seq_starts,
             key=key,
             value=value,
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz]
+    def indexer_select_post_process(
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple[Any, ...] | None,
+        weights: torch.Tensor,
+        kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
+        use_torch_npu_lightning_indexer: bool,
+    ) -> torch.Tensor:
+        indexer_cache_idx = indexer_k_cache_idx
+        if enable_sparse_li_c4:
+            raise RuntimeError("C4 lightning indexer is only supported on A5 devices.")
 
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
-
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-        dequant_scale_q_nope = None
-        if atten_obj.fa_quant_layer:
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
-                quantized_x,
-                atten_obj.wd_q,
-                atten_obj.wu_q,
-                atten_obj.W_UK_T,
-                atten_obj.wd_kv,
-                atten_obj.gamma1,
-                atten_obj.gamma2,
-                sin,
-                cos,
-                attn_metadata.slot_mapping[:bsz].to(torch.int64),
-                decode_k_nope,
-                decode_k_pe,
-                dequant_scale_x=pertoken_scale.view(-1, 1),
-                dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
-                dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
-                dequant_scale_w_dkv_kr=atten_obj.dequant_scale_w_dkv_kr,
-                quant_scale_ckv=atten_obj.quant_kscale,
-                cache_mode="PA_NZ",
+        if enable_sparse_li_c8:
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
+            assert q_li_scale is not None
+            assert q_li_shape_ori is not None
+            weights = weights.to(torch.float16)
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
+                query=q_li.view(q_li_shape_ori),
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
+                key_dequant_scale=kv_cache[indexer_scale_cache_idx].squeeze(2),  # B S N D -> B S D
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+                pre_tokens=INT64_MAX,
+                next_tokens=INT64_MAX,
             )
         else:
-            decode_q_nope = torch.empty(
-                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_nope.shape[-1]),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
             )
-            decode_q_pe = torch.empty(
-                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_pe.shape[-1]),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
+        return topk_indices
 
-            torch.ops._C_ascend.mla_preprocess(
-                hidden_states,
-                atten_obj.wd_qkv,
-                atten_obj.deq_scale_qkv,
-                atten_obj.gamma1,
-                atten_obj.beta1,
-                atten_obj.wu_q,
-                atten_obj.qb_deq_scl,
-                atten_obj.gamma2,
-                cos,
-                sin,
-                atten_obj.W_UK_T,
-                decode_k_nope,
-                decode_k_pe,
-                attn_metadata.slot_mapping[:bsz],
-                quant_scale0=atten_obj.quant_scale0,
-                quant_offset0=atten_obj.quant_offset0,
-                bias0=atten_obj.quant_bias_qkv,
-                quant_scale1=atten_obj.quant_scale1,
-                quant_offset1=atten_obj.quant_offset1,
-                bias1=atten_obj.qb_qt_bias,
-                ctkv_scale=atten_obj.ctkv_scale,
-                q_nope_scale=atten_obj.q_nope_scale,
-                cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
-                quant_mode="per_tensor_quant_asymm",
-                q_out0=decode_q_nope,
-                kv_cache_out0=decode_k_nope,
-                q_out1=decode_q_pe,
-                kv_cache_out1=decode_k_pe,
-                enable_inner_out=False,
-                inner_out=torch.tensor([], device=hidden_states.device),
-            )
-            decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
-            decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+    @classmethod
+    def execute_sparse_flash_attention_process(
+        cls,
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple,
+        topk_indices: torch.Tensor,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        block_table: torch.Tensor | None = None,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if block_table is None:
+            block_table = attn_metadata.block_table
+        kv = kv_cache[0]
 
-        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
-
-        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
-
-        decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+        # The kv-quant sparse attention op only accepts packed quantized KV.
+        # Do not route by the feature flag alone: tests and fallback paths may
+        # pass a normal BF16/FP16 KV cache even when the mocked impl exposes a
+        # truthy attribute.
+        use_kv_quant_sparse_attention = kv.dtype in (
+            torch.int8,
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
         )
-        return decode_preprocess_res, None
+        if use_kv_quant_sparse_attention:
+            result = cls._execute_kv_quant_sparse_flash_attention_vllm(
+                sfa_impl,
+                ql_nope,
+                q_pe,
+                kv,
+                block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=sparse_mode,
+                return_lse=return_lse,
+            )
+        else:
+            key_rope = kv_cache[1]
+            result = torch.ops._C_ascend.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                query_rope=q_pe,
+                key_rope=key_rope,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                return_softmax_lse=return_lse,
+            )
+        if not isinstance(result, tuple):
+            if return_lse:
+                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
+            return result
+        if return_lse:
+            return result
+        else:
+            return result[0]
 
-    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        context_layer = torch.empty_like(query)
+    @staticmethod
+    def _execute_kv_quant_sparse_flash_attention_vllm(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
+        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1])
+        if return_lse or qk_rope_head_dim == 0:
+            return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+                return_softmax_lse=return_lse,
+            )
+        else:
+            return torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+            )
 
-        torch_npu._npu_flash_attention_unpad(
-            query=query,
-            key=key,
-            value=value,
-            seq_len=seq_lens_cpu,
-            scale_value=scale_value,
-            num_heads=head_num,
-            num_kv_heads=num_kv_heads,
-            out=context_layer,
+    # ===== SWA / Compressor KV Scatter =====
+
+    @staticmethod
+    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
+
+    # ===== Indexer Quant + Scatter =====
+
+    @staticmethod
+    def indexer_quantize_query(q):
+        """Quantize indexer query for lightning_indexer.
+        Non-A5: int8 quant with float16 scale."""
+        q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
+        q_scale = q_scale.to(torch.float16)
+        return q_quant, q_scale
+
+    @staticmethod
+    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+        """Quantize q and scatter kv into indexer cache.
+        Non-A5: int8 quant + 2x scatter_nd_update_sk for k_cache and scale_cache."""
+        q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
+        q_scale = q_scale.to(torch.float16)
+
+        kv_out = kv
+        kv_scale_out = None
+        if kv is not None:
+            kv_out, kv_scale_out = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
+            kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
+            if kv_scale_out.ndim < 4:
+                kv_scale_out = kv_scale_out.unsqueeze(-1)
+            torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_out)
+            torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_out)
+
+        return q, q_scale, kv_out, kv_scale_out
+
+    @staticmethod
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+        """Part1 of multi-stream indexer scatter.
+        Non-A5: quantize kv + scatter k_cache.
+        Returns (kv_quant, kv_scale) for use in Part3, or (None, None) if kv is None."""
+        if kv is None:
+            return None, None
+        kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
+        kv_scale = kv_scale.unsqueeze(-1)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_out)
+        return kv_out, kv_scale
+
+    @staticmethod
+    def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
+        """Part3 of multi-stream indexer scatter.
+        Non-A5: scatter scale_cache (float16 conversion + scatter)."""
+        kv_scale = kv_scale.to(torch.float16)
+        if kv_scale.ndim < 4:
+            kv_scale = kv_scale.unsqueeze(-1)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale)
+
+    @staticmethod
+    def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
+        """Warmup profiling for indexer quant+scatter.
+        Non-A5: int8 quant + 2x scatter with dummy cache tensors."""
+        kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(hidden_states, dst_type=torch.int8)
+        kv_scale_dummy = kv_scale_dummy.unsqueeze(-1).to(torch.float16)
+        if kv_scale_dummy.ndim < 4:
+            kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
+        dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
+        indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
+        indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_dummy)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
+
+    # ===== Lightning Indexer Dtype Prep =====
+
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """Non-A5: q/k are int8 with fp16 scales, so lightning indexer runs
+        in INT8 quant mode (QUANT_MODE_INT8 = 2 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 2
+
+    @staticmethod
+    def prepare_dsa_indexer_weights(weights):
+        """Non-A5: cast indexer weights to float16."""
+        return weights.to(torch.float16)
+
+    @staticmethod
+    def prepare_dsa_indexer_query_scale(q_scale):
+        """Non-A5: q_scale already float16, pass through."""
+        return q_scale
+
+    @staticmethod
+    def prepare_dsa_indexer_key_scale(indexer_scale_cache):
+        """Non-A5: cast key dequant scale to float16."""
+        return indexer_scale_cache.squeeze(-2).to(torch.float16)
+
+    # ===== Q RMS Norm =====
+
+    @staticmethod
+    def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
+        """Apply Q RMS norm. Non-A5: triton_q_rms.
+        A5: uses q_norm_without_weight callable when provided."""
+        if q_norm_without_weight is not None:
+            return q_norm_without_weight(q)
+
+        if triton_q_rms is not None:
+            return triton_q_rms(q, eps)
+        else:
+            dtype = q.dtype
+            q = q.float()
+            variance = q.square().mean(-1, keepdim=True)
+            q = q * torch.rsqrt(variance + eps)
+            return q.to(dtype)
+
+    # ===== KV Cache Helpers =====
+
+    @staticmethod
+    def unpack_dsa_indexer_kv_cache(kv_cache):
+        """Unpack indexer kv_cache tuple.
+        Non-A5: returns (state_cache, k_cache, scale_cache, None).
+        A5: returns (state_cache, k_cache, scale_cache, full_cache)."""
+        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache = kv_cache
+        return indexer_state_cache, indexer_k_cache, indexer_scale_cache, None
+
+    @staticmethod
+    def unpack_dsa_forward_kv_cache(kv_cache, compress_ratio):
+        """Unpack kv_cache for forward pass.
+        Returns 6-tuple: (compress_kv_cache, swa_kv_cache, state_cache,
+        indexer_k_cache, indexer_scale_cache, indexer_full_cache).
+        Non-A5: indexer_full_cache is always None.
+        All devices: unused slots are None.
+        """
+        idx_full = 6  # 7th element (indexer_full_cache), A5 only
+        full_cache = kv_cache[idx_full] if len(kv_cache) > idx_full else None
+        if compress_ratio == 4:
+            # [0]=compress, [1]=swa, [2]=state, [3]=unused, [4]=ik, [5]=isc
+            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
+        elif compress_ratio == 128:
+            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
+        else:
+            return (None, kv_cache[1], None, None, None, full_cache)
+
+    @staticmethod
+    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
+        """Pad slot_mapping for decode metadata. Non-A5: pass through."""
+        return slot_mapping
+
+    @staticmethod
+    def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
+        """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
+        A5 override always returns None."""
+        return cmp_kv_tensor
+
+    @staticmethod
+    def get_dsa_decode_cu_seqlens_ori_kv(
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+    ):
+        """Non-A5: return fallback directly (self.cu_seqlens_ori_kv)."""
+        return fallback_cu_seqlens
+
+    @staticmethod
+    def get_dsa_kernel_block_sizes():
+        """Non-A5: return supported kernel block sizes."""
+        return [8, 32, 128]
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(
+        num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
+    ):
+        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            bh_step=bh_step,
+            task_num=task_num,
+            num_core=num_core,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
         )
 
-        return context_layer
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        extract_slice_stride_1 = LARGE_BLOCK_T // 32
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=extract_slice_stride_1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
+        return x
+
+    @staticmethod
+    def fla_gdn_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        scale: float,
+        prebuilt_meta,
+        fused_fwd,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
+        q = l2norm_fwd(q.contiguous()).contiguous()
+        k = l2norm_fwd(k.contiguous()).contiguous()
+        v = v.contiguous()
+        g = g.to(torch.float32).contiguous()
+        beta = beta.to(v.dtype).contiguous()
+        initial_state = initial_state.contiguous()
+
+        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
+        # still returned sequence-major, so only the inputs are permuted.
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+
+        cu_seqlens = prebuilt_meta.cu_seqlens_host
+        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        keep_meta = prebuilt_meta.keep_meta
+        # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
+        initial_state_kern = initial_state.transpose(-1, -2).contiguous()
+        if keep_meta is not None:
+            cu_seqlens = prebuilt_meta.cu_seqlens_kern
+            initial_state_kern = initial_state[keep_meta].transpose(-1, -2).contiguous()
+
+        output, final_state, *_ = fused_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            layout="BNSD",
+            use_exp2=False,
+            use_qk_l2norm_in_kernel=False,
+            allow_neg_eigval=False,
+            disable_recompute=True,
+            state_v_first=False,
+        )
+        if keep_meta is not None:
+            # Scatter in the kernel layout so empty segments keep their initial state,
+            # then flip back to the caller's [.., Dv, Dk].
+            full_final_state = initial_state.transpose(-1, -2).contiguous()
+            full_final_state[keep_meta] = final_state
+            final_state = full_final_state
+        return output, final_state.transpose(-1, -2).contiguous()
+
+    @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+
+    @staticmethod
+    def split_qkv_rmsnorm_rope(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+        results = torch.ops.vllm.qkv_rmsnorm_rope(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+
+    @staticmethod
+    def split_qkv_rmsnorm_rope_vnorm(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+        results = torch.ops.vllm.qkv_rmsnorm_rope_vnorm(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+
+    @staticmethod
+    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
+        return torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
+        )
+
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        tensor.index_fill_(dim, indices, value)
+        return tensor
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
+    @staticmethod
+    def _scatter_cache(var, indices, updates) -> bool:
+        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
+        if operation is None or not var.is_contiguous():
+            return False
+        if updates.dtype not in (
+            torch.int8,
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ):
+            return False
+        # PA expects [T, H, D] keys and [blocks, block_size, H, D] cache.
+        # With one row per block, flattened slot indices keep their original
+        # offsets. This is a view of the same destination, including its offset.
+        width = var.shape[1]
+        operation(
+            updates.reshape(-1, 1, width).contiguous(),
+            indices.reshape(-1).contiguous(),
+            key_cache=var.view(var.shape[0], 1, 1, width),
         )
+        return True
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _load_cann_quant_lightning_indexer_ops():
+        ops = import_module("cann_ops_transformer.ops")
+        return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
+
+    @staticmethod
+    def host_register_flags() -> int:
+        # A5 runtime rejects the redundant PINNED hint with error 107000.
+        # MAPPED works for both malloc-host allocations and shared mappings.
+        return ACL_HOST_REG_MAPPED
+
+    @staticmethod
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
+        from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
+
+        return MixedQuantPackedCacheOps
+
+    @classmethod
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            key_cache = key_cache.permute(0, 2, 1, 3)
+            value_cache = value_cache.permute(0, 2, 1, 3)
+        super().reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
+
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_prefill_no_cache: bool,
+        **kwargs,
+    ):
+        if kwargs.get("block_table") is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _execute_kv_quant_sparse_flash_attention_vllm(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if return_lse or getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
+            # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
+            # (csrc/attention/kv_quant_sparse_flash_attention_vllm). The torch_npu
+            # built-in aclnn op has no RoPE0 contract: it sizes its outputs from
+            # rope_head_dim=64 and faults while registering them. Route RoPE0 to
+            # the custom operator. LSE requests also require the custom operator;
+            # keep RoPE64 without LSE on the built-in one.
+            return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention_vllm(
+                sfa_impl,
+                ql_nope,
+                q_pe,
+                kv,
+                block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=sparse_mode,
+                return_lse=return_lse,
+            )
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
+        result = torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+        )
+        if return_lse:
+            raise RuntimeError(
+                "C8 sparse flash attention via torch_npu only returns attention_out; "
+                "cannot return softmax max/sum for DCP LSE merge."
+            )
+        return result
 
     @staticmethod
     def npu_moe_init_routing(
@@ -333,7 +1186,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         expert_tokens_num_flag: bool = True,
         active_expert_range=None,
         quant_mode: int = -1,
+        act_quant_type: torch.dtype | None = None,
     ):
+        input_dtype = act_quant_type or hidden_states.dtype
         return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
@@ -344,6 +1199,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            x_dtype=input_dtype if input_dtype in QUANT_DTYPES else None,
         )
 
     @staticmethod
@@ -387,6 +1243,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "ai_cpu",
+    ):
+        expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
+        if expansion_mode == "CCU_SCHED":
+            comm_mode = "ccu"
+
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -403,7 +1292,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
 
         if dynamic_scale is None:
-            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states,
+                dst_type=act_quant_type,
+                scale_alg=get_dynamic_mx_quant_scale_alg(),
+            )
 
         return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
@@ -416,39 +1309,118 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
-        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        swiglu_limit: float = 0.0,
+        mxfp_quant_dtype: QuantType | None = None,
     ):
-        if not use_mxfp_quant:
-            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=x,
-                weight=weight,
-                group_list=group_list,
-                weight_scale=weight_scale,
-                x_scale=x_scale,
-                bias=bias,
-                swiglu_limit=swiglu_limit,
-                use_mxfp_quant=False,
-            )
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm+swiglu+quant kernels are dispatched by each FusedMoEMethod on A5.")
 
-        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+        if act_quant_type == torch.float8_e4m3fn:
+            out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                x=x,
+                weight=[weight],
+                weight_scale=[weight_scale],
+                x_scale=x_scale,
+                group_list=group_list,
+                quant_dtype=torch.float8_e4m3fn,
+                dequant_dtype=torch.float32,
+            )
+            return out, out_scale, None
+
+        return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=x,
-            weight=[weight],
+            weight=weight,
             group_list=group_list,
-            weight_scale=[weight_scale],
+            weight_scale=weight_scale,
             x_scale=x_scale,
-            dequant_mode=2,
-            quant_mode=2,
-            dequant_dtype=torch.float32,
-            quant_dtype=act_quant_type,
-            x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
-            weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-            weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            bias=bias,
+            swiglu_limit=swiglu_limit,
+            use_mxfp_quant=False,
         )
-        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
+
+    @staticmethod
+    def npu_grouped_matmul_situ_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        group_list: torch.Tensor,
+        group_list_type: int,
+        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        x_scale: torch.Tensor,
+        beta: float,
+        linear_beta: float,
+        mxfp_quant_dtype: QuantType | None = None,
+    ):
+        if mxfp_quant_dtype != QuantType.W4A8MXFP:
+            raise RuntimeError("GMM-SiTU quant fusion requires W4A8 MXFP quantization.")
+
+        weight_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
+        x_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
+
+        is_list = isinstance(weight, (list, tuple))
+        if isinstance(weight, torch.Tensor) and not weight.is_contiguous():
+            weight = weight.transpose(1, 2)
+        if isinstance(weight_scale, (list, tuple)):
+            weight_scale = [
+                scale if scale.is_contiguous() else A5DeviceAdaptor._align_gmm_situ_weight_scale(scale)
+                for scale in weight_scale
+            ]
+        elif not weight_scale.is_contiguous():
+            weight_scale = A5DeviceAdaptor._align_gmm_situ_weight_scale(weight_scale)
+
+        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+        if is_list:
+            op = op.list
+        out, out_scale = op(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_assist_matrix=None,
+            bias=None,
+            x_scale=x_scale,
+            smooth_scale=None,
+            group_list=group_list,
+            dequant_mode=1,
+            dequant_dtype=0,
+            quant_mode=1,
+            group_list_type=group_list_type,
+            tuning_config=None,
+            beta=beta,
+            linear_beta=linear_beta,
+        )
+        return out, out_scale, None
+
+    @staticmethod
+    def _align_gmm_situ_weight_scale(scale: torch.Tensor) -> torch.Tensor:
+        scale = scale.transpose(-3, -2)
+        if not scale.is_contiguous():
+            raise ValueError(
+                "weight_scale must be the transposed view of N-major bytes "
+                f"or an already-contiguous N-major tensor; got shape {tuple(scale.shape)} "
+                f"and strides {tuple(scale.stride())}"
+            )
+        return scale
+
+    @staticmethod
+    def _restore_mxfp_semantic_dtype(
+        tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        semantic_dtype: torch.dtype,
+    ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
+        def restore_dtype(tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.dtype != torch.uint8:
+                return tensor
+            if isinstance(tensor, torch.Tensor) and int(torch_npu.get_npu_format(tensor)) != int(torch_npu.Format.ND):
+                return tensor
+            return tensor.view(semantic_dtype)
+
+        if isinstance(tensors, list):
+            return [restore_dtype(tensor) for tensor in tensors]
+        if isinstance(tensors, tuple):
+            return tuple(restore_dtype(tensor) for tensor in tensors)
+        return restore_dtype(tensors)
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -461,30 +1433,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_bf16: bool = True,
         use_mxfp_quant: bool = False,
     ) -> dict:
-        if not use_mxfp_quant:
-            return BaseDeviceAdaptor.get_quant_gmm2_kwargs(
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=False,
-            )
-
-        output_dtype = (
-            input_dtype
-            if input_dtype in [torch.bfloat16, torch.float16]
-            else (torch.bfloat16 if use_bf16 else torch.float16)
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm2 kernels are dispatched by each FusedMoEMethod on A5.")
+        return BaseDeviceAdaptor.get_quant_gmm2_kwargs(
+            input_dtype=input_dtype,
+            act_quant_type=act_quant_type,
+            weight_quant_type=weight_quant_type,
+            scale_type=scale_type,
+            per_token_scale_type=per_token_scale_type,
+            use_bf16=use_bf16,
+            use_mxfp_quant=False,
         )
-
-        return {
-            "scale_dtype": scale_type if scale_type in SCALE_DTYPES else None,
-            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in SCALE_DTYPES else None,
-            "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
-            "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-            "output_dtype": output_dtype,
-        }
 
     @classmethod
     def npu_grouped_matmul_gmm2(
@@ -505,60 +1464,49 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
-        if not use_mxfp_quant:
-            return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
-                hidden_states=hidden_states,
-                weight=weight,
-                weight_scale=weight_scale,
-                per_token_scale=per_token_scale,
-                group_list=group_list,
-                group_list_type=group_list_type,
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=False,
-                bias=bias,
-                fallback_output_dtype=fallback_output_dtype,
-            )
-
-        gmm2_kwargs = cls.get_quant_gmm2_kwargs(
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm2 kernels are dispatched by each FusedMoEMethod on A5.")
+        if act_quant_type == torch.float8_e4m3fn:
+            fallback_output_dtype = torch.bfloat16
+        return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
+            hidden_states=hidden_states,
+            weight=weight,
+            weight_scale=weight_scale,
+            per_token_scale=per_token_scale,
+            group_list=group_list,
+            group_list_type=group_list_type,
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
             scale_type=scale_type,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
-            use_mxfp_quant=True,
-        )
-        output_dtype = gmm2_kwargs.pop("output_dtype")
-
-        if isinstance(weight, list) and len(weight) != 1:
-            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-        if isinstance(weight_scale, list) and len(weight_scale) != 1:
-            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
-        gmm2_weight = weight if isinstance(weight, list) else [weight]
-        gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
-
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=gmm2_weight,
-            scale=gmm2_scale,
+            use_mxfp_quant=False,
             bias=bias,
-            per_token_scale=[per_token_scale],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=group_list,
-            output_dtype=output_dtype,
-            **gmm2_kwargs,
-        )[0]
+            fallback_output_dtype=fallback_output_dtype,
+        )
+
+    @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -569,71 +1517,581 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             value=value,
         )
 
+    # ===== Indexer Quant + Scatter =====
+
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz].unsqueeze(1)
-        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
-        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+    def indexer_quantize_query(q):
+        """Quantize indexer query. A5: fp8 quant, no extra scale conversion."""
+        q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
+        return q_quant, q_scale
 
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+    @staticmethod
+    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+        """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
+        On A5, the fused op handles kv quantization, k_cache scatter, and
+        scale_cache scatter internally. q is quantized separately for use
+        by lightning_indexer."""
+        q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
 
-        decode_q_nope, decode_q_pe, _, _, _ = torch_npu.npu_mla_prolog_v3(
-            token_x=hidden_states,
-            weight_dq=atten_obj.weight_dq,
-            weight_uq_qr=atten_obj.weight_uq_qr,
-            weight_uk=atten_obj.W_UK_T,
-            weight_dkv_kr=atten_obj.weight_dkv_kr,
-            rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
-            rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
-            rope_sin=sin,
-            rope_cos=cos,
-            kv_cache=decode_k_nope,
-            kr_cache=decode_k_pe,
-            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
-            cache_mode="PA_BSND",
-            query_quant_mode=0,
-            weight_quant_mode=3,
+        kv_out = kv
+        kv_scale_out = None
+        if kv is not None:
+            torch.ops._C_ascend.indexer_compress_epilog_v2(
+                indexer_compress_cache=indexer_full_cache.view(torch.uint8),
+                x=kv,
+                slot_mapping=slot_mapping,
+                layout=2,
+            )
+
+        return q, q_scale, kv_out, kv_scale_out
+
+    @staticmethod
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+        """Part1 of multi-stream indexer scatter.
+        A5: fused indexer_compress_epilog_v2 handles both k_cache and scale_cache.
+        Returns (kv, None) to signal Part3 is a no-op."""
+        if kv is None:
+            return None, None
+        torch.ops._C_ascend.indexer_compress_epilog_v2(
+            indexer_compress_cache=indexer_full_cache.view(torch.uint8),
+            x=kv,
+            slot_mapping=slot_mapping,
+            layout=2,
+        )
+        return kv, None
+
+    @staticmethod
+    def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
+        """Part3 of multi-stream indexer scatter.
+        A5: no-op — fused op in Part1 already handled scale_cache."""
+        pass
+
+    @staticmethod
+    def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
+        """Warmup profiling for indexer quant+scatter.
+        A5: fused indexer_compress_epilog_v2 with dummy cache tensor."""
+        dummy_cache_shape = (1, 1, 1, hidden_states.shape[-1])
+        indexer_full_cache_dummy = torch.zeros(dummy_cache_shape, dtype=torch.uint8, device=hidden_states.device)
+        torch.ops._C_ascend.indexer_compress_epilog_v2(
+            indexer_compress_cache=indexer_full_cache_dummy,
+            x=hidden_states,
+            slot_mapping=slot_mapping,
+            layout=2,
         )
 
-        decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
-        decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+    # ===== Lightning Indexer Dtype Prep =====
 
-        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
-        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """A5: q/k are fp8_e4m3fn with fp32 scales, so lightning indexer runs
+        in FP8 quant mode (QUANT_MODE_FP8 = 1 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 1
 
-        decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
-        return decode_preprocess_res, None
+    @staticmethod
+    def prepare_dsa_indexer_weights(weights):
+        """A5: cast indexer weights to float32 (fp8 scale format needs float)."""
+        return weights.float()
 
-    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+    @staticmethod
+    def prepare_dsa_indexer_query_scale(q_scale):
+        """A5: cast query dequant scale to float32."""
+        return q_scale.float()
 
-        context_layer = torch_npu.npu_fusion_attention(
-            query=query,
+    @staticmethod
+    def prepare_dsa_indexer_key_scale(indexer_scale_cache):
+        """A5: cast key dequant scale to float32."""
+        return indexer_scale_cache.squeeze(-2).float()
+
+    # ===== Q RMS Norm =====
+
+    @staticmethod
+    def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
+        """Apply Q RMS norm. A5: uses q_norm_without_weight callable."""
+        if q_norm_without_weight is not None:
+            return q_norm_without_weight(q)
+
+        if triton_q_rms is not None:
+            return triton_q_rms(q, eps)
+        else:
+            dtype = q.dtype
+            q = q.float()
+            variance = q.square().mean(-1, keepdim=True)
+            q = q * torch.rsqrt(variance + eps)
+            return q.to(dtype)
+
+    # ===== KV Cache Helpers =====
+
+    @staticmethod
+    def unpack_dsa_indexer_kv_cache(kv_cache):
+        """Unpack indexer kv_cache tuple.
+        A5: returns (state_cache, k_cache, scale_cache, full_cache)."""
+        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache = kv_cache
+        return indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache
+
+    @staticmethod
+    def unpack_dsa_forward_kv_cache(kv_cache, compress_ratio):
+        """Unpack kv_cache for forward pass. A5: 7-element tuple with
+        indexer_full_cache at position 6; non-A5: 6 elements (None substituted)."""
+        idx_full = 6
+        full_cache = kv_cache[idx_full]
+        if compress_ratio == 4:
+            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
+        elif compress_ratio == 128:
+            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
+        else:
+            return (None, kv_cache[1], None, None, None, full_cache)
+
+    @staticmethod
+    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
+        """A5: pad slot_mapping to target shape for ACL graph compatibility."""
+        effective_compress_ratio = compress_ratio if compress_ratio != 0 else 1
+        target_shape = min(num_decode_tokens, num_decode_tokens // effective_compress_ratio + num_decodes)
+        pad_size = target_shape - slot_mapping.shape[0]
+        if pad_size > 0:
+            if slot_mapping.ndim == 1:
+                slot_mapping = F.pad(slot_mapping, (0, pad_size), value=-1)
+            else:
+                slot_mapping = F.pad(slot_mapping, (0, 0, 0, pad_size), value=-1)
+        else:
+            slot_mapping = slot_mapping[:target_shape]
+        return slot_mapping
+
+    @staticmethod
+    def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
+        """A5: cu_seqlens_cmp_kv is always None."""
+        return None
+
+    @staticmethod
+    def get_dsa_decode_cu_seqlens_ori_kv(
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+    ):
+        """A5: compute from cumsum of seq_lens, with caching."""
+        if decode_ratio_to_sas_metadata is not None and cache_key in decode_ratio_to_sas_metadata:
+            return decode_ratio_to_sas_metadata[cache_key]
+        cu_seqlens = torch.cat(
+            [
+                zero_i32,
+                torch.cumsum(seq_lens[:num_decodes], dim=0).to(torch.int32),
+            ]
+        )
+        if decode_ratio_to_sas_metadata is not None:
+            decode_ratio_to_sas_metadata[cache_key] = cu_seqlens
+        return cu_seqlens
+
+    @staticmethod
+    def get_dsa_kernel_block_sizes():
+        """A5: return supported kernel block sizes."""
+        return [8, 16, 128]
+
+    @staticmethod
+    def indexer_select_post_process(
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple[Any, ...] | None,
+        weights: torch.Tensor,
+        kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
+        use_torch_npu_lightning_indexer: bool,
+    ) -> torch.Tensor:
+        indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
+
+        if enable_sparse_li_c4:
+            assert len(kv_cache) == 2
+            assert q_li_shape_ori is not None
+            assert q_li_scale is not None
+
+            # C4 uses cann_ops_transformer.quant_lightning_indexer (V2 API)
+            # with quant_mode=5: q/k=float4_e2m1, scale=float8_e8m0, w=float32.
+            # V2 API uses: topk (not sparse_count), mask_mode (not sparse_mode),
+            # cu_seqlens_q/seqused_k (not actual_seq_lengths_*),
+            # and requires metadata from quant_lightning_indexer_metadata.
+            # k_descale (PA_BBND, quant_mode=5): (block_num, block_size, k_n, d/64, 2)
+            key_dequant_scale = kv_cache[indexer_scale_cache_idx]
+            # quant_mode=5 requires weights to be float32.
+            weights_c4 = weights.to(torch.float32)
+
+            # TND layout requires cu_seqlens_q (b+1,) cumulative.
+            # actual_seq_lengths_query is cum_query_lens = query_start_loc[1:] (b,).
+            # Reconstruct full cu_seqlens_q by prepending 0.
+            cu_seqlens_q = F.pad(actual_seq_lengths_query, (1, 0), value=0)
+            seqused_k = actual_seq_lengths_key
+
+            num_heads_q = q_li_shape_ori[1]
+            head_dim = q_li_shape_ori[-1]
+            batch_size = seqused_k.shape[0]
+
+            quant_li_metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+
+            metadata = quant_li_metadata_op(
+                num_heads_q=num_heads_q,
+                num_heads_k=1,
+                head_dim=head_dim,
+                topk=2048,
+                quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q,
+                seqused_k=seqused_k,
+                batch_size=batch_size,
+                max_seqlen_q=-1,
+                max_seqlen_k=-1,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=1,
+            )
+
+            # FP4 (float4_e2m1fn_x2) packs 2 values per byte: npu_dynamic_mx_quant
+            # returns half the elements.  View q_li to the packed shape (d/2)
+            # rather than the original logical shape (d).
+            q_li_packed_shape = (*q_li_shape_ori[:-1], q_li_shape_ori[-1] // 2)
+            topk_indices, _ = quant_li_op(
+                q_li.view(q_li_packed_shape),
+                kv_cache[indexer_cache_idx],
+                weights_c4,
+                q_li_scale,
+                key_dequant_scale,
+                topk=2048,
+                quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q,
+                seqused_k=seqused_k,
+                block_table=attn_metadata.block_table,
+                metadata=metadata,
+                max_seqlen_q=-1,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=1,
+                return_value=0,
+            )
+        elif enable_sparse_li_c8:
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
+            assert q_li_shape_ori is not None
+
+            if q_li_scale is not None:
+                q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
+                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+
+                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                    query=q_li.view(q_li_shape_ori),
+                    key=kv_cache[indexer_cache_idx],
+                    weights=weights,
+                    query_dequant_scale=q_li_scale,
+                    key_dequant_scale=key_dequant_scale,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                    pre_tokens=INT64_MAX,
+                    next_tokens=INT64_MAX,
+                )
+            else:
+                topk_indices, _ = torch_npu.npu_lightning_indexer(
+                    query=q_li.view(q_li_shape_ori),
+                    key=kv_cache[indexer_cache_idx],
+                    weights=weights,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
+        else:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        return topk_indices
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(
+        num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
+    ):
+        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            bh_step=bh_step,
+            task_num=task_num,
+            num_core=num_core,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
+            disable_tightly_coupled_buffer_reuse=True,
+        )
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
+        return x
+
+    @staticmethod
+    def fla_gdn_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        scale: float,
+        prebuilt_meta,
+        fused_fwd,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the A5 arch35 FLA NPU GDN prefill kernel."""
+        # Conv1d head-first output is exposed as BSND views by GDN. Recover
+        # its contiguous BNSD storage instead of copying all three tensors.
+        # A token slice in a mixed batch may break contiguity; retain BSND
+        # packing for that case. Gates and output remain sequence-major.
+        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
+        if all(x.is_contiguous() for x in head_first_qkv):
+            q, k, v = head_first_qkv
+            layout = "BNSD"
+        else:
+            q, k, v = (x.contiguous() for x in (q, k, v))
+            layout = "BSND"
+        g = g.to(torch.float32).contiguous()
+        beta = beta.to(v.dtype).contiguous()
+        initial_state = initial_state.contiguous()
+
+        cu_seqlens = prebuilt_meta.cu_seqlens_host
+        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        keep_meta = prebuilt_meta.keep_meta
+        initial_state_kern = initial_state
+        if keep_meta is not None:
+            cu_seqlens = prebuilt_meta.cu_seqlens_kern
+            initial_state_kern = initial_state[keep_meta]
+
+        output, final_state, *_ = fused_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            layout=layout,
+            use_exp2=True,
+            use_qk_l2norm_in_kernel=True,
+            allow_neg_eigval=False,
+            disable_recompute=True,
+            state_v_first=True,
+        )
+        if keep_meta is not None:
+            full_final_state = initial_state.clone()
+            full_final_state[keep_meta] = final_state
+            final_state = full_final_state
+        return output, final_state
+
+    @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+
+    @staticmethod
+    def split_qkv_rmsnorm_rope(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+        results = torch.ops.vllm.qkv_rmsnorm_rope_simt(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+
+    @staticmethod
+    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
+        return torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
+        )
+
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        """Temporarily emulate ``index_fill_`` with ``scatter_`` on A5.
+
+        The current A5 torch-npu implementation converts the device index
+        tensor to a host vector, which introduces device-to-host synchronization
+        proportional to the number of indices. Remove this workaround once the
+        native A5 ``index_fill_`` path accepts device indices without syncing.
+        """
+        if indices.numel() == 0:
+            return tensor
+
+        if dim < 0:
+            dim += tensor.dim()
+        if dim < 0 or dim >= tensor.dim():
+            raise IndexError(
+                f"Dimension out of range (expected to be in range of "
+                f"[-{tensor.dim()}, {tensor.dim() - 1}], but got {dim})"
+            )
+
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        index_shape = [1] * tensor.dim()
+        index_shape[dim] = norm_indices.numel()
+        scatter_shape = list(tensor.shape)
+        scatter_shape[dim] = norm_indices.numel()
+        scatter_indices = norm_indices.reshape(index_shape).expand(scatter_shape)
+        tensor.scatter_(dim, scatter_indices, value)
+        return tensor
+
+
+class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @classmethod
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            raise NotImplementedError("BNSD KV cache is not supported on Ascend 310P")
+        torch_npu._npu_reshape_and_cache(
             key=key,
             value=value,
-            actual_seq_qlen=seq_lens_cpu,
-            actual_seq_kvlen=seq_lens_cpu,
-            head_num=head_num,
-            scale=scale_value,
-            input_layout="TND",
-        )[0]
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_indices=slot_mapping,
+        )
 
-        return context_layer
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        # index_fill_ is unavailable on 310P; emulate it with a boolean mask
+        # along `dim` so behavior matches torch.index_fill_ for any dim,
+        # negative indices, empty indices and arbitrary tensor rank.
+        if indices.numel() == 0:
+            return tensor
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        pos = torch.arange(
+            dim_size,
+            device=tensor.device,
+            dtype=norm_indices.dtype,
+        )
+        mask = torch.eq(pos.unsqueeze(1), norm_indices.unsqueeze(0)).any(dim=1)
+        idx = [slice(None)] * tensor.dim()
+        idx[dim] = mask
+        tensor[tuple(idx)] = value
+        return tensor
+
+    @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
-    ascend_device_type = get_ascend_device_type()
-    if ascend_device_type == AscendDeviceType.A5:
-        return A5DeviceAdaptor
-    return BaseDeviceAdaptor
+    adaptor_by_family = {
+        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
+        DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
+    }
+    return adaptor_by_family[get_current_hardware_profile().device_adaptor_family]
 
 
 DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()

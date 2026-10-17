@@ -1,0 +1,276 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"[InternVL3.5](https://huggingface.co/papers/2508.18265), a new family of "
+"open-source multimodal models that significantly advances versatility, "
+"reasoning capability, and inference efficiency along the InternVL series."
+msgstr ""
+"[InternVL3.5](https://huggingface.co/papers/2508.18265) 是一个新的开源多模态模型系列，在 "
+"InternVL 系列的基础上显著提升了通用性、推理能力和推理效率。"
+
+msgid "The `InternVL3.5` model is first supported in `vllm-ascend:v0.20.2`"
+msgstr "`InternVL3.5` 模型在 `vllm-ascend:v0.20.2` 中首次获得支持"
+
+msgid ""
+"This document will show the main verification steps of both "
+"`InternVL3_5-38B` and `InternVL3_5-241B-A28B` model, including supported "
+"features, feature configuration, environment preparation, single-node and "
+"multi-node deployment, accuracy and performance evaluation."
+msgstr ""
+"本文档将展示 `InternVL3_5-38B` 和 `InternVL3_5-241B-A28B` "
+"模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度和性能评估。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "You can use our official docker image to run InternVL3_5 directly."
+msgstr "您可以直接使用我们的官方 Docker 镜像来运行 InternVL3_5。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单节点在线部署"
+
+msgid "=== \"InternVL3_5-38B\""
+msgstr "=== \"InternVL3_5-38B\""
+
+msgid "=== \"InternVL3_5-241B-A28B\""
+msgstr "=== \"InternVL3_5-241B-A28B\""
+
+msgid "**Notice:**"
+msgstr "**注意：**"
+
+msgid "Some configurations for optimization are shown below:"
+msgstr "一些用于优化的配置如下所示："
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示查询模型："
+
+msgid "Expected Result:"
+msgstr "预期结果："
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 有关详细信息，请参考[使用 "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid "2. After execution, you can get the result."
+msgstr "2. 执行后，您可以获取结果。"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"有关详细信息，请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"
+
+msgid "## 9 FAQ"
+msgstr "## 9 常见问题解答"
+
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr "更多详细信息请参考 [vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid "### 5.2 Multi-Node PD Separation Deployment"
+msgstr "### 5.2 多节点PD分离部署"
+
+msgid "Not support yet."
+msgstr "暂不支持。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid "#### Table 1: Scenario Overview"
+msgstr "#### 表1：场景概述"
+
+msgid ""
+"| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key "
+"Considerations |"
+msgstr "| 场景 | 部署模式 | *NPU总数 | 权重版本 | 关键注意事项 |"
+
+msgid ""
+"| InternVL3_5-241B-A28B-w8a8 High Throughput | Single node deployment | 8 "
+"(A3) | InternVL3_5-241B-A28B-w8a8 | For short-sequence high throughput, try "
+"tp4dp2 |"
+msgstr ""
+"| InternVL3_5-241B-A28B-w8a8 高吞吐 | 单节点部署 | 8 (A3) | "
+"InternVL3_5-241B-A28B-w8a8 | 对于短序列高吞吐，可尝试tp4dp2 |"
+
+msgid ""
+"| InternVL3_5-38B-w8a8 High Throughput | Single node deployment | 4 (A3) | "
+"InternVL3_5-38B-w8a8 | For short-sequence high throughput, try tp4 |"
+msgstr ""
+"| InternVL3_5-38B-w8a8 高吞吐 | 单节点部署 | 4 (A3) | InternVL3_5-38B-w8a8 | "
+"对于短序列高吞吐，可尝试tp4 |"
+
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr "#### 表2：详细节点配置"
+
+msgid ""
+"|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max "
+"Model Len|"
+msgstr "|场景|配置|NPU|TP|DP|最大序列数|最大批量令牌数|最大模型长度|"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid "# InternVL3.5(38B/241B-A28B)"
+msgstr "# InternVL3.5（38B/241B-A28B）"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性列表](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
+
+msgid ""
+"- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 "
+"(64GB × 16) node."
+msgstr "- 量化模型 `InternVL3_5-38B-w8a8` 可以在1个Atlas 800 A3（64GB × 16）节点上部署。"
+
+msgid ""
+"- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas "
+"800 A3 (64GB × 16) node."
+msgstr ""
+"- 量化模型 `InternVL3_5-241B-A28B-w8a8` 可以在1个Atlas 800 A3（64GB × 16）节点上部署。"
+
+msgid ""
+"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
+"Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
+msgstr ""
+"请参阅[公开性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
+"请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的特性描述。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [Public "
+"FAQs](../../faqs.md)."
+msgstr "常见问题提示：如果遇到问题，请参阅[公共FAQ](../../faqs.md)。"
+
+msgid ""
+"- `additional_config.enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.\n"
+"- The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.\n"
+"- For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md)."
+msgstr ""
+"- `additional_config.enable_fused_mc2`：启用dispatch_ffn_combine/mega_moe融合算子。\n"
+"- 上述参数在特定测试环境中验证，仅供参考。请根据实际输入/输出长度、并发数和硬件配置调整`--max-model-len`、`--max-num-seqs`、`--max-num-batched-tokens`和`--gpu-memory-utilization`。\n"
+"- 有关通过`--additional-config`传递的Ascend特定选项，请参阅[附加配置](../../user_guide/configuration/additional_config.md)。有关Ascend特定环境变量，请参阅[环境变量](../../user_guide/configuration/env_vars.md)。"
+
+msgid ""
+"- Common Issues Tip: If you encounter issues, refer to [Public "
+"FAQs](../../faqs.md)."
+msgstr "- 常见问题提示：如果遇到问题，请参阅[公共FAQ](../../faqs.md)。"
+
+msgid ""
+"To verify the successful installation of the environment, please refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "要验证环境是否安装成功，请参阅[安装](../../getting_started/installation.md)。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参阅[安装](../../getting_started/installation.md)。"
+
+msgid ""
+"|  Weight Version                       | Hardware Requirements           | "
+"Download Links |"
+msgstr "|  权重版本                       | 硬件要求           | 下载链接 |"
+
+msgid ""
+"| `InternVL3_5-38B-w8a8`                | 1 Atlas 800 A3 (64GB × 16) node | "
+"[ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8) |"
+msgstr ""
+"| `InternVL3_5-38B-w8a8`                | 1 个 Atlas 800 A3 (64GB × 16) 节点 | "
+"[ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8) |"
+
+msgid ""
+"| `InternVL3_5-241B-A28B-w8a8`          | 1 Atlas 800 A3 (64GB × 16) node | "
+"[ModelScope](https://modelscope.cn/models/Eco-"
+"Tech/InternVL3_5-241B-A28B-w8a8) |"
+msgstr ""
+"| `InternVL3_5-241B-A28B-w8a8`          | 1 个 Atlas 800 A3 (64GB × 16) 节点 | "
+"[ModelScope](https://modelscope.cn/models/Eco-"
+"Tech/InternVL3_5-241B-A28B-w8a8) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"

@@ -2,6 +2,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
@@ -81,6 +82,10 @@ def golden_recurrent_gated_delta_rule(
     return o.to(query.dtype), initial_state.to(query.dtype)
 
 
+@pytest.mark.skipif(
+    get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
+    reason="Tested separately on a 310P machine.",
+)
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("mtp", [1, 2])
 @pytest.mark.parametrize("headnum", [(4, 8), (8, 16), (16, 32)])

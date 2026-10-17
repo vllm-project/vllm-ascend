@@ -25,11 +25,13 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
+# TODO: UB size differs across chips; consider whether BLOCK_SIZE can
+# be dynamically computed with a formula instead of autotuning {1,2,4}.
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK": 64}),
-        triton.Config({"BLOCK": 128}),
-        triton.Config({"BLOCK": 256}),
+        triton.Config({"BLOCK_SIZE": 1}),
+        triton.Config({"BLOCK_SIZE": 2}),
+        triton.Config({"BLOCK_SIZE": 4}),
     ],
     key=["q_cols", "k_cols"],
 )
@@ -43,65 +45,84 @@ def _split_qkv_and_compute_local_qk_var_kernel(
     num_tokens,
     q_cols: tl.constexpr,
     k_cols: tl.constexpr,
-    BLOCK: tl.constexpr,
+    q_cols_pow2: tl.constexpr,
+    k_cols_pow2: tl.constexpr,
+    qkv_stride: tl.constexpr,
+    q_inv_size: tl.constexpr,
+    k_inv_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0).to(tl.int64)
-    num_programs = tl.num_programs(0)
-    tokens_per_program = tl.cdiv(num_tokens, num_programs)
-    iter_num_per_program = tokens_per_program
-    program_token_offset = pid * tokens_per_program
-    program_token_end = min(program_token_offset + tokens_per_program, num_tokens)
-    input_row_stride = q_cols + 2 * k_cols
+    """
+    Grid Stride Loop + batch loading + precomputed reciprocal.
+    (BLOCK_SIZE is limited to 1-4 to prevent UB overflow for large hidden_size)
+    """
+    pid = tl.program_id(0)
+    num_pids = tl.num_programs(0)
+    block_range = tl.arange(0, BLOCK_SIZE)
 
-    for iter in tl.range(iter_num_per_program):
-        idx = program_token_offset + iter
-        token_mask = idx < program_token_end
-        input_base = input_ptr + idx * input_row_stride
+    # Grid Stride Loop: each program processes BLOCK_SIZE tokens at a time
+    stride = num_pids * BLOCK_SIZE
+    start_token_idx = pid * BLOCK_SIZE
 
-        q_in_base = input_base
-        q_out_base = q_out_ptr + idx * q_cols
-        q_sum = tl.zeros((), dtype=tl.float32)
-        q_comp = tl.zeros((), dtype=tl.float32)
-        for q_off in tl.static_range(0, q_cols, BLOCK):
-            q_offsets = q_off + tl.arange(0, BLOCK)
-            q_mask = token_mask & (q_offsets < q_cols)
-            q_vals = tl.load(q_in_base + q_offsets, mask=q_mask, other=0.0)
-            q_vals_f32 = q_vals.to(tl.float32)
-            q_chunk = tl.sum(q_vals_f32 * q_vals_f32, axis=0)
-            y = q_chunk - q_comp
-            t = q_sum + y
-            q_comp = (t - q_sum) - y
-            q_sum = t
-            tl.store(q_out_base + q_offsets, q_vals, mask=q_mask)
-        q_var = q_sum / q_cols
+    for block_start in tl.range(start_token_idx, num_tokens, stride):
+        token_indices = block_start + block_range
+        token_mask = (token_indices < num_tokens)[:, None]
 
-        k_in_base = input_base + q_cols
-        k_out_base = k_out_ptr + idx * k_cols
-        k_sum = tl.zeros((), dtype=tl.float32)
-        k_comp = tl.zeros((), dtype=tl.float32)
-        for k_off in tl.static_range(0, k_cols, BLOCK):
-            k_offsets = k_off + tl.arange(0, BLOCK)
-            k_mask = token_mask & (k_offsets < k_cols)
-            k_vals = tl.load(k_in_base + k_offsets, mask=k_mask, other=0.0)
-            k_vals_f32 = k_vals.to(tl.float32)
-            k_chunk = tl.sum(k_vals_f32 * k_vals_f32, axis=0)
-            y = k_chunk - k_comp
-            t = k_sum + y
-            k_comp = (t - k_sum) - y
-            k_sum = t
-            tl.store(k_out_base + k_offsets, k_vals, mask=k_mask)
-        k_var = k_sum / k_cols
+        # === Batch load QKV data ===
+        # Q: [BLOCK_SIZE, q_cols]
+        q_offset = tl.arange(0, q_cols_pow2)[None, :]
+        q_mask = token_mask & (q_offset < q_cols)
+        q_batch = tl.load(
+            input_ptr + token_indices[:, None] * qkv_stride + q_offset,
+            mask=q_mask,
+            other=0.0,
+        )
+        q_batch_f32 = q_batch.to(tl.float32)
 
-        v_in_base = input_base + q_cols + k_cols
-        v_out_base = v_out_ptr + idx * k_cols
-        for v_off in tl.static_range(0, k_cols, BLOCK):
-            v_offsets = v_off + tl.arange(0, BLOCK)
-            v_mask = token_mask & (v_offsets < k_cols)
-            v_vals = tl.load(v_in_base + v_offsets, mask=v_mask, other=0.0)
-            tl.store(v_out_base + v_offsets, v_vals, mask=v_mask)
+        # K: [BLOCK_SIZE, k_cols], K follows immediately after Q
+        k_offset = tl.arange(0, k_cols_pow2)[None, :]
+        k_mask = token_mask & (k_offset < k_cols)
+        k_batch = tl.load(
+            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_offset,
+            mask=k_mask,
+            other=0.0,
+        )
+        k_batch_f32 = k_batch.to(tl.float32)
 
-        tl.store(qk_var_ptr + idx * 2, q_var, mask=token_mask)
-        tl.store(qk_var_ptr + idx * 2 + 1, k_var, mask=token_mask)
+        # V: [BLOCK_SIZE, k_cols], V is at offset Q + 2*K
+        v_offset = tl.arange(0, k_cols_pow2)[None, :]
+        v_mask = token_mask & (v_offset < k_cols)
+        v_batch = tl.load(
+            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_cols + v_offset,
+            mask=v_mask,
+            other=0.0,
+        )
+
+        # === Batch compute sum of squares ===
+        q_squaresum = tl.sum(q_batch_f32 * q_batch_f32, axis=-1) * q_inv_size
+        k_squaresum = tl.sum(k_batch_f32 * k_batch_f32, axis=-1) * k_inv_size
+
+        # === Batch store QKV output ===
+        # Store Q
+        q_out_offset = token_indices[:, None] * q_cols + q_offset
+        q_out_mask = token_mask & (q_offset < q_cols)
+        tl.store(q_out_ptr + q_out_offset, q_batch, mask=q_out_mask)
+
+        # Store K
+        k_out_offset = token_indices[:, None] * k_cols + k_offset
+        k_out_mask = token_mask & (k_offset < k_cols)
+        tl.store(k_out_ptr + k_out_offset, k_batch, mask=k_out_mask)
+
+        # Store V
+        v_out_offset = token_indices[:, None] * k_cols + v_offset
+        v_out_mask = token_mask & (v_offset < k_cols)
+        tl.store(v_out_ptr + v_out_offset, v_batch, mask=v_out_mask)
+
+        # === Store variance ===
+        var_offset = token_indices * 2
+        var_mask = token_indices < num_tokens
+        tl.store(qk_var_ptr + var_offset, q_squaresum, mask=var_mask)
+        tl.store(qk_var_ptr + var_offset + 1, k_squaresum, mask=var_mask)
 
 
 @triton.jit
@@ -258,11 +279,13 @@ def split_qkv_tp_rmsnorm_rope_impl(
     q_num_heads = q_hidden_size // head_dim
     k_num_heads = kv_hidden_size // head_dim
 
-    cos_2d = cos.view(num_tokens, -1)
-    sin_2d = sin.view(num_tokens, -1)
-    q_2d = q.view(num_tokens, -1)
-    k_2d = k.view(num_tokens, -1)
     qk_var = torch.empty(num_tokens, 2, dtype=torch.float32, device=q.device)
+    # Precompute reciprocal to avoid division inside kernel
+    q_inv_size = 1.0 / q_cols
+    k_inv_size = 1.0 / k_cols
+    # Pad to power-of-2 for tl.arange (required by Ascend NPU Triton backend)
+    q_cols_pow2 = 1 << (q_cols - 1).bit_length()
+    k_cols_pow2 = 1 << (k_cols - 1).bit_length()
     _split_qkv_and_compute_local_qk_var_kernel[grid](
         input_2d,
         q,
@@ -272,10 +295,19 @@ def split_qkv_tp_rmsnorm_rope_impl(
         num_tokens,
         q_cols,
         k_cols,
+        q_cols_pow2,
+        k_cols_pow2,
+        q_cols + 2 * k_cols,
+        q_inv_size,
+        k_inv_size,
     )
     if tp_world > 1:
         qk_var = tensor_model_parallel_all_reduce(qk_var)
 
+    cos_2d = cos.view(num_tokens, -1)
+    sin_2d = sin.view(num_tokens, -1)
+    q_2d = q.view(num_tokens, -1)
+    k_2d = k.view(num_tokens, -1)
     _apply_global_rmsnorm_kernel[grid](
         q_2d,
         k_2d,

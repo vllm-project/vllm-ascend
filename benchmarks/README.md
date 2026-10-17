@@ -6,7 +6,7 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 ## Overview
 
-**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
+**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas 800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
 
 - Latency tests
     - Input length: 32 tokens.
@@ -132,12 +132,11 @@ Once the script completes, you can find the results in the benchmarks/results fo
 
 ```shell
 .
-|-- serving_qwen2_5_7B_tp1_qps_1.json
-|-- serving_qwen2_5_7B_tp1_qps_16.json
-|-- serving_qwen2_5_7B_tp1_qps_4.json
-|-- serving_qwen2_5_7B_tp1_qps_inf.json
-|-- latency_qwen2_5_7B_tp1.json
-|-- throughput_qwen2_5_7B_tp1.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_1.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_16.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_4.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_inf.json
+|-- throughput_qwen2_5_7Bvl_tp1.json
 ```
 
 These files contain detailed benchmarking results for further analysis.

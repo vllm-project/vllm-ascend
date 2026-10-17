@@ -18,10 +18,15 @@ using namespace AscendC;
 
 namespace optiling {
 
-constexpr uint64_t ROPE_ABA_AND_BA_TILING_PRIORITY = 10000;
 constexpr uint64_t TILING_KEY_ABA = 20010;
 constexpr uint64_t TILING_KEY_BA = 20011;
+constexpr uint64_t TILING_KEY_ABA_BF16_FP32 = 20110;
+constexpr uint64_t TILING_KEY_ABA_FP16_FP32 = 20210;
+constexpr uint64_t TILING_KEY_BA_BF16_FP32 = 20111;
+constexpr uint64_t TILING_KEY_BA_FP16_FP32 = 20211;
 constexpr int64_t UB_FACTOR = 4;
+constexpr int64_t MIXED_PRECISION_X_FACTOR = 4;
+constexpr int64_t MIXED_PRECISION_COS_SIN_FACTOR = 4;
 constexpr int64_t MAX_COPY_BLOCK_COUNT = 4095;
 constexpr int32_t WORKSPACE_SIZE = 16 * 1024 * 1024;
 
@@ -93,15 +98,28 @@ ge::graphStatus RopeRegBaseTilingClassABAAndBA::ComputeUbFactor()
     ubFactorS_ = 1;
     ubFactorB_ = 1;
     ubFactorN_ = 1;
-    // UB占用大小：
-    // 11sd：4 * (bn + 1) * s * dAlign
-    // b1sd：4 * b * (n + 1) * s * dAlign
-    int64_t dSize = CeilAlign(sliceLength_ * GetSizeByDataType(dtype_) / dSplitCoef_, this->blockSize_) * dSplitCoef_;
-    int64_t numOfDAvailable = FloorDiv(static_cast<int64_t>(aicoreParams_.ubSize), UB_FACTOR * dSize);
+
+    auto cosDtype = context_->GetInputDesc(1)->GetDataType();
+    bool isMixedPrecision = (dtype_ == ge::DT_BF16 || dtype_ == ge::DT_FLOAT16) && cosDtype == ge::DT_FLOAT;
+
+    int64_t dSizeX = CeilAlign(sliceLength_ * GetSizeByDataType(dtype_) / dSplitCoef_, this->blockSize_) * dSplitCoef_;
+    int64_t dSizeCosSin =
+        CeilAlign(sliceLength_ * GetSizeByDataType(cosDtype) / dSplitCoef_, this->blockSize_) * dSplitCoef_;
+
+    int64_t totalDSize;
+    if (isMixedPrecision) {
+        totalDSize = dSizeX * MIXED_PRECISION_X_FACTOR + dSizeCosSin * MIXED_PRECISION_COS_SIN_FACTOR;
+    } else {
+        totalDSize = dSizeX * UB_FACTOR;
+    }
+
+    int64_t numOfDAvailable = FloorDiv(static_cast<int64_t>(aicoreParams_.ubSize), totalDSize);
     OPS_ERR_IF(numOfDAvailable < ubFactorB_ + 1,
-                OPS_LOG_E(context_, "D is too big to load in ub, ubSize is %ld bytes, loading requires %ld bytes.",
-                        static_cast<int64_t>(aicoreParams_.ubSize), UB_FACTOR * dSize * (ubFactorB_ + 1)),
-                return ge::GRAPH_FAILED);
+        OPS_LOG_E(context_,
+            "D is too big to load in ub, ubSize is %ld bytes, loading requires %ld bytes.",
+            static_cast<int64_t>(aicoreParams_.ubSize),
+            totalDSize * (ubFactorB_ + 1)),
+        return ge::GRAPH_FAILED);
 
     ubFactorS_ = std::min(blockFactorS_, FloorDiv(numOfDAvailable, ubFactorB_ + 1));
     ubFactorS_ = std::min(ubFactorS_, MAX_COPY_BLOCK_COUNT / dSplitCoef_);
@@ -161,26 +179,45 @@ void RopeRegBaseTilingClassABAAndBA::SetTilingData()
     tilingData_.set_sliceLength(static_cast<int64_t>(sliceLength_));
 
     OPS_LOG_I(context_->GetNodeName(),
-            "RopeRegBaseTilingClassABAAndBA tilingData: "
-            "B is %ld, CosB is %ld, S is %ld, D is %ld, N is %ld, blockNumB %ld,"
-            "blockFactorB_ is %ld, blockNumS %ld, blockFactorS is %ld, ubLoopNumS is %ld,"
-            "ubFactorS is %ld, ubTailFactorS %ld, ubLoopNumB is %ld, ubFactorB is %ld,"
-            "ubTailFactorB is %ld, ubLoopNumN is %ld, ubFactorN is %ld, ubTailFactorN is %ld,"
-            "rotaryMode is %ld, tilingKey is %ld, sliceStart is %ld, sliceEnd is %ld, sliceLength is %ld",
-            tilingData_.get_B(), tilingData_.get_CosB(), tilingData_.get_S(), tilingData_.get_D(), tilingData_.get_N(),
-            tilingData_.get_blockNumB(), tilingData_.get_blockFactorB(), tilingData_.get_blockNumS(),
-            tilingData_.get_blockFactorS(), tilingData_.get_ubLoopNumS(), tilingData_.get_ubFactorS(),
-            tilingData_.get_ubTailFactorS(), tilingData_.get_ubLoopNumB(), tilingData_.get_ubFactorB(),
-            tilingData_.get_ubTailFactorB(), tilingData_.get_ubLoopNumN(), tilingData_.get_ubFactorN(),
-            tilingData_.get_ubTailFactorN(), tilingData_.get_rotaryMode(), GetTilingKey(), tilingData_.get_sliceStart(), tilingData_.get_sliceEnd(), tilingData_.get_sliceLength());
+        "RopeRegBaseTilingClassABAAndBA tilingData: "
+        "B is %ld, CosB is %ld, S is %ld, D is %ld, N is %ld, blockNumB %ld,"
+        "blockFactorB_ is %ld, blockNumS %ld, blockFactorS is %ld, ubLoopNumS is %ld,"
+        "ubFactorS is %ld, ubTailFactorS %ld, ubLoopNumB is %ld, ubFactorB is %ld,"
+        "ubTailFactorB is %ld, ubLoopNumN is %ld, ubFactorN is %ld, ubTailFactorN is %ld,"
+        "rotaryMode is %ld, tilingKey is %ld, sliceStart is %ld, sliceEnd is %ld, sliceLength is %ld",
+        tilingData_.get_B(),
+        tilingData_.get_CosB(),
+        tilingData_.get_S(),
+        tilingData_.get_D(),
+        tilingData_.get_N(),
+        tilingData_.get_blockNumB(),
+        tilingData_.get_blockFactorB(),
+        tilingData_.get_blockNumS(),
+        tilingData_.get_blockFactorS(),
+        tilingData_.get_ubLoopNumS(),
+        tilingData_.get_ubFactorS(),
+        tilingData_.get_ubTailFactorS(),
+        tilingData_.get_ubLoopNumB(),
+        tilingData_.get_ubFactorB(),
+        tilingData_.get_ubTailFactorB(),
+        tilingData_.get_ubLoopNumN(),
+        tilingData_.get_ubFactorN(),
+        tilingData_.get_ubTailFactorN(),
+        tilingData_.get_rotaryMode(),
+        GetTilingKey(),
+        tilingData_.get_sliceStart(),
+        tilingData_.get_sliceEnd(),
+        tilingData_.get_sliceLength());
 }
 
 ge::graphStatus RopeRegBaseTilingClassABAAndBA::DoOpTiling()
 {
-    OPS_ERR_IF(SplitCore() != ge::GRAPH_SUCCESS, OPS_LOG_E(context_->GetNodeName(), "failed to split core."),
-                return ge::GRAPH_FAILED);
+    OPS_ERR_IF(SplitCore() != ge::GRAPH_SUCCESS,
+        OPS_LOG_E(context_->GetNodeName(), "failed to split core."),
+        return ge::GRAPH_FAILED);
     OPS_ERR_IF(ComputeUbFactor() != ge::GRAPH_SUCCESS,
-                OPS_LOG_E(context_->GetNodeName(), "failed to compute ub factor."), return ge::GRAPH_FAILED);
+        OPS_LOG_E(context_->GetNodeName(), "failed to compute ub factor."),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -191,7 +228,15 @@ ge::graphStatus RopeRegBaseTilingClassABAAndBA::DoLibApiTiling()
 
 uint64_t RopeRegBaseTilingClassABAAndBA::GetTilingKey() const
 {
-    return cosb_ == 1 ? TILING_KEY_BA : TILING_KEY_ABA;
+    auto xDtype = context_->GetInputDesc(0)->GetDataType();
+    auto cosDtype = context_->GetInputDesc(1)->GetDataType();
+    if (xDtype == ge::DT_BF16 && cosDtype == ge::DT_FLOAT) {
+        return (cosb_ == 1) ? TILING_KEY_BA_BF16_FP32 : TILING_KEY_ABA_BF16_FP32;
+    } else if (xDtype == ge::DT_FLOAT16 && cosDtype == ge::DT_FLOAT) {
+        return (cosb_ == 1) ? TILING_KEY_BA_FP16_FP32 : TILING_KEY_ABA_FP16_FP32;
+    }
+
+    return (cosb_ == 1) ? TILING_KEY_BA : TILING_KEY_ABA;
 }
 
 ge::graphStatus RopeRegBaseTilingClassABAAndBA::GetWorkspaceSize()
@@ -214,5 +259,6 @@ ge::graphStatus RopeRegBaseTilingClassABAAndBA::PostTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-// REGISTER_OPS_TILING_TEMPLATE(InplacePartialRotaryMul, RopeRegBaseTilingClassABAAndBA, ROPE_ABA_AND_BA_TILING_PRIORITY);
-} // namespace optiling
+// REGISTER_OPS_TILING_TEMPLATE(InplacePartialRotaryMul, RopeRegBaseTilingClassABAAndBA,
+// ROPE_ABA_AND_BA_TILING_PRIORITY);
+}  // namespace optiling

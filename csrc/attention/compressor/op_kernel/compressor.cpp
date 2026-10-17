@@ -13,10 +13,14 @@
  * \brief
  */
 
-#include "compressor_kernel.h"
-// #if (__CCE_AICORE__ == 220)
-#include "compressor_kernel_perf.h"
-// #endif
+#if (__CCE_AICORE__ == 220)
+#include "arch32/compressor_kernel.h"
+#include "arch32/compressor_kernel_perf.h"
+#include "arch32/compressor_kernel_full_load.h"
+#else
+#include "arch35/compressor_kernel.h"
+#include "arch35/compressor_kernel_full_load.h"
+#endif
 
 using namespace Compressor;
 
@@ -51,7 +55,7 @@ __global__ __aicore__ void compressor(
     GET_TILING_DATA_WITH_STRUCT(optiling::CompressorTilingData, tilingDataIn, tiling);
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::EMPTY_X) {
         return;
-    }
+    } else {
     const optiling::CompressorTilingData *__restrict tilingData = &tilingDataIn;
     TPipe pipe;
     constexpr auto xLayout = static_cast<X_LAYOUT>(XLayout);
@@ -59,18 +63,18 @@ __global__ __aicore__ void compressor(
     constexpr auto coff = static_cast<COFF>(Coff);
     constexpr auto rotaryMode = static_cast<ROTARY_MODE>(RotaryMode);
     constexpr auto cacheMode = static_cast<CACHE_MODE>(CacheMode);
-// #if (__CCE_AICORE__ == 220)
-//     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
-//     } else {
-//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
-//     }
-// #else
-//     INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
-// #endif
-    if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
-    } else {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
+    #if (__CCE_AICORE__ == 220)
+        if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::FULL_LOAD) {
+            INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelFullLoad, xLayout, xDtype, coff, rotaryMode);
+        } else {
+            INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
+        }
+    #else
+        if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::FULL_LOAD) {
+            INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelFullLoad, xLayout, xDtype, coff, rotaryMode, cacheMode);
+        } else {
+            INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode, cacheMode);
+        }
+    #endif
     }
 }

@@ -4,7 +4,11 @@
 
 This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [code](https://gitcode.com/Ascend/torchair)
+You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
+
+!!! note "Atlas 300I DUO"
+
+    Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 ## Default FX Graph Optimization
 
@@ -15,15 +19,15 @@ You can get its code [code](https://gitcode.com/Ascend/torchair)
 
 ### FX fusion pass
 
-npugraph_ex now provides three default operator fusion passes, and more will be added in the future.
+npugraph_ex now provides some operator fusion passes, and more will be added in the future.
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/latest/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 
-Users can register a custom graph fusion pass in TorchAir to modify PyTorch FX graphs. The registration relies on the register_replacement API.
+Users can register a custom graph fusion pass in npugraph_ex to modify PyTorch FX graphs. The registration relies on the register_replacement API.
 
 Below is the declaration of this API and a demo of its usage.
 
@@ -40,15 +44,15 @@ register_replacement(search_fn, replace_fn, example_inputs, trace_fn=fwd_only, e
 |extra_check|Input|Find the extra verification function after operator fusion. The function's input parameter must be a Match object from torch._inductor.pattern_matcher, and it is used for further custom checks on the matching result, such as checking whether the fused operators are on the same stream, checking the device type, checking the input shapes, and so on.|No|
 |search_fn_pattern|Input|A custom pattern object is generally unnecessary to provide. Its definition follows the rules of the native PyTorch MultiOutputPattern object. After passing this parameter, search_fn will no longer be used to match operator combinations; instead, this parameter will be used directly as the matching rule.|No|
 
-Usage Example
+### Usage Example
 
 ```python
 import functools
-import torch, torch_npu, torchair
+import torch, torch_npu, npugraph_ex
 
 from torch._inductor.pattern_matcher import Match
 from torch._subclasses.fake_tensor import FakeTensorMode
-from torchair.core.utils import logger
+from npugraph_ex.core.utils import logger
 
 # Assume fusing the add operator and the npu_rms_norm operator into the npu_add_rms_norm operator
 # Define a search_fn to find the operator combinations in the original FX graph before fusion.
@@ -69,13 +73,12 @@ def extra_check(match: Match):
     x1 = match.kwargs.get("x1")
 
     if x1 is None:
-        return False 
+        return False
     if not hasattr(x1, "meta") or "val" not in x1.meta:
         return False
 
     a_shape = x1.meta["val"].shape
-    return a_shape[-1] == 7168 
-
+    return a_shape[-1] == 7168
 
 # Define some sample inputs to trace search_fn and replace_fn into an FX graph
 fake_mode = FakeTensorMode()
@@ -85,8 +88,8 @@ with fake_mode:
     input_tensor = functools.partial(torch.empty, (1, 1, 2), device="npu", dtype=torch.float16)
     kwargs_tensor = functools.partial(torch.empty, 2, device="npu", dtype=torch.float16)
 
-    # Call the torchair.register_replacement API with search_fn, replace_fn, and example_inputs. If there are additional validations, you can pass them in as extra_check.
-    torchair.register_replacement(
+    # Call the npugraph_ex.register_replacement API with search_fn, replace_fn, and example_inputs. If there are additional validations, you can pass them in as extra_check.
+    npugraph_ex.register_replacement(
         search_fn=search_fn,
         replace_fn=replace_fn,
         example_inputs=(input_tensor(), input_tensor(), kwargs_tensor()),

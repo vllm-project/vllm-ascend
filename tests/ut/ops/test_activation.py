@@ -18,9 +18,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SiluAndMulWithClamp
 
-from vllm_ascend.utils import is_310p as is_310p_hw
+from vllm_ascend.ops.activation import AscendSiluAndMulWithClamp
 
 
 @pytest.fixture
@@ -51,12 +51,9 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
     mock_gelu.assert_called_once()
 
 
-@pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method", return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
@@ -64,7 +61,6 @@ def test_SiluAndMul_forward(
     out = layer.forward(dummy_tensor)
     expected_arg = dummy_tensor
 
-    # assert mock_swiglu.call_count == 1
     mock_swiglu.assert_called_once()
 
     actual_arg = mock_swiglu.call_args[0][0]
@@ -74,23 +70,28 @@ def test_SiluAndMul_forward(
     assert torch.allclose(out, expected_out)
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
-@patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
-def test_SiluAndMul_forward_310p(
-    mock_silu,
+@patch("torch_npu.npu_clipped_swiglu", side_effect=lambda x, **kwargs: x[..., : x.shape[-1] // 2] + 1)
+def test_SiluAndMulWithClamp_forward(
+    mock_clipped_swiglu,
     dummy_tensor,
     default_vllm_config,
 ):
-    layer = SiluAndMul()
+    layer = SiluAndMulWithClamp(swiglu_limit=7.0, alpha=1.702, beta=1.0)
+
+    assert isinstance(layer, AscendSiluAndMulWithClamp)
+
     out = layer.forward(dummy_tensor)
-    h = dummy_tensor.shape[-1] // 2
-    expected_arg = dummy_tensor[..., :h]
 
-    # assert mock_silu.call_count == 1
-    mock_silu.assert_called_once()
+    mock_clipped_swiglu.assert_called_once()
 
-    actual_arg = mock_silu.call_args[0][0]
-    assert torch.allclose(actual_arg, expected_arg), "swiglu called with unexpected input"
+    actual_arg = mock_clipped_swiglu.call_args[0][0]
+    assert torch.allclose(actual_arg, dummy_tensor), "npu_clipped_swiglu called with unexpected input"
+    assert mock_clipped_swiglu.call_args[1] == {
+        "interleaved": False,
+        "alpha": 1.702,
+        "limit": 7.0,
+        "bias": 1.0,
+    }
 
-    expected_out = (dummy_tensor[..., :h] + 1) * dummy_tensor[..., h:]
+    expected_out = dummy_tensor[..., : dummy_tensor.shape[-1] // 2] + 1
     assert torch.allclose(out, expected_out)

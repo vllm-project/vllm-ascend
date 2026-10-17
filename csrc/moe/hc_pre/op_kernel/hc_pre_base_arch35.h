@@ -230,11 +230,11 @@ __aicore__ inline void VFProcessCast(const LocalTensor<float> &yLocal, const Loc
             }
         }
     }
-
 }
 
 template <typename T, bool WithUbReduce = false>
-__aicore__ inline void VFProcessCastAndInvRmsPart1(const LocalTensor<float> &rmsNormLocal, const LocalTensor<float> &xCastLocal,
+__aicore__ inline void VFProcessCastAndInvRmsPart1(const LocalTensor<float> &rmsNormLocal,
+                                                   const LocalTensor<float> &xCastLocal,
                                                    const LocalTensor<T> &xLocal, float coeff,
                                                    const uint16_t curRowNum, const uint16_t curColNum)
 {
@@ -278,7 +278,6 @@ __aicore__ inline void VFProcessCastAndInvRmsPart1(const LocalTensor<float> &rms
                     DataCopy<float, AscendC::MicroAPI::StoreDist::DIST_FIRST_ELEMENT_B32>(rmsNormLocalAddr + i, sum, pregMerge);
                 }
             }
-
         }
     } else {
         __VEC_SCOPE__
@@ -314,6 +313,101 @@ __aicore__ inline void VFProcessCastAndInvRmsPart1(const LocalTensor<float> &rms
     }
 }
 
+template <typename T, bool WithRmsReduce, bool WithYReduce>
+__aicore__ inline void VFProcessCastInvRmsAndPremixYPart1(
+    const LocalTensor<float> &rmsNormLocal, const LocalTensor<float> &yAccLocal,
+    const LocalTensor<float> &xCastLocal, const LocalTensor<float> &preMixLocal,
+    const LocalTensor<T> &xLocal, float coeff, uint16_t preMixColIdx,
+    uint16_t preMixRowStride, uint16_t yAccRowStride,
+    uint16_t curRowNum, uint16_t curColNum)
+{
+    __local_mem__ float *rmsAddr = (__local_mem__ float *)rmsNormLocal.GetPhyAddr();
+    __local_mem__ float *yAccAddr = (__local_mem__ float *)yAccLocal.GetPhyAddr();
+    __local_mem__ float *xCastAddr = (__local_mem__ float *)xCastLocal.GetPhyAddr();
+    __local_mem__ float *preMixAddr = (__local_mem__ float *)preMixLocal.GetPhyAddr();
+    __local_mem__ T *xAddr = (__local_mem__ T *)xLocal.GetPhyAddr();
+    uint16_t loopCount = CeilDiv(curColNum, VL_FP32);
+    uint16_t xRowStride = RoundUp<T>(curColNum);
+    uint16_t floatRowStride = RoundUp<float>(curColNum);
+    uint16_t castRowStride = floatRowStride + BLOCK_SIZE / sizeof(float);
+
+    __VEC_SCOPE__
+    {
+        RegTensor<float> x;
+        RegTensor<float> xSquare;
+        RegTensor<float> squareSum;
+        RegTensor<float> rmsOld;
+        RegTensor<float> mix;
+        RegTensor<float> weightedX;
+        RegTensor<float> yAcc;
+        MaskReg pregLoop;
+        MaskReg pregFull = CreateMask<float>();
+        MaskReg pregScalar = CreateMask<float, AscendC::MicroAPI::MaskPattern::VL1>();
+        uint32_t sreg;
+        for (uint16_t i = 0; i < curRowNum; i++) {
+            Duplicate(squareSum, 0.0f, pregFull);
+            if constexpr (WithRmsReduce) {
+                LoadInputDataWithBrc<float>(rmsOld, rmsAddr, pregScalar, i);
+            }
+            sreg = curColNum;
+            for (uint16_t j = 0; j < loopCount; j++) {
+                pregLoop = UpdateMask<float>(sreg);
+                uint32_t xOffset = i * xRowStride + j * VL_FP32;
+                uint32_t yAccOffset = i * yAccRowStride + j * VL_FP32;
+                LoadInputData<T>(x, xAddr, pregLoop, xOffset);
+                StoreOutputData<float>(xCastAddr, x, pregLoop,
+                                       i * castRowStride + j * VL_FP32);
+
+                Mul(xSquare, x, x, pregLoop);
+                Add(squareSum, squareSum, xSquare, pregLoop);
+
+                LoadInputDataWithBrc<float>(
+                    mix, preMixAddr, pregLoop, i * preMixRowStride + preMixColIdx);
+                Mul(weightedX, mix, x, pregLoop);
+                if constexpr (WithYReduce) {
+                    LoadInputData<float>(yAcc, yAccAddr, pregLoop, yAccOffset);
+                } else {
+                    Duplicate(yAcc, 0.0f, pregLoop);
+                }
+                Add(yAcc, yAcc, weightedX, pregLoop);
+                StoreOutputData<float>(yAccAddr, yAcc, pregLoop, yAccOffset);
+            }
+            Muls(squareSum, squareSum, coeff, pregFull);
+            ReduceSum(squareSum, squareSum, pregFull);
+            if constexpr (WithRmsReduce) {
+                Add(squareSum, rmsOld, squareSum, pregScalar);
+            }
+            DataCopy<float, AscendC::MicroAPI::StoreDist::DIST_FIRST_ELEMENT_B32>(
+                rmsAddr + i, squareSum, pregScalar);
+        }
+    }
+}
+
+template <typename T>
+__aicore__ inline void VFProcessPremixYCast(const LocalTensor<T> &yLocal,
+                                            const LocalTensor<float> &yAccLocal,
+                                            uint16_t yAccRowStride,
+                                            uint16_t curRowNum, uint16_t curColNum)
+{
+    __local_mem__ T *yAddr = (__local_mem__ T *)yLocal.GetPhyAddr();
+    __local_mem__ float *yAccAddr = (__local_mem__ float *)yAccLocal.GetPhyAddr();
+    uint16_t loopCount = CeilDiv(curColNum, VL_FP32);
+    uint16_t dstRowStride = RoundUp<T>(curColNum);
+    __VEC_SCOPE__
+    {
+        RegTensor<float> y;
+        MaskReg pregLoop;
+        uint32_t sreg;
+        for (uint16_t i = 0; i < curRowNum; i++) {
+            sreg = curColNum;
+            for (uint16_t j = 0; j < loopCount; j++) {
+                pregLoop = UpdateMask<float>(sreg);
+                LoadInputData<float>(y, yAccAddr, pregLoop, i * yAccRowStride + j * VL_FP32);
+                StoreOutputData<T>(yAddr, y, pregLoop, i * dstRowStride + j * VL_FP32);
+            }
+        }
+    }
+}
 
 template <bool WithUbReduce = false>
 __aicore__ inline void VFProcessInvRmsPart1(const LocalTensor<float> &yLocal, const LocalTensor<float> &xLocal,
@@ -420,13 +514,6 @@ __aicore__ inline void VFProcessInvRmsPart2(const LocalTensor<float> &yLocal, co
 
 
 // (k, bs, hc_mix) * (k, bs, 1) = (bs, hc_mix)
-// for循环组织形式如下:
-/*
-    for (i, 0, bs)
-
-        for (j, 0, k)
-            for (h, 0, hc_mix)
-*/
 // hcMix小于64，因此直接去掉内层for循环
 __aicore__ inline void VFProcessInvRmsPart3WithGroupReduce(const LocalTensor<float> &yLocal,
                                                            const LocalTensor<float> &mmLocal,
@@ -873,6 +960,294 @@ __aicore__ inline void VFProcessCombFragRLessVLUseFourUnfold(const LocalTensor<f
     }
 }
 
+__aicore__ inline void RowGroupMaxBcast(RegTensor<float> &out, RegTensor<float> &in, RegTensor<float> &t0,
+                                        RegTensor<float> &t1, RegTensor<float> &t2, RegTensor<float> &t3, MaskReg preg)
+{
+    DeInterleave(t0, t1, in, in);        // t0=偶lane, t1=奇lane（组内两两配对）
+    Max(t0, t0, t1, preg);               // 每组内 c0/c1、c2/c3 的两两max
+    DeInterleave(t2, t3, t0, t0);
+    Max(t2, t2, t3, preg);               // lane0..3 = 每行(组)的max
+    Interleave(t0, t1, t2, t2);          // [m0,m0,m1,m1,m2,m2,m3,m3]
+    Interleave(out, t1, t0, t0);         // [m0,m0,m0,m0,m1,m1,m1,m1,...] 每行max广播到4个lane
+}
+
+// 按行(C方向，连续4个一组)做 sum 归约并广播：out[4r+c] = sum_c M[r][c]
+__aicore__ inline void RowGroupSumBcast(RegTensor<float> &out, RegTensor<float> &in, RegTensor<float> &t0,
+                                        RegTensor<float> &t1, RegTensor<float> &t2, RegTensor<float> &t3, MaskReg preg)
+{
+    DeInterleave(t0, t1, in, in);
+    Add(t0, t0, t1, preg);
+    DeInterleave(t2, t3, t0, t0);
+    Add(t2, t2, t3, preg);
+    Interleave(t0, t1, t2, t2);
+    Interleave(out, t1, t0, t0);
+}
+
+// softmax(over C) 就地：m -= 行max -> exp -> /行sum -> +eps（替代函数式宏，4 个寄存器各调一次）
+__aicore__ inline void SoftmaxRowBcastInplace(RegTensor<float> &m, RegTensor<float> &red,
+                                              RegTensor<float> &t0, RegTensor<float> &t1,
+                                              RegTensor<float> &t2, RegTensor<float> &t3,
+                                              float eps, MaskReg preg)
+{
+    RowGroupMaxBcast(red, m, t0, t1, t2, t3, preg);
+    Sub(m, m, red, preg);
+    Exp(m, m, preg);
+    RowGroupSumBcast(red, m, t0, t1, t2, t3, preg);
+    Div(m, m, red, preg);
+    Adds(m, m, eps, preg);
+}
+
+// /(行sum + eps) 就地，并把结果累加进列和 csum（用于 Sinkhorn 迭代）
+__aicore__ inline void RowNormAccum(RegTensor<float> &m, RegTensor<float> &red, RegTensor<float> &csum,
+                                    RegTensor<float> &t0, RegTensor<float> &t1,
+                                    RegTensor<float> &t2, RegTensor<float> &t3,
+                                    float eps, MaskReg preg)
+{
+    RowGroupSumBcast(red, m, t0, t1, t2, t3, preg);
+    Adds(red, red, eps, preg);
+    Div(m, m, red, preg);
+    Add(csum, csum, m, preg);
+}
+
+__aicore__ inline void VFProcessCombFragPacked(const LocalTensor<float> &combFragLocal,
+                                               const LocalTensor<float> &mixLocal,
+                                               const LocalTensor<float> &hcBaseLocal,
+                                               float scale, float eps, uint16_t iters,
+                                               uint16_t dim0, uint16_t hcMult, uint16_t hcMix)
+{
+    __local_mem__ float *combOutAddr = (__local_mem__ float *)combFragLocal.GetPhyAddr();
+    __local_mem__ float *mixAddr = (__local_mem__ float *)mixLocal.GetPhyAddr();
+    __local_mem__ float *hcBaseAddr = (__local_mem__ float *)hcBaseLocal.GetPhyAddr();
+
+    const uint16_t R = hcMult;
+    const uint16_t pack = VL_FP32 / R;
+    const uint16_t combLen = R * R;
+    const uint16_t nChunks = (dim0 + pack - 1) / pack;
+    __local_mem__ float *mBase = mixAddr;
+    __local_mem__ float *oBase = combOutAddr;
+
+    __VEC_SCOPE__
+    {
+        RegTensor<float> mix0, mix1, mix2, mix3;
+        RegTensor<float> base0, base1, base2, base3;
+        RegTensor<float> red, csum;
+        RegTensor<float> t0, t1, t2, t3;
+        RegTensor<int32_t> vL, vbs, vc, gIdx, sIdx, cShift, cMask;
+
+        uint32_t uFull = VL_FP32;
+        MaskReg pIdx = UpdateMask<int32_t>(uFull);
+
+        Arange(vL, 0);
+        Duplicate(cShift, (int32_t)2, pIdx);
+        Duplicate(cMask, (int32_t)(R - 1), pIdx);
+        ShiftRight(vbs, vL, cShift, pIdx);
+        And(vc, vL, cMask, pIdx);
+        Muls(gIdx, vbs, (int32_t)hcMix, pIdx);
+        Add(gIdx, gIdx, vc, pIdx);
+        Muls(sIdx, vbs, (int32_t)combLen, pIdx);
+        Add(sIdx, sIdx, vc, pIdx);
+        DataCopyGather(base0, hcBaseAddr + 0 * R, (RegTensor<uint32_t> &)vc, pIdx);
+        DataCopyGather(base1, hcBaseAddr + 1 * R, (RegTensor<uint32_t> &)vc, pIdx);
+        DataCopyGather(base2, hcBaseAddr + 2 * R, (RegTensor<uint32_t> &)vc, pIdx);
+        DataCopyGather(base3, hcBaseAddr + 3 * R, (RegTensor<uint32_t> &)vc, pIdx);
+
+        uint32_t act = (uint32_t)dim0 * R;
+        for (uint16_t cIdx = 0; cIdx < nChunks; cIdx++) {
+            uint16_t i = cIdx * pack;
+            MaskReg preg = UpdateMask<float>(act);
+            mBase = mixAddr + (uint32_t)i * hcMix;
+            oBase = combOutAddr + (uint32_t)i * combLen;
+
+            DataCopyGather(mix0, mBase + 0 * R, (RegTensor<uint32_t> &)gIdx, preg);
+            DataCopyGather(mix1, mBase + 1 * R, (RegTensor<uint32_t> &)gIdx, preg);
+            DataCopyGather(mix2, mBase + 2 * R, (RegTensor<uint32_t> &)gIdx, preg);
+            DataCopyGather(mix3, mBase + 3 * R, (RegTensor<uint32_t> &)gIdx, preg);
+            Muls(mix0, mix0, scale, preg); Add(mix0, mix0, base0, preg);
+            Muls(mix1, mix1, scale, preg); Add(mix1, mix1, base1, preg);
+            Muls(mix2, mix2, scale, preg); Add(mix2, mix2, base2, preg);
+            Muls(mix3, mix3, scale, preg); Add(mix3, mix3, base3, preg);
+
+            SoftmaxRowBcastInplace(mix0, red, t0, t1, t2, t3, eps, preg);
+            SoftmaxRowBcastInplace(mix1, red, t0, t1, t2, t3, eps, preg);
+            SoftmaxRowBcastInplace(mix2, red, t0, t1, t2, t3, eps, preg);
+            SoftmaxRowBcastInplace(mix3, red, t0, t1, t2, t3, eps, preg);
+
+            Add(csum, mix0, mix1, preg); Add(csum, csum, mix2, preg); Add(csum, csum, mix3, preg);
+            Adds(csum, csum, eps, preg);
+            Div(mix0, mix0, csum, preg); Div(mix1, mix1, csum, preg);
+            Div(mix2, mix2, csum, preg); Div(mix3, mix3, csum, preg);
+
+            for (uint16_t j = 0; j < iters; j++) {
+                Duplicate(csum, static_cast<float>(0), preg);
+                RowNormAccum(mix0, red, csum, t0, t1, t2, t3, eps, preg);
+                RowNormAccum(mix1, red, csum, t0, t1, t2, t3, eps, preg);
+                RowNormAccum(mix2, red, csum, t0, t1, t2, t3, eps, preg);
+                RowNormAccum(mix3, red, csum, t0, t1, t2, t3, eps, preg);
+                Adds(csum, csum, eps, preg);
+                Div(mix0, mix0, csum, preg); Div(mix1, mix1, csum, preg);
+                Div(mix2, mix2, csum, preg); Div(mix3, mix3, csum, preg);
+            }
+            DataCopyScatter(oBase + 0 * R, mix0, (RegTensor<uint32_t> &)sIdx, preg);
+            DataCopyScatter(oBase + 1 * R, mix1, (RegTensor<uint32_t> &)sIdx, preg);
+            DataCopyScatter(oBase + 2 * R, mix2, (RegTensor<uint32_t> &)sIdx, preg);
+            DataCopyScatter(oBase + 3 * R, mix3, (RegTensor<uint32_t> &)sIdx, preg);
+        }
+    }
+}
+
+template <bool Pairwise>
+__aicore__ inline void VFElementMajorSum(RegTensor<float> &sum, RegTensor<float> &a, RegTensor<float> &b,
+                                         RegTensor<float> &c, RegTensor<float> &d, MaskReg &mask)
+{
+    Add(sum, a, b, mask);
+    if constexpr (Pairwise) {
+        RegTensor<float> tail;
+        Add(tail, c, d, mask);
+        Add(sum, sum, tail, mask);
+    } else {
+        Add(sum, sum, c, mask);
+        Add(sum, sum, d, mask);
+    }
+}
+
+template <bool Pairwise>
+__aicore__ inline void VFElementMajorNormalize(RegTensor<float> &a, RegTensor<float> &b, RegTensor<float> &c,
+                                               RegTensor<float> &d, float eps, MaskReg &mask)
+{
+    RegTensor<float> sum;
+    VFElementMajorSum<Pairwise>(sum, a, b, c, d, mask);
+    Adds(sum, sum, eps, mask);
+    Div(a, a, sum, mask);
+    Div(b, b, sum, mask);
+    Div(c, c, sum, mask);
+    Div(d, d, sum, mask);
+}
+
+__aicore__ inline void VFElementMajorSoftmax(RegTensor<float> &a, RegTensor<float> &b, RegTensor<float> &c,
+                                             RegTensor<float> &d, float eps, MaskReg &mask)
+{
+    RegTensor<float> maximum;
+    RegTensor<float> tail;
+    RegTensor<float> sum;
+    Max(maximum, a, b, mask);
+    Max(tail, c, d, mask);
+    Max(maximum, maximum, tail, mask);
+    Sub(a, a, maximum, mask);
+    Sub(b, b, maximum, mask);
+    Sub(c, c, maximum, mask);
+    Sub(d, d, maximum, mask);
+    Exp(a, a, mask);
+    Exp(b, b, mask);
+    Exp(c, c, mask);
+    Exp(d, d, mask);
+    VFElementMajorSum<true>(sum, a, b, c, d, mask);
+    Div(a, a, sum, mask);
+    Div(b, b, sum, mask);
+    Div(c, c, sum, mask);
+    Div(d, d, sum, mask);
+    Adds(a, a, eps, mask);
+    Adds(b, b, eps, mask);
+    Adds(c, c, eps, mask);
+    Adds(d, d, eps, mask);
+}
+
+template <uint32_t Element>
+__aicore__ inline void VFElementMajorLoad(RegTensor<float> &value, __local_mem__ float *input,
+                                          __local_mem__ float *bias, RegTensor<uint32_t> &index,
+                                          float scale, MaskReg &mask)
+{
+    RegTensor<float> base;
+    Gather(value, input + Element, index, mask);
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(base, bias + Element / 4 * C0_SIZE + Element % 4);
+    Muls(value, value, scale, mask);
+    Add(value, value, base, mask);
+}
+
+// mixesLocal has a 24-float input row; its 16-float output rows may reuse the same UB.
+__aicore__ inline void VFProcessCombFragPremixElementMajor(const LocalTensor<float> &mixesLocal,
+                                                           const LocalTensor<float> &bias, float scale, float eps,
+                                                           uint16_t iters, uint16_t rows, uint16_t hcMix)
+{
+    __local_mem__ float *mixAddr = (__local_mem__ float *)mixesLocal.GetPhyAddr();
+    __local_mem__ float *biasAddr = (__local_mem__ float *)bias.GetPhyAddr();
+    const uint32_t inputStride = RoundUp<float>(hcMix);
+    const uint16_t loops = CeilDiv(rows, VL_FP32);
+    __VEC_SCOPE__
+    {
+        RegTensor<uint32_t> lane;
+        RegTensor<uint32_t> inputIndex;
+        RegTensor<uint32_t> outputIndex;
+        MaskReg fullMask = CreateMask<float>();
+        Arange((RegTensor<int32_t> &)lane, static_cast<int32_t>(0));
+        Muls(inputIndex, lane, inputStride, fullMask);
+        Muls(outputIndex, lane, static_cast<uint32_t>(16), fullMask);
+        uint32_t remaining = rows;
+        for (uint16_t batch = 0; batch < loops; ++batch) {
+            MaskReg mask = UpdateMask<float>(remaining);
+            __local_mem__ float *input = mixAddr + batch * VL_FP32 * inputStride + 8;
+            RegTensor<float> m00, m01, m02, m03;
+            RegTensor<float> m10, m11, m12, m13;
+            RegTensor<float> m20, m21, m22, m23;
+            RegTensor<float> m30, m31, m32, m33;
+            VFElementMajorLoad<0>(m00, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<1>(m01, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<2>(m02, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<3>(m03, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<4>(m10, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<5>(m11, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<6>(m12, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<7>(m13, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<8>(m20, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<9>(m21, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<10>(m22, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<11>(m23, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<12>(m30, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<13>(m31, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<14>(m32, input, biasAddr, inputIndex, scale, mask);
+            VFElementMajorLoad<15>(m33, input, biasAddr, inputIndex, scale, mask);
+
+            VFElementMajorSoftmax(m00, m01, m02, m03, eps, mask);
+            VFElementMajorSoftmax(m10, m11, m12, m13, eps, mask);
+            VFElementMajorSoftmax(m20, m21, m22, m23, eps, mask);
+            VFElementMajorSoftmax(m30, m31, m32, m33, eps, mask);
+            VFElementMajorNormalize<false>(m00, m10, m20, m30, eps, mask);
+            VFElementMajorNormalize<false>(m01, m11, m21, m31, eps, mask);
+            VFElementMajorNormalize<false>(m02, m12, m22, m32, eps, mask);
+            VFElementMajorNormalize<false>(m03, m13, m23, m33, eps, mask);
+            for (uint16_t iter = 0; iter < iters; ++iter) {
+                VFElementMajorNormalize<true>(m00, m01, m02, m03, eps, mask);
+                VFElementMajorNormalize<true>(m10, m11, m12, m13, eps, mask);
+                VFElementMajorNormalize<true>(m20, m21, m22, m23, eps, mask);
+                VFElementMajorNormalize<true>(m30, m31, m32, m33, eps, mask);
+                VFElementMajorNormalize<false>(m00, m10, m20, m30, eps, mask);
+                VFElementMajorNormalize<false>(m01, m11, m21, m31, eps, mask);
+                VFElementMajorNormalize<false>(m02, m12, m22, m32, eps, mask);
+                VFElementMajorNormalize<false>(m03, m13, m23, m33, eps, mask);
+            }
+
+            // All input lanes are resident before compacting this batch in place.
+            __local_mem__ float *output = mixAddr + batch * VL_FP32 * 16;
+            Scatter(output + 0, m00, outputIndex, mask);
+            Scatter(output + 1, m01, outputIndex, mask);
+            Scatter(output + 2, m02, outputIndex, mask);
+            Scatter(output + 3, m03, outputIndex, mask);
+            Scatter(output + 4, m10, outputIndex, mask);
+            Scatter(output + 5, m11, outputIndex, mask);
+            Scatter(output + 6, m12, outputIndex, mask);
+            Scatter(output + 7, m13, outputIndex, mask);
+            Scatter(output + 8, m20, outputIndex, mask);
+            Scatter(output + 9, m21, outputIndex, mask);
+            Scatter(output + 10, m22, outputIndex, mask);
+            Scatter(output + 11, m23, outputIndex, mask);
+            Scatter(output + 12, m30, outputIndex, mask);
+            Scatter(output + 13, m31, outputIndex, mask);
+            Scatter(output + 14, m32, outputIndex, mask);
+            Scatter(output + 15, m33, outputIndex, mask);
+        }
+    }
+}
+
+
 template <typename T>
 __aicore__ inline void VFProcessY(const LocalTensor<T> &yLocal, const LocalTensor<float> &mixLocal,
                                   const LocalTensor<T> &xLocal, uint16_t bs, uint16_t hcMult, uint16_t d, uint16_t hcMix)
@@ -993,15 +1368,47 @@ __aicore__ inline void CopyOut(const LocalTensor<T> &outputTensor, const GlobalT
     DataCopyPad(outputGm, outputTensor, dataCopyParams);
 }
 
+// GM -> UB，UB侧相邻block间隔以32B为单位（用于将行数据加载到与mixesLocal一致的hcMixAlign行距布局）
+template <typename T>
+__aicore__ inline void CopyInWithUbStride(const GlobalTensor<T> &inputGm, const LocalTensor<T> &inputTensor,
+                                          const uint16_t nBurst, const uint32_t copyLen, uint32_t srcStride,
+                                          uint32_t ubDstStrideBlock)
+{
+    DataCopyPadExtParams<T> dataCopyPadExtParams;
+    dataCopyPadExtParams.isPad = false;
+    dataCopyPadExtParams.leftPadding = 0;
+    dataCopyPadExtParams.rightPadding = 0;
+    dataCopyPadExtParams.paddingValue = 0;
+
+    DataCopyExtParams dataCoptExtParams;
+    dataCoptExtParams.blockCount = nBurst;
+    dataCoptExtParams.blockLen = copyLen * sizeof(T);
+    dataCoptExtParams.srcStride = srcStride * sizeof(T);
+    dataCoptExtParams.dstStride = ubDstStrideBlock; // UB侧stride单位为32B
+    DataCopyPad(inputTensor, inputGm, dataCoptExtParams, dataCopyPadExtParams);
+}
+
+// 计算将每行hcMult个float按hcMixAlign行距排布时，UB侧相邻block间需要的32B间隔数
+// (blockLen非32B对齐时UB侧块足迹为ceil32(blockLen)，加上ubDstStrideBlock*32B即为行距)
+__aicore__ inline uint32_t UbRowGapBlocks(uint16_t hcMult, uint16_t hcMix)
+{
+    uint32_t rowPitchBytes = RoundUp<float>(hcMix) * sizeof(float);
+    uint32_t rowFootprintBytes = CeilAlign(static_cast<uint32_t>(hcMult) * sizeof(float), BLOCK_SIZE);
+    return (rowPitchBytes - rowFootprintBytes) / BLOCK_SIZE;
+}
+
+// UB -> UB（对齐搬运，srcStride/dstStride以32B块为单位；用于将hcMixAlign行距的行首hcMult个元素
+// 聚拢到hcMultAlign行距的紧凑布局，配合VECOUT TQue的double buffer异步拷出）
 template <typename T>
 __aicore__ inline void CopyOut(const LocalTensor<T> &outputTensor, const LocalTensor<T> &outputGm,
-                               const uint16_t nBurst, const uint32_t copyLen)
+                               const uint16_t nBurst, const uint32_t copyLen, uint32_t dstStride = 0,
+                               uint32_t srcStride = 0)
 {
     DataCopyParams dataCopyParams;
     dataCopyParams.blockCount = nBurst;
-    dataCopyParams.blockLen = copyLen * sizeof(T) / BLOCK_SIZE;
-    dataCopyParams.srcStride = 0;
-    dataCopyParams.dstStride = 0;
+    dataCopyParams.blockLen = CeilDiv(copyLen * sizeof(T), BLOCK_SIZE);
+    dataCopyParams.srcStride = srcStride;
+    dataCopyParams.dstStride = dstStride;
     DataCopy(outputGm, outputTensor, dataCopyParams);
 }
 

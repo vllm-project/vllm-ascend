@@ -1,12 +1,26 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+from vllm_ascend.core.kv_cache_interface import (
+    is_circular_kv_cache_spec,
+    is_prefix_cacheable,
+)
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.compute_slot_mapping import (
+    _compute_slot_mapping_kernel,
+    _next_power_of_2,
+    compute_slot_mapping_fused_groups,
+    pad_replayed_slot_mapping,
+)
 
 
 class BlockTable:
@@ -24,31 +38,35 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        compress_ratio = 1
-        if (
+        self.dcp_world_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group
+        is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
-        ):
-            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+            and get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec) == KVCacheSpecKind.MAMBA
+        )
+        # The KV cache spec already provides the per-rank table capacity.
+        # Mamba state is replicated across DCP ranks, not sharded then expanded.
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-
-        try:
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
+        self.is_mamba_group = is_mamba_group
+        self.is_circular = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
+        if self.is_circular:
+            if self.dcp_world_size != 1:
+                raise ValueError("Circular tail caches do not support context parallelism.")
+            # A request owns one physical ring. Never split it into ordinary
+            # logical pages, even if another backend advertises smaller sizes.
+            kernel_sizes = [block_size]
+            self.max_num_blocks_per_req = max_num_blocks_per_req = 1
+        self.is_circular_group = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
+        # Fixed for the group's lifetime. A bounded-replay sliding-window group
+        # opts out of prefix caching, so it is the one group that has to keep
+        # writing the replayed positions -- that write rebuilds its window.
+        # Every other group pads them.
+        self.is_prefix_cacheable = kv_cache_group is None or is_prefix_cacheable(kv_cache_group.kv_cache_spec)
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -84,12 +102,16 @@ class BlockTable:
             logical_table_size = max_num_blocks_per_req
 
         duplicate_size = 1
-        if self.pcp_world_size * self.dcp_world_size > 1:
+        if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        # MTP slot preparation appends up to num_speculative_tokens - 1
+        # draft positions for every request beyond the scheduler token limit.
+        num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
         self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
+            self.max_num_batched_tokens + num_mtp_draft_slots,
+            dtype=torch.int32,
         )
 
         self.kernel_sizes = kernel_sizes
@@ -141,26 +163,50 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        _compute_slot_mapping_kernel[(num_reqs + 1,)](
-            num_tokens,
-            self.max_num_batched_tokens,
-            query_start_loc,
-            positions,
-            self.block_table.gpu,
-            self.block_table.gpu.stride(0),
-            self.block_size,
-            self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=1024,
-        )
+        total_cp_world_size = self.dcp_world_size
+        total_cp_rank = self.dcp_rank
+        if self.dcp_world_size > 1:
+            req_indices = torch.repeat_interleave(
+                torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
+                query_start_loc[1:] - query_start_loc[:-1],
+                output_size=num_tokens,
+            )
+            self._compute_dcp_slot_mapping(req_indices, positions)
+        else:
+            TILE_BLOCK_SIZE = 1024
+            kernel_kwargs = {
+                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
+                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
+                "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
+                "TOTAL_CP_RANK": total_cp_rank,
+                "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
+                "PAD_ID": PAD_SLOT_ID,
+                "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
+                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
+                "IS_CIRCULAR": self.is_circular,
+            }
 
-    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                num_tokens,
+                self.max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self.block_table.gpu,
+                self.block_table.gpu.stride(0),
+                self.block_size,
+                self.slot_mapping.gpu,
+                **kernel_kwargs,
+            )
+
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
+    ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -168,53 +214,29 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.dcp_world_size * self.pcp_world_size > 1:
-            # Note(hc): The DCP implement store kvcache with an interleave
-            # style, the kvcache for the token whose token_idx is i is
-            # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
-
-            # Use a "virtual block" which equals to world_size * block_size
-            # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
-
-            # IMPORTANT: In hybrid mode, positions are in logical block space,
-            # but we need to map them to the correct logical block table indices
-            logical_block_idx = positions // virtual_block_size
-
-            # Account for the expanded logical table
-            # (always needed with unified tensor)
-            # Each physical block is split into multiple logical blocks
-            # The logical table has been expanded to accommodate this
-            block_table_indices = (
-                req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
-            )
-
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
-            # Use virtual_block_size for mask calculation, which marks local
-            # tokens.
-            virtual_block_offsets = positions % virtual_block_size
-            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-            mask = (
-                virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size)
-                == self.current_rank
-            )
-            # Calculate local block_offsets
-            block_offsets = (
-                virtual_block_offsets
-                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
-                + virtual_block_offsets % self.cp_kv_cache_interleave_size
-            )
-            # Calculate slot_mapping
-            slot_mapping = block_numbers * self.block_size + block_offsets
-            # Write final slots, use -1 for not-local
-            self.slot_mapping.np[: req_indices.shape[0]] = np.where(mask, slot_mapping, -1)
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
+        if self.dcp_world_size > 1:
+            if not isinstance(req_indices, torch.Tensor):
+                req_indices = torch.from_numpy(req_indices)
+            if not isinstance(positions, torch.Tensor):
+                positions = torch.from_numpy(positions)
+            self._compute_dcp_slot_mapping(req_indices, positions)
         else:
+            if isinstance(req_indices, torch.Tensor):
+                if req_indices.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                req_indices = req_indices.numpy()
+            if isinstance(positions, torch.Tensor):
+                if positions.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
             # but we need to map them to the correct logical block table indices
-            logical_block_idx = positions // self.block_size
+            logical_block_idx = np.zeros_like(positions) if self.is_circular else positions // self.block_size
 
             # Account for the expanded logical table
             # (always needed with unified tensor)
@@ -224,10 +246,63 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
-            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
+            if self.is_circular:
+                self.slot_mapping.np[: req_indices.shape[0]][positions < 0] = PAD_SLOT_ID
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
+
+    def _compute_dcp_slot_mapping(
+        self,
+        req_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        # Note(hc): The DCP implement store kvcache with an interleave
+        # style, the kvcache for the token whose token_idx is i is
+        # always stored on the GPU whose dcp_rank equals the interleaved shard:
+
+        # Use a "virtual block" which equals to world_size * block_size
+        # for block_table_indices calculation.
+        # virtual_block_size = self.block_size * self.dcp_world_size
+
+        # IMPORTANT: In hybrid mode, positions are in logical block space,
+        # but we need to map them to the correct logical block table indices
+        # logical_block_idx = positions // virtual_block_size
+
+        total_cp_world_size = self.dcp_world_size
+        virtual_physical_block_size = self.physical_block_size * total_cp_world_size
+        physical_block_idx = positions // virtual_physical_block_size
+        virtual_block_offsets = positions % virtual_physical_block_size
+
+        self.current_rank = self.dcp_rank
+        mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size == self.current_rank
+        local_physical_offsets = (
+            virtual_block_offsets
+            // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+            * self.cp_kv_cache_interleave_size
+            + virtual_block_offsets % self.cp_kv_cache_interleave_size
+        )
+        logical_block_idx = physical_block_idx * self.blocks_per_phys_block + (
+            local_physical_offsets // self.block_size
+        )
+
+        block_table_indices = req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
+
+        block_offsets = local_physical_offsets % self.block_size
+
+        if block_table_indices.device.type != "cpu":
+            block_numbers = self.block_table.gpu.flatten()[block_table_indices]
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
+        else:
+            block_numbers = self.block_table.cpu.flatten()[block_table_indices]
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
@@ -253,8 +328,10 @@ class BlockTable:
 
         return np.array(logical_blocks, dtype=np.int32)
 
-    def get_device_tensor(self) -> torch.Tensor:
+    def get_device_tensor(self, num_reqs: int | None = None) -> torch.Tensor:
         """Returns the device tensor of the block table."""
+        if num_reqs is not None:
+            return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
 
     def get_cpu_tensor(self) -> torch.Tensor:
@@ -282,12 +359,12 @@ class MultiGroupBlockTable:
         block_sizes: list[int],
         num_speculative_tokens: int = 0,
         max_num_blocks: list[int] | None = None,
-        kernel_sizes: list[list[int]] | None = None,
+        kernel_sizes: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: KVCacheGroupSpec = None,
     ) -> None:
         if kernel_sizes is None:
-            kernel_sizes = [[0]] * len(block_sizes)
+            kernel_sizes = [0] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
         elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
             kernel_sizes = kernel_sizes * len(block_sizes)
@@ -301,8 +378,8 @@ class MultiGroupBlockTable:
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
             # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
-            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
+            dcp_world_size = get_decode_context_model_parallel_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * dcp_world_size) for block_size in block_sizes]
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
@@ -319,12 +396,12 @@ class MultiGroupBlockTable:
                     max_num_batched_tokens,
                     pin_memory,
                     device,
-                    kernel_size_list,
+                    [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                     kv_cache_group,
                 )
-                for block_size, kernel_size_list, max_num_blocks_per_req, kv_cache_group in zip(
+                for block_size, kernel_size, max_num_blocks_per_req, kv_cache_group in zip(
                     block_sizes, kernel_sizes, max_num_blocks, kv_cache_groups
                 )
             ]
@@ -337,14 +414,66 @@ class MultiGroupBlockTable:
                     max_num_batched_tokens,
                     pin_memory,
                     device,
-                    kernel_size_list,
+                    [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                 )
-                for block_size, kernel_size_list, max_num_blocks_per_req in zip(
-                    block_sizes, kernel_sizes, max_num_blocks
-                )
+                for block_size, kernel_size, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
             ]
+
+        active_block_tables = [block_table for block_table in self.block_tables if not block_table.is_mamba_group]
+        self._can_fuse_slot_mapping = len(active_block_tables) > 1 and all(
+            block_table.dcp_world_size == 1 for block_table in active_block_tables
+        )
+        if self._can_fuse_slot_mapping:
+            self._fused_slot_mapping_group_count = len(active_block_tables)
+            self._fused_max_num_batched_tokens = active_block_tables[0].max_num_batched_tokens
+            self._fused_block_table_addrs = torch.tensor(
+                [block_table.block_table.gpu.data_ptr() for block_table in active_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            self._fused_slot_mapping_addrs = torch.tensor(
+                [block_table.slot_mapping.gpu.data_ptr() for block_table in active_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            self._fused_block_table_strides = torch.tensor(
+                [block_table.block_table.gpu.stride(0) for block_table in active_block_tables],
+                dtype=torch.int64,
+                device=device,
+            )
+            self._fused_block_sizes = torch.tensor(
+                [block_table.block_size for block_table in active_block_tables],
+                dtype=torch.int32,
+                device=device,
+            )
+            self._fused_is_circular = torch.tensor(
+                [block_table.is_circular for block_table in active_block_tables],
+                dtype=torch.int32,
+                device=device,
+            )
+            self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
+
+        # The replayed-slot PAD pass addresses the groups' slot mappings
+        # directly, so unlike the fused kernel above it cannot be limited to the
+        # fused configuration -- that one additionally requires DCP to be off
+        # and every group to be splittable. Built unconditionally, mamba groups
+        # aside, which are the ones the fused path skips too.
+        self._replay_slot_mapping_addrs = torch.tensor(
+            [block_table.slot_mapping.gpu.data_ptr() for block_table in active_block_tables],
+            dtype=torch.uint64,
+            device=device,
+        )
+        # Only the cacheable groups get padded. A group that opted out of prefix
+        # caching never has its KV persisted, so it has no cached copy of the
+        # replayed positions to fall back on -- and for the bounded-replay
+        # sliding-window group, writing them is what rebuilds its window.
+        self._replay_cacheable_groups = torch.tensor(
+            [group_idx for group_idx, block_table in enumerate(active_block_tables) if block_table.is_prefix_cacheable],
+            dtype=torch.int32,
+            device=device,
+        )
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
@@ -374,20 +503,76 @@ class MultiGroupBlockTable:
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
+        num_tokens = positions.shape[0]
+        if self._can_fuse_slot_mapping and not positions_compressed_list and not req_indices_compressed_list:
+            compute_slot_mapping_fused_groups(
+                self._fused_slot_mapping_group_count,
+                num_reqs,
+                num_tokens,
+                self._fused_max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self._fused_block_table_addrs,
+                self._fused_slot_mapping_addrs,
+                self._fused_block_table_strides,
+                self._fused_block_sizes,
+                self._fused_min_block_size,
+                pad_id=PAD_SLOT_ID,
+                is_circular_ptr=self._fused_is_circular,
+            )
+            return
+
         for i, block_table in enumerate(self.block_tables):
+            if block_table.is_mamba_group:
+                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
                 block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
 
+    def pad_replayed_slots(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        replay_start: torch.Tensor,
+        replay_window: int,
+    ) -> None:
+        """Stop the cacheable groups from rewriting replayed KV.
+
+        A request that hit a prefix cache reuses the hit's blocks, which are
+        still shared with every other request that hit the same prefix, so the
+        KV they hold must not be written again -- not because the rewritten
+        values would be wrong for this request, but because they would be
+        different from what every other sharer reads. ``replay_start`` names,
+        per request, where the replayed run begins (0 for a request that is not
+        replaying), and that run is exactly what has to be skipped: the
+        sliding-window group rebuilds it itself.
+
+        Runs after every group's slot mapping is final, so it needs to know
+        nothing about how those were computed.
+        """
+        pad_replayed_slot_mapping(
+            num_reqs,
+            query_start_loc,
+            positions,
+            replay_start,
+            self._replay_slot_mapping_addrs,
+            self._replay_cacheable_groups,
+            replay_window,
+            pad_id=PAD_SLOT_ID,
+        )
+
     def compute_slot_mapping_draft(
         self,
-        req_indices: np.ndarray,
-        positions: np.ndarray,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
+            if block_table.is_mamba_group:
+                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
