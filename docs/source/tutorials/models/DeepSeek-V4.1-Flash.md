@@ -20,9 +20,10 @@ vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
 guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration.
 
-DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
-upstream vLLM revision dated September 11, 2026 or later. vLLM v0.30.0 is
-recommended.
+vLLM Ascend v0.30.0rc2 supports both DeepSeek-V4.1-Flash and the
+[DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+update. Use an upstream vLLM revision dated September 11, 2026 or later;
+vLLM v0.30.0 is recommended.
 
 ## 2 Supported Features
 
@@ -46,12 +47,16 @@ The official DeepSeek-V4.1-Flash checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
 
-The Ascend W8A8 checkpoint used by this guide will be published as
-[Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
-on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
-After the checkpoint is available, download it to the same absolute path on
-every server and replace the checkpoint-path placeholder in each serving
-command.
+The official 1017 update is available from
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+on Hugging Face.
+
+For the Ascend W8A8 checkpoint of the 1017 update, refer to
+[Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)
+on ModelScope. Use a checkpoint that includes the DSpark draft parameters and
+INT8 Engram tables. Download the complete checkpoint to the same absolute path
+on every server and replace the checkpoint-path placeholder in each serving
+command. The deployment configurations below also apply to the 1017 update.
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
