@@ -30,6 +30,7 @@ from vllm_ascend.observability.runtime_guard.detector.manager import AfterSample
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
     TokenRepeatDetector,
     TokenRepeatState,
+    TokenRepeatWindow,
     push_token_repeat,
 )
 from vllm_ascend.observability.runtime_guard.dump import KvCacheReader, _slice_blocks
@@ -91,16 +92,27 @@ def _dump_ctx(
 
 
 def test_push_token_repeat_scores_and_ignore():
-    st = TokenRepeatState()
+    st = TokenRepeatState(windows=[TokenRepeatWindow(window=8)])
     ignore: set[int] = set()
     for tid in (1, 2, 3, 4):
-        assert push_token_repeat(st, tid, window=8, ignore=ignore) == 0
-    assert push_token_repeat(st, 1, window=8, ignore=ignore) == 1
-    assert st.repeat_sum >= 1
+        assert push_token_repeat(st, tid, ignore=ignore) == [0]
+    assert push_token_repeat(st, 1, ignore=ignore) == [1]
+    assert st.windows[0].repeat_sum >= 1
 
-    ignored = TokenRepeatState()
-    assert push_token_repeat(ignored, 0, window=8, ignore={0}) == 0
-    assert len(ignored.content) == 0
+    ignored = TokenRepeatState(windows=[TokenRepeatWindow(window=8)])
+    assert push_token_repeat(ignored, 0, ignore={0}) == [0]
+    assert len(ignored.windows[0].content) == 0
+
+
+def test_push_token_repeat_multi_window_scores():
+    st = TokenRepeatState(windows=[TokenRepeatWindow(window=2), TokenRepeatWindow(window=4)])
+    ignore: set[int] = set()
+    # token 1 first appears: no prior occurrence in either window.
+    assert push_token_repeat(st, 1, ignore=ignore) == [0, 0]
+    # second 1: appears once in both windows.
+    assert push_token_repeat(st, 1, ignore=ignore) == [1, 1]
+    # third 1: both windows hold two prior 1s.
+    assert push_token_repeat(st, 1, ignore=ignore) == [2, 2]
 
 
 def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
@@ -166,6 +178,127 @@ def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
         assert det.check_all([[7]], req_ids=["off"]) == []
 
 
+def test_token_repeat_multi_window_short_and_long(tmp_path: Path):
+    """Multi-window: a short window catches tight runs, a long one long phrases."""
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    cfg = RuntimeConfig(
+        config_path=tmp_path / "c.json",
+        report_dir=tmp_path / "r",
+        ensure_file=True,
+        hot_reload=False,
+    )
+    tr = cfg._data["detector"]["token_repeat"]
+    tr["enabled"] = True
+    tr["window"] = [8, 128]
+    tr["repeat_sum_threshold"] = [8, 64]
+    tr["min_tokens"] = [0, 32]
+
+    det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    det.refresh_from_config()
+
+    # Tight run: the small window fires before the long window's warmup.
+    io = RequestIoSnapshotManager.get()
+    alerts: list = []
+    for _ in range(6):
+        io.clear_wave_cache()
+        alerts = det.check_all([[7]], req_ids=["tight"])
+        if alerts:
+            break
+    assert len(alerts) == 1
+    assert alerts[0].detail["window"] == 8
+    assert alerts[0].detail["fired_windows"] == [8]
+
+    # Long phrase (period 16): the small window never sees it, the long one does.
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    det.clear_finished("tight")
+    io = RequestIoSnapshotManager.get()
+    phrase = list(range(16))
+    alerts = []
+    for _ in range(5):
+        for tid in phrase:
+            io.clear_wave_cache()
+            alerts = det.check_all([[tid]], req_ids=["phrase"])
+            if alerts:
+                break
+        if alerts:
+            break
+    assert len(alerts) == 1
+    assert alerts[0].detail["window"] == 128
+
+
+def test_token_repeat_hot_reload_levels_reach_ongoing_request(tmp_path: Path):
+    """Hot-reloading thresholds / warmup must apply to in-flight requests.
+
+    Window sizes are unchanged, so the per-request state (and its window content)
+    is kept; the threshold and min_tokens captured when the state was created have
+    to follow the reloaded config instead of staying stale until the request ends.
+    """
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    cfg = RuntimeConfig(
+        config_path=tmp_path / "c.json",
+        report_dir=tmp_path / "r",
+        ensure_file=True,
+        hot_reload=False,
+    )
+    tr = cfg._data["detector"]["token_repeat"]
+    tr["enabled"] = True
+    tr["window"] = 8
+    tr["repeat_sum_threshold"] = 64
+    tr["min_tokens"] = 0
+
+    det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    det.refresh_from_config()
+
+    io = RequestIoSnapshotManager.get()
+    alerts: list = []
+    for _ in range(4):
+        io.clear_wave_cache()
+        alerts = det.check_all([[7]], req_ids=["live"])
+    assert alerts == []
+
+    state = det._states["live"]
+    window = state.windows[0]
+    assert window.threshold == 64
+    repeat_sum_before = window.repeat_sum
+
+    # Reload changes only the threshold: window sizes stay the same.
+    tr["repeat_sum_threshold"] = 1
+    det.refresh_from_config()
+    assert det._states["live"] is state  # in-flight state is kept, not rebuilt
+    assert window.threshold == 1
+
+    io.clear_wave_cache()
+    alerts = det.check_all([[7]], req_ids=["live"])
+    assert len(alerts) == 1
+    assert alerts[0].detail["repeat_sum"] > repeat_sum_before
+    assert alerts[0].detail["repeat_sum_threshold"] == 1
+
+    # A reload that only raises min_tokens must reach a live request too: the
+    # request is already over the threshold but must not alert during warmup.
+    tr["min_tokens"] = 200
+    det.refresh_from_config()
+    alerts = []
+    for _ in range(6):
+        io.clear_wave_cache()
+        alerts = det.check_all([[7]], req_ids=["warm"])
+    assert alerts == []
+    assert det._states["warm"].windows[0].min_tokens == 200
+
+    tr["min_tokens"] = 0
+    det.refresh_from_config()
+    assert det._states["warm"].windows[0].min_tokens == 0
+    io.clear_wave_cache()
+    alerts = det.check_all([[7]], req_ids=["warm"])
+    assert len(alerts) == 1
+
+
 def test_w1_1_r04_same_wave_double_fold_keeps_seen_eq_oc(tmp_path: Path):
     """W1-1/R-04: same-wave duplicate after-sample must not inflate content_tokens_seen.
 
@@ -209,7 +342,7 @@ def test_w1_1_r04_same_wave_double_fold_keeps_seen_eq_oc(tmp_path: Path):
     st = RequestGuardStore.get().get_state(rid)
     assert st is not None
     oc = len(st.output_token_ids)
-    seen = det._states[rid].content_tokens_seen
+    seen = det._states[rid].windows[0].content_tokens_seen
     snap = io.snapshot(None, rid, None, include_token_ids=False, use_cache=False)
     assert oc == 10
     assert seen == oc
@@ -252,7 +385,7 @@ def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
     st = RequestGuardStore.get().get_state(rid)
     assert st is not None
     assert len(st.output_token_ids) == 1
-    assert mgr.get("token_repeat")._states[rid].content_tokens_seen == 1  # type: ignore[attr-defined]
+    assert mgr.get("token_repeat")._states[rid].windows[0].content_tokens_seen == 1  # type: ignore[attr-defined]
 
 
 def test_slice_blocks_selects_requested_and_empty():
