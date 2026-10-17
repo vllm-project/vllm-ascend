@@ -27,7 +27,9 @@ def validate_recoverssm_config(config) -> None:
     if parallel.pipeline_parallel_size != 1 or parallel.data_parallel_size != 1:
         raise ValueError("Experimental KDA RecoverSSM requires PP=1 and DP=1")
     spec = config.speculative_config
-    if spec is None or spec.method != "deepseek_mtp" or spec.num_speculative_tokens < 1:
+    # Current vLLM normalizes model-specific aliases to "mtp" during config
+    # validation; retain the legacy alias for builds that expose it unchanged.
+    if spec is None or spec.method not in ("mtp", "deepseek_mtp") or spec.num_speculative_tokens < 1:
         raise ValueError("Experimental KDA RecoverSSM requires MTP with at least one speculative token")
 
 

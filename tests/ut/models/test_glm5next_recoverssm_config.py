@@ -17,12 +17,15 @@ def make_config():
         cache_config=SimpleNamespace(enable_prefix_caching=False),
         kv_transfer_config=None,
         parallel_config=SimpleNamespace(pipeline_parallel_size=1, data_parallel_size=1),
-        speculative_config=SimpleNamespace(method="deepseek_mtp", num_speculative_tokens=5),
+        speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=5),
     )
 
 
-def test_supported_execution_contract():
-    validate_recoverssm_config(make_config())
+@pytest.mark.parametrize("method", ["mtp", "deepseek_mtp"])
+def test_supported_execution_contract(method):
+    config = make_config()
+    config.speculative_config.method = method
+    validate_recoverssm_config(config)
 
 
 @pytest.mark.parametrize("value,expected", [(None, False), ("0", False), ("1", True), ("2", None)])

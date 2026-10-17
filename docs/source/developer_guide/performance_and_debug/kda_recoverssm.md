@@ -23,7 +23,7 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 vllm serve /path/to/GLM-5.3-Flash \
   --tensor-parallel-size 8 --enable-expert-parallel \
   --enforce-eager --no-async-scheduling --no-enable-prefix-caching \
-  --speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":5,"enforce_eager":true}'
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5,"enforce_eager":true}'
 ```
 
 Use the model's usual Ascend quantization and deployment options. The current
