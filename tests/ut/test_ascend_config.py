@@ -79,7 +79,8 @@ def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
 @pytest.mark.parametrize("compact_weights", [False, True, "false", "true"])
 @pytest.mark.parametrize("sleep_mode", [False, True])
 def test_compact_weights_sleep_mode_compatibility(compact_weights, sleep_mode):
-    vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
+    with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
+        vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
     vc.parallel_config.enable_eplb = True
     assert vc.model_config is not None
     vc.model_config.enable_sleep_mode = sleep_mode
@@ -97,7 +98,8 @@ def test_compact_weights_sleep_mode_compatibility(compact_weights, sleep_mode):
 
 @pytest.mark.parametrize("compact_weights", [False, True, "false", "true"])
 def test_compact_weights_requires_eplb(compact_weights):
-    vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
+    with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
+        vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
     clear_ascend_config()
     try:
         if compact_weights in (True, "true"):
