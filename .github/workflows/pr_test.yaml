@@ -303,24 +303,46 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Download test case map and coverage package
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
-            -o test_case_map.json
-          echo "Downloaded test_case_map.json"
-          du -h test_case_map.json
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
-            -o coverage.tar
-          echo "Downloaded coverage.tar"
-          du -h coverage.tar
+          OBS="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test"
+          # releases/v0.30.0 -> coverage-v0.30.0.tar. main and other branches
+          # have no suffix. A missing branch object falls back to main.
+          suffix=""
+          if [[ "${BASE_REF}" =~ ^releases/(v[0-9][0-9A-Za-z._-]*)$ ]]; then
+            suffix="${BASH_REMATCH[1]}"
+          fi
+
+          download_optional() {
+            local url="$1"
+            local dest="$2"
+            local code
+            code=$(curl -sSL --retry 3 --retry-delay 5 -o "${dest}" -w "%{http_code}" "${url}" || echo "000")
+            if [ "${code}" = "200" ] && [ -s "${dest}" ]; then
+              return 0
+            fi
+            rm -f "${dest}"
+            return 1
+          }
+
+          use_main=true
+          if [ -n "${suffix}" ] \
+            && download_optional "${OBS}/coverage-${suffix}.tar" coverage.tar \
+            && download_optional "${OBS}/test_case_map-${suffix}.json" test_case_map.json; then
+            use_main=false
+            echo "Using coverage-${suffix}.tar for ${BASE_REF}"
+          fi
+          if [ "${use_main}" = "true" ]; then
+            rm -f coverage.tar test_case_map.json
+            echo "Using main coverage package for ${BASE_REF}"
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/test_case_map.json" -o test_case_map.json
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/coverage.tar" -o coverage.tar
+          fi
+          du -h test_case_map.json coverage.tar
           tar xf coverage.tar vllm-ascend/covstub
           test -d vllm-ascend/covstub
           echo "Extracted vllm-ascend/covstub"
