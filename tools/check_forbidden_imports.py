@@ -42,6 +42,10 @@ CHECK_IMPORTS = {
         allowed_files={
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
+            # Mirrors vLLM's GroupCoordinator.send_object, which pickles the
+            # object for the CPU (gloo) group; the VPP fold channel reuses the
+            # same wire format for its non-blocking metadata send.
+            "vllm_ascend/patch/worker/patch_distributed.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
         },
     ),
