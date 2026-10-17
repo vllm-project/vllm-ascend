@@ -82,6 +82,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
+    # Quantized all-reduce for large bf16 TP collectives (Atlas A2).
+    # "1": int8-quantize large all-reduces to halve communication volume.
+    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE": lambda: _strict_binary_env("VLLM_ASCEND_QUANTIZED_ALL_REDUCE"),
+    # Minimum numel for a bf16 all-reduce to be quantized (default 4 MiB of
+    # bf16 payload). Smaller messages stay on the bf16 path because they are
+    # latency-bound.
+    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": lambda: os.getenv(
+        "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", None
+    ),
 }
 
 # end-env-vars-definition
