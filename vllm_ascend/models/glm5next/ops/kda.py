@@ -5,7 +5,7 @@
 import torch
 
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
-from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda import KDA_CHUNK_SIZE, run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 KDA_MAX_RECURRENT_TOKENS = 8
@@ -73,18 +73,48 @@ def chunk_kda(
         has_initial_state = has_initial_state[metadata.keep_meta]
     initial_state = gather_initial_states(state, state_indices, has_initial_state).float().contiguous()
     cu_seqlens = metadata.cu_seqlens_host if metadata.cu_seqlens_kern is None else metadata.cu_seqlens_kern
+    chunk_indices = metadata.chunk_indices_chunk64_host
+    beta = raw_beta.float().sigmoid()
+    lengths = [end - start for start, end in zip(cu_seqlens, cu_seqlens[1:])]
+    padded_cu_seqlens = None
+    if any(length % KDA_CHUNK_SIZE for length in lengths):
+        # FLA's partial chunks can produce incorrect outputs. Neutral tokens
+        # complete each chunk without updating or decaying its final state.
+        parts: list[list[torch.Tensor]] = [[] for _ in range(5)]
+        padded_cu_seqlens = [0]
+        chunk_indices = []
+        for sequence, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
+            length = end - start
+            padding = -length % KDA_CHUNK_SIZE
+            padded_cu_seqlens.append(padded_cu_seqlens[-1] + length + padding)
+            chunk_indices.extend(
+                index for chunk in range((length + padding) // KDA_CHUNK_SIZE) for index in (sequence, chunk)
+            )
+            for index, tensor in enumerate((q, k, v, raw_gate, beta)):
+                part = tensor[:, start:end]
+                if padding:
+                    shape = (tensor.shape[0], padding, *tensor.shape[2:])
+                    dummy = tensor.new_full(shape, float("-inf") if index == 3 else 0)
+                    part = torch.cat((part, dummy), dim=1)
+                parts[index].append(part)
+        q, k, v, raw_gate, beta = (torch.cat(part, dim=1) for part in parts)
+        cu_seqlens = padded_cu_seqlens
     output, final_state = run_chunk_kda(
         q,
         k,
         v,
         raw_gate,
-        raw_beta.float().sigmoid(),
+        beta,
         initial_state,
         cu_seqlens,
-        metadata.chunk_indices_chunk64_host,
+        chunk_indices,
         a_log,
         dt_bias,
         lower_bound=lower_bound,
     )
+    if padded_cu_seqlens is not None:
+        output = torch.cat(
+            [output[:, start : start + length] for start, length in zip(padded_cu_seqlens, lengths)], dim=1
+        )
     scatter_states(state, final_state.to(state.dtype), state_indices)
     return output
