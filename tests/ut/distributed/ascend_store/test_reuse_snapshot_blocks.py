@@ -53,6 +53,7 @@ def worker():
     w._make_layerwise_full_key = lambda group, key: "full:" + key
     w._make_layerwise_partial_key = lambda r, group, block, end: f"{r.req_id}:snapshot:{block}:{end}"
     w._invalid_block_ids, w._invalid_block_ids_lock = set(), threading.Lock()
+    w._save_disabled = threading.Event()
     w.layerwise_max_transfer_blocks = 0
     w.m_store = Store()
     reset(w)
@@ -60,6 +61,7 @@ def worker():
 
 
 def reset(w):
+    w._step_load_keys = set()
     w._masked_runs_cache = {}
     w._step_keyinfo_cache, w._step_lease_result, w._step_exist_cache = {}, {}, {}
     w.layer_save_tasks, w.layer_load_tasks = [[], []], [[], []]
@@ -191,7 +193,8 @@ class SnapshotTests(unittest.TestCase):
             w._prepare_load_gvas([m])
         query.assert_called_once()
         sleep.assert_not_called()
-        self.assertEqual(w._invalid_block_ids, {0})
+        self.assertEqual(w._invalid_block_ids, {1})
+        self.assertFalse(m.can_save)
         self.assertFalse(m.load_keys)
 
     def test_partial_lease_retry_is_bounded(self):
@@ -217,7 +220,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(lease.call_count, 1 + expected_retries)
                 self.assertEqual(sleep.call_count, expected_retries)
                 self.assertTrue(all(call.args == (0.001,) for call in sleep.call_args_list))
-                self.assertEqual(w._invalid_block_ids, set() if recover else {0})
+                self.assertEqual(w._invalid_block_ids, set() if recover else {1})
                 self.assertEqual(bool(m.load_keys), recover)
 
     def test_other_data_planes_keep_their_save_range(self):

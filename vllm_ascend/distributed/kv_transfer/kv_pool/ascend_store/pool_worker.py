@@ -224,7 +224,11 @@ class KVPoolWorker:
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
+        self._save_disabled = threading.Event()
+        self._step_load_keys: set[str] = set()
+        self._closed = False
         self._invalid_block_ids: set[int] = set()
+        self._failed_requests: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self._retired_store_req_ids: set[str] = set()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
@@ -726,6 +730,25 @@ class KVPoolWorker:
             )
         return builders
 
+    def shutdown(self) -> None:
+        if self._closed:
+            return
+        threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
+        for thread in threads:
+            thread.stop()
+        for thread in threads:
+            if thread.is_alive():
+                thread.join()
+        try:
+            if self._step_load_keys:
+                result = self.m_store.batch_remove_lease(list(self._step_load_keys))
+                if result != 0:
+                    logger.error("AscendStore shutdown lease cleanup returned %s", result)
+                self._step_load_keys.clear()
+        finally:
+            self.m_store.close()
+        self._closed = True
+
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         """Accept the MultiConnector composite slot-release waiter.
 
@@ -774,6 +797,8 @@ class KVPoolWorker:
                     put_started_keys_lock=self._put_started_keys_lock,
                     session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
                     raise_on_transfer_failure=self.layerwise_offload,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -839,6 +864,9 @@ class KVPoolWorker:
                     self.num_layers,
                     layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
                 )
+            self.kv_recv_thread.save_disabled = self._save_disabled
+            if self.kv_send_thread is not None:
+                self.kv_send_thread.save_disabled = self._save_disabled
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
@@ -1250,6 +1278,9 @@ class KVPoolWorker:
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
         self._attention_saved_layers = set()
+        self._save_disabled.clear()
+        if self.kv_recv_thread is not None:
+            self.kv_recv_thread.load_disabled.clear()
         self.process_layer_data(metadata.requests)
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
@@ -1302,12 +1333,14 @@ class KVPoolWorker:
                 # TP mismatch is restricted to non-hybrid, single-group KV.
                 group_block_size = self.grouped_block_size[0]
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
-                self._load_kv_tp_mismatch(
+                loaded = self._load_kv_tp_mismatch(
                     request.block_hashes,
                     request.block_ids_by_group[0],
                     token_len,
                     mask_num,
                 )
+                if loaded is False:
+                    self._record_failed_request(request)
                 continue
 
             addr_list = []
@@ -1373,6 +1406,11 @@ class KVPoolWorker:
                 time.perf_counter() - load_get_start,
                 len(key_list_c),
             )
+            if self.backend_name == "memcache" and (
+                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
+            ):
+                self._record_failed_request(request)
+                continue
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -1827,6 +1865,28 @@ class KVPoolWorker:
         return {k for k in unique_keys if step_cache.get(k, 0) != 1}
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
+        if not self.use_layerwise_transfer:
+            return
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            return
+        for request in requests:
+            if self._save_disabled.is_set():
+                break
+            if not request.can_save:
+                continue
+            if self._alloc_gvas_for_save_for_request([request]) is False:
+                logger.error("Memcache save preparation failed for %s", request.req_id)
+                self._save_disabled.set()
+        if self._save_disabled.is_set():
+            # batch_alloc may return a shared allocation. Stop this step's
+            # saves without deleting keys that another writer may have published.
+            for request in requests:
+                if self.layerwise_offload and request.can_save:
+                    self._record_failed_request(request)
+                request.can_save = False
+                request.save_keys = []
+
+    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -1840,9 +1900,9 @@ class KVPoolWorker:
         exists check to avoid re-transferring them.
         """
         if not self.use_layerwise_transfer:
-            return
+            return None
         if not self.can_put:
-            return
+            return None
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -1933,11 +1993,7 @@ class KVPoolWorker:
                         transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
                     )
                     if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
-                        raise RuntimeError(
-                            "MemCache batch_alloc returned unexpected number of GVAs: "
-                            f"expected={len(transfer_keys)}, "
-                            f"actual={len(transfer_gvas) if transfer_gvas is not None else 0}"
-                        )
+                        return False
                     if any(gva <= 0 for gva in transfer_gvas):
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
@@ -1954,6 +2010,8 @@ class KVPoolWorker:
                     for key, gva in zip(transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
+                    if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
+                        return False
 
                 partial_block_index = get_partial_block_index(
                     request.target_token_len,
@@ -1974,7 +2032,9 @@ class KVPoolWorker:
                         [alloc_size],
                         LAYERWISE_READ_LEASE_TTL_MS,
                     )
-                    partial_gva = allocated[0] if allocated else 0
+                    if not allocated or len(allocated) != 1:
+                        return False
+                    partial_gva = allocated[0]
                     if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
                         all_group_save_keys.append(partial_key)
                     elif partial_gva <= 0:
@@ -1985,6 +2045,8 @@ class KVPoolWorker:
                             partial_block_index,
                             partial_gva,
                         )
+                    if self.layerwise_offload and partial_gva <= 0:
+                        return False
                     request.partial_save_gva_per_group[group_id] = (
                         partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
                     )
@@ -2018,8 +2080,17 @@ class KVPoolWorker:
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]
                 request.gva_block_offset = 0
+        return None
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
+        for request in requests:
+            if self._prepare_load_gvas_for_request([request]) is False:
+                logger.error("Memcache load preparation failed for %s", request.req_id)
+                self._record_failed_request(request)
+                if request.load_spec is not None:
+                    request.load_spec.can_load = False
+
+    def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Fetch per-rank GVA and acquire read lease for the load path.
 
         memcache requires batch_copy (read) to find the blob in the per-process
@@ -2030,7 +2101,7 @@ class KVPoolWorker:
           2. Acquire a read lease and refresh the GVA while its allocation is pinned.
         """
         if not self.use_layerwise_transfer:
-            return
+            return None
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
@@ -2138,11 +2209,8 @@ class KVPoolWorker:
                 uncached = [k for k in keys if k not in ki_cache]
                 if uncached:
                     fetched_infos = self.m_store.batch_get_key_info(uncached, for_load=True)
-                    if len(fetched_infos) != len(uncached):
-                        raise RuntimeError(
-                            "MemCache key info check returned unexpected number of results: "
-                            f"expected={len(uncached)}, actual={len(fetched_infos)}"
-                        )
+                    if fetched_infos is None or len(fetched_infos) != len(uncached):
+                        return False
                     for k, ki in zip(uncached, fetched_infos):
                         ki_cache[k] = ki
                 key_infos = [ki_cache[k] for k in keys]
@@ -2179,13 +2247,12 @@ class KVPoolWorker:
                 new_lease_keys = [k for k in valid_keys if k not in lease_cache]
                 if new_lease_keys:
                     new_results = self.m_store.batch_add_lease(new_lease_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if len(new_results) != len(new_lease_keys):
-                        raise RuntimeError(
-                            "MemCache lease returned unexpected number of results: "
-                            f"expected={len(new_lease_keys)}, actual={len(new_results)}"
-                        )
+                    if new_results is None or len(new_results) != len(new_lease_keys):
+                        return False
                     for k, res in zip(new_lease_keys, new_results):
                         lease_cache[k] = res
+                        if res == 0:
+                            self._step_load_keys.add(k)
                 if valid_keys:
                     lease_results = [lease_cache[k] for k in valid_keys]
                     leased_keys = []
@@ -2199,13 +2266,12 @@ class KVPoolWorker:
                                     [partial_key],
                                     LAYERWISE_READ_LEASE_TTL_MS,
                                 )
-                                if len(retry_results) != 1:
-                                    raise RuntimeError(
-                                        "MemCache partial lease retry returned "
-                                        f"unexpected number of results: {len(retry_results)}"
-                                    )
+                                if retry_results is None or len(retry_results) != 1:
+                                    return False
                                 lease_res = retry_results[0]
                                 lease_cache[partial_key] = lease_res
+                                if lease_res == 0:
+                                    self._step_load_keys.add(partial_key)
                                 if lease_res != MEMCACHE_UNMATCHED_STATE:
                                     break
                         block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
@@ -2232,8 +2298,7 @@ class KVPoolWorker:
                 if leased_keys:
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
-                        self.m_store.batch_remove_lease([*all_group_load_keys, *leased_keys])
-                        raise RuntimeError("Memcache leased key-info response length mismatch")
+                        return False
                     for key, info in zip(leased_keys, leased_infos, strict=True):
                         index = keys.index(key)
                         gvas[index] = (
@@ -2242,32 +2307,8 @@ class KVPoolWorker:
                         if not gvas[index]:
                             invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
-                # Report invalid blocks to scheduler for recompute.
-                # Single-group models can safely report individual block IDs.
-                # Multi-group (hybrid) models must not report partial group
-                # failures, as the scheduler cannot handle inconsistent KV
-                # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
-                    if self.num_kv_cache_groups == 1:
-                        with self._invalid_block_ids_lock:
-                            self._invalid_block_ids.update(invalid_block_ids)
-                    else:
-                        leased_keys_to_release = list(
-                            dict.fromkeys(
-                                [
-                                    *all_group_load_keys,
-                                    *leased_keys,
-                                ]
-                            )
-                        )
-                        if leased_keys_to_release:
-                            self.m_store.batch_remove_lease(leased_keys_to_release)
-                        raise RuntimeError(
-                            "Layerwise multi-group KV load failed and cannot "
-                            "safely fall back to per-block recomputation: "
-                            f"request={request.req_id}, "
-                            f"failed_blocks={invalid_block_ids}"
-                        )
+                    return False
                 all_group_load_keys.extend(leased_keys)
 
                 logger.debug(
@@ -2300,6 +2341,7 @@ class KVPoolWorker:
                 request.load_block_gvas_by_group_np = all_group_load_gvas
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.load_gva_block_offset = 0
+        return None
 
     def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
         if not block_ids:
@@ -2635,6 +2677,9 @@ class KVPoolWorker:
         In multi-group mode, shared data is built per-group because each
         group has different block_ranges (different effective_block_size).
         """
+        for tasks in self.layer_save_tasks:
+            for task in tasks:
+                task.block_ranges = [br for br in task.block_ranges if br.request.can_save is not False]
         if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
             all_save_keys: list[str] = []
             for group_id in range(self.num_kv_cache_groups):
@@ -2867,12 +2912,33 @@ class KVPoolWorker:
         self._build_shared_load_data()
 
     def _check_hybrid_load_errors(self) -> None:
+        # Memcache reports invalid blocks through the existing scheduler policy.
+        if self.use_layerwise_transfer:
+            return
         # A hybrid block ID can belong to SWA, compressed KV or compressor
         # state. Do not feed partially restored state to the attention kernel.
         with self._invalid_block_ids_lock:
             if self._invalid_block_ids:
                 self._layer_load_aborted.set()
                 raise RuntimeError("Hybrid layerwise load failed; refusing incomplete KV/state")
+
+    def _record_failed_request(self, request: ReqMeta) -> None:
+        request.can_save = False
+        if self.num_kv_cache_groups > 1:
+            with self._invalid_block_ids_lock:
+                self._failed_requests.add(request.req_id)
+        else:
+            self._record_layerwise_invalid_blocks([block_id for block_id in request.block_ids if block_id > 0])
+        self._save_disabled.set()
+
+    def get_failed_requests(self) -> set[str]:
+        with self._invalid_block_ids_lock:
+            failed = self._failed_requests.copy()
+            self._failed_requests.clear()
+        for thread in (self.kv_send_thread, self.kv_recv_thread):
+            if thread is not None:
+                failed.update(thread.get_and_clear_failed_requests())
+        return failed
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
@@ -3385,12 +3451,12 @@ class KVPoolWorker:
         block_ids: list[int],
         token_len: int,
         mask_num: int,
-    ) -> None:
+    ) -> bool | None:
         keys, addrs, sizes, key_block_ids = self._build_tp_mismatch_keys_and_addrs(
             block_hashes, block_ids, token_len, mask_num
         )
         if not keys:
-            return
+            return None
         offset = self.tp_rank % len(keys)
         keys_c = keys[offset:] + keys[:offset]
         addrs_c = addrs[offset:] + addrs[:offset]
@@ -3408,6 +3474,8 @@ class KVPoolWorker:
             time.perf_counter() - load_get_start,
             len(keys_c),
         )
+        if self.backend_name == "memcache" and (ret is None or len(ret) != len(keys_c) or any(r != 0 for r in ret)):
+            return False
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
             with self._invalid_block_ids_lock:
@@ -3420,6 +3488,7 @@ class KVPoolWorker:
             "KV pool worker tp_mismatch get returned keys=%d",
             len(keys_c),
         )
+        return None
 
     def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> bool:
         send_thread = self.kv_send_thread
@@ -3564,6 +3633,13 @@ class KVPoolWorker:
         return True
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        if self.use_layerwise and self._step_load_keys:
+            if self.kv_recv_thread is not None:
+                self._drain_attention_transfers(full=True)
+            keys, self._step_load_keys = list(self._step_load_keys), set()
+            result = self.m_store.batch_remove_lease(keys)
+            if result != 0:
+                logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
         if self.kv_send_thread is not None:
@@ -3596,7 +3672,7 @@ class KVPoolWorker:
         done_recving = set()
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
-            if self.load_async:
+            if self.load_async and not self.use_layerwise:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
 
         logger.debug(

@@ -218,6 +218,12 @@ class MemcacheBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
+    def close(self) -> None:
+        if self.store is not None:
+            self.store.close()
+            self.store = None
+            self._store_initialized = False
+
     def ensure_initialized(self):
         if self._store_initialized:
             return
@@ -330,7 +336,8 @@ class MemcacheBackend(Backend):
         if not for_load:
             return infos
         if infos is None or len(infos) != len(keys):
-            raise RuntimeError("Memcache key-info response length mismatch")
+            logger.error("Memcache key-info response length mismatch")
+            return [None] * len(keys)
         rewarmed = False
         for key, info in zip(keys, infos, strict=True):
             # A missing key yields a None entry: there is no SSD object to
@@ -353,13 +360,15 @@ class MemcacheBackend(Backend):
             address = scratch.data_ptr()
             registered = self.store.register_buffer(address, size)
             if registered != 0:
-                raise RuntimeError(f"Memcache SSD rewarm buffer registration failed: result={registered}")
+                logger.error("Memcache SSD rewarm buffer registration failed: result=%s", registered)
+                return [None] * len(keys)
             try:
                 results = self.store.batch_get_into([key], [address], [size], MmcDirect.COPY_G2L.value)
             finally:
                 self.store.unregister_buffer(address, size)
             if results != [0]:
-                raise RuntimeError(f"Memcache SSD rewarm failed: key={key}, results={results}")
+                logger.error("Memcache SSD rewarm failed: key=%s, results=%s", key, results)
+                return [None] * len(keys)
             rewarmed = True
             logger.debug("Memcache layerwise SSD rewarm completed key=%s bytes=%d", key, size)
         return self.store.batch_get_key_info(keys) if rewarmed else infos
@@ -411,8 +420,13 @@ class MemcacheBackend(Backend):
         if self._lazy_init and not self._store_initialized:
             return [False] * len(keys)
         key_infos = self.batch_get_key_info(keys)
-        if len(key_infos) != len(keys):
-            raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
+        if key_infos is None or len(key_infos) != len(keys):
+            logger.error(
+                "Memcache readability query failed: expected=%d key infos, got=%s; treating as cache misses",
+                len(keys),
+                len(key_infos) if key_infos is not None else None,
+            )
+            return [False] * len(keys)
         readable = []
         for key_info in key_infos:
             if key_info is None:
@@ -442,11 +456,7 @@ class MemcacheBackend(Backend):
 
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        finish = getattr(self.store, "batch_write_finish", None)
-        if finish is None:
-            # Older MemCache releases publish writes directly in batch_copy.
-            return [0] * len(keys)
-        return finish(keys, results)
+        return self.store.batch_write_finish(keys, results)
 
     def get(
         self,
