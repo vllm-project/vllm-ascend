@@ -131,6 +131,28 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         else:
             self.attn_backend = AscendDSASWABackend
 
+        # These layers choose their backend here rather than through
+        # get_attn_backend_cls, so the platform's dtype check has to be asked from
+        # here as well. Only kv_cache_dtype and the device decide it. Imported
+        # here because the platform module pulls in the patch layer.
+        from vllm_ascend.platform import reject_unsupported_kv_cache_dtype
+
+        reject_unsupported_kv_cache_dtype(
+            self.attn_backend,
+            kv_cache_dtype,
+            lambda dtype: self.attn_backend.supports_combination(
+                self.head_size,
+                None,
+                dtype,
+                cache_config.block_size if cache_config is not None else None,
+                True,
+                False,
+                True,
+                False,
+                None,
+            ),
+        )
+
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
             cache_config is not None

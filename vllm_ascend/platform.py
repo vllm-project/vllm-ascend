@@ -63,6 +63,7 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
@@ -247,6 +248,14 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        backend = cls._select_attn_backend_cls(attn_selector_config)
+        # Upstream rejects a dtype no candidate backend accepts from
+        # get_valid_backends, which it calls here (vllm/platforms/rocm.py).
+        _check_selector_kv_cache_dtype(backend, attn_selector_config)
+        return backend
+
+    @classmethod
+    def _select_attn_backend_cls(cls, attn_selector_config) -> str:
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
@@ -986,6 +995,113 @@ def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
         and not vllm_config.use_v2_model_runner
     ):
         raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
+
+
+def _declares_kv_cache_dtypes(backend_cls: type[AttentionBackend]) -> bool:
+    """Whether a backend opts in by declaring the set itself.
+
+    Only backends that declare it are checked: the inherited upstream default is
+    a CUDA-oriented set that does not list the quantized dtypes Ascend uses, so
+    enforcing it would reject configurations that work today. Adoption is per
+    backend, DeepSeek V4 first.
+
+    The whole MRO counts, not ``__dict__`` alone, because the backends that need
+    this most are subclasses -- the DeepSeek sparse layers select
+    ``AscendDSAC4Backend`` / ``AscendDSAC128Backend`` / ``AscendDSASWABackend``,
+    none of which redeclare what ``AscendDSABackend`` already states.
+    """
+    from vllm.v1.attention.backend import AttentionBackend
+
+    return any(
+        "supported_kv_cache_dtypes" in klass.__dict__ for klass in backend_cls.__mro__ if klass is not AttentionBackend
+    )
+
+
+def reject_unsupported_kv_cache_dtype(backend_cls: type[AttentionBackend], cache_dtype: str, combination) -> None:
+    """Reject a KV cache dtype this backend does not accept on this device.
+
+    Upstream asks two questions and raises when neither is satisfied
+    (``AttentionBackend.validate_configuration``): ``supported_kv_cache_dtypes``
+    states what the backend can store at all, and ``supports_combination`` states
+    what this device can run. ``combination`` binds the second question's upstream
+    arguments to one call site and takes a dtype.
+
+    Only backends that declare the set are checked: the inherited upstream default
+    is a CUDA-oriented set that does not list the quantized dtypes Ascend uses, so
+    enforcing it would reject configurations that work today. Adoption is per
+    backend, DeepSeek V4 first.
+    """
+    if not _declares_kv_cache_dtypes(backend_cls):
+        return
+
+    def reason_for(dtype: str) -> str | None:
+        if not backend_cls.supports_kv_cache_dtype(dtype):
+            return "kv_cache_dtype not supported"
+        return combination(dtype)
+
+    reason = reason_for(cache_dtype)
+    if reason is None:
+        return
+
+    # List what this backend accepts *here*: the device narrows the declared set,
+    # and naming a dtype that was just refused would contradict the message.
+    supported = sorted(dtype for dtype in backend_cls.supported_kv_cache_dtypes if reason_for(dtype) is None)
+    hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+    raise ValueError(
+        f"KV cache dtype {cache_dtype!r} is not supported by the attention "
+        f"backend {backend_cls.__name__}. Reasons: {reason}.{hint}"
+    )
+
+
+def _selector_combination(backend_cls: type[AttentionBackend], attn_selector_config):
+    """Bind ``supports_combination``'s upstream arguments for the selector path.
+
+    Ascend reports no device capability, so that argument is left unset and a
+    backend that narrows per device reads the hardware profile itself.
+    """
+    return lambda kv_cache_dtype: backend_cls.supports_combination(
+        attn_selector_config.head_size,
+        attn_selector_config.dtype,
+        kv_cache_dtype,
+        attn_selector_config.block_size,
+        attn_selector_config.use_mla,
+        attn_selector_config.has_sink,
+        attn_selector_config.use_sparse,
+        attn_selector_config.use_mm_prefix,
+        None,
+    )
+
+
+def _check_selector_kv_cache_dtype(backend_path: str, attn_selector_config) -> None:
+    """Check the backend ``get_attn_backend_cls`` is about to hand back.
+
+    Upstream does this from ``Platform.get_valid_backends``, which
+    ``get_attn_backend_cls`` calls (see ``vllm/platforms/rocm.py``). Ascend selects
+    its backend with a lookup table, so the same check runs here.
+
+    DeepSeek V4 does not come through here -- its sparse layers pick their backend
+    themselves -- so they call ``reject_unsupported_kv_cache_dtype`` directly.
+    """
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    try:
+        backend_cls = resolve_obj_by_qualname(backend_path)
+    except ImportError:
+        # The backend's own module can need a package this install may not have:
+        # the FA3 backend imports ``flash_attn_npu_v3``. A backend that cannot be
+        # imported declares nothing here, and selecting it will report the missing
+        # package far more clearly than a dtype check could.
+        return
+    # Check the opt-in before reading anything off the selector config: the
+    # selector is not the only thing that calls this, and a backend that never
+    # declared the set must not make the config shape matter.
+    if not _declares_kv_cache_dtypes(backend_cls):
+        return
+    reject_unsupported_kv_cache_dtype(
+        backend_cls,
+        attn_selector_config.kv_cache_dtype,
+        _selector_combination(backend_cls, attn_selector_config),
+    )
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
