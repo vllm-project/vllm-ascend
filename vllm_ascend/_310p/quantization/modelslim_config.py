@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
     VocabParallelEmbedding,
 )
 
@@ -123,6 +124,21 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
                     f"Quantization type {quant_type} for VocabParallelEmbedding is not supported on 310P."
                 )
             from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
+
+            # A ParallelLMHead is mathematically a linear layer; when the checkpoint
+            # quantizes it (lm_head.weight != FLOAT), route it to the linear scheme so
+            # the int8 weight + deq_scale/input_scale params are created and loaded.
+            if isinstance(layer, ParallelLMHead) and not self.is_layer_skipped_ascend(
+                prefix, getattr(self, "packed_modules_mapping", {})
+            ):
+                scheme = create_scheme_for_layer(
+                    quant_description=self.quant_description,
+                    prefix=prefix,
+                    layer_type="linear",
+                    packed_modules_mapping=getattr(self, "packed_modules_mapping", {}),
+                )
+                logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "ParallelLMHead")
+                return AscendLinearMethod(scheme)
 
             logger.debug(
                 "Select AscendUnquantizedEmbeddingMethod310 for %s (layer=%s)", prefix, "VocabParallelEmbedding"

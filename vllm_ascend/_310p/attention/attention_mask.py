@@ -70,6 +70,20 @@ class AttentionMaskBuilder310:
         return mask
 
     @classmethod
+    def build_splitfuse_mask_nz_from_host(cls, q_list: list, c_list: list, device: torch.device):
+        """
+        Same mask as get_splitfuse_mask, but takes host-side query/context length
+        lists so it can run in the metadata builder (outside any graph capture);
+        get_splitfuse_mask's query_start_loc/seq_lens D2H reads are illegal there.
+        """
+        if cls.chunked_prefill_attn_mask is None:
+            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
+        pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
+        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
+        splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
+        return torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+
+    @classmethod
     def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
         """
         Generates and formats the attention mask for SplitFuse (chunked prefill) decoding.
