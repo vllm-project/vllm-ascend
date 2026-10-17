@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
+import importlib.util
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
-
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import GlobalTE
 
 _WAIT_SECONDS = 5
 
@@ -21,6 +21,15 @@ class TestGlobalTE(unittest.TestCase):
         modules = patch.dict("sys.modules", {"mooncake": mooncake, "mooncake.engine": engine_module})
         modules.start()
         self.addCleanup(modules.stop)
+
+        # ascend_store tests replace the canonical module during collection.
+        # Load the real source privately without changing their mocked module.
+        source = Path(__file__).parents[4] / "vllm_ascend/distributed/kv_transfer/utils/mooncake_transfer_engine.py"
+        spec = importlib.util.spec_from_file_location("_test_global_te", source)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.global_te_cls = module.GlobalTE
 
     def test_concurrent_getters_only_receive_initialized_engine(self):
         started = threading.Event()
@@ -37,7 +46,7 @@ class TestGlobalTE(unittest.TestCase):
             return 0
 
         engine.initialize.side_effect = initialize
-        global_te = GlobalTE()
+        global_te = self.global_te_cls()
         lock = threading.Lock()
 
         class ObservedLock:
@@ -77,7 +86,7 @@ class TestGlobalTE(unittest.TestCase):
     def test_failed_initialization_can_be_retried(self):
         for failure in (-1, RuntimeError("native initialization failed")):
             with self.subTest(failure=failure):
-                global_te = GlobalTE()
+                global_te = self.global_te_cls()
                 failed, recovered = MagicMock(), MagicMock()
                 if isinstance(failure, Exception):
                     failed.initialize.side_effect = failure
@@ -94,7 +103,7 @@ class TestGlobalTE(unittest.TestCase):
                     recovered.initialize.assert_called_once_with("localhost", "P2PHANDSHAKE", "ascend", "device0")
 
     def test_registration_uses_successfully_initialized_engine(self):
-        global_te = GlobalTE()
+        global_te = self.global_te_cls()
         with self.assertRaisesRegex(AssertionError, "must be initialized"):
             global_te.register_buffer([100], [64])
         engine = MagicMock()
