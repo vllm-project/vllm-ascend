@@ -2686,6 +2686,7 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            self._restore_c8_mxfp_loaded_v_scales(scheduler_output)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -4826,6 +4827,12 @@ class NPUModelRunner(GPUModelRunner):
         the scheduler assigns that physical page to full attention again.
         """
         self._c8_mxfp_v_scale_caches = []
+        kv_cache_config = getattr(self, "kv_cache_config", None)
+        group_by_layer = {
+            name: group_id
+            for group_id, group in enumerate(getattr(kv_cache_config, "kv_cache_groups", ()))
+            for name in group.layer_names
+        }
         for layer_name, cache in kv_caches.items():
             layer = self.compilation_config.static_forward_context.get(layer_name)
             if isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
@@ -4833,9 +4840,45 @@ class NPUModelRunner(GPUModelRunner):
                 assert value_scale_cache.shape[0] % self.kv_cache_config.num_blocks == 0
                 kernel_blocks_per_page = value_scale_cache.shape[0] // self.kv_cache_config.num_blocks
                 self._c8_mxfp_v_scale_caches.append(
-                    (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page)
+                    (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page, group_by_layer.get(layer_name))
                 )
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
+
+    def _restore_c8_mxfp_loaded_v_scales(self, scheduler_output: "SchedulerOutput") -> None:
+        """Prepare admitted Pull pages after receives and Mamba copies finish."""
+        caches = getattr(self, "_c8_mxfp_v_scale_caches", ())
+        if not caches:
+            return
+        req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
+        req_ids.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        row_updates = scheduler_output.block_table_updates or {}
+        req_ids.update(row_updates)
+        if not req_ids or scheduler_output.has_sync_kv_loads:
+            return
+        transfer_config = self.vllm_config.kv_transfer_config
+        if transfer_config is None or not transfer_config.is_kv_consumer or not has_kv_transfer_group():
+            return
+
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+
+        # Pull admits requests only after asynchronous receives complete.
+        # Other connectors/subclasses may defer loads until individual layers.
+        if type(get_kv_transfer_group()) is not MooncakePullConnector:
+            return
+        blocks_by_group: dict[int, set[int]] = {}
+        for req_id in req_ids:
+            if req_id in self.input_batch.req_id_to_index:
+                block_ids = row_updates.get(req_id, self.requests[req_id].block_ids)
+                for group_id, blocks in enumerate(block_ids):
+                    blocks_by_group.setdefault(group_id, set()).update(blocks)
+        zeroed = set(scheduler_output.new_block_ids_to_zero or ())
+        for value_scale, cache, ratio, group_id in caches:
+            if group_id is None:
+                continue
+            for block_id in sorted(blocks_by_group.get(group_id, set()) - zeroed):
+                if block_id > 0:
+                    start = block_id * ratio
+                    fill_mxfp_v_scale_cache(value_scale, cache[start : start + ratio])
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Prepare freshly assigned attention pages, including static C8 scales."""
@@ -4843,7 +4886,7 @@ class NPUModelRunner(GPUModelRunner):
         # MRV1 can receive new attention block IDs without a KV zeroer. Scale
         # restoration must still run: Mamba owns the same physical pages while
         # those IDs are assigned to its cache groups.
-        for value_scale, value_scale_cache, ratio in getattr(self, "_c8_mxfp_v_scale_caches", ()):
+        for value_scale, value_scale_cache, ratio, _ in getattr(self, "_c8_mxfp_v_scale_caches", ()):
             for block_id in block_ids:
                 start = block_id * ratio
                 fill_mxfp_v_scale_cache(value_scale, value_scale_cache[start : start + ratio])
