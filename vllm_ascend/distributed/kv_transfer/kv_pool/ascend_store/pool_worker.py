@@ -677,7 +677,8 @@ class KVPoolWorker:
         # register_kv_caches to include them; the key layer count must follow
         # or those extra layers are skipped during the save/load lifecycle. A
         # block-key store owns a stage-local object, so its count stays local
-        # under PP. A GVA store retains the global PP layout and offset below.
+        # under PP. GVA keys are also stage-specific; their byte layout below
+        # contains only the local descriptors.
         if self.use_block_key_layerwise or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
@@ -685,32 +686,16 @@ class KVPoolWorker:
             group_page_size = (
                 sum(self.group_block_len[group_id])
                 if self.use_block_key_layerwise
-                else self._global_group_alloc_size(group_id)
+                else self._group_alloc_size(group_id)
             )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
-            #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
-            #       hold different context shards of the same logical block
-            #       and share ONE region; shard d occupies the byte range
-            #       [d * shard_stride, (d+1) * shard_stride) where the stride
-            #       is the group byte total aligned up to the GVA hugepage
-            #       size (unaligned strides yield misaligned GVA addresses).
-            #       With put_step == 1 every rank owns a distinct region key
-            #       and no shard separation is needed.
+            # Memcache keys include the PP rank, so each stage starts at byte
+            # zero within its own object. Only DCP ranks sharing that key need
+            # disjoint, hugepage-aligned shard offsets. Global layer IDs remain
+            # unchanged for key construction and physical layer routing.
             layer_byte_offset = 0
-            gbl = self.group_block_len.get(group_id) or []
-            if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
-                per_layer = sum(gbl) // group_num_layers
-                if getattr(self, "pp_size", 1) > 1:
-                    layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
-                if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
-                    shard_idx = self.dcp_rank
-                    layer_byte_offset += shard_idx * shard_stride
+            if not self.use_block_key_layerwise and self.dcp_size > 1 and self.put_step > 1:
+                shard_stride = group_page_size // self.dcp_size
+                layer_byte_offset = self.dcp_rank * shard_stride
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
@@ -961,39 +946,22 @@ class KVPoolWorker:
         )
         return get_layerwise_physical_layer_index(layer_name, base_layers)
 
-    def _global_group_alloc_size(self, group_id: int) -> int:
-        # GLOBAL region size: per-layer bytes x TOTAL model layers.
-        # Under PP each stage sees a LOCAL group view (non-uniform splits make
-        # the per-stage layer counts differ) but all stages plus the decode
-        # side share ONE region per pool key, so the region must cover the
-        # union of all writers. vllm groups layers by identical cache spec,
-        # so per-layer bytes are uniform within a group.
+    def _group_alloc_size(self, group_id: int) -> int:
+        # Each PP stage owns a separate key. Sum the actual local descriptors:
+        # layers may have different numbers or dtypes of indexer tensors, so
+        # extrapolating an average layer size to the whole model is incorrect.
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
-        # Backward compatibility: when total_layers is not set (unit tests,
-        # partial init), fall back to the LOCAL sum (pre-PP behavior).
-        total_layers = getattr(self, "total_layers", None)
-        if not total_layers or not isinstance(total_layers, int):
-            return sum(gbl)
-        n_local = int(self.group_num_layers.get(group_id, 0))
-        if n_local <= 0:
-            return sum(gbl)
-        per_layer = (sum(gbl) + n_local - 1) // n_local
-        n_global = max(total_layers, int(self.num_layers), n_local)
-        # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
-        # e.g. MLA) hold different context shards of the same logical block
-        # and share ONE region, so the region must cover all shards. The
-        # per-shard stride is the group byte total aligned up to the GVA
-        # hugepage size: hybrid DSA groups have non-uniform per-layer bytes,
-        # and an unaligned stride would yield misaligned GVA addresses that
-        # SDMA rejects. With put_step == 1 every rank owns a distinct region
-        # key and no shard separation is needed.
+        local_size = sum(gbl)
+        # DCP ranks sharing head_or_tp_rank (put_step>1, e.g. MLA) share
+        # one stage-specific object. Each context shard needs a hugepage-aligned
+        # stride; with put_step==1 the rank already owns a distinct key.
         if self.put_step > 1 and self.dcp_size > 1:
             gva_align = 2 * 1024 * 1024
-            shard_stride = (per_layer * n_global + gva_align - 1) // gva_align * gva_align
+            shard_stride = (local_size + gva_align - 1) // gva_align * gva_align
             return shard_stride * self.dcp_size
-        return per_layer * n_global
+        return local_size
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
@@ -1861,7 +1829,7 @@ class KVPoolWorker:
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
                 effective_block_size = self.grouped_block_size[group_id]
-                alloc_size = self._global_group_alloc_size(group_id)
+                alloc_size = self._group_alloc_size(group_id)
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
 
                 save_start_block = request.save_start_token // effective_block_size
