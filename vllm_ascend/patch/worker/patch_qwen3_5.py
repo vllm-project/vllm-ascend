@@ -213,6 +213,8 @@ if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY)
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
+    _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention.get_state_dtype
+    _GDN_PATCH_TARGET.get_kv_cache_spec = AscendGatedDeltaNetAttention.get_kv_cache_spec
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
     @wraps(_GDN_ORIGINAL_INIT)

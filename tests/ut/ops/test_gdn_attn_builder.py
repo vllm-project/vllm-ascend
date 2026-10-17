@@ -250,6 +250,46 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
+def test_recover_metadata_snapshots_mixed_request_rows(monkeypatch):
+    monkeypatch.setattr(ascend_gdn_attn_builder, "is_gdn_recover_enabled", lambda: True)
+    builder = _make_builder(device=torch.device("cpu"), num_heads=32, num_speculative_tokens=3)
+    common = create_common_attn_metadata(BatchSpec(seq_lens=[20, 8, 30], query_lens=[2, 8, 4]), 16, torch.device("cpu"))
+    # Force a one-slot recover table and leave a prefill between spec rows.
+    common.block_table_tensor = torch.tensor([[5], [9], [2]], dtype=torch.int32)
+    accepted = torch.tensor([4, 1, 2], dtype=torch.int32)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=torch.tensor([1, -1, 3], dtype=torch.int32),
+    )
+    assert isinstance(metadata, ascend_gdn_attn_builder.AscendGDNRecoverMetadata)
+    assert metadata.recover_request_rows.tolist() == [0, 2]
+    assert metadata.recover_state_indices.tolist() == [5, 2]
+    assert metadata.recover_query_offsets.tolist() == [0, 2, 6]
+    assert metadata.num_accepted_tokens.tolist() == [1, 1]
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.num_accepted_tokens.tolist() == [1, 1]
+    common.block_table_tensor.fill_(99)
+    metadata.spec_query_start_loc.fill_(0)
+    builder.spec_sequence_indices_cpu.fill_(0)
+    assert metadata.recover_request_rows.tolist() == [0, 2]
+    assert metadata.recover_state_indices.tolist() == [5, 2]
+    assert metadata.recover_query_offsets.tolist() == [0, 2, 6]
+
+
+@pytest.mark.parametrize("draft_counts", [None, torch.tensor([-1, -1], dtype=torch.int32)])
+def test_recover_metadata_without_spec_rows(monkeypatch, draft_counts):
+    monkeypatch.setattr(ascend_gdn_attn_builder, "is_gdn_recover_enabled", lambda: True)
+    _, _, metadata = _build_attn_metadata(
+        BatchSpec(seq_lens=[20, 30], query_lens=[1, 1]),
+        num_speculative_tokens=3,
+        num_decode_draft_tokens_cpu=draft_counts,
+    )
+    assert metadata.recover_state_indices is None
+    assert metadata.recover_query_offsets is None
+    assert metadata.recover_request_rows is None
+
+
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
