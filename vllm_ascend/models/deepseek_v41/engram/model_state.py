@@ -84,7 +84,18 @@ class EngramModelState(AscendModelState):
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self._replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        # PCP's DualChunkSwap represents every scheduled prefill request with
+        # up to two rank-local rows. Match the local attention batch capacity;
+        # _replay_start_np remains scheduler-indexed at max_num_reqs.
+        replay_metadata_capacity = self.max_num_reqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            replay_metadata_capacity *= 2
+        self._replay_start = CpuGpuBuffer(
+            replay_metadata_capacity,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=False,
+        )
         self._replay_groups: tuple[int, torch.Tensor] | None = None
         layers = getattr(model, "decoder_replay_layers", None)
         self.decoder_replay = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
