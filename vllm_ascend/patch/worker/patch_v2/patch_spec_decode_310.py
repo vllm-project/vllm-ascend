@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_decode_inputs_cpu,
@@ -17,6 +16,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 )
 from vllm_ascend.worker.v2 import aclgraph_utils as aclgraph_utils_mod
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
+from vllm_ascend.worker.v2.spec_decode.upstream import ar_speculator_module as ar_speculator
 
 ar_speculator.prepare_prefill_inputs = prepare_prefill_inputs_cpu
 ar_speculator.prepare_decode_inputs = prepare_decode_inputs_cpu

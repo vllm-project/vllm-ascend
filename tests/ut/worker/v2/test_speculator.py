@@ -6,14 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
@@ -21,6 +22,7 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     gather,
     torch_gather_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.upstream import AutoRegressiveSpeculator
 
 
 def test_calc_next_seq_lens_cpu():
@@ -209,6 +211,58 @@ def test_generate_draft_skips_update_without_attn_metadata():
     with patch.object(AutoRegressiveSpeculator, "_generate_draft"):
         speculator._generate_draft(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
+
+
+@pytest.mark.parametrize("k", [0, 1, 2, 4])
+def test_propose_forwards_runtime_draft_width(k):
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.replicated_pcp = False
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.torch_gather_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch.object(AutoRegressiveSpeculator, "propose") as propose,
+    ):
+        speculator.propose(*[object() for _ in range(11)], num_speculative_tokens=k)
+    assert propose.call_args.kwargs["num_speculative_tokens"] == k
+
+
+@pytest.mark.parametrize("k", [2, 4])
+def test_decode_and_input_update_use_runtime_width(k):
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator._update_decode_attn_metadata = MagicMock()
+    batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.NONE)
+    with (
+        patch.object(AutoRegressiveSpeculator, "_multi_step_decode") as decode,
+        patch.object(AutoRegressiveSpeculator, "_generate_draft") as generate,
+    ):
+        speculator._multi_step_decode(2, False, batch_desc, None, None, k)
+        speculator._generate_draft(2, 2, None, None, None, CUDAGraphMode.NONE, k)
+    assert decode.call_args.kwargs["num_speculative_steps"] == k
+    assert generate.call_args.kwargs["num_speculative_steps"] == k
+
+
+@pytest.mark.parametrize("k", [1, 2, 4])
+@pytest.mark.skipif(vllm_version_is("0.30.0"), reason="Runtime K requires upstream #57053")
+def test_eager_decode_executes_only_selected_draft_steps(k):
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.num_speculative_steps = 4
+    speculator.input_buffers = SimpleNamespace(positions=torch.zeros(2), query_start_loc=torch.arange(3))
+    speculator.idx_mapping = torch.arange(2)
+    speculator.current_draft_step = torch.tensor(0)
+    speculator._generate_draft = MagicMock()
+    speculator._multi_step_decode(2, True, SimpleNamespace(cg_mode=CUDAGraphMode.NONE, num_tokens=2), None, None, k)
+    assert speculator._generate_draft.call_count == k - 1
+    assert all(call.kwargs["num_speculative_steps"] == k for call in speculator._generate_draft.call_args_list)
 
 
 def test_multi_step_decode_full_graph():
@@ -417,6 +471,33 @@ def test_build_draft_attn_metadatas_decode_updates_each_step():
     assert speculator._update_decode_attn_metadata.call_count == 2
 
 
+def test_decode_graph_updates_only_selected_metadata_steps():
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft": object()})
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator.input_batch = SimpleNamespace(num_reqs=2)
+    steps = [{"draft": object()} for _ in range(3)]
+    speculator._init_decode_draft_attn_metadatas = MagicMock(return_value=steps)
+    speculator._update_decode_attn_metadata = MagicMock()
+    for k in (2, 4, 2):
+        speculator._update_decode_attn_metadata.reset_mock()
+        assert speculator.build_draft_attn_metadatas(4, 4, False, k) == steps[: k - 1]
+        assert speculator._update_decode_attn_metadata.call_count == k - 1
+
+
+@pytest.mark.parametrize("k", [2, 4])
+def test_fia_params_match_selected_width(k):
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.use_dcp = False
+    speculator.num_speculative_steps = 4
+    speculator.max_model_len = 30
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
+    params = speculator.build_fia_params(3, {"draft": SimpleNamespace(block_tables=torch.zeros((3, 2)))}, False, k)
+    assert len(params) == k - 1
+    assert params[-1]["actual_seq_lengths_kv"] == [10 + k - 1, 30, 0]
+
+
 def test_init_decode_draft_attn_metadatas_sparse_attention():
     """Test draft decode metadata initialization for sparse attention."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
@@ -581,6 +662,7 @@ def test_capture_multi_step_captures_decode():
     speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 3
+    speculator.speculative_config = SimpleNamespace(uses_dynamic_speculative_decoding=lambda: True)
     with (
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
@@ -594,6 +676,7 @@ def test_capture_multi_step_captures_decode():
         speculator.capture()
     speculator.prefill_cudagraph_manager.capture.assert_called_once()
     speculator.decode_cudagraph_manager.capture.assert_called_once()
+    assert speculator.decode_cudagraph_manager.capture.call_args.kwargs["specialize_spec_tokens"] is True
 
 
 def test_propose_replicated_pcp_disables_dp_sync():
