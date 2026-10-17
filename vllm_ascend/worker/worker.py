@@ -24,6 +24,7 @@ from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -127,6 +128,21 @@ else:
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
     )
+
+# vLLM #57516 reclaims cached memory inside `load_model` via
+# `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable memory pool
+# `torch.npu.empty_cache()` trips "captures_underway.empty()", so on main
+# neutralize it while weights load; the pool is reclaimed by sleep()/wake_up().
+if vllm_version_is("0.31.0"):
+
+    def _load_model_empty_cache_context() -> AbstractContextManager:
+        return nullcontext()
+
+else:
+
+    def _load_model_empty_cache_context() -> AbstractContextManager:
+        return patch("torch.npu.empty_cache", lambda: None)
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -920,11 +936,13 @@ class NPUWorker(WorkerBase):
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
-
             context = nullcontext()  # type: ignore
 
-        with context, set_current_vllm_config(self.vllm_config):
+        empty_cache_context = (
+            _load_model_empty_cache_context() if self.vllm_config.model_config.enable_sleep_mode else nullcontext()
+        )
+
+        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
