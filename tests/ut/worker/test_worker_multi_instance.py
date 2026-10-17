@@ -284,7 +284,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result), self.assertRaises(AssertionError) as ctx:
+        with self._patch_memory_profiling(profile_result), self.assertRaises(ValueError) as ctx:
             worker.determine_available_memory()
 
         self.assertIn("Error in memory profiling", str(ctx.exception))
