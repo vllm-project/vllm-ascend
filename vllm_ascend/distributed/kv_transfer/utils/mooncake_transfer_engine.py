@@ -21,11 +21,12 @@ class GlobalTE:
                             "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                             "to run vLLM with MooncakeConnector."
                         ) from e
-                    self.transfer_engine = TransferEngine()
+                    engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
-                    ret_value = self.transfer_engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
+                    ret_value = engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
                     if ret_value != 0:
                         raise RuntimeError(f"TransferEngine initialization failed with ret_value: {ret_value}")
+                    self.transfer_engine = engine
         return self.transfer_engine
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
