@@ -149,6 +149,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls():
         return AscendSFAIndexerMetadataBuilder

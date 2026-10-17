@@ -97,7 +97,14 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        return uses_compressed_cache or has_state_group
+        # DSV41 SWA bounded replay: the decoder cannot rebuild a loaded window,
+        # so it recomputes the last token and the prefiller must lay it out.
+        has_bounded_replay = any(
+            isinstance(getattr(spec, "prefix_replay_tokens", 0), int) and getattr(spec, "prefix_replay_tokens", 0) > 0
+            for group_specs in self.group_unique_specs
+            for spec in group_specs
+        )
+        return uses_compressed_cache or has_state_group or has_bounded_replay
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
@@ -157,11 +164,15 @@ class MooncakeBaseConnectorScheduler:
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """Drop the last P-side prompt token for stateful model transfer."""
         params = request.kv_transfer_params
+        # A request that skips reading the prefix cache loads nothing on the
+        # decoder, which recomputes its whole prompt.
+        skip_prefix_cache = getattr(request, "get_skip_reading_prefix_cache", None)
         if (
             params is None
             or not self.need_truncate
             or params.get("_p_side_truncated")
             or request.num_prompt_tokens <= 1
+            or (skip_prefix_cache is not None and skip_prefix_cache())
         ):
             return
 

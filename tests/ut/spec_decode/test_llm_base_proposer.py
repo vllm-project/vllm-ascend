@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 #
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
@@ -30,6 +31,7 @@ from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -181,15 +183,27 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 789
 
+    def test_kimi_k25_uses_config_image_token_id(self):
+        config = SimpleNamespace(
+            image_token_id=123,
+            image_token_index=456,
+            media_placeholder_token_id=789,
+        )
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "KimiK25ForConditionalGeneration", config
+        )
+
+        assert image_token_index == (789 if vllm_version_is("0.31.0") else 123)
+
     @pytest.mark.parametrize(
         "model_name",
         [
-            "KimiK25ForConditionalGeneration",
             "KimiK3ForConditionalGeneration",
             "AscendKimiK3ForConditionalGeneration",
         ],
     )
-    def test_kimi_uses_media_placeholder_token_id(self, model_name: str):
+    def test_kimi_k3_uses_media_placeholder_token_id(self, model_name: str):
         config = SimpleNamespace(
             image_token_id=123,
             image_token_index=456,

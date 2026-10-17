@@ -312,6 +312,10 @@ class AscendIndexerKPoolBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
@@ -455,6 +459,10 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:

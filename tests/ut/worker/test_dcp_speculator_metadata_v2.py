@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# mypy: ignore-errors
 """Exercise the DSpark/MTP entry points, not just the length helper."""
 
 from contextlib import contextmanager, nullcontext
@@ -11,13 +12,13 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
@@ -140,9 +141,23 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
                 seq_lens_cpu = common.seq_lens
             return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
 
-    spec.attn_groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: RecordingBuilder(), layer_names=["draft.layer"])]
-    ]
+    def _make_group() -> SimpleNamespace:
+        builder = RecordingBuilder()
+        return SimpleNamespace(
+            get_metadata_builder=lambda ubatch_id=0: builder,
+            layer_names=["draft.layer"],
+            build_metadata=lambda common_attn_metadata, ubatch_idx=0, common_prefix_len=0, **kwargs: builder.build(
+                common_prefix_len, common_attn_metadata
+            ),
+            build_metadata_for_cudagraph_capture=lambda common_attn_metadata, ubatch_idx=0: builder.build(
+                0, common_attn_metadata
+            ),
+            build_metadata_for_drafting=lambda common_attn_metadata, draft_index=0: builder.build(
+                0, common_attn_metadata
+            ),
+        )
+
+    spec.attn_groups = [[_make_group()]]
 
     def prepare_device(out, seq_lens, num_reqs, size, rank, interleave):
         out.zero_()

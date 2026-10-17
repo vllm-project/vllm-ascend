@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# mypy: ignore-errors
 """Regression tests for the hybrid coordinator MTP + prefix-cache fix.
 
 The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
@@ -49,6 +50,7 @@ from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 HASH_BLOCK_SIZE = 128
 
@@ -77,12 +79,16 @@ class _FakeBlockPool:
 
 
 class _FakeFAManager:
+    supports_fine_grained_hash_lookup = False
+
     def __init__(self, **kwargs):
         self.use_eagle = False
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
+    supports_fine_grained_hash_lookup = False
+
     def __init__(self, **kwargs):
         self.use_eagle = False
         self.block_size = kwargs["kv_cache_spec"].block_size
@@ -334,10 +340,14 @@ def test_standard_lookup_skips_drop_on_standalone():
 
 def test_per_group_lookup_drops_last_block_on_consumer():
     coordinator = _make_lookup_coordinator(producer=False)
-    _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
+    # Enough hashes for the EAGLE margin to fit inside the offered lookup.
+    block_hashes = ["hash"] * 32
+    _, hit_lengths = coordinator.find_longest_cache_hit_per_group(block_hashes, 2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
-    assert hit_lengths == (2048, 2048)
+    # vLLM main extends the EAGLE group's lookup by one block before the drop.
+    fa_expected = 2048 + coordinator.hash_block_size if not vllm_version_is("0.31.0") else 2048
+    assert hit_lengths == (fa_expected, 2048)
 
 
 def test_per_group_lookup_skips_drop_on_producer():

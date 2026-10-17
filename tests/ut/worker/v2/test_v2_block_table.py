@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
@@ -9,6 +10,7 @@ import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 _TRITON_BLOCK_SIZE = 1024
@@ -21,14 +23,22 @@ def _parent_init(
     max_num_batched_tokens,
     max_num_blocks_per_group,
     device,
-    kernel_block_sizes,
-    cp_size,
-    cp_rank,
-    cp_interleave,
+    *args,
+    kernel_block_sizes=None,
+    cp_size=1,
+    cp_rank=0,
+    cp_interleave=1,
     slot_mapping_enabled=None,
+    dcp_sharded=None,
 ):
     self.block_sizes = block_sizes
-    self.kernel_block_sizes = kernel_block_sizes
+    if args:
+        kernel_block_sizes = args[0]
+        cp_size = args[1] if len(args) > 1 else cp_size
+        cp_rank = args[2] if len(args) > 2 else cp_rank
+        cp_interleave = args[3] if len(args) > 3 else cp_interleave
+    if kernel_block_sizes is not None:
+        self.kernel_block_sizes = kernel_block_sizes
     self.num_kv_cache_groups = len(block_sizes)
     self.max_num_batched_tokens = max_num_batched_tokens
     self.device = device
@@ -198,7 +208,8 @@ def test_init_block_table_layout_tensors_builds_distinct_sizes():
     tables._slot_mapping_enabled = [True, False]
     tables.init_block_table_layout_tensors()
 
-    assert torch.equal(tables.kernel_block_sizes_tensor, torch.tensor([8, 8], dtype=torch.int32))
+    if vllm_version_is("0.31.0"):
+        assert torch.equal(tables.kernel_block_sizes_tensor, torch.tensor([8, 8], dtype=torch.int32))
     assert torch.equal(tables.block_sizes_tensor, torch.tensor([16, 32], dtype=torch.int32))
     assert tables.block_sizes_tensor.device.type == "cpu"
 

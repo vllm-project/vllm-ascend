@@ -274,6 +274,12 @@ class KpoolTailManager(FullAttentionManager):
         assert not new_computed_blocks, "Tail blocks cannot be shared through prefix caching."
 
     def allocate_external_computed_blocks(
-        self, request_id: str, num_local_computed_tokens: int, num_external_computed_tokens: int
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
+        # `record_for_zeroing` (vLLM main) only suppresses the base manager's
+        # zeroing bookkeeping; this private ring block is never zeroed here.
         self.allocate_new_blocks(request_id, num_local_computed_tokens + num_external_computed_tokens, 0)

@@ -23,11 +23,15 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
-from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
+from vllm_ascend.ops.triton.v2.sample.sampling_mask import (
+    sampling_mask_from_logits_npu,
+    sampling_mask_from_logits_npu_main,
+)
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
@@ -72,7 +76,11 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
 # Avoid excessive UB allocation for strided vocab-dimension loads.
-output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
+if vllm_version_is("0.31.0"):
+    output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
+else:
+    # vLLM main adds cu_num_logits and multiple output slots per request.
+    output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu_main)
 # TODO: Remove after the new Q4 Triton-Ascend release is available.
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.

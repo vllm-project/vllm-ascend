@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,7 @@ from vllm.config.compilation import CompilationMode
 from vllm.config.vllm import VllmConfig
 
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_use_v2_model_runner_is_driven_by_ascend_default():
@@ -80,4 +82,8 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
     )
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
     # Spec+PP is natively supported; unrelated upstream guards still apply.
-    assert unsupported == (["sequence parallelism"] if enable_sp else [])
+    if not vllm_version_is("0.31.0"):
+        # vLLM main removed the sequence-parallel pass, so the guard is gone.
+        assert unsupported == []
+    else:
+        assert unsupported == (["sequence parallelism"] if enable_sp else [])

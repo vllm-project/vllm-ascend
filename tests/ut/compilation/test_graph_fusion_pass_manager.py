@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -36,7 +37,9 @@ class TestGraphFusionPassManagerConfig(TestBase):
     def test_fuse_gemm_comms_registers_pattern_matcher_pass(self, mock_platform):
         vllm_config = VllmConfig()
         vllm_config.model_config = MagicMock(dtype=torch.bfloat16)
-        vllm_config.compilation_config.pass_config.fuse_gemm_comms = True
+        # vLLM main dropped the field from PassConfig; the manager reads it
+        # defensively, so exercise it with a lightweight config object.
+        vllm_config.compilation_config.pass_config = SimpleNamespace(fuse_gemm_comms=True)
         vllm_config.additional_config = {
             "ascend_compilation_config": {
                 "fuse_norm_quant": "false",

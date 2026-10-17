@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 #
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
@@ -15,6 +16,7 @@
 
 import json
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +24,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.sharded_state_loader_310p import ShardedStateLoader310
+from vllm_ascend.utils import vllm_version_is
 
 
 class MockQuantConfig:
@@ -61,7 +64,16 @@ class TestShardedStateLoader310(TestBase):
         mock_tensor = MagicMock(spec=torch.Tensor)
 
         model = MockModel()
+        render_patch = (
+            nullcontext()
+            if vllm_version_is("0.31.0")
+            else patch(
+                "vllm.model_executor.model_loader.ShardedStateLoader._render_default_pattern",
+                return_value="model-rank-0-part-0.safetensors",
+            )
+        )
         with (
+            render_patch,
             patch.object(model, "state_dict", return_value={"linear.weight": mock_tensor}),
             tempfile.TemporaryDirectory() as tmpdir,
         ):

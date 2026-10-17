@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 
 from inspect import signature
@@ -12,6 +13,7 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
@@ -59,6 +61,18 @@ def make_request(backend: str):
     )
 
 
+def _allow_guidance_tokenizer(monkeypatch):
+    # vLLM main validates the guidance tokenizer inside
+    # `_validate_structured_outputs`; 0.31.0 has no such gate to bypass.
+    if vllm_version_is("0.31.0"):
+        return
+    monkeypatch.setattr(
+        backend_guidance.GuidanceBackend,
+        "is_tokenizer_supported",
+        staticmethod(lambda tokenizer: True),
+    )
+
+
 def validate_structured_outputs(params, config):
     original_validate = getattr(
         SamplingParams,
@@ -71,6 +85,8 @@ def validate_structured_outputs(params, config):
 
 
 def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
+    _allow_guidance_tokenizer(monkeypatch)
+
     def fake_validate_xgrammar(sampling_params):
         schema = sampling_params.structured_outputs.json
         if schema.get("force_guidance"):
@@ -105,6 +121,7 @@ def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
 
 
 def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
+    _allow_guidance_tokenizer(monkeypatch)
     monkeypatch.setattr(
         backend_guidance,
         "has_guidance_unsupported_json_features",
@@ -126,6 +143,7 @@ def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
 
 
 def test_failed_first_validation_does_not_lock_config(monkeypatch):
+    _allow_guidance_tokenizer(monkeypatch)
     monkeypatch.setattr(
         backend_xgrammar,
         "validate_xgrammar_grammar",
