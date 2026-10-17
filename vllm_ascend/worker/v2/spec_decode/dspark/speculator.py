@@ -229,6 +229,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 target_attn_groups,
             )
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+            from vllm_ascend.worker.v2.dsa_pcp_metadata import bind_dspark_metadata_plan
+
+            bind_dspark_metadata_plan(self, target_attn_groups)
             # npu needs attn_backends to update full graph params in run_fullgraph.
             attn_backends: dict[str, type[AttentionBackend]] = {}
             active_layer_names = self.draft_attn_layer_names
