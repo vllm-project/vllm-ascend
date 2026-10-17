@@ -34,6 +34,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
+    AutoRegressiveSpeculator,
 )
 
 
@@ -270,10 +271,6 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
         # Call GPU AR generate_draft (sample + update_draft_inputs) without the
         # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-            AutoRegressiveSpeculator,
-        )
-
         AutoRegressiveSpeculator._generate_draft(
             self,
             num_reqs,

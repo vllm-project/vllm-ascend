@@ -95,6 +95,10 @@ class AscendMLABackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_MLA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls():
         dcp_enabled = enable_dcp()

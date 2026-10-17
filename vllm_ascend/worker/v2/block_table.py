@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendBlockTables(BlockTables):
@@ -48,23 +49,47 @@ class AscendBlockTables(BlockTables):
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
+        self.kernel_block_sizes = kernel_block_sizes
+        # Ascend kernels address kernel blocks directly, so keep the table
+        # split that vLLM main moved into AttentionGroup.
+        self.blocks_per_kv_block = [
+            block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
+        ]
         # Forward the per-group sharding selection when supplied by the caller.
         super_kwargs: dict[str, list[bool]] = {}
         if dcp_sharded is not None:
             super_kwargs["dcp_sharded"] = dcp_sharded
-        super().__init__(
-            block_sizes,
-            max_num_reqs,
-            max_num_batched_tokens,
-            max_num_blocks_per_group,
-            device,
-            kernel_block_sizes,
-            cp_size,
-            cp_rank,
-            cp_interleave,
-            slot_mapping_enabled=slot_mapping_enabled,
-            **super_kwargs,
-        )
+        if vllm_version_is("0.31.0"):
+            super().__init__(  # type: ignore[call-arg]
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+                slot_mapping_enabled=slot_mapping_enabled,
+                **super_kwargs,
+            )
+        else:
+            super().__init__(  # type: ignore[call-arg]
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                [
+                    num_blocks * blocks_per_kv_block
+                    for num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
+                ],
+                device,
+                cp_size=cp_size,
+                cp_rank=cp_rank,
+                cp_interleave=cp_interleave,
+                slot_mapping_enabled=slot_mapping_enabled,
+                **super_kwargs,
+            )
+        self.kernel_block_sizes_tensor = torch.tensor(kernel_block_sizes, dtype=torch.int32, device=device)
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
         # touched by one token tile. Use the smallest kernel block size to
@@ -88,6 +113,27 @@ class AscendBlockTables(BlockTables):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def append_block_ids(
+        self,
+        req_index: int,
+        new_block_ids: tuple[list[int], ...],
+        overwrite: bool,
+    ) -> None:
+        if not vllm_version_is("0.31.0"):
+            new_block_ids = tuple(
+                (
+                    [
+                        block_id * blocks_per_kv_block + offset
+                        for block_id in block_ids
+                        for offset in range(blocks_per_kv_block)
+                    ]
+                    if blocks_per_kv_block > 1
+                    else list(block_ids)
+                )
+                for block_ids, blocks_per_kv_block in zip(new_block_ids, self.blocks_per_kv_block)
+            )
+        super().append_block_ids(req_index, new_block_ids, overwrite)
 
     def compute_slot_mappings(
         self,

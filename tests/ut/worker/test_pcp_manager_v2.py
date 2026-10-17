@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -32,6 +33,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -127,7 +129,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
 
-def test_decode_sharding_does_not_add_a_parallel_config_field():
+def test_decode_sharding_derives_from_declared_fields():
     parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     parallel_config.worker_cls = "test-worker"
     config = SimpleNamespace(
@@ -150,7 +152,9 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
         hardware_profile.return_value.supports.return_value = False
         _setup_worker_and_scheduler(config, ascend_config)
 
-    assert not hasattr(parallel_config, "pcp_shard_decode_requests")
+    # vLLM main now exposes `ParallelConfig.pcp_shard_decode_requests`; Ascend's
+    # helper must keep deriving the same decision from the declared fields (and
+    # must survive `replace()` cloning).
     replace(parallel_config)
     assert is_pcp_decode_sharding_enabled(config) is True
 
@@ -1096,8 +1100,10 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.prompt_logprobs_worker = None
     # vLLM main added these ExecuteModelState fields.
     state_kwargs: dict = {}
-    state_kwargs["dp_sync"] = None
+    state_kwargs["dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"] = None
     state_kwargs["cudagraph_stats"] = None
+    if not vllm_version_is("0.31.0"):
+        state_kwargs["num_spec_tokens_to_schedule"] = 0
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -767,7 +768,7 @@ def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
 
     assert len(RecordingZeroer.calls) == 2
     assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
-    assert all(call["attn_groups"] == [group] for call in RecordingZeroer.calls)
+    assert all(call["attn_groups"][0].layer_names == group.layer_names for call in RecordingZeroer.calls)
     for component_id, call in enumerate(RecordingZeroer.calls):
         assert call["static_forward_context"] == {
             "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])

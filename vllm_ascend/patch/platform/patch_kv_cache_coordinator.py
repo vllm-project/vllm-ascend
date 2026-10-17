@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
 import sys
 from collections.abc import Mapping
 from copy import copy
@@ -35,6 +36,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
+
+# Loaded by name: the helpers below are added on vLLM main and must not be
+# statically imported on the release lane.
+_KV_CACHE_UTILS = importlib.import_module("vllm.v1.core.kv_cache_utils")
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -214,12 +220,28 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
-        )
+        if vllm_version_is("0.31.0"):
+            self.enable_partial_hash_hits = (
+                allow_partial_hash_hits
+                and dcp_world_size == 1
+                and any(
+                    isinstance(g.kv_cache_spec, MambaSpec)
+                    and g.kv_cache_spec.mamba_cache_mode == "align"
+                    and g.kv_cache_spec.block_size > hash_block_size
+                    for g in kv_cache_config.kv_cache_groups
+                )
+            )
+        else:
+            # vLLM main replaced the inline partial-hit check with a helper.
+            # Reach it through the module: the symbol does not exist on the
+            # pinned release tree.
+            partial_hash_hits_enabled = _KV_CACHE_UTILS.partial_hash_hits_enabled
+            self.enable_partial_hash_hits = allow_partial_hash_hits and partial_hash_hits_enabled(
+                kv_cache_config.kv_cache_groups,
+                hash_block_size,
+                dcp_world_size,
+                [type(manager) for manager in self.single_type_managers],
+            )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -413,14 +435,26 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 _max_length = curr_hit_length
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
                     # Eagle needs to match one more block and then pop the last.
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
-                    )
-                    _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
+                    if vllm_version_is("0.31.0"):
+                        eagle_margin = (
+                            self.hash_block_size
+                            if self.enable_partial_hash_hits
+                            and manager_cls.supports_fine_grained_hash_lookup
+                            and group_block_size > self.hash_block_size
+                            else group_block_size
+                        )
+                        _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
+                    else:
+                        eagle_proof_margin = _KV_CACHE_UTILS.eagle_proof_margin
+                        eagle_margin = eagle_proof_margin(
+                            group_block_size,
+                            self.hash_block_size,
+                            self.enable_partial_hash_hits and manager_cls.supports_fine_grained_hash_lookup,
+                        )
+                        _max_length = min(
+                            curr_hit_length + eagle_margin,
+                            len(block_hashes) * self.hash_block_size,
+                        )
                 hit_result = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
@@ -483,9 +517,28 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            lookup_length = max_cache_hit_length
+            if (
+                not vllm_version_is("0.31.0")
+                and use_eagle
+                and not self.skips_eagle_block_drop
+                and not isinstance(spec, MambaSpec)
+            ):
+                # Only extend when the drop actually runs; a suppressed drop
+                # would otherwise return a hit past the requested maximum.
+                eagle_proof_margin = _KV_CACHE_UTILS.eagle_proof_margin
+                eagle_margin = eagle_proof_margin(
+                    self._get_effective_block_size(spec),
+                    self.hash_block_size,
+                    self.enable_partial_hash_hits and manager_cls.supports_fine_grained_hash_lookup,
+                )
+                lookup_length = min(
+                    max_cache_hit_length + eagle_margin,
+                    len(block_hashes) * self.hash_block_size,
+                )
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
+                max_length=lookup_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,

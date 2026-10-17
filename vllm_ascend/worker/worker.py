@@ -110,6 +110,7 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -196,7 +197,8 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine = None
         self._weight_update_active = False
 
-        # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+        # FixMe: this is a patch to fix the issue caused by
+        # https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
@@ -599,7 +601,11 @@ class NPUWorker(WorkerBase):
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            # Mirror vLLM's gpu_worker: profiling must run under the active
+            # vLLM config so memory measurement (and the derived KV budget)
+            # matches the configured batch shapes.
+            with set_current_vllm_config(getattr(self, "vllm_config", None)):
+                self.model_runner.profile_run()
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -617,10 +623,16 @@ class NPUWorker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            # Mirror vLLM's gpu_worker: profiling must run under the active
+            # vLLM config so memory measurement (and the derived KV budget)
+            # matches the configured batch shapes.
+            set_current_vllm_config(getattr(self, "vllm_config", None)),
+        ):
             self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
@@ -863,7 +875,7 @@ class NPUWorker(WorkerBase):
         )
         return output
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -874,7 +886,7 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
 
         with context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -987,7 +999,13 @@ class NPUWorker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        if vllm_version_is("0.31.0"):
+            set_random_seed(self.model_config.seed)
+        else:
+            # Offset by the DP engine index so data-parallel ranks do not sample
+            # unseeded requests identically (bare test workers may omit the config).
+            parallel_config = getattr(self, "parallel_config", None)
+            set_random_seed(self.model_config.seed, getattr(parallel_config, "data_parallel_index", 0))
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
@@ -1213,6 +1231,18 @@ class NPUWorker(WorkerBase):
             # Connector construction must see loader-owned draft caches before
             # planning target layerwise scratch buffers or pool transfers.
             kv_cache_config.dspark_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
+        worker_cache_config = getattr(self, "cache_config", None)
+        if not vllm_version_is("0.31.0") and worker_cache_config is not None:
+            # vLLM main resolves prefix-cache granularity in the engine core and
+            # hands it to workers through the config; adopt it before connectors
+            # and the model runner read cache_config. Partial config doubles and
+            # bare-object tests may omit the fields entirely.
+            hash_block_size = getattr(kv_cache_config, "hash_block_size", None)
+            if hash_block_size is not None:
+                worker_cache_config.hash_block_size = hash_block_size  # type: ignore[attr-defined]
+            cache_hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
+            if cache_hit_alignment is not None:
+                worker_cache_config.cache_hit_alignment_tokens = cache_hit_alignment  # type: ignore[attr-defined]
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
@@ -1242,7 +1272,14 @@ class NPUWorker(WorkerBase):
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
             self.model_runner._init_kv_zero_meta()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1261,11 +1298,17 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
-                self.profiler.start()  # type: ignore[attr-defined]
+            # vLLM main threads per-session iteration bounds into the profiler;
+            # the 0.31.0 release keeps the zero-arg start(). `Any` keeps the
+            # call signature-clean under both trees' mypy passes.
+            profiler: Any = self.profiler
+            if vllm_version_is("0.31.0"):
+                profiler.start()
             else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+                profiler.start(
+                    delay_iterations=delay_iterations,
+                    max_iterations=max_iterations,
+                )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")

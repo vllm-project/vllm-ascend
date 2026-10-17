@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+import importlib
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -17,7 +18,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -30,12 +30,25 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+# Upstream renamed the AR speculator cudagraph module for the 0.32 line.
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+else:
+    _speculator_graph_module = importlib.import_module(
+        "vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils"
+        if vllm_version_is("0.31.0")
+        else "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils"
+    )
+    SpeculatorCudaGraphManager = _speculator_graph_module.SpeculatorCudaGraphManager
 
 
 class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
@@ -123,12 +136,19 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     max_query_len=desc.max_query_len or desc.uniform_token_count,
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
+                # vLLM main threads the dynamic-K step count into the captured
+                # call so its `_multi_step_decode` (which now requires it) is
+                # happy; the 0.31.0 release keeps the legacy signature.
+                forward_kwargs: dict = {}
+                if not vllm_version_is("0.31.0"):
+                    forward_kwargs["num_speculative_steps"] = getattr(self.vllm_config, "num_speculative_tokens", 0)
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
                     BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                     num_tokens_across_dp,
                     seq_lens_cpu_upper_bound,
+                    **forward_kwargs,
                 )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)

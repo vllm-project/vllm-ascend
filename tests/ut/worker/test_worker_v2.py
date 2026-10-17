@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -113,7 +114,7 @@ class TestNPUWorkerV2(TestBase):
         connector = mock_get_ec_transfer.return_value
         connector.start_worker_services.side_effect = lambda: events.append("ec")
         worker = self._make_worker_for_lifecycle_test()
-        worker.model_runner.load_model.side_effect = lambda: events.append("model")
+        worker.model_runner.load_model.side_effect = lambda **kwargs: events.append("model")
 
         worker.load_model()
 

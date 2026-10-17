@@ -369,6 +369,17 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+def _ascend_supports_kernel_block_size(backend, block_size: int) -> bool:
+    """Whether a backend accepts ``block_size`` as one of its kernel blocks."""
+    for supported in backend.get_supported_kernel_block_sizes():
+        if isinstance(supported, int):
+            if block_size == supported:
+                return True
+        elif block_size % supported.base == 0:
+            return True
+    return False
+
+
 class NPUModelRunner(GPUModelRunner):
     # vLLM #51718 describes compatible KV cache groups as views over one
     # standardized backing allocation. The default runner preserves that
@@ -1038,7 +1049,9 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
-            if self.cache_config.mamba_cache_mode == "all":
+            # Mamba cache mode "all" (and postprocess_mamba_all) was removed on
+            # vLLM main; it still exists on the v0.31.0 release.
+            if vllm_version_is("0.31.0") and self.cache_config.mamba_cache_mode == "all":
                 mamba_utils.postprocess_mamba_all(
                     scheduler_output,
                     self.kv_cache_config,
@@ -4447,10 +4460,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(
                     mc2_tokens_capacity, with_prefill=True, is_profile=True, randomize_inputs=randomize_inputs
                 )
-        if vllm_version_is("0.31.0"):
-            super().profile_run(randomize_inputs=randomize_inputs)
-        else:
-            super().profile_run()
+        super().profile_run(randomize_inputs=randomize_inputs)
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -4478,7 +4488,12 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
-    def load_model(self) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *,
+        model: nn.Module | None = None,
+    ) -> None:
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
             join_early_kernel_warmup,
             start_early_kernel_warmup,
@@ -4496,6 +4511,8 @@ class NPUModelRunner(GPUModelRunner):
 
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
+        if model is None and load_dummy_weights:
+            self.load_config.load_format = "dummy"
 
         if self.ascend_config.mix_placement:
             # TODO: Enabling the mix placement in deepseek_v2.py
@@ -4511,7 +4528,7 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
-            self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            self.model: nn.Module = model or get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -4719,6 +4736,8 @@ class NPUModelRunner(GPUModelRunner):
         kernel_block_sizes = prepare_kernel_block_sizes(
             kv_cache_config, self.attn_groups
         )
+        if not vllm_version_is("0.31.0"):
+            kernel_block_sizes = self.prefer_storage_block_sizes(kv_cache_config, kernel_block_sizes)
         self.kernel_block_sizes = kernel_block_sizes
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # The one replay window the KV cache groups agree on, 0 when nothing
@@ -6199,10 +6218,39 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
-    def may_reinitialize_input_batch(
+    def prefer_storage_block_sizes(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
+    ) -> list[int]:
+        """Restore Ascend's storage-block kernel size for compressed MLA groups.
+
+        vLLM main's ``prepare_kernel_block_sizes`` no longer prefers the
+        spec's storage block and stops splitting block-outermost packed
+        groups. Ascend attention kernels still address those physical pages,
+        so keep the release selection whenever the backends accept it.
+        """
+        for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if group_id >= len(self.attn_groups):
+                continue
+            spec = kv_cache_group.kv_cache_spec
+            if not isinstance(spec, AscendMLAAttentionSpec):
+                continue
+            storage_block_size = get_storage_block_size(spec)
+            if storage_block_size == spec.block_size:
+                continue
+            backends = [group.backend for group in self.attn_groups[group_id]]
+            supports = all(
+                _ascend_supports_kernel_block_size(backend, storage_block_size) for backend in backends
+            )
+            if supports:
+                kernel_block_sizes[group_id] = storage_block_size
+        return kernel_block_sizes
+
+    def may_reinitialize_input_batch(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
     ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
@@ -6211,7 +6259,11 @@ class NPUModelRunner(GPUModelRunner):
 
         Args:
             kv_cache_config: The KV cache configuration.
+            kernel_block_sizes: Kernel block sizes of the KV cache groups. vLLM
+                main resolves them inside the runner and calls without it.
         """
+        if kernel_block_sizes is None:
+            kernel_block_sizes = self.kernel_block_sizes
         non_encoder_groups = [
             group
             for group in kv_cache_config.kv_cache_groups
@@ -6351,7 +6403,11 @@ class NPUModelRunner(GPUModelRunner):
                     )
                 )
                 attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
+                    attn_backend,
+                    layer_names,
+                    kv_cache_spec,
+                    kv_cache_group_id,
+                    metadata_builders=attn_metadata_builders,
                 )
                 attn_groups.append(attn_group)
             return attn_groups
@@ -6609,7 +6665,13 @@ class NPUModelRunner(GPUModelRunner):
         """
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or self.compilation_config.pass_config.enable_sp)
+            and (
+                enable_dsa_cp()
+                or enable_sp(self.vllm_config)
+                # Removed from PassConfig on vLLM main; Ascend SP uses
+                # parallel_config.use_sequence_parallel_moe instead.
+                or getattr(self.compilation_config.pass_config, "enable_sp", False)
+            )
         )
 
     def _check_and_update_cudagraph_mode(
@@ -6637,17 +6699,33 @@ class NPUModelRunner(GPUModelRunner):
             resolver_tensor_parallel_size = tensor_parallel_size
             if self._should_align_cudagraph_capture_sizes():
                 graph_alignment = math.lcm(self.uniform_decode_query_len, tensor_parallel_size)
-                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
+                if vllm_version_is("0.31.0"):
+                    # The release lane still ties graph alignment to TP.
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(  # type: ignore[call-arg]
+                        graph_alignment, 1
+                    )
+                else:
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
                 resolver_tensor_parallel_size = 1
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support=min_cg_support,
-                min_cg_attn_backend=min_cg_attn_backend,
-                uniform_decode_query_len=self.uniform_decode_query_len,
-                use_v2_model_runner=False,
-                tensor_parallel_size=resolver_tensor_parallel_size,
-                kv_cache_config=self.kv_cache_config,
-                max_num_reqs=self.max_num_reqs,
-            )
+            if vllm_version_is("0.31.0"):
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    tensor_parallel_size=resolver_tensor_parallel_size,  # type: ignore[call-arg]
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
+            else:
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
@@ -6839,6 +6917,11 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 
 @contextmanager
 def update_pass_config(model_runner):
+    if not vllm_version_is("0.31.0"):
+        # vLLM main removed the sequence-parallel pass config; Ascend SP is
+        # already reflected in parallel_config.use_sequence_parallel_moe.
+        yield
+        return
     try:
         original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
         model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)

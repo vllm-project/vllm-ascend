@@ -16,8 +16,17 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as vllm_speculator_module
+import importlib
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
 
-vllm_speculator_module.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager
+# Upstream renamed the AR speculator module for the 0.32 line.
+_vllm_speculator_module_name = (
+    "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator"
+    if vllm_version_is("0.31.0")
+    else "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator"
+)
+vllm_speculator_module = importlib.import_module(_vllm_speculator_module_name)
+
+vllm_speculator_module.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager  # type: ignore[attr-defined]

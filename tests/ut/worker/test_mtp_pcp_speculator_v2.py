@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -31,6 +32,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
@@ -926,6 +928,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
         # Exercise upstream's real reuse checks; only the collective is mocked.
         with patch.object(dp_utils, "sync_cudagraph_and_dp_padding") as sync:
             sync.return_value = (SimpleNamespace(cg_mode=CUDAGraphMode.NONE), object())
+            sync_kwargs = {"dp_sync": args[11]} if vllm_version_is("0.31.0") else {"dp_sync_state": args[11]}
             dp_utils.dispatch_cg_and_sync_dp(
                 None,
                 input_batch.num_reqs,
@@ -934,7 +937,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
                 dp_size=2,
                 dp_rank=0,
                 need_eager=True,
-                dp_sync=args[11],
+                **sync_kwargs,
             )
         assert sync.call_count == int(replicated_pcp)
         return expected

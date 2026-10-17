@@ -15,9 +15,12 @@
 # limitations under the License.
 #
 
+import importlib
+
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -71,13 +74,19 @@ import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _ar_spec
+    # Upstream renamed the AR speculator module for the 0.32 line.
+    _ar_spec_name = (
+        "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator"
+        if vllm_version_is("0.31.0")
+        else "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator"
+    )
+    _ar_spec = importlib.import_module(_ar_spec_name)
 
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
         AutoRegressiveAclGraphManager310,
     )
 
-    _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+    _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310  # type: ignore[attr-defined]
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

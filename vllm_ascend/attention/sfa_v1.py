@@ -356,6 +356,10 @@ class AscendSFABackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_SFA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls():
         if get_ascend_config().sparse_kv_offload_config.enabled:
