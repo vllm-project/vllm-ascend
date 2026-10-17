@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -8,6 +10,9 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DFLASH, calculate_acceptance_per_pos
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 @pytest.mark.parametrize("method", DFLASH.keys())
@@ -82,6 +87,8 @@ def test_dflash_acceptance(
 
 
 class DFlashQueryBufferProbe:
+    model_runner: NPUModelRunner
+
     def dflash_query_buffer_state(self):
         runner = self.model_runner
         runtime_mode, descriptor = runner.cudagraph_dispatcher.dispatch(4, uniform_decode=False)
