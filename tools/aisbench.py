@@ -18,9 +18,11 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import filelock
@@ -64,8 +66,11 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        self.stdout_file = f"output_{self.task_type}.txt"
-        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
+        stdout_dir = Path.cwd() / "outputs" / "default"
+        stdout_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.stdout_file = stdout_dir / f"output_{self.task_type}_{timestamp}.txt"
+        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {shlex.quote(str(self.stdout_file))} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
         self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True)
 
@@ -258,8 +263,7 @@ class AisbenchRunner:
 
     def _check_runtime_stdout(self):
         time.sleep(5)
-        cmd = f"tail -100 {self.stdout_file}"
-        return subprocess.check_output(cmd, shell=True).decode()
+        return subprocess.check_output(["tail", "-100", str(self.stdout_file)]).decode()
 
     @staticmethod
     def _check_runtime_error(line):

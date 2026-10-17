@@ -31,6 +31,8 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: DEFAULT_DOWNLOAD_PATHS
+                value: {{ default_download_paths | default("[]") | tojson }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -153,6 +155,8 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: DEFAULT_DOWNLOAD_PATHS
+                value: {{ default_download_paths | default("[]") | tojson }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
