@@ -110,6 +110,7 @@ def _fake_hixl(engine):
 
 def test_hixl_reads_registered_remote_expert(monkeypatch):
     engine = _Engine()
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock())
     monkeypatch.setitem(sys.modules, "hixl", _fake_hixl(engine))
     context = object()
     set_context = MagicMock(return_value=0)
@@ -265,6 +266,7 @@ def test_hixl_close_retains_resources_on_disconnect_failure(monkeypatch):
 
 
 def _bare_session(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock())
     group = MagicMock()
     group.rank.return_value = 0
     group.size.return_value = 2
@@ -276,6 +278,33 @@ def _bare_session(monkeypatch):
     session._confirm_all_ranks = lambda error, _operation: (_ for _ in ()).throw(error) if error else None
     monkeypatch.setattr(torch, "npu", SimpleNamespace(set_device=lambda _device: None), raising=False)
     return session
+
+
+@pytest.mark.parametrize("explicit_stream", [False, True])
+def test_hixl_waits_for_buffer_consumption_before_private_stream_read(monkeypatch, explicit_stream):
+    session, models, engine = _shared_models(monkeypatch)
+    session.initialize(models)
+    communicator = models["main"]
+    stream = MagicMock()
+    if explicit_stream:
+        communicator.set_stream(stream)
+    else:
+        torch.accelerator.current_stream.return_value = stream
+    buffer = {"consumed": False}
+    stream.synchronize.side_effect = lambda: buffer.update(consumed=True)
+    original_transfer = engine.transfer_async
+
+    def transfer(*args):
+        assert buffer["consumed"], "HIXL reused the buffer before the EPLB stream finished consuming it"
+        return original_transfer(*args)
+
+    engine.transfer_async = transfer
+    communicator.set_transfer_context(np.arange(4), layer_idx=1)
+    communicator.add_recv([_Tensor(2000, session._device, (4,), 16)], 1, 3)
+    communicator.execute()
+    stream.synchronize.assert_called_once_with()
+    assert len(engine.transfers) == 1
+    session.close()
 
 
 @pytest.mark.parametrize(

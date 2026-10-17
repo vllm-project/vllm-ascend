@@ -8,7 +8,7 @@
   1. Each program handles one token and vectorizes Q/K and index Q/K along contiguous head rows.
   2. Cos/sin is loaded from the RoPE cache by `positions`. No external gather, slice-contiguous, or cache-scatter kernel is launched.
   3. The model calls this through the opaque op `minimax_m3_fused_sparse_forward`, then runs the indexer and sparse attention. The original cache-insertion path is not called again.
-- **Supported modes**: BF16 NPU input, main and index head dimension 128, at most 512 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
+- **Supported modes**: BF16 NPU input, main and index head dimension 128, at most 262144 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
 
 ## Parameters
 
@@ -46,7 +46,7 @@ pytest -q tests/ut/models/minimax_m3
 pytest -q tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py
 ```
 
-Unit tests cover the fusion guard, fallback, dummy and fake forwards, separate index projections, and cache-insertion order. NPU tests cover 1 to 513 tokens, several head layouts, partial and full RoPE, shuffled and negative slots, untouched cache regions, non-contiguous inputs, empty inputs, and graph replay after `positions` or slots change. Dynamic-cache cases use 3, 64, 5392, and 8192 blocks. Two FP8 cases are skipped when A5 is not available.
+Unit tests cover the fusion guard, fallback, dummy and fake forwards, separate index projections, and cache-insertion order. NPU tests cover 1 to 8192 tokens, several head layouts, partial and full RoPE, shuffled and negative slots, untouched cache regions, non-contiguous inputs, empty inputs, and graph replay after `positions` or slots change. A3 large-prefill validation additionally samples output/cache correctness and latency at 32768, 65536, 131072, and 262144 tokens. Dynamic-cache cases use 3, 64, 5392, and 8192 blocks. Two FP8 cases are skipped when A5 is not available.
 
 ## Compilation and performance regression tests
 

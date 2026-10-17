@@ -213,6 +213,7 @@ nav:
         - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
         - tutorials/models/SigLIP2.md
+        - tutorials/models/Step-5-Preview.md
         - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md

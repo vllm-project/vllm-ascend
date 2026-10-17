@@ -20,6 +20,7 @@ import dataclasses
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -51,6 +52,8 @@ from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import (
     apply_legacy_replay_patch,
     register_legacy_replay_argument,
 )
+
+_PLATFORM_PACKAGE_PATH = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform"
 
 pytestmark = pytest.mark.skipif(
     hasattr(Scheduler, "_mark_prefix_replay")
@@ -86,6 +89,13 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, CachedRequestData
 originals = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+import sys
+import types
+import vllm_ascend.patch
+platform_package = types.ModuleType("vllm_ascend.patch.platform")
+platform_package.__path__ = [__PLATFORM_PATH__]
+sys.modules[platform_package.__name__] = platform_package
+vllm_ascend.patch.platform = platform_package
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
 assert not hasattr(Scheduler, '_mark_prefix_replay')
 assert originals == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
@@ -97,7 +107,7 @@ installed = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCach
 assert (originals != installed) == ENABLED
 apply_legacy_replay_patch(config)
 assert installed == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
-""".replace("ENABLED", repr(enabled))
+""".replace("ENABLED", repr(enabled)).replace("__PLATFORM_PATH__", repr(str(_PLATFORM_PACKAGE_PATH)))
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 

@@ -1196,6 +1196,15 @@ class MooncakePullRecvingThread(threading.Thread):
                 for cache_index, (local_base_addr, remote_base_addr) in enumerate(
                     zip(local_base_addrs, remote_base_addrs)
                 ):
+                    if is_circular_kv_cache_spec(spec):
+                        local_shape = self.block_shapes[local_layer_index][cache_index]
+                        remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
+                        if local_shape != remote_shape:
+                            raise ValueError(
+                                f"Mooncake circular cache layout mismatch for layer "
+                                f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
+                                f"local={local_shape}, remote={remote_shape}"
+                            )
                     local_block_stride = self.block_strides[local_layer_index][cache_index]
                     remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
                     local_block_len = self.block_lens[local_layer_index][cache_index]

@@ -1043,7 +1043,9 @@ class AscendConfig:
             logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
             return mega_moe_supported_by_config
         hf_text_config = vllm_config.model_config.hf_text_config
-        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+        if hidden_size is None:
+            hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:

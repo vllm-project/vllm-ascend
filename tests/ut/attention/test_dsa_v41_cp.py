@@ -448,6 +448,40 @@ class TestLegacyMetadata:
 
 
 class TestPCPMetadata:
+    @pytest.mark.parametrize("graph_width", [1, 8])
+    @pytest.mark.parametrize("packed_cache", [False, True])
+    def test_empty_rank_disables_captured_query_tasks(self, builders, graph_width, packed_cache):
+        owners = builders(world=4, rank=3, decode_sharded=True)
+        _build_planes(owners, _batch(4, 3, "prefill", decode_sharded=True))
+        builder = owners["swa"]
+        if packed_cache:
+            builder._a5_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+        captured = [builder._smla_metadata, builder._qli_metadata]
+        if packed_cache:
+            captured.append(builder._a5_smla_metadata)
+        for buffer in captured:
+            buffer.fill_(1)
+        addresses = [buffer.data_ptr() for buffer in captured]
+        global_metadata = builder._global_builder._seq_lens
+        assert global_metadata.numel() > 0
+        global_metadata.fill_(7)
+        batch = _batch(4, 3, "decode", decode_sharded=True)
+        common = batch.local.replace(
+            num_reqs=graph_width,
+            num_input_tokens=graph_width,
+            query_start_loc=torch.arange(graph_width + 1, dtype=torch.int32),
+        )
+
+        result = builder._build_empty_local_metadata(common)
+
+        assert result.num_actual_tokens == 0
+        assert result.num_input_tokens == graph_width
+        assert torch.count_nonzero(result.seq_lens) == 0
+        assert torch.all(result.slot_mapping == -1)
+        assert [buffer.data_ptr() for buffer in captured] == addresses
+        assert all(torch.count_nonzero(buffer) == 0 for buffer in captured)
+        assert torch.all(global_metadata == 7)
+
     @pytest.mark.parametrize(
         "world,rank,scenario,decode_sharded",
         [

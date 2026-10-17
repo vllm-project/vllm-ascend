@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -437,6 +438,7 @@ class KVCacheRecvingThread(threading.Thread):
         prefill_pp_layer_partition: str | None = None,
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
+        use_request_level_recv_errors: bool = False,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -524,6 +526,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_mla = self.model_config.is_deepseek_mla
         self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
+        self.use_request_level_recv_errors = use_request_level_recv_errors
         self.block_size = self.vllm_config.cache_config.block_size
         try:
             hf_text_config = self.model_config.hf_text_config
@@ -625,14 +628,18 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
+    def get_and_clear_failed_recv_requests(self, finished_req_ids: set[str]) -> set[str]:
+        """Retain failures until every local pull and reformat has finished."""
+        with self.failed_recv_requests_lock:
+            failed_req_ids = self.failed_recv_requests & finished_req_ids
+            self.failed_recv_requests.difference_update(failed_req_ids)
+        return failed_req_ids if self.use_request_level_recv_errors else set()
+
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids[0])
-
-    def _clear_failed_recv_request(self, request_id: str) -> None:
-        with self.failed_recv_requests_lock:
-            self.failed_recv_requests.discard(request_id)
+            if not self.use_request_level_recv_errors:
+                self.invalid_block_ids.update(local_block_ids[0])
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -758,10 +765,10 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
+                # Drain the failure with completion, after all local writes end.
                 self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
-                self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             # Always send the done signal to the remote host to ensure proper
@@ -1683,6 +1690,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
@@ -2179,6 +2190,9 @@ class MooncakeConnectorWorker:
         self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and not all(
             _is_fullattn_group
         )
+        # Use the logical cache layout and HMA state, before registration expands
+        # _is_hma_required for transfer-only groups sharing one block table.
+        self._use_request_level_recv_errors = self._is_hma_required or len(kv_cache_config.kv_cache_groups) > 1
         self._layer_specs = self._build_layer_specs_from_kv_cache_config(kv_cache_config)
 
         # Handshake base port
@@ -2741,6 +2755,7 @@ class MooncakeConnectorWorker:
                 self._prefill_pp_layer_partition,
                 self.kv_group2layeridx,
                 self.block_size_scale,
+                use_request_level_recv_errors=self._use_request_level_recv_errors,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()
@@ -2754,6 +2769,10 @@ class MooncakeConnectorWorker:
             time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         done_sending = (
             self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
             )
@@ -2766,6 +2785,11 @@ class MooncakeConnectorWorker:
             if self.kv_role == "kv_consumer"
             else set()
         )
+        failed_recving = (
+            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)  # type: ignore[union-attr]
+            if self.kv_role == "kv_consumer"
+            else set()
+        )
         if self.tp_rank == 0:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -2773,7 +2797,11 @@ class MooncakeConnectorWorker:
                     len(done_sending),
                     len(done_recving),
                 )
-        return done_sending, done_recving
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:

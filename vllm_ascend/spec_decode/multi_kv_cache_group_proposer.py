@@ -13,6 +13,7 @@ from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES = {"glm5_next_mtp"}
@@ -142,8 +143,15 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         # addresses).
         slot_mapping_lens = self.slot_mapping_group[0].shape[0]
         self._multi_group_slot_mapping_buffers: dict[tuple[int, int], torch.Tensor] = {}
+        capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes or []
+        table_rows = max([self.runner.max_num_reqs, *capture_sizes])
+        table_buffers = self._multi_group_block_table_buffers = dict[int, torch.Tensor]()
+        table_widths: dict[int, int] = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
+            table_widths[gid] = max(table_widths.get(gid, 0), self._draft_block_table_width(attn_group))
+        for gid, width in table_widths.items():
+            table_buffers[gid] = torch.zeros(table_rows, width, dtype=torch.int32, device=self.device)
             if gid == self.kv_cache_gid:
                 # The primary group reuses the proposer's per-step buffers.
                 continue
@@ -162,12 +170,6 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         )
 
     def _draft_block_table_width(self, attn_group: AttentionGroup) -> int:
-        """Helper: return the block-table width consumed by one group.
-
-        This method is new in this subclass. It converts the maximum logical
-        sequence length into the kernel block-table width when logical and
-        physical block sizes differ, as they do for the indexer cache.
-        """
         builder = attn_group.get_metadata_builder()
         logical_block_size = getattr(builder, "logical_block_size", None)
         blocks_per_logical_block = getattr(builder, "kernel_blocks_per_logical_block", None)
@@ -187,6 +189,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         attn_group,
         num_input_tokens,
         draft_index=0,
+        refreshed_gids: set[int] | None = None,
     ):
         """Override the runtime common-metadata view hook for one group.
 
@@ -208,56 +211,74 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             block_table = self.runner.input_batch.block_table[gid]
             num_reqs = group_metadata.num_reqs
             num_actual_tokens = common_attn_metadata.num_actual_tokens
-            block_table.compute_slot_mapping(
-                num_reqs,
-                common_attn_metadata.query_start_loc,
-                common_attn_metadata.positions[:num_actual_tokens],
-            )
             block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-            # Pre-created in ``initialize_attn_backend``; never allocate here so
-            # the address an ACL graph captured stays valid across replays.
-            group_slot_mapping = self._multi_group_slot_mapping_buffers.get((gid, draft_index))
-            assert group_slot_mapping is not None
-            assert group_slot_mapping.shape[0] >= num_input_tokens
-            source_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
-            group_slot_mapping[:num_input_tokens].copy_(source_slot_mapping)
-            group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
-            group_metadata.slot_mapping = group_slot_mapping
-
-        group_metadata.block_table_tensor = block_table_tensor[
+            if not block_table.is_circular_group:
+                block_table.compute_slot_mapping(
+                    num_reqs,
+                    common_attn_metadata.query_start_loc,
+                    common_attn_metadata.positions[:num_actual_tokens],
+                )
+                group_slot_mapping = self._multi_group_slot_mapping_buffers[(gid, draft_index)]
+                source_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
+                group_slot_mapping[:num_input_tokens].copy_(source_slot_mapping)
+                group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
+                group_metadata.slot_mapping = group_slot_mapping
+        table = self._multi_group_block_table_buffers[gid]
+        if refreshed_gids is None or gid not in refreshed_gids:
+            rows = min(group_metadata.num_reqs, block_table_tensor.shape[0])
+            table[:rows].copy_(block_table_tensor[:rows, : table.shape[1]])
+            if rows < group_metadata.num_reqs:
+                table[rows : group_metadata.num_reqs].zero_()
+            if refreshed_gids is not None:
+                refreshed_gids.add(gid)
+        group_metadata.block_table_tensor = table[
             : group_metadata.num_reqs, : self._draft_block_table_width(attn_group)
         ]
         return group_metadata
 
     def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
-        # ``glm5_next_mtp`` is the only family routed here and it never uses
-        # compressed attention, so every draft step takes the plain capture
-        # entrypoint.
         assert not self.use_compress
+        common_attn_metadata = copy.copy(common_attn_metadata)
+        # Dummy padding has query tokens but zero sequence lengths.
+        actual = common_attn_metadata.seq_lens_cpu[: common_attn_metadata.num_reqs].count_nonzero().item()
+        common_attn_metadata.num_actual_tokens = int(common_attn_metadata.query_start_loc_cpu[actual])
+        if draft_index > 0:
+            # Later drafts use one query per padded row, matching FULL replay.
+            tokens = common_attn_metadata.num_input_tokens
+            common_attn_metadata.num_reqs = tokens
+            common_attn_metadata.num_actual_tokens = actual
+            common_attn_metadata.max_query_len = common_attn_metadata.decode_token_per_req = 1
+            query = self.query_start_loc_group[draft_index][: tokens + 1]
+            query.copy_(self.arange[: tokens + 1])
+            common_attn_metadata.query_start_loc = query
+            common_attn_metadata.query_start_loc_cpu = torch.from_numpy(self.token_arange_np[: tokens + 1])
+            lengths = self.seq_lens_group[draft_index][:tokens]
+            lengths[actual:].zero_()
+            common_attn_metadata.seq_lens = lengths
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata._seq_lens_cpu = None
         per_layer_attn_metadata: dict[str, Any] = {}
+        refreshed_gids: set[int] = set()
         for attn_group in self.draft_attn_groups:
             group_common_metadata = self._common_attn_metadata_for_draft_group(
                 common_attn_metadata,
                 attn_group,
                 common_attn_metadata.num_input_tokens,
                 draft_index,
+                refreshed_gids,
             )
-            attn_metadata = attn_group.get_metadata_builder().build_for_graph_capture(
-                group_common_metadata,
-                AscendAttentionState.DecodeOnly,
-            )
+            builder = attn_group.get_metadata_builder()
+            if draft_index > 0 and not self._is_cache_only_draft_attn_group(attn_group):
+                attn_metadata = builder.build_for_drafting(group_common_metadata, draft_index)
+            else:
+                attn_metadata = builder.build_for_graph_capture(group_common_metadata, AscendAttentionState.DecodeOnly)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_layer_attn_metadata
 
     @staticmethod
     def _copy_cache_only_draft_metadata(attn_metadata):
-        """Helper: preserve a step's tensors before a builder reuses its buffers.
-
-        KPool builders use persistent buffers for target graph replay. Draft
-        metadata for every step must coexist until the merged draft finishes,
-        including step 0's multi-token query layout and compressed cache slots.
-        """
+        if isinstance(attn_metadata, (AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata)):
+            return attn_metadata
         if not is_dataclass(attn_metadata) or isinstance(attn_metadata, type):
             return attn_metadata
         return replace(
@@ -283,14 +304,6 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         mtp_slot_mapping=None,
         attn_group=None,
     ):
-        """Override the transition from verification rows to one row per request.
-
-        The first pass may retain rejected tokens as padding. Later draft steps
-        start at each request's selected token, so reset lengths to its actual
-        device position before the inherited updater advances the step once.
-        CPU lengths still describe the optimistic verification batch and must
-        be invalidated without introducing a device-to-host synchronization.
-        """
         if self._uses_multi_group_kv_cache and draft_index == 1:
             old_common_metadata = copy.copy(old_common_metadata)
             old_common_metadata.seq_lens = old_common_metadata.seq_lens.clone()
@@ -319,14 +332,6 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         num_input_tokens,
         num_actual_tokens,
     ):
-        """Override step-0 draft attention metadata construction.
-
-        The base implementation builds every attention group from one common
-        block table and slot mapping. This override supplies a physical-group
-        view to each builder, then returns the executable primary group's
-        metadata as the shared MTP state. Single-group models delegate to the
-        inherited implementation.
-        """
         if not self._uses_multi_group_kv_cache:
             return super().build_draft_attn_metadata(
                 common_attn_metadata,
@@ -336,6 +341,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
 
         per_layer_attn_metadata: dict[str, Any] = {}
         shared_draft_cache: dict[str, Any] = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
+        refreshed_gids: set[int] = set()
         for attn_group in self.draft_attn_groups:
             extra_attn_metadata_args = dict(shared_draft_cache)
             if self.use_compress:
@@ -347,6 +353,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                     attn_group,
                     num_input_tokens,
                     0,
+                    refreshed_gids,
                 ),
                 self.runner.get_model(),
                 **extra_attn_metadata_args,
@@ -371,14 +378,6 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         primary_metadata,
         cache_only_groups,
     ):
-        """Override cache-only metadata construction for later MTP steps.
-
-        ``attn_update_stack_num_spec_norm`` has already advanced shared state
-        once for the primary group before this hook is called. This override
-        rebinds that updated logical state to each cache-only group's physical
-        cache without advancing sequence lengths, positions, or DCP metadata a
-        second time. Single-group models use the base hook unchanged.
-        """
         if not self._uses_multi_group_kv_cache:
             return super()._build_cache_only_group_next_step_attn_metadata(
                 common_attn_metadata,
@@ -392,12 +391,18 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         per_layer_attn_metadata: dict[str, Any] = {
             layer_name: primary_metadata for layer_name in primary_group.layer_names
         }
+        refreshed_gids = {primary_group.kv_cache_group_id}
         for attn_group in cache_only_groups:
+            if draft_index > 1:
+                gid = attn_group.kv_cache_group_id
+                if gid not in refreshed_gids and self.runner.input_batch.block_table[gid].is_circular_group:
+                    refreshed_gids.add(gid)
             group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
                 common_attn_metadata,
                 attn_group,
                 num_input_tokens,
                 draft_index,
+                refreshed_gids,
             )
             extra_attn_metadata_args: dict[str, Any] = {}
             if self.use_compress:
@@ -407,10 +412,6 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 draft_index,
                 **extra_attn_metadata_args,
             )
-            # The cache-only builder reuses its persistent buffers across draft
-            # steps in eager mode too — the same reuse ACL graph replay performs
-            # — so a step's tensors must be cloned before the next build
-            # overwrites them.
             if not getattr(self, "use_cuda_graph", False):
                 attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:

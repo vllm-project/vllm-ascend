@@ -74,6 +74,11 @@ on:
         type: string
         default: '910b'
         description: "Ascend SoC type for the job container image tag (e.g. 910b, a3, 310p, 950)"
+      os_filter:
+        required: false
+        type: string
+        default: 'all'
+        description: "Build a single OS variant: 'ubuntu', 'openeuler', or 'all'. Lets ubuntu and openeuler pipelines run independently."
     secrets:
       SWR_USERNAME:
         required: false
@@ -91,9 +96,23 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ inputs.build_type }}" = "daily" ]; then
-            MATRIX='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
+            ALL='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
-            MATRIX='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
+            ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
+          fi
+          OS="${{ inputs.os_filter }}"
+          if [ -z "$OS" ] || [ "$OS" = "all" ]; then
+            MATRIX="$ALL"
+          else
+            MATRIX=$(echo "$ALL" | jq -c --arg os "$OS" '{include:[.include[]|select(.os==$os)]}')
+          fi
+          # Guard against an empty matrix (e.g. os_filter='openeuler' with build_type
+          # 'release', where release only builds ubuntu, or an unsupported os_filter).
+          # An empty `include` yields a matrix with no jobs, so fail loudly instead.
+          COUNT=$(echo "$MATRIX" | jq '.include | length')
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::No build matrix for os_filter='${{ inputs.os_filter }}' with build_type='${{ inputs.build_type }}'"
+            exit 1
           fi
           echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
 
@@ -159,6 +178,12 @@ jobs:
           if [ "${{ matrix.os }}" = "openeuler" ]; then
             OS_MARK="-openeuler"
           fi
+          # Base image chip suffix: a2 has none, other targets use the target name
+          # (a3, 310p, a5), matching the base image built by _schedule_image_build.yaml.
+          TARGET_MARK=""
+          if [ "${{ inputs.target }}" != "a2" ]; then
+            TARGET_MARK="-${{ inputs.target }}"
+          fi
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             # Resolve the base image date: 'auto' backtracks day-by-day from today to find
             # the latest date for which the SWR base image exists; otherwise use the
@@ -167,7 +192,7 @@ jobs:
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${TARGET_MARK}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
                 if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_ci/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
@@ -292,15 +317,29 @@ jobs:
           # base images may be built on different days, so resolve the date per OS
           # variant using the same backtracking logic as the build step.
           BASE_TAG="daily-${BRANCH_TAG}-${{ inputs.target }}"
+          # Base image chip suffix: a2 has none, other targets use the target name.
+          TARGET_MARK=""
+          if [ "${{ inputs.target }}" != "a2" ]; then
+            TARGET_MARK="-${{ inputs.target }}"
+          fi
+
+          # Restrict to the requested OS variant so ubuntu and openeuler pipelines
+          # merge independently of each other.
+          case "${{ inputs.os_filter }}" in
+            ubuntu) OS_LIST="ubuntu" ;;
+            openeuler) OS_LIST="openeuler" ;;
+            *) OS_LIST="ubuntu openeuler" ;;
+          esac
 
           MISSING_VARIANT=0
           MERGED_VARIANT=0
-          for OS_MARK in "" "-openeuler"; do
+          for OS_NAME in $OS_LIST; do
+            if [ "$OS_NAME" = "openeuler" ]; then OS_MARK="-openeuler"; else OS_MARK=""; fi
             if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                CANDIDATE_TAG="nightly-${BRANCH_TAG}${TARGET_MARK}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
                 if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_ci/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   break

@@ -1026,7 +1026,6 @@ std::vector<bool> is_contiguous_axes(const at::Tensor &tensor)
         contiguous_stride[i] = contiguous_stride[i + 1] * sizes[i + 1];
     }
 
-
     for (int64_t i = 0; i < ndim; i++) {
         result[i] = (strides[i] == contiguous_stride[i]);
     }
@@ -1053,7 +1052,6 @@ std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, c
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
-
 
 std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
                                   at::Tensor &state_cache, const at::Tensor &ape, const at::Tensor &norm_weight,
@@ -1717,54 +1715,6 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
                  y_out, y2_out, scale_out, scale2_out);
 
     return std::make_tuple(y_out, scale_out);
-}
-
-void validate_kv_compress_epilog_inputs(
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    at::Tensor& kv_compress_cache)
-{
-    TORCH_CHECK(x.dim() == 2, "x must be 2D tensor, but got dimensions: ", x.dim());
-    TORCH_CHECK(x.size(0) > 0 && x.size(1) > 0,
-                "x dimensions must be positive, but got: [", x.size(0), ", ", x.size(1), "]");
-    TORCH_CHECK(slot_mapping.dim() == 1,
-                "slot_mapping must be 1D tensor, but got dimensions: ", slot_mapping.dim());
-    TORCH_CHECK(slot_mapping.size(0) == x.size(0),
-                "slot_mapping size must equal x's first dimension, but got slot_mapping_size=",
-                slot_mapping.size(0), ", x.dim(0)=", x.size(0));
-    if (kv_compress_cache.dim() == 4) {
-        TORCH_CHECK(kv_compress_cache.size(2) == 1,
-                    "kv_compress_cache 4D tensor requires headnum (dim 2) == 1, but got ",
-                    kv_compress_cache.size(2));
-    }
-    TORCH_CHECK(x.dtype() == at::kBFloat16, "x must be BF16, but got ", x.dtype());
-    TORCH_CHECK(slot_mapping.dtype() == at::kInt || slot_mapping.dtype() == at::kLong,
-                "slot_mapping must be INT32 or INT64, but got ", slot_mapping.dtype());
-    TORCH_CHECK(kv_compress_cache.dtype() == at::ScalarType::Float8_e5m2 ||
-                kv_compress_cache.dtype() == at::ScalarType::Float8_e4m3fn,
-                "kv_compress_cache must be FP8_E5M2 or FP8_E4M3, but got ", kv_compress_cache.dtype());
-}
-
-void kv_compress_epilog_npu(
-    at::Tensor& kv_compress_cache,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_group_size,
-    int64_t quant_mode,
-    bool round_scale_flag,
-    int64_t layout)
-{
-    validate_kv_compress_epilog_inputs(x, slot_mapping, kv_compress_cache);
-
-    at::Tensor cache = kv_compress_cache;
-    if (cache.dim() == 4) {
-        cache = cache.squeeze(2);
-    }
-
-    int64_t round_scale = round_scale_flag ? 1 : 0;
-    int64_t cache_stride = cache.stride(0);
-    EXEC_NPU_CMD(aclnnKvCompressEpilog, cache, x, slot_mapping, quant_group_size, quant_mode, round_scale,
-                 layout, cache_stride);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_npu(
@@ -3446,19 +3396,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y_out, Tensor scale_out)"
         );
     ops.impl("npu_rms_norm_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_dynamic_quant_npu);
-
-    ops.def(
-        "kv_compress_epilog("
-            "Tensor(a!) kv_compress_cache, "
-            "Tensor x, "
-            "Tensor slot_mapping, "
-            "int quant_group_size, "
-            "int quant_mode, "
-            "bool round_scale_flag, "
-            "int layout"
-        ") -> ()"
-    );
-    ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
 
     ops.def(
         "kv_compress_epilog_v2(Tensor(a!) cache, Tensor x, Tensor slot_mapping, *, "

@@ -1,8 +1,11 @@
+import pytest
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
 
 from tests.e2e.conftest import HfRunner, VllmRunner
+
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 
 def test_qwen_pooling_classify_correctness() -> None:

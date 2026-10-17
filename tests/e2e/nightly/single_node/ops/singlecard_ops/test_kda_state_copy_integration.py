@@ -318,6 +318,41 @@ def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride
         torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("to_cache", [False, True])
+@torch.inference_mode()
+def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype, index_dtype, to_cache):
+    """Exercise the real fallback launcher beyond one byte-copy tile, without JIT."""
+    from vllm_ascend.ops import kda_state_copy_plan as production
+
+    payload, stride = 4097, 4113
+    backing = torch.full((4 * stride + 1,), -23, dtype=dtype, device="npu")
+    state = backing.as_strided((4, 1, 1, payload), (stride, payload, payload, 1), 1)
+    state.copy_(torch.arange(4, device="npu")[:, None, None, None])
+    initial = backing.cpu()
+    plan = production.StridedKDAFallbackPlan.prepare(state, 4)
+    plan.seal()
+    torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
+    _forbid_compilation(monkeypatch)
+    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    ids = torch.tensor([3, -1, 4, 0], dtype=index_dtype, device="npu")
+    if to_cache:
+        packed = torch.full((4, 1, 1, payload), 17, dtype=dtype, device="npu")
+        plan.scatter(state, packed, ids)
+        expected = initial.clone()
+        view = expected.as_strided(state.shape, state.stride(), 1)
+        view[[3, 0]] = 17
+        torch.testing.assert_close(backing.cpu(), expected, rtol=0, atol=0)
+    else:
+        flags = torch.tensor([True, True, True, False], device="npu")
+        packed = plan.gather(state, ids, flags)
+        expected = torch.zeros((4, 1, 1, payload), dtype=dtype)
+        expected[0].fill_(3)
+        torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
+
+
 @torch.inference_mode()
 def test_scatter_graph_replay_int64_extremes(monkeypatch):
     """Graph replay consumes dynamic INT64 values, including invalid extremes."""
