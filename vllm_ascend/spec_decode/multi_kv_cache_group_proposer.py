@@ -170,18 +170,9 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         )
 
     def _draft_block_table_width(self, attn_group: AttentionGroup) -> int:
-        builder = attn_group.get_metadata_builder()
-        logical_block_size = getattr(builder, "logical_block_size", None)
-        blocks_per_logical_block = getattr(builder, "kernel_blocks_per_logical_block", None)
-        if (
-            isinstance(logical_block_size, int)
-            and logical_block_size > 0
-            and isinstance(blocks_per_logical_block, int)
-            and blocks_per_logical_block > 0
-        ):
-            max_logical_blocks = (self.max_model_len + logical_block_size - 1) // logical_block_size
-            return max_logical_blocks * blocks_per_logical_block
-        return builder.kv_cache_spec.max_num_blocks_per_req(self.vllm_config, self.max_model_len)
+        """Preserve the runtime table's expanded kernel pages for each group."""
+        block_table = self.runner.input_batch.block_table[attn_group.kv_cache_group_id]
+        return block_table.get_device_tensor().shape[1]
 
     def _common_attn_metadata_for_draft_group(
         self,
@@ -194,7 +185,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         """Override the runtime common-metadata view hook for one group.
 
         The base hook returns the common metadata unchanged. This override
-        crops every group's block table to the width consumed by its builder.
+        preserves every group's runtime kernel-page table.
         For a secondary group it computes every input token's slot from the
         device positions, query boundaries, and that group's block table. The input
         metadata is shallow-copied so the primary group's view is not

@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from tests.ut.base import TestBase
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 
 
 class TestBlockTableComputeSlotMapping(TestBase):
@@ -56,6 +57,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
         dcp_rank,
         cp_kv_cache_interleave_size,
         num_speculative_tokens=0,
+        kv_cache_group=None,
     ):
         """Helper method to create BlockTable with mocked distributed groups"""
 
@@ -78,9 +80,47 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 kernel_sizes=self.kernel_sizes,
                 cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
                 num_speculative_tokens=num_speculative_tokens,
+                kv_cache_group=kv_cache_group,
             )
 
             return block_table
+
+    def create_circular_block_table(self):
+        self.block_size = 9
+        self.kernel_sizes = [9]
+        spec = AscendIndexerKPoolTailSpec(
+            block_size=9,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float32,
+        )
+        group = KVCacheGroupSpec(layer_names=["layer.indexer.tail_cache"], kv_cache_spec=spec)
+        table = self.create_block_table(1, 0, 1, kv_cache_group=group)
+        table.add_row([5], 0)
+        return table
+
+    def test_circular_draft_positions_wrap_within_the_owned_block(self):
+        table = self.create_circular_block_table()
+        req_indices = np.zeros(4, dtype=np.int32)
+        positions = np.array([13100, 13101, 13102, -1], dtype=np.int64)
+
+        table.compute_slot_mapping_draft(req_indices, positions)
+
+        self.assertEqual(table.slot_mapping.cpu[:4].tolist(), [50, 51, 52, -1])
+
+    def test_circular_slot_mapping_dispatches_to_ring_kernel(self):
+        table = self.create_circular_block_table()
+        boundaries = torch.tensor([0, 3], dtype=torch.int32)
+        positions = torch.tensor([13100, 13101, 13102], dtype=torch.int64)
+        with patch("vllm_ascend.worker.block_table._compute_slot_mapping_kernel") as kernel:
+            table.compute_slot_mapping(1, boundaries, positions)
+
+        launch = kernel.__getitem__.return_value
+        launch.assert_called_once()
+        self.assertTrue(launch.call_args.kwargs["IS_CIRCULAR"])
+        self.assertEqual(table.block_table.cpu.shape[1], 1)
 
     def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
         """MTP5 draft slots can exceed the scheduler token capacity."""
