@@ -69,9 +69,25 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable Virtual Pipeline Parallelism (VPP) support on the
+    # multiproc executor. Default: false (opt-in).
+    "ENABLE_VPP": lambda: os.getenv("ENABLE_VPP", "false").lower() in ("true", "1"),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Under VPP, compile one artifact per virtual pipeline stage. Without it,
+    # torch.compile / ACL graph combinations are stage-blind and silently
+    # produce wrong results, so `platform._update_compilation_modes` rejects
+    # them unless this is enabled. Default: false (opt-in).
+    "VLLM_ASCEND_VPP_PER_STAGE_COMPILE": lambda: os.getenv("VLLM_ASCEND_VPP_PER_STAGE_COMPILE", "0").lower()
+    in ("true", "1"),
+    # Raise instead of warning when a VPP graph input cannot be bound to (or a
+    # direct-read metadata tensor is not covered by) the captured address.
+    # Default: false (warn once).
+    "VLLM_ASCEND_GRAPH_IO_STRICT": lambda: os.getenv("VLLM_ASCEND_GRAPH_IO_STRICT", "0").lower() in ("true", "1"),
+    # Log every graph input / metadata pin performed by the VPP graph IO
+    # binder. Very verbose; debugging aid only. Default: false.
+    "VLLM_ASCEND_GRAPH_IO_DEBUG": lambda: os.getenv("VLLM_ASCEND_GRAPH_IO_DEBUG", "0").lower() in ("true", "1"),
 }
 
 # end-env-vars-definition

@@ -1359,6 +1359,43 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         )
         compilation_config.cudagraph_mode = cudagraph_mode
 
+    # VPP + torch.compile. The compiled model is traced with the virtual
+    # stage's layer slice already applied and all Dynamo guards are dropped, so
+    # without per-stage artifacts every stage replays stage 0's subgraph and
+    # silently computes the wrong layers. That holds for PIECEWISE just as much
+    # as for the FULL_AND_PIECEWISE piecewise half; only the whole-model FULL
+    # path keys its acl graph cache by virtual stage. The AOT artifact path and
+    # the backend artifact directory are also stage-blind, so the support is
+    # opt-in until it has been validated: refuse rather than miscompute.
+    vpp_size = getattr(ascend_config, "virtual_pipeline_parallel_size", 1)
+    vpp_size = vpp_size if isinstance(vpp_size, int) else 1
+    cudagraph_mode = compilation_config.cudagraph_mode
+    if vpp_size > 1 and not enforce_eager and compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        # Imported lazily: this module is imported while ``vllm.config`` is
+        # still initializing, and the breakable-graph module imports it back.
+        from vllm_ascend import envs as ascend_envs
+
+        if not ascend_envs.VLLM_ASCEND_VPP_PER_STAGE_COMPILE:
+            raise ValueError(
+                f"Virtual pipeline parallelism (virtual_pipeline_parallel_size={vpp_size}) "
+                f"with torch.compile (compilation mode {compilation_config.mode}, "
+                f"cudagraph_mode {cudagraph_mode}) needs one compiled artifact per "
+                f"virtual stage. Without it every virtual stage would replay the "
+                f"first stage's compiled layers and produce wrong results. Set "
+                f"VLLM_ASCEND_VPP_PER_STAGE_COMPILE=1 to enable per-virtual-stage "
+                f"compilation, or run with enforce_eager / --no-compile."
+            )
+
+        from vllm.compilation import breakable_cudagraph
+
+        if breakable_cudagraph.is_breakable_cudagraph_enabled():
+            raise ValueError(
+                "Virtual pipeline parallelism with breakable acl graph is not "
+                "supported: its graph cache is keyed by batch descriptor only, so "
+                "virtual stages would replay each other's captured layers. Run "
+                "without breakable acl graph, or with enforce_eager=True."
+            )
+
 
 def _setup_compile_backend(
     vllm_config: VllmConfig,

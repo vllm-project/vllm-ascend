@@ -585,6 +585,12 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
+    # VPP (vpp-14945) reads this to enable the async-exponential sampler for
+    # rope-v2 alpha sampling during exponential-averaged generation. Ascend
+    # chips rely on torch_npu's native sampler, so the flag stays OFF here;
+    # the field exists so the VPP execute path can atomically read it instead of
+    # raising AttributeError on an accessor that was never defined.
+    enable_async_exponential: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -809,6 +815,65 @@ class AscendConfig:
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
+
+        # Virtual Pipeline Parallelism (VPP)
+        _additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        # vLLM's `--additional-config` splats its keys into VllmConfig kwargs,
+        # and `virtual_pipeline_parallel_size` is not a vLLM field, so the value
+        # would otherwise be rejected by pydantic. Allow it via env as a fallback.
+        self.virtual_pipeline_parallel_size: int = _additional_config.get(
+            "virtual_pipeline_parallel_size",
+            int(os.getenv("VPP_SIZE", "1")),
+        )
+        vp_size = self.virtual_pipeline_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.vpp_layer_ranges: list[list[tuple[int, int]]] | None = None
+        if vp_size > 1:
+            if pp_size < 2:
+                raise ValueError("virtual_pipeline_parallel_size > 1 requires pipeline_parallel_size >= 2.")
+            if getattr(vllm_config, "use_v2_model_runner", False):
+                # use_v2_model_runner already falls back to V1 for vp_size > 1
+                # (mrv2_utils blacklist) unless VLLM_USE_V2_MODEL_RUNNER=1 was
+                # set explicitly -- that explicit override would silently drop
+                # the entire VPP stage loop, so reject it here instead.
+                raise ValueError(
+                    "VPP (virtual_pipeline_parallel_size > 1) requires the V1 "
+                    "model runner; unset VLLM_USE_V2_MODEL_RUNNER and the "
+                    "runner falls back to V1 automatically."
+                )
+            if vp_size != 2:
+                # The fold-back scheduling/communication path in vpp_utils
+                # and model_runner_v1 is generic in vp_size; only vp_size == 2
+                # was validated upstream (PR #14945/#18018), so warn rather
+                # than reject other sizes.
+                logger.warning(
+                    "VPP vp_size=%d (pp_size=%d) has not been validated "
+                    "upstream (only vp_size == 2 was verified); proceeding "
+                    "on the generic fold-back path.",
+                    vp_size,
+                    pp_size,
+                )
+            num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+            raw_ranges = _additional_config.get("vpp_layer_ranges", None)
+            if raw_ranges is None:
+                # additional_config 注入会被 pydantic 拒绝，与 VPP_SIZE 一样
+                # 提供 env 回退通道：VPP_LAYER_RANGES='[[[0,15],[15,30]],[[30,45],[45,60]]]'
+                import json
+
+                env_ranges = os.getenv("VPP_LAYER_RANGES", None)
+                if env_ranges is not None:
+                    raw_ranges = json.loads(env_ranges)
+            if raw_ranges is not None:
+                from vllm_ascend.distributed.vpp_utils import validate_vpp_layer_ranges
+
+                self.vpp_layer_ranges = validate_vpp_layer_ranges(raw_ranges, num_layers, pp_size, vp_size)
+                logger.info(
+                    "VPP enabled with manual layer ranges: vp_size=%d, pp_size=%d, num_layers=%d, ranges=%s",
+                    vp_size,
+                    pp_size,
+                    num_layers,
+                    self.vpp_layer_ranges,
+                )
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
