@@ -23,7 +23,6 @@ from vllm_ascend._310p.sample.sampler import (
     _prepare_cpu_generators_310p,
     _random_sample_310p,
 )
-from vllm_ascend.utils import vllm_version_is
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
@@ -104,27 +103,14 @@ class Ascend310PSampler:
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
 
-    if vllm_version_is("0.30.0"):
-
-        def add_request(
-            self,
-            req_idx: int,
-            prompt_len: int,
-            sampling_params: SamplingParams,
-        ) -> None:
-            del prompt_len
-            self._add_request_impl(req_idx, sampling_params)
-
-    else:
-
-        def add_request(
-            self,
-            req_idx: int,
-            sampling_params: SamplingParams,
-        ) -> None:
-            # vLLM #56497 dropped the prompt_len argument from
-            # Sampler.add_request (and added custom logits processors).
-            self._add_request_impl(req_idx, sampling_params)
+    def add_request(
+        self,
+        req_idx: int,
+        sampling_params: SamplingParams,
+    ) -> None:
+        # vLLM #56497 dropped the prompt_len argument from
+        # Sampler.add_request (and added custom logits processors).
+        self._add_request_impl(req_idx, sampling_params)
 
     def _add_request_impl(
         self,

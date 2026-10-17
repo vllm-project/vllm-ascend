@@ -7,17 +7,28 @@ from unittest.mock import MagicMock, Mock, call, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    fill_mxfp_v_scale_cache,
+    mxfp_paged_cache_views,
+    mxfp_v_scale_cache_shape,
+)
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
 def _make_runner(need_timing: bool = True):
@@ -120,29 +131,41 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
     assert events == expected
 
 
+@pytest.mark.parametrize("legacy_worker", [False, True])
+@pytest.mark.parametrize("ordinary_logprobs,fixed_token_scores", [(True, False), (False, True), (True, True)])
+def test_lmhead_tp_rejects_unpadded_prompt_scoring(ordinary_logprobs, fixed_token_scores, legacy_worker):
+    runner = _make_runner()
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        uses_prompt_logprobs=np.array([ordinary_logprobs]),
+        token_id_scores={"request": object()} if fixed_token_scores else {},
+    )
+    if legacy_worker:
+        if not ordinary_logprobs:
+            pytest.skip("fixed token scoring does not exist on verified main")
+        del runner.prompt_logprobs_worker.token_id_scores
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
+        pytest.raises(NotImplementedError, match="not supported with lmhead TP"),
+    ):
+        runner.sample_tokens(None)
+
+
 def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
     num_reqs = len(computed)
     is_prefilling = np.array(computed) < np.array(prefill_lens)
-    has_prefill = bool(is_prefilling.any())
-    # vLLM main added num_draft_tokens_np/prefill_runs_as_decode_np/
-    # decode_graph_eligible to BatchReqState; 0.30.0 predates them.
-    version_kwargs: dict = {}
-    if not vllm_version_is("0.30.0"):
-        version_kwargs = {
-            "num_draft_tokens_np": None,
-            "prefill_runs_as_decode_np": None,
-            "decode_graph_eligible": not has_prefill,
-        }
     return BatchReqState(
         req_ids=[f"req-{i}" for i in range(num_reqs)],
         num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
         num_tokens=sum(scheduled),
+        num_draft_tokens_np=None,
         idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
         prefill_len_np=np.array(prefill_lens, dtype=np.int32),
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
-        has_prefill=has_prefill,
-        **version_kwargs,
+        has_prefill=bool(is_prefilling.any()),
+        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=not bool(is_prefilling.any()),
     )
 
 
@@ -239,6 +262,29 @@ def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     switch.assert_called_once_with()
 
 
+@pytest.mark.parametrize("prefill_runs_as_decode", [False, True])
+def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_decode):
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    batch_state = _make_batch_state([127, 0], [1, 1], [128, 1])
+    batch_state = batch_state._replace(prefill_runs_as_decode_np=np.array([False, prefill_runs_as_decode]))
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch.object(
+            runner.vllm_config,
+            "kv_transfer_config",
+            SimpleNamespace(is_kv_consumer=True, is_kv_producer=False),
+        ),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
+    assert gathered.has_prefill is True
+    assert gathered.decode_graph_eligible is prefill_runs_as_decode
+    assert uniform == (1 if prefill_runs_as_decode else None)
+
+
 def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
@@ -272,6 +318,8 @@ def test_execute_model_records_profiling_time():
         "context_len": 0,
         "valid_dummy_state_slots": False,
     }
+    if vllm_version_is("0.31.0"):
+        expected_kwargs["randomize_inputs"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -448,23 +496,17 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
     runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    if vllm_version_is("0.30.0"):
-        # v0.30.0 restores aux outside restore_for_sampling, so the Ascend
-        # pre-restore only covers the target hidden states.
-        runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
-        state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
-    else:
-        # vLLM main (#57980) folded the aux restore into restore_for_sampling,
-        # which the replicated-PCP fast path bypasses; the pre-restore must
-        # cover aux too or the draft reads PCP-local rows.
-        assert runner.pcp_manager.restore_hidden_states.call_args_list == [
-            call(hidden_states),
-            call(aux_hidden_states),
-        ]
-        state._replace.assert_called_once_with(
-            hidden_states=restored_hidden_states,
-            aux_hidden_states=[restored_hidden_states],
-        )
+    # vLLM main (#57980) folded the aux restore into restore_for_sampling,
+    # which the replicated-PCP fast path bypasses; the pre-restore must
+    # cover aux too or the draft reads PCP-local rows.
+    assert runner.pcp_manager.restore_hidden_states.call_args_list == [
+        call(hidden_states),
+        call(aux_hidden_states),
+    ]
+    state._replace.assert_called_once_with(
+        hidden_states=restored_hidden_states,
+        aux_hidden_states=[restored_hidden_states],
+    )
     assert runner.execute_model_state is restored_state
 
 
@@ -480,24 +522,21 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     partition_calls = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "maybe_partition_pcp_batch"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "partition_batch"
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the whole descriptor (upstream vLLM #53867
-    # changed maybe_partition_pcp_batch from padded_num_tokens to a
-    # BatchExecutionDescriptor).
+    # graph descriptor, and forwards the whole descriptor through the retained
+    # v0.31 PCPManager API (vLLM #57980).
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]
-    batch_desc_kw = next(keyword.value for keyword in partition_call.keywords if keyword.arg == "batch_desc")
-    assert isinstance(batch_desc_kw, ast.Name)
-    assert batch_desc_kw.id == "batch_desc"
+    assert ast.unparse(partition_call.func) == "self.pcp_manager.partition_batch"
+    assert [ast.unparse(arg) for arg in partition_call.args] == ["input_batch", "batch_desc"]
+    assert partition_call.keywords == []
 
 
 def _make_dump_runner(debugger=None):
@@ -728,6 +767,126 @@ def test_load_model_skips_dump_in_eager_mode():
     debugger.start.assert_not_called()
 
 
+@pytest.mark.parametrize("with_draft", [False, True])
+def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with_draft):
+    runner = _make_runner(need_timing=False)
+    runner.device = torch.device("cpu")
+    runner.load_config = SimpleNamespace(load_format="auto")
+    runner.vllm_config.load_config = runner.load_config
+    runner.model_config.dtype = torch.bfloat16
+    runner.model_config.logits_processors = None
+    runner.model_config.hf_config = SimpleNamespace()
+    runner.model_config.hf_text_config = SimpleNamespace()
+    runner.vllm_config.model_config = runner.model_config
+    runner.vllm_config.cache_config = SimpleNamespace(block_size=128)
+    runner.vllm_config.compilation_config = runner.compilation_config
+    runner.vllm_config.use_v2_model_runner = True
+    runner.compilation_config.static_forward_context = {}
+    runner.compilation_config.mode = CompilationMode.NONE
+    runner.req_states = Mock()
+    runner.parallel_config = SimpleNamespace(enable_batch_sharded_sampling=False)
+    runner.eplb = Mock(
+        maybe_register_model=Mock(return_value=False), maybe_register_speculator=Mock(return_value=False)
+    )
+    runner.jit_warmup_registry = SimpleNamespace(activate=nullcontext)
+    runner.lora_config = None
+    runner.use_aux_hidden_state_outputs = False
+    runner.encoder_cache = None
+    runner.num_speculative_steps = int(with_draft)
+    runner.speculative_config = SimpleNamespace() if with_draft else None
+    runner.is_first_pp_rank = True
+    runner._draft_workspace_lane = object()
+    model = SimpleNamespace()
+    allocated_bytes = 0
+    profiling = False
+    profile_count = 0
+    layers = runner.compilation_config.static_forward_context
+    runner.get_kv_cache_spec = Mock(side_effect=AssertionError("Loading must not inspect cache allocation"))
+
+    def load_attention(name):
+        layer = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_backend = AscendMLABackend
+        impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        impl.layer_name = name
+        impl.vllm_config = runner.vllm_config
+        impl.kv_b_proj = SimpleNamespace(
+            quant_method=UnquantizedLinearMethod(), weight=torch.nn.Parameter(torch.empty(2, 2))
+        )
+        impl.kv_lora_rank = 2
+        impl.num_heads = 1
+        impl.qk_nope_head_dim = 1
+        impl.v_head_dim = 1
+        impl.enable_mlapo = False
+        impl.fa_quant_layer = False
+        impl.pcp_enabled = False
+        impl.dcp_enabled = False
+        impl.supports_prolog_v3_writer = lambda: True
+        layer.impl = impl
+        layer.indexer = None
+        layer.kv_cache_dtype = "auto"
+        layer.head_size = 3
+        layer.sliding_window = None
+        layer.non_causal_multi_token_decode = False
+
+        def build_weights():
+            nonlocal allocated_bytes
+            assert profiling, "Post-load PROLOG weights must be allocated inside the original profiler"
+            weight = torch.empty(16, dtype=torch.bfloat16)
+            allocated_bytes += weight.numel() * weight.element_size()
+            return {"weight_dq": weight}
+
+        impl._build_prolog_v3_weights = Mock(side_effect=build_weights)
+        layers[name] = layer
+        impl.process_weights_after_loading(torch.bfloat16)
+
+    def load_target(**_kwargs):
+        nonlocal allocated_bytes
+        allocated_bytes += 1024
+        load_attention("target.attn")
+        return model
+
+    runner.speculator = Mock(spec=vllm_model_runner.DraftModelSpeculator) if with_draft else None
+    if runner.speculator:
+        runner.speculator.load_model.side_effect = lambda _target: load_attention("draft.attn")
+
+    @contextmanager
+    def profile():
+        nonlocal profiling, profile_count
+        assert not profiling
+        profiling = True
+        profile_count += 1
+        before = allocated_bytes
+        memory = SimpleNamespace(consumed_memory=0)
+        yield memory
+        memory.consumed_memory = allocated_bytes - before
+        profiling = False
+
+    # Execute the real parent load_model: target and draft hooks must both be
+    # covered by its one existing profiler, without an Ascend-only second pass.
+    monkeypatch.setattr(vllm_model_runner, "DeviceMemoryProfiler", profile)
+    monkeypatch.setattr(vllm_model_runner, "get_model_loader", lambda _config: SimpleNamespace(load_model=load_target))
+    monkeypatch.setattr(
+        vllm_model_runner,
+        "init_model_state",
+        lambda *_args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
+    monkeypatch.setattr(vllm_model_runner, "use_workspace_lane", lambda _lane: nullcontext())
+    monkeypatch.setattr(vllm_model_runner, "get_offloader", NoopOffloader)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_offloader", NoopOffloader)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", lambda _config: ())
+
+    runner.load_model()
+
+    assert set(layers) == ({"target.attn", "draft.attn"} if with_draft else {"target.attn"})
+    assert profile_count == 1
+    assert runner.model_memory_usage == 1024 + 32 * len(layers)
+    runner.get_kv_cache_spec.assert_not_called()
+    for layer in layers.values():
+        layer.impl._build_prolog_v3_weights.assert_called_once_with()
+
+
 def test_pool_closes_dump_cycle_for_pooling_models():
     # Pooling models never reach sample_tokens(): the worker calls pool()
     # directly, so the dump cycle must be closed there.
@@ -853,12 +1012,9 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    # vLLM main (#58149) made max_model_len a read-only property backed by
-    # model_config; v0.30.0 keeps the plain instance attribute.
-    if vllm_version_is("0.30.0"):
-        state.max_model_len = 32
-    else:
-        state.model_config = SimpleNamespace(max_model_len=32)
+    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # model_config.
+    state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
     runner.model_state = state
     batch = SimpleNamespace(
@@ -1188,7 +1344,8 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
-def test_profile_run_dummy_reserves_mc2(moe_type):
+@pytest.mark.parametrize("randomize_inputs", [False, True])
+def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
     runner = _make_runner()
     runner.max_num_tokens = 16
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
@@ -1201,9 +1358,10 @@ def test_profile_run_dummy_reserves_mc2(moe_type):
         patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
         patch.object(GPUModelRunner, "profile_run") as parent,
     ):
-        runner.profile_run()
-    runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True)
-    parent.assert_called_once_with()
+        runner.profile_run(randomize_inputs=randomize_inputs)
+    profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+    runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True, **profile_kwargs)
+    parent.assert_called_once_with(**profile_kwargs)
 
 
 def test_profile_run_skips_mc2_dummy_without_capacity():
@@ -1221,12 +1379,15 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
 
 @pytest.mark.parametrize(("pcp_size", "tokens", "expected"), [(1, 16384, 16384), (16, 16384, 1024), (4, 17, 5)])
 @pytest.mark.parametrize("fail", [False, True])
-def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail):
+@pytest.mark.parametrize("randomize_inputs", [False, True])
+def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail, randomize_inputs):
+    expected_randomize = randomize_inputs if vllm_version_is("0.31.0") else False
     runner = _make_runner()
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
     runner.max_num_tokens = tokens
 
-    def parent_profile(self):
+    def parent_profile(self, randomize_inputs=False):
+        assert randomize_inputs == expected_randomize
         assert self.max_num_tokens == expected
         if fail:
             raise RuntimeError("profile failed")
@@ -1237,9 +1398,9 @@ def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens,
     ):
         if fail:
             with pytest.raises(RuntimeError, match="profile failed"):
-                runner.profile_run()
+                runner.profile_run(randomize_inputs=randomize_inputs)
         else:
-            runner.profile_run()
+            runner.profile_run(randomize_inputs=randomize_inputs)
     assert runner.max_num_tokens == tokens
 
 
@@ -1376,13 +1537,12 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
         idx_mapping_np=np.array([0, 1], dtype=np.int32),
         has_prefill=True,
+        decode_graph_eligible=False,
+        prefill_runs_as_decode_np=None,
+        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
-        # vLLM main added these BatchReqState fields; ignored by the
-        # version-gated 0.30.0 prepare_inputs wrapper.
-        decode_graph_eligible=False,
-        prefill_runs_as_decode_np=None,
     )
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
@@ -1431,7 +1591,7 @@ def _run_prepare_inputs(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
-        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch) as make_batch,
         patch.object(
             vllm_model_runner,
             "pcp",
@@ -1439,14 +1599,20 @@ def _run_prepare_inputs(
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
-        # vLLM main (#56456) added num_active_loras to prepare_inputs.
-        if vllm_version_is("0.30.0"):
-            return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
-        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0), batch
+        prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
+        assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
+        assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
+        if vllm_version_is("0.31.0"):
+            assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
+        else:
+            assert "max_seq_len_np" not in make_batch.call_args.kwargs
+        return prepared, batch
 
 
 def test_prepare_inputs_common_path():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner()
+    batch_req_state.prefill_runs_as_decode_np = np.array([False, False])
+    batch_req_state.max_seq_len_np = np.array([8, 8], dtype=np.int32)
     out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
@@ -1573,7 +1739,180 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     npu_stream.assert_called_once_with(stream)
     stream.wait_stream.assert_called_once_with(default_stream)
     runner.num_computed_tokens_cpu.copy_.assert_called_once()
-    runner.num_computed_tokens_event.record.assert_called_once_with()
+
+
+def _c8_mxfp_runner(layers: dict, num_blocks: int = 2) -> NPUModelRunner:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    runner.compilation_config = SimpleNamespace(static_forward_context=layers)
+    runner.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="mxfp8"),
+        compilation_config=runner.compilation_config,
+    )
+    return runner
+
+
+def _c8_mxfp_layer(num_kv_heads: int = 2, v_dim: int = 64):
+    return SimpleNamespace(
+        v_cache_scale=torch.arange(num_kv_heads * v_dim, dtype=torch.int32).remainder(251).to(torch.uint8),
+        impl=object.__new__(AscendC8MXFPAttentionBackendImpl),
+    )
+
+
+def _c8_packet(ratio: int, k_dim: int = 64, v_dim: int = 64, num_pages: int = 2):
+    """Real packet views with padding, a nonzero offset and registered entries."""
+    heads, block = 2, 512
+    kernel_blocks = num_pages * ratio
+    pitch = heads * block * (k_dim + v_dim + (k_dim + v_dim) // 32) + 256
+    raw = torch.full((128 + kernel_blocks * pitch + 128,), 37, dtype=torch.int8)
+    views = mxfp_paged_cache_views(raw[128:-128], kernel_blocks, heads, k_dim, v_dim, block, page_stride_bytes=pitch)
+    layer = _c8_mxfp_layer(heads, v_dim)
+    layer.kv_cache = views
+    runner = _c8_mxfp_runner({"attn": layer}, num_blocks=num_pages)
+    runner._fill_c8_mxfp_v_scale_caches()
+    return raw, views, layer, runner, pitch
+
+
+def test_fill_c8_mxfp_v_scale_caches_fills_and_registers():
+    layer = _c8_mxfp_layer()
+    v_scale = torch.zeros(mxfp_v_scale_cache_shape(2, 128, 2, 64), dtype=torch.uint8)
+    layer.kv_cache = (MagicMock(), MagicMock(), MagicMock(), v_scale)
+    runner = _c8_mxfp_runner({"attn": layer})
+
+    runner._fill_c8_mxfp_v_scale_caches()
+
+    assert runner._c8_mxfp_v_scale_caches == [(layer.v_cache_scale, v_scale, 1)]
+    assert torch.equal(v_scale[0, :, :, 0, :, 0].reshape(-1), layer.v_cache_scale)
+    # Fill only prepares the entries; wrapper assembly happens later in
+    # _init_kv_zero_meta.
+    assert not hasattr(runner, "kv_block_zeroer")
+
+
+def test_fill_c8_mxfp_v_scale_caches_skips_non_c8_layers():
+    layer = SimpleNamespace(impl=object(), kv_cache=(MagicMock(), MagicMock()))
+    runner = _c8_mxfp_runner({"plain": layer})
+
+    runner._fill_c8_mxfp_v_scale_caches()
+
+    assert runner._c8_mxfp_v_scale_caches == []
+    assert not hasattr(runner, "kv_block_zeroer")
+
+
+@pytest.mark.parametrize("ratio", [1, 2, 4])
+@pytest.mark.parametrize(("k_dim", "v_dim"), [(64, 64), (64, 128)])
+def test_zero_block_ids_restores_reassigned_page_v_scales(ratio, k_dim, v_dim):
+    # A Mamba group writes over the whole physical page while it owns the
+    # block; zeroing and restoring must bring the static V scales back.
+    raw, _, layer, runner, pitch = _c8_packet(ratio, k_dim, v_dim)
+    raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
+    expected = raw.clone()
+    expected_views = mxfp_paged_cache_views(
+        expected[128:-128], 2 * ratio, 2, k_dim, v_dim, 512, page_stride_bytes=pitch
+    )
+    fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3][ratio : 2 * ratio])
+    events = []
+
+    delegate = MagicMock()
+    delegate.zero_block_ids.side_effect = lambda ids: events.append("zero")
+
+    def fill(scale, cache):
+        events.append("restore")
+        fill_mxfp_v_scale_cache(scale, cache)
+
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+    runner.kv_block_zeroer.zero_block_ids([1])
+
+    assert events == ["zero", "restore"]
+    assert torch.equal(raw, expected)
+
+
+def test_zero_block_ids_with_empty_ids_is_noop():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    delegate = MagicMock()
+    fill = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+
+    runner.kv_block_zeroer.zero_block_ids([])
+
+    delegate.zero_block_ids.assert_not_called()
+    fill.assert_not_called()
+
+
+@pytest.mark.parametrize("block_ids", [[-1], [2], [0, 2]])
+def test_zero_block_ids_validates_ids_before_writes(block_ids):
+    raw, _, _, runner, _ = _c8_packet(ratio=1)
+    before = raw.clone()
+    delegate = MagicMock()
+    fill = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, runner._c8_mxfp_v_scale_caches, fill)
+
+    with pytest.raises(IndexError):
+        runner.kv_block_zeroer.zero_block_ids(block_ids)
+
+    delegate.zero_block_ids.assert_not_called()
+    fill.assert_not_called()
+    assert torch.equal(raw, before)
+
+
+def test_init_kv_zero_meta_wraps_tuple_aware_zeroer_for_mxfp8():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="mxfp8"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [512]
+    runner.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    entries = [(MagicMock(), MagicMock(), 1)]
+    runner._c8_mxfp_v_scale_caches = entries
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as cls:
+        runner._init_kv_zero_meta()
+
+    cls.assert_called_once()
+    kwargs = cls.call_args.kwargs
+    assert kwargs["cache_dtype"] == "mxfp8"
+    assert kwargs["kernel_block_sizes"] == [512]
+    assert isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
+    assert runner.kv_block_zeroer.delegate is cls.return_value
+    assert runner.kv_block_zeroer.entries is entries
+
+
+def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp8():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [512]
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as generic_cls:
+        runner._init_kv_zero_meta()
+
+    generic_cls.assert_called_once()
+    assert runner.kv_block_zeroer is generic_cls.return_value
+    assert not isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
+
+
+def test_shutdown_releases_c8_views_and_unwraps_zeroer():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    entries = runner._c8_mxfp_v_scale_caches
+    wrapper_entries = list(entries)
+    delegate = MagicMock()
+    runner.kv_block_zeroer = C8KVBlockZeroer(delegate, wrapper_entries, fill_mxfp_v_scale_cache)
+
+    with patch.object(GPUModelRunner, "shutdown") as parent:
+        runner.shutdown()
+
+    parent.assert_called_once_with()
+    assert entries == [] and wrapper_entries == []
+    assert runner.kv_block_zeroer is delegate
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v41", "other_model"])

@@ -55,7 +55,7 @@ def test_ring_lifetime_reuse_and_external_tokens():
         manager.cache_blocks(
             SimpleNamespace(request_id="a"),
             tokens,
-            replay_boundaries=[tokens - 1],
+            **{"replay_boundaries": [tokens - 1]},
         )
         assert manager.req_to_blocks["a"] == a
     assert manager.take_new_block_ids() == []

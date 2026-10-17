@@ -8,10 +8,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch_npu
+from torch import nn
+from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.offloader.base import NoopOffloader
+from vllm.model_executor.offloader.prefetch import PrefetchOffloader
+from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.utils import supports_strided_mla_cache
+from vllm_ascend.model_executor.offloader.prefetch import AscendPrefetchOffloader
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8FP8DynamicLinearMethod,
@@ -113,6 +121,285 @@ def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:
         )
 
 
+def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
+    """Run the actual weight hook with small, already loaded projections."""
+    impl = impl_type.__new__(impl_type)
+    impl.__dict__.update(_make_impl().__dict__)
+    impl.num_heads = impl.num_heads_padded = 2
+    impl.head_padding = 0
+    impl.mlapo_num_heads = 2
+    impl.q_lora_rank = impl.kv_lora_rank = 4
+    impl.qk_nope_head_dim = impl.qk_rope_head_dim = 2
+    impl.qk_head_dim = 4
+    impl.v_head_dim = 2
+    impl.enable_mlapo = False
+    impl.pcp_enabled = False
+    impl.dcp_enabled = impl_type is AscendMlaDCPImpl
+    impl.is_pcp_decode_sharded = False
+    impl.speculative_config = None
+    impl._prolog_v3_weights = None
+    impl._dcp_current_kv_buffers = None
+    impl._dcp_prefill_current_kv_buffers = None
+    impl.q_a_layernorm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6)
+    impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6)
+    quant_method = object.__new__(AscendW8A8LinearMethod)
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=torch.ones(4, 10),
+        weight_scale=torch.ones(10),
+        quant_method=SimpleNamespace(quant_method=quant_method),
+    )
+    impl.q_proj = SimpleNamespace(
+        weight=torch.ones(4, 8),
+        weight_scale=torch.ones(8),
+        quant_method=SimpleNamespace(quant_method=quant_method),
+        _chunk_size=0,
+    )
+    impl.kv_b_proj = SimpleNamespace(
+        weight=torch.ones(8, 4),
+        quant_method=UnquantizedLinearMethod(),
+    )
+    impl.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        ),
+        cache_config=SimpleNamespace(block_size=BLOCK_SIZE, cache_dtype="auto"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=4),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=2),
+        speculative_config=None,
+        kv_transfer_config=None,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        use_v2_model_runner=False,
+    )
+    owner = MLAAttention.__new__(MLAAttention)
+    nn.Module.__init__(owner)
+    owner.attn_backend = mla_v1.AscendMLABackend
+    owner.impl = impl
+    owner.indexer = None
+    owner.kv_cache_dtype = "auto"
+    owner.head_size = impl.kv_lora_rank + impl.qk_rope_head_dim
+    owner.sliding_window = None
+    owner.non_causal_multi_token_decode = False
+    impl.vllm_config.compilation_config.static_forward_context[impl.layer_name] = owner
+    monkeypatch.setattr(mla_v1, "maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr(torch_npu, "npu_format_cast", lambda tensor, _format: tensor)
+    monkeypatch.setattr(mla_v1, "get_offloader", lambda: NoopOffloader())
+    monkeypatch.setattr(mla_v1, "enable_dcp", lambda: impl.dcp_enabled)
+    monkeypatch.setattr(
+        mla_v1,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            mlapo_keep_prefill_weights=True,
+        ),
+    )
+    monkeypatch.setattr(
+        mla_v1,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda _capability: False),
+    )
+    return impl
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+@pytest.mark.parametrize("native_weights", [False, True])
+def test_post_load_prepares_private_prolog_weights(monkeypatch, use_v2_runner, native_weights):
+    impl = _make_post_load_impl(monkeypatch)
+    impl.vllm_config.use_v2_model_runner = use_v2_runner
+    if native_weights:
+        for projection in (impl.fused_qkv_a_proj, impl.q_proj):
+            projection.weight = projection.weight.T.contiguous()
+            projection.quant_method = UnquantizedLinearMethod()
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    prepared = impl._prolog_v3_weights
+    assert prepared is not None
+    assert prepared["weight_dq"].shape == (4, 4)
+    assert prepared["weight_dkv_kr"].shape == (4, 6)
+    assert prepared["weight_uq_qr"].shape == (4, 8)
+    assert prepared["weight_uk"] is impl.mlapo_W_UK_T
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_post_load_prepares_sliding_window_prolog_weights(monkeypatch, use_v2_runner):
+    impl = _make_post_load_impl(monkeypatch)
+    config = impl.vllm_config
+    config.use_v2_model_runner = use_v2_runner
+    owner = config.compilation_config.static_forward_context[impl.layer_name]
+    owner.sliding_window = BLOCK_SIZE
+    assert isinstance(owner.get_kv_cache_spec(config), SlidingWindowMLASpec)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is not None
+
+
+@pytest.mark.parametrize("free_source_weights", [False, True])
+def test_post_load_reuses_mlapo_projection_storage(monkeypatch, free_source_weights):
+    impl = _make_post_load_impl(monkeypatch)
+    impl.enable_mlapo = True
+    if free_source_weights:
+        impl.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", is_kv_consumer=True)
+        monkeypatch.setattr(
+            mla_v1,
+            "get_ascend_config",
+            lambda: SimpleNamespace(
+                sparse_kv_offload_config=SimpleNamespace(enabled=False), mlapo_keep_prefill_weights=False
+            ),
+        )
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    prepared = impl._prolog_v3_weights
+    assert prepared is not None
+    for name in ("weight_dq", "weight_dkv_kr", "weight_uq_qr", "dequant_scale_w_dq"):
+        assert prepared[name] is getattr(impl, name)
+    assert prepared["weight_uk"] is impl.mlapo_W_UK_T
+    if free_source_weights:
+        assert impl.fused_qkv_a_proj.weight is None
+        assert impl.q_proj.weight is None
+
+
+def test_post_load_refreshes_private_prolog_weights_in_place(monkeypatch):
+    impl = _make_post_load_impl(monkeypatch)
+    impl.process_weights_after_loading(torch.bfloat16)
+    prepared = impl._prolog_v3_weights
+    assert prepared is not None
+    pointers = {name: value.data_ptr() for name, value in prepared.items() if isinstance(value, torch.Tensor)}
+    impl.fused_qkv_a_proj.weight = torch.full((4, 10), 2.0)
+    impl.q_proj.weight = torch.full((4, 8), 3.0)
+    impl.fused_qkv_a_proj.weight_scale = torch.full((10,), 4.0)
+    impl.q_proj.weight_scale = torch.full((8,), 5.0)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is prepared
+    for name, pointer in pointers.items():
+        assert prepared[name].data_ptr() == pointer
+    torch.testing.assert_close(prepared["weight_dq"], torch.full((4, 4), 2.0))
+    torch.testing.assert_close(prepared["weight_dkv_kr"], torch.full((4, 6), 2.0))
+    torch.testing.assert_close(prepared["weight_uq_qr"], torch.full((4, 8), 3.0))
+    torch.testing.assert_close(prepared["dequant_scale_w_dq"], torch.full((1, 4), 4.0))
+    torch.testing.assert_close(prepared["dequant_scale_w_uq_qr"], torch.full((1, 8), 5.0))
+
+
+@pytest.mark.parametrize("offloader_type", [PrefetchOffloader, AscendPrefetchOffloader])
+def test_post_load_offloader_keeps_prolog_weights_lazy(monkeypatch, offloader_type):
+    impl = _make_post_load_impl(monkeypatch)
+    offloader = offloader_type.__new__(offloader_type)
+    monkeypatch.setattr(mla_v1, "get_offloader", lambda: offloader)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is None
+
+
+@pytest.mark.parametrize(
+    "excluded_path",
+    [
+        "fp16",
+        "no_rope",
+        "pcp",
+        "sharded_pcp",
+        "nz",
+        "indexer",
+        "sparse",
+        "sparse_offload",
+        "compress",
+        "fa_quant",
+        "unsupported_quant",
+        "model_version",
+        "block_stride",
+        "unsupported_pd",
+    ],
+)
+def test_post_load_skips_unused_prolog_weights(monkeypatch, excluded_path):
+    impl = _make_post_load_impl(monkeypatch)
+    config = impl.vllm_config
+    owner = config.compilation_config.static_forward_context[impl.layer_name]
+    if excluded_path == "fp16":
+        impl.dtype = torch.float16
+    elif excluded_path == "no_rope":
+        impl.use_mla_rope = False
+    elif excluded_path == "pcp":
+        impl.pcp_enabled = True
+    elif excluded_path == "sharded_pcp":
+        impl.is_pcp_decode_sharded = True
+    elif excluded_path == "nz":
+        impl.enable_kv_nz = True
+    elif excluded_path == "indexer":
+        owner.indexer = nn.Identity()
+    elif excluded_path == "sparse":
+        config.model_config.hf_text_config.index_topk = 4
+    elif excluded_path == "sparse_offload":
+        monkeypatch.setattr(
+            mla_v1,
+            "get_ascend_config",
+            lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True)),
+        )
+    elif excluded_path == "compress":
+        config.model_config.hf_config.compress_ratios = [1]
+    elif excluded_path == "fa_quant":
+        impl.fa_quant_layer = True
+        impl._mlapo_uses_native_weights = False
+        owner.quant_kscale = torch.ones(1)
+        owner.fak_descale_float = torch.ones(1)
+        owner.fak_descale_reciprocal = torch.ones(1)
+    elif excluded_path == "unsupported_quant":
+        for projection in (impl.fused_qkv_a_proj, impl.q_proj):
+            projection.quant_method.quant_method = object.__new__(AscendW8A8FP8DynamicLinearMethod)
+    elif excluded_path == "model_version":
+        owner.model_version = "glm5_next"
+    elif excluded_path == "block_stride":
+        owner.indexes_kv_by_block_stride = True
+    else:
+        config.kv_transfer_config = SimpleNamespace(kv_connector="UnsupportedConnector")
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tokens_per_state", 2),
+        ("model_version", "deepseek_v4"),
+        ("indexes_kv_by_block_stride", True),
+        ("cache_sparse_sfa_c8", True),
+    ],
+)
+def test_post_load_generic_spec_uses_same_layout_exclusions(monkeypatch, field, value):
+    impl = _make_post_load_impl(monkeypatch)
+    config = impl.vllm_config
+    owner = config.compilation_config.static_forward_context[impl.layer_name]
+    cache_spec = owner.get_kv_cache_spec(config)
+    assert supports_strided_mla_cache(config, owner, cache_spec)
+    object.__setattr__(cache_spec, field, value)
+
+    assert not supports_strided_mla_cache(config, owner, cache_spec)
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_dcp_post_load_prepares_prolog_weights_after_current_kv_buffers(monkeypatch, use_v2_runner):
+    impl = _make_post_load_impl(monkeypatch, AscendMlaDCPImpl)
+    impl.vllm_config.use_v2_model_runner = use_v2_runner
+    prepare = impl._prepare_prolog_v3_weights
+
+    def prepare_after_buffers():
+        assert impl._dcp_current_kv_buffers_are_sufficient()
+        return prepare()
+
+    impl._prepare_prolog_v3_weights = MagicMock(side_effect=prepare_after_buffers)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    impl._prepare_prolog_v3_weights.assert_called_once()
+    assert impl._prolog_v3_weights is not None
+    assert impl._dcp_current_kv_buffers is not None
+    assert impl._dcp_prefill_current_kv_buffers is not None
+
+
 @pytest.mark.parametrize(
     ("pcp_size", "dcp_size", "expected_pcp", "expected_dcp"),
     [
@@ -156,6 +443,48 @@ def _token_fused_cache(blocks: int = 4):
     nope = fused[..., :NOPE_DIM]
     rope = fused[..., NOPE_DIM:]
     return nope, rope
+
+
+def _load_cache_rows_on_cpu(cache_k, cache_v, slots):
+    packed = cache_k.new_zeros((slots.numel(), cache_k.shape[-1] + cache_v.shape[-1]))
+    for row, slot in enumerate(slots.reshape(-1).tolist()):
+        if slot >= 0:
+            block, offset = divmod(slot, cache_k.shape[1])
+            packed[row, : cache_k.shape[-1]] = cache_k[block, offset, 0]
+            packed[row, cache_k.shape[-1] :] = cache_v[block, offset, 0]
+    return packed
+
+
+@pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
+@pytest.mark.parametrize("slots", [[], [0], [129, -1, 0, 129, 3]])
+def test_current_kv_gather_materializes_only_selected_rows(cache_factory, slots):
+    cache_k, cache_v = cache_factory()
+    slot_tensor = torch.tensor(slots, dtype=torch.int64)
+    packed = _load_cache_rows_on_cpu(cache_k, cache_v, slot_tensor)
+
+    class CacheReadGuard(torch.Tensor):
+        def __getitem__(self, index):
+            raise AssertionError("Do not index the entire strided cache.")
+
+        def contiguous(self, *args, **kwargs):
+            raise AssertionError("Do not materialize the entire strided cache.")
+
+    guarded_cache = (cache_k.as_subclass(CacheReadGuard), cache_v.as_subclass(CacheReadGuard))
+    with patch.object(mla_v1, "load_mla_cache_rows_by_slots", return_value=packed) as mock_reader:
+        nope, rope = AscendMLAImpl._gather_current_kv_from_cache(guarded_cache, slot_tensor)
+
+    mock_reader.assert_called_once_with(*guarded_cache, slot_tensor)
+    assert nope.shape == (len(slots), 1, NOPE_DIM)
+    assert rope.shape == (len(slots), 1, ROPE_DIM)
+    assert nope.is_contiguous() and rope.is_contiguous()
+    torch.testing.assert_close(nope[:, 0], packed[:, :NOPE_DIM])
+    torch.testing.assert_close(rope[:, 0], packed[:, NOPE_DIM:])
+    # Patching Tensor.__getitem__ leaves CPython sequence slots changed even
+    # after restoration, breaking scalar-tensor construction in later EPLB UTs.
+    torch.testing.assert_close(
+        torch.tensor([torch.tensor(3), torch.tensor(7)], dtype=torch.int32),
+        torch.tensor([3, 7], dtype=torch.int32),
+    )
 
 
 @pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
@@ -396,7 +725,10 @@ def test_dcp_post_load_allocates_only_consumed_workspaces(
     impl._dcp_prefill_current_kv_buffers = None
     impl.supports_prolog_v3_writer = lambda: use_rope
 
-    with patch.object(AscendMLAImpl, "process_weights_after_loading"):
+    with (
+        patch.object(AscendMLAImpl, "process_weights_after_loading"),
+        patch.object(AscendMLAImpl, "_prepare_prolog_v3_weights_after_loading"),
+    ):
         impl.process_weights_after_loading(torch.bfloat16)
 
     assert (impl._dcp_current_kv_buffers is not None) is (expected_buffers != "none")
@@ -471,9 +803,12 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
     assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
-def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
+@pytest.mark.parametrize("num_decode", [0, 2])
+@pytest.mark.parametrize("padding", [0, 3])
+def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding):
     impl = _make_impl()
-    total_tokens = 5
+    num_prefill = 3
+    total_tokens = num_decode + num_prefill + padding
     qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
     impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
     impl.q_a_layernorm = MagicMock(side_effect=lambda tensor: tensor)
@@ -485,17 +820,16 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     nope.fill_(1.0)
     rope.fill_(2.0)
 
-    num_decode = 2
-    num_prefill = 3
-    hidden = torch.randn(num_decode + num_prefill, 128)
+    hidden = torch.randn(total_tokens, 128)
     decode_cos = torch.randn(num_decode, ROPE_DIM)
     decode_sin = torch.randn(num_decode, ROPE_DIM)
-    prefill_cos = torch.randn(num_prefill, ROPE_DIM)
-    prefill_sin = torch.randn(num_prefill, ROPE_DIM)
+    prefill_cos = torch.randn(num_prefill + padding, 1, 1, ROPE_DIM)
+    prefill_sin = torch.randn(num_prefill + padding, 1, 1, ROPE_DIM)
+    original_cos, original_sin = prefill_cos.clone(), prefill_sin.clone()
     metadata = SimpleNamespace(
         num_decode_tokens=num_decode,
         num_actual_tokens=num_decode + num_prefill,
-        slot_mapping=torch.tensor([0, 1, 129, 130, 131]),
+        slot_mapping=torch.tensor([0, 1][:num_decode] + [129, 130, 131] + [-1] * padding),
         decode=SimpleNamespace(cos=decode_cos, sin=decode_sin),
         prefill=SimpleNamespace(cos=prefill_cos, sin=prefill_sin),
     )
@@ -517,17 +851,30 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     with (
         patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
         patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
+        patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
     ):
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
-    assert mock_prolog.call_count == 2
+    assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
-    assert decode is not None
+    assert (decode is not None) == bool(num_decode)
     assert prefill is not None
     assert prefill.q_nope.shape == (num_prefill, impl.num_heads, impl.qk_nope_head_dim)
     assert prefill.q_pe.shape == (num_prefill, impl.num_heads, ROPE_DIM)
     assert prefill.k_pe.shape == (num_prefill, impl.num_heads, ROPE_DIM)
     assert torch.all(prefill.k_pe == 2.0)
+    impl.rope_single.assert_called_once()
+    rope_input, rope_cos, rope_sin = impl.rope_single.call_args.args
+    assert rope_input.shape[0] == num_prefill
+    torch.testing.assert_close(rope_cos, original_cos[:num_prefill])
+    torch.testing.assert_close(rope_sin, original_sin[:num_prefill])
+    prefill_kwargs = mock_prolog.call_args_list[-1].kwargs
+    assert prefill_kwargs["token_x"].shape[0] == num_prefill
+    torch.testing.assert_close(prefill_kwargs["rope_cos"], original_cos[:num_prefill].reshape(num_prefill, ROPE_DIM))
+    torch.testing.assert_close(prefill_kwargs["rope_sin"], original_sin[:num_prefill].reshape(num_prefill, ROPE_DIM))
+    assert metadata.prefill.cos is prefill_cos and metadata.prefill.sin is prefill_sin
+    torch.testing.assert_close(metadata.prefill.cos, original_cos)
+    torch.testing.assert_close(metadata.prefill.sin, original_sin)
 
 
 @pytest.mark.parametrize(
@@ -973,7 +1320,10 @@ def test_mla_preprocess_prolog_v3_keeps_prefill_query_unquantized_for_fa_quant()
             None,
         )
 
-    with patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog:
+    with (
+        patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
+        patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
+    ):
         impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
     assert mock_prolog.call_count == 2

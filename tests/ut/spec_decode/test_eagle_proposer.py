@@ -25,6 +25,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -35,7 +36,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -45,6 +46,16 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
 
 
 class _NullPatch:
@@ -64,17 +75,11 @@ class _NullPatch:
 
 
 def _supports_multimodal_inputs_patch(vllm_config=None):
-    """Keep the proposer on the text-only path across vLLM versions.
+    """Keep the proposer on the vLLM 0.31 text-only path.
 
-    v0.30.0 reads ``MultiModalRegistry.supports_multimodal_inputs``; vLLM main
-    removed that method and reads ``ModelConfig.supports_multimodal_inputs``
-    instead. ``vllm_config`` is only required on the main lane.
+    Both supported lanes read ``ModelConfig.supports_multimodal_inputs``.
+    Set the fixture flags when a ``vllm_config`` is provided.
     """
-    if vllm_version_is("0.30.0"):
-        return patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
-            return_value=False,
-        )
     if vllm_config is not None:
         model_config = getattr(vllm_config, "model_config", None)
         if model_config is not None:
@@ -2418,11 +2423,6 @@ class TestRunMergedDraft(TestBase):
         import vllm.multimodal.registry
 
         assert hasattr(vllm.multimodal.registry, "MultiModalRegistry")
-        # vLLM main removed this method; only check the contract on v0.30.0.
-        if vllm_version_is("0.30.0"):
-            sig = inspect.signature(vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs)
-            sig_name = self.get_param_names(sig)
-            assert sig_name == ["self", "model_config"]
 
         import vllm.v1.spec_decode.eagle
 

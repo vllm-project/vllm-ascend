@@ -158,7 +158,8 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
         self.vllm_config = args[0]
         self.policy = SchedulingPolicy.FCFS
         self.waiting = create_request_queue(self.policy)
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.deferred_waiting = set()
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -474,8 +475,8 @@ def test_balance_deltas_present_in_schedule():
     assert "max(t.item() for t in self.balance_queue)" in src
     assert "self.max_num_running_reqs" in src
 
-    # delta 3: `if request_queue is None: break` replaces upstream's assert.
-    assert "if request_queue is None:" in src
+    # The shared queue path must stop before peeking an empty request queue.
+    assert "if not request_queue:" in src
 
 
 # ---------------------------------------------------------------------------
@@ -612,38 +613,21 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
+    "_holds_kv_blocks",
+    "_is_blocked_waiting_status",
+    "_handle_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
     "_inflight_prefill_reserved_blocks",
 ]
 
-# v0.30.0 keeps the single `skipped_waiting` queue and its helpers; upstream
-# main (#58947) replaced them with `kv_holding_waiting`/`deferred_waiting` and
-# the `_handle_blocked_waiting_request`/`_holds_kv_blocks` helpers.
-_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS = [
-    "_select_waiting_queue_for_scheduling",
-    "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
-]
-_MAIN_ONLY_SCHEDULER_METHOD_SEAMS = [
-    "_is_blocked_waiting_status",
-    "_handle_blocked_waiting_request",
-    "_holds_kv_blocks",
-]
-
-
-def _scheduler_method_seams() -> list[str]:
-    if vllm_version_is("0.30.0"):
-        return [*_SCHEDULER_METHOD_SEAMS, *_LEGACY_ONLY_SCHEDULER_METHOD_SEAMS]
-    return [*_SCHEDULER_METHOD_SEAMS, *_MAIN_ONLY_SCHEDULER_METHOD_SEAMS]
-
 
 def test_upstream_scheduler_seams_still_exist():
     """Guard the upstream method names the patch depends on. The copied
     ``schedule()`` body calls a fixed set of Scheduler internals by name; if
     upstream renames/removes any, the body breaks when balance runs."""
-    missing = [n for n in _scheduler_method_seams() if not hasattr(_UpstreamScheduler, n)]
+    missing = [n for n in _SCHEDULER_METHOD_SEAMS if not hasattr(_UpstreamScheduler, n)]
     assert not missing, "upstream Scheduler lost methods the patch depends on: " + ", ".join(missing)
     assert hasattr(_UpstreamDPEngineCoreProc, "run_busy_loop"), (
         "upstream DPEngineCoreProc lost run_busy_loop (BalanceDPEngineCoreProc inherits it)"
@@ -709,7 +693,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -729,8 +712,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
-        if not vllm_version_is("0.27.1"):
-            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+        stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
         stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
 
@@ -840,6 +822,29 @@ def test_balance_schedule_waiting_and_running_paths():
     scheduler.schedule(throttle_prefills=True)
 
 
+@pytest.mark.parametrize("holds_kv_blocks", [False, True])
+def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
+    scheduler = _make_balance_scheduler()
+    empty = scheduler.schedule()
+    assert empty.total_num_scheduled_tokens == 0
+    assert not empty.num_scheduled_tokens
+
+    request = _create_requests(1, num_tokens=8)[0]
+    request.num_computed_tokens = 4 if holds_kv_blocks else 0
+    scheduler.add_request(request)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
+
+    output = scheduler.schedule()
+
+    scheduler._handle_blocked_waiting_request.assert_called_once_with(request)
+    assert output.total_num_scheduled_tokens == 0
+    assert not output.num_scheduled_tokens
+    assert not scheduler.running
+    assert list(scheduler.kv_holding_waiting) == ([request] if holds_kv_blocks else [])
+    assert list(scheduler.waiting) == ([] if holds_kv_blocks else [request])
+    assert request in scheduler.deferred_waiting
+
+
 def test_balance_schedule_pause_freeze_and_v2():
     import torch
     from vllm.v1.core.sched.interface import PauseState
@@ -914,7 +919,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler.add_request(blocked)
     blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
     scheduler.schedule()
 
     preempt = _make_balance_scheduler()
@@ -1101,3 +1106,26 @@ def test_balance_full_pool_does_not_cascade_preempt_on_deferred_free():
 
     # With balance disabled schedule() delegates to upstream Scheduler.
     assert run(balance_enabled=True) == run(balance_enabled=False)
+
+
+@pytest.mark.parametrize("encoder_only", [False, True])
+@pytest.mark.parametrize("chunked_prefill", [False, True])
+@pytest.mark.parametrize("num_tokens", [512, 2500])
+def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_tokens):
+    scheduler = _make_balance_scheduler()
+    token_budget = 1024
+    scheduler.max_num_scheduled_tokens = token_budget
+    scheduler.scheduler_config.max_num_batched_tokens = token_budget
+    scheduler.scheduler_config.enable_chunked_prefill = chunked_prefill
+    scheduler.is_mm_encoder_only = encoder_only
+    request = _create_requests(1, num_tokens=num_tokens)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    can_chunk = chunked_prefill or (encoder_only and not vllm_version_is("0.31.0"))
+    expected = min(num_tokens, token_budget) if can_chunk or num_tokens <= token_budget else 0
+    assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
+    assert output.total_num_scheduled_tokens == expected
+    assert (request in scheduler.running) == bool(expected)
+    assert (request in scheduler.waiting) == (not expected)

@@ -117,12 +117,16 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 
 
 @pytest.mark.parametrize("cached_hit", [False, True])
-def test_joint_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit):
+@pytest.mark.parametrize("mode", ["dspark", "reuse"])
+def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit, mode):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
-    scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
+    scheduler.dspark_prefix_keys = (
+        DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
+    )
+    scheduler.layerwise_offload = mode == "reuse"
     scheduler.dspark_draft_only_group_ids = frozenset({1})
     scheduler.layerwise_max_transfer_blocks = 0
     scheduler.hash_block_size = 16
@@ -139,14 +143,15 @@ def test_joint_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_h
     )
 
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
-    draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash")
+    draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash") if scheduler.dspark_prefix_keys else []
     readable_keys.update(["target", *draft_keys])
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 16
-    readable_keys.remove(draft_keys[-1])
+    readable_keys.remove(draft_keys[-1] if draft_keys else "target")
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
     assert scheduler._lw_block_hit_cache == original_cache
     scheduler.dspark_prefix_keys = None
+    scheduler.layerwise_offload = False
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == (16 if cached_hit else 0)
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
 

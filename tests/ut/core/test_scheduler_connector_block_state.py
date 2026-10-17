@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
@@ -24,6 +25,7 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     if isinstance(scheduler, BalanceScheduler):
         # Exercise the local schedule implementation, not its super fallback.
         scheduler._balance_enabled = True
+        scheduler.balance_queue = [torch.tensor([0], dtype=torch.int)]
 
     scheduler.connector = object() if with_connector else None
     scheduler.ec_connector = None
