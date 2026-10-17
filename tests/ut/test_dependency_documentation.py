@@ -31,7 +31,7 @@ def _requirements_versions() -> dict[str, str]:
     versions = {}
     for name, version in re.findall(
         r"^(torch|torch-npu|torchvision|torchaudio|triton-ascend)==([^\s;]+)$",
-        _read("requirements.txt"),
+        _read("requirements/runtime.txt"),
         flags=re.MULTILINE,
     ):
         versions[name] = version

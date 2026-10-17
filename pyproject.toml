@@ -1,5 +1,5 @@
 [build-system]
-# Should be mirrored in requirements.txt
+# Isolated build requirements; runtime dependencies live in requirements/runtime.txt.
 requires = [
     "attrs",
     "cmake>=3.26",
