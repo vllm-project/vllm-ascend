@@ -242,11 +242,23 @@ def test_parallel_config_platform_patch_is_idempotent():
     assert parallel_module.current_platform is proxy
 
 
-def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
+@pytest.mark.parametrize("compact_weights", [False, "false", True, "true"])
+def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch, compact_weights):
     communicator = object()
     gloo_cls = MagicMock(return_value=communicator)
     monkeypatch.setattr(patch_eplb, "AscendGlooEplbCommunicator", gloo_cls)
+    monkeypatch.setattr(
+        patch_eplb,
+        "get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=EplbConfig(compact_weights=compact_weights)),
+    )
     coordinator = MagicMock()
+
+    if compact_weights in (True, "true"):
+        with pytest.raises(ValueError, match="compact_weights requires the hixl communicator"):
+            patch_eplb._eplb_communicator.create_eplb_communicator(coordinator, "torch_gloo", [[object()]], [object()])
+        gloo_cls.assert_not_called()
+        return
 
     result = patch_eplb._eplb_communicator.create_eplb_communicator(
         coordinator,
@@ -293,6 +305,7 @@ def test_communicator_factory_accepts_additive_parameters(monkeypatch):
     communicator = object()
     gloo_cls = MagicMock(return_value=communicator)
     monkeypatch.setattr(patch_eplb, "AscendGlooEplbCommunicator", gloo_cls)
+    monkeypatch.setattr(patch_eplb, "get_ascend_config", lambda: SimpleNamespace(eplb_config=EplbConfig()))
 
     def original_factory(
         group_coordinator,

@@ -344,6 +344,8 @@ def _wrap_communicator_factory(original_factory):
         bound = factory_signature.bind(*args, **kwargs)
         backend = bound.arguments["backend"]
         if backend == "torch_gloo":
+            if get_ascend_config().eplb_config.compact_weights:
+                raise ValueError("EPLB compact_weights requires the hixl communicator; torch_gloo was selected.")
             return AscendGlooEplbCommunicator(
                 cpu_group=bound.arguments["group_coordinator"].cpu_group,
             )

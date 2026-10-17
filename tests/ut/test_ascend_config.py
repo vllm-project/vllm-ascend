@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import pytest
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -73,6 +74,39 @@ def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
             get_hidden_size=lambda: 0,
         )
     return config
+
+
+@pytest.mark.parametrize("compact_weights", [False, True, "false", "true"])
+@pytest.mark.parametrize("sleep_mode", [False, True])
+def test_compact_weights_sleep_mode_compatibility(compact_weights, sleep_mode):
+    vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
+    vc.parallel_config.enable_eplb = True
+    assert vc.model_config is not None
+    vc.model_config.enable_sleep_mode = sleep_mode
+    clear_ascend_config()
+    try:
+        if sleep_mode and compact_weights in (True, "true"):
+            with pytest.raises(ValueError, match="compact_weights is incompatible with sleep mode"):
+                init_ascend_config(vc)
+        else:
+            config = init_ascend_config(vc)
+            assert config.eplb_config.compact_weights == (compact_weights in (True, "true"))
+    finally:
+        clear_ascend_config()
+
+
+@pytest.mark.parametrize("compact_weights", [False, True, "false", "true"])
+def test_compact_weights_requires_eplb(compact_weights):
+    vc = VllmConfig(additional_config={"eplb_config": {"compact_weights": compact_weights}})
+    clear_ascend_config()
+    try:
+        if compact_weights in (True, "true"):
+            with pytest.raises(ValueError, match="compact_weights requires enable_eplb"):
+                init_ascend_config(vc)
+        else:
+            assert not init_ascend_config(vc).eplb_config.compact_weights
+    finally:
+        clear_ascend_config()
 
 
 def test_config_modules_do_not_load_vllm_config():
