@@ -159,6 +159,9 @@ class AscendPCPManager(PCPManager):
             dcp_world_size: int = 1,
             dcp_rank: int = 0,
             cp_interleave: int = 1,
+            # vLLM #60946 (main) added this argument and
+            # `maybe_build_pcp_manager` always passes it.
+            moe_gathers_tokens: bool = False,
         ) -> None:
             super().__init__(
                 pcp_world_size=pcp_world_size,
@@ -171,6 +174,7 @@ class AscendPCPManager(PCPManager):
                 dcp_world_size=dcp_world_size,
                 dcp_rank=dcp_rank,
                 cp_interleave=cp_interleave,
+                moe_gathers_tokens=moe_gathers_tokens,
             )
             # PCP supplies its own output buffers to compute_slot_mappings, so their
             # dtype must match Ascend block-table slots for cache-write operators.
