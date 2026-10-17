@@ -43,6 +43,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm.v1.worker.gpu.model_runner import (
     BatchReqState,
     ExecuteModelState,
@@ -139,6 +140,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_connector: KVConnector
     max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
