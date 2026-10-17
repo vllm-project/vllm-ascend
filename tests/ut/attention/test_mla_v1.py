@@ -2521,6 +2521,19 @@ class TestAscendMLAImpl(TestBase):
         self.impl.vllm_config.kv_transfer_config = kv_transfer_config
         self.impl.vllm_config.weight_transfer_config = None
 
+    def test_kv_b_proj_disposal_keeps_weight_when_rl_config_unavailable(self):
+        impl = object.__new__(AscendMLAImpl)
+        impl.kv_b_proj = self._make_kv_b_proj_layer()
+        self._configure_kv_transfer(is_kv_consumer=True)
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.is_rl_weight_update_enabled",
+            side_effect=RuntimeError("Ascend config is not initialized"),
+        ):
+            impl._maybe_dispose_kv_b_proj()
+
+        self.assertGreater(impl.kv_b_proj.weight.numel(), 0)
+
     @patch.object(AscendMLAImpl, "_prepare_prolog_v3_weights_after_loading")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_disposes_kv_b_proj_on_pure_kv_consumer(self, mock_format_cast, mock_prepare_prolog):

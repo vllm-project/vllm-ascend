@@ -1223,11 +1223,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             return
         kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         if (
-            kv_transfer_config is not None
-            and getattr(kv_transfer_config, "is_kv_consumer", False)
-            and not getattr(kv_transfer_config, "is_kv_producer", False)
-            and not is_rl_weight_update_enabled(vllm_config)
+            kv_transfer_config is None
+            or not getattr(kv_transfer_config, "is_kv_consumer", False)
+            or getattr(kv_transfer_config, "is_kv_producer", False)
         ):
+            return
+        try:
+            rl_weight_update_enabled = is_rl_weight_update_enabled(vllm_config)
+        except RuntimeError:
+            # Unit-test fixtures and partially initialized loaders may provide a
+            # vLLM config before the Ascend singleton is initialized. Preserve
+            # the source weight when the reload policy cannot be resolved.
+            return
+        if not rl_weight_update_enabled:
             dispose_layer(self.kv_b_proj)
 
     def _load_fa_quant_scales(self):
