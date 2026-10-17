@@ -242,17 +242,19 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
+            # KPool uses SFA for the main cache even when enable_sfa() is false.
+            # Select the packed layout from the attention implementation.
             if getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
+            elif bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
                 cache_sparse_sfa_turboquant = True
                 head_size = get_tq_fused_slot_bytes(
                     attn_module.kv_lora_rank,
                     attn_module.qk_rope_head_dim,
                 )
                 dtype, cache_dtype_str = torch.int8, vllm_config.cache_config.cache_dtype
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
+            elif bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
                 cache_sparse_sfa_c8 = True
                 head_size = get_sfa_qsfa_packed_head_dim(
                     vllm_config.model_config.hf_text_config.kv_lora_rank,
@@ -1265,7 +1267,7 @@ def _allocate_kv_cache(
                     get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
                     lambda size, align: _allocate_int8_cache_tensor(size, align, device),
                 )
-        elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
+        elif kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
@@ -1738,7 +1740,7 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.head_size,
                 cache_dtype,
             )
-            packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
+            packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
                 get_kv_cache_compression_ratio(kv_cache_spec) > 1
             ):
