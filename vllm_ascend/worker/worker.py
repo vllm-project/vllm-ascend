@@ -21,6 +21,7 @@ import copy
 import gc
 import logging
 from contextlib import AbstractContextManager, nullcontext
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
 
@@ -186,9 +187,11 @@ class NPUWorker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         self.profiler: TorchNPUProfilerWrapper | None = None
         self.npugraph_memory_bytes = 0
-        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
-            # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # State saved before level-2 sleep. Keep these maps alive across
+        # level-1 cycles so a pending level-2 snapshot cannot be discarded.
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
+        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -256,17 +259,60 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
+    def get_draft_model(self) -> nn.Module | None:
+        return self.model_runner.get_draft_model()
+
+    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
+        parameters = dict(model.named_parameters())
+        draft = self.get_draft_model()
+        if draft is not None:
+            shared = {id(parameter) for parameter in parameters.values()}
+            parameters.update(
+                (f"draft.{name}", parameter)
+                for name, parameter in draft.named_parameters()
+                if id(parameter) not in shared
+            )
+        return parameters
+
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", None)
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+
+        parameters = self._get_sleep_parameters(model)
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches and pattern != "draft.*":
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+
+        self._sleep_saved_parameters = {
+            name: parameter.detach().to("cpu")
+            for name, parameter in parameters.items()
+            if name in names and not parameter.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        parameters = self._get_sleep_parameters(model)
+        for name, value in self._sleep_saved_parameters.items():
+            parameters[name].copy_(value)
+
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
         # stays resident and does not need a CPU backup.
-        if level == 1:
-            self._sleep_saved_buffers = {}
-        else:
+        if level == 2:
             model = self.model_runner.model
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+            draft = self.get_draft_model()
+            if draft is not None:
+                self._sleep_saved_draft_buffers = {name: buffer.cpu().clone() for name, buffer in draft.named_buffers()}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -300,13 +346,43 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
+        wake_weights = tags is None or "weights" in tags
+
+        saved_parameters = getattr(self, "_sleep_saved_parameters", {})
+        if wake_weights and saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
+
         # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        saved_buffers = getattr(self, "_sleep_saved_buffers", {})
+        if wake_weights and saved_buffers:
             model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
+            buffers = dict(model.named_buffers())
+            missing = set(saved_buffers) - set(buffers)
+            if missing:
+                raise RuntimeError(f"Saved model buffers are missing during wake-up: {sorted(missing)}")
+            for name, value in saved_buffers.items():
+                buffers[name].data.copy_(value.data)
+
+        saved_draft_buffers = getattr(self, "_sleep_saved_draft_buffers", {})
+        if wake_weights and saved_draft_buffers:
+            draft = self.get_draft_model()
+            if draft is None:
+                raise RuntimeError("Draft model is missing during wake-up")
+            buffers = dict(draft.named_buffers())
+            missing = set(saved_draft_buffers) - set(buffers)
+            if missing:
+                raise RuntimeError(f"Saved draft buffers are missing during wake-up: {sorted(missing)}")
+            for name, value in saved_draft_buffers.items():
+                buffers[name].data.copy_(value.data)
+
+        # Clear all snapshots only after target parameters, target buffers, and
+        # draft buffers have been restored successfully.  Keeping the complete
+        # snapshot on failure makes the wake operation retryable and avoids
+        # entering inference with partially restored state.
+        if wake_weights:
+            self._sleep_saved_parameters = {}
             self._sleep_saved_buffers = {}
+            self._sleep_saved_draft_buffers = {}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
