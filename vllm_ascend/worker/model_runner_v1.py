@@ -4447,10 +4447,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(
                     mc2_tokens_capacity, with_prefill=True, is_profile=True, randomize_inputs=randomize_inputs
                 )
-        if vllm_version_is("0.31.0"):
-            super().profile_run(randomize_inputs=randomize_inputs)
-        else:
-            super().profile_run()
+        super().profile_run(randomize_inputs=randomize_inputs)
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -4720,6 +4717,11 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config, self.attn_groups
         )
         self.kernel_block_sizes = kernel_block_sizes
+        if not vllm_version_is("0.31.0"):
+            # vLLM #57169/main splits metadata-builder creation out of
+            # `initialize_attn_backend`; builders need the kernel block sizes.
+            self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+            self._init_device_metadata_providers()
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # The one replay window the KV cache groups agree on, 0 when nothing
         # replays (the scheduler asserts the same agreement). Read after the
@@ -4775,7 +4777,11 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDraftModelProposer,
             )
             kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
+            if isinstance(self.drafter, AscendDSparkProposer) or not vllm_version_is("0.31.0"):
+                # On main, create_metadata_builders() selects the kernel block
+                # size via select_common_block_size(), which requires an int.
+                # 310P keeps per-group candidate lists (e.g. [[128], [0]]), so
+                # collapse each group to its first candidate.
                 sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
                 draft_kernel_block_sizes = [
                     int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
@@ -6341,18 +6347,30 @@ class NPUModelRunner(GPUModelRunner):
             for group_key, layer_names in attn_backends_map.items():
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
-                attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
+                if vllm_version_is("0.31.0"):
+                    attn_metadata_builders = [
+                        attn_backend.get_builder_cls()(
+                            kv_cache_spec,
+                            layer_names,
+                            self.vllm_config,
+                            self.device,
+                        )
+                    ]
+                    attn_group = AttentionGroup(
+                        attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                     )
-                )
-                attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
-                )
+                else:
+                    # vLLM #57169/main inserted `kernel_block_size` (et al.)
+                    # before `metadata_builders`, so the builders are no longer
+                    # the 5th positional field. On main they are created later
+                    # by `initialize_metadata_builders` (which also needs the
+                    # kernel block sizes).
+                    attn_group = AttentionGroup(
+                        backend=attn_backend,
+                        layer_names=layer_names,
+                        kv_cache_spec=kv_cache_spec,
+                        kv_cache_group_id=kv_cache_group_id,
+                    )
                 attn_groups.append(attn_group)
             return attn_groups
 
@@ -6371,6 +6389,16 @@ class NPUModelRunner(GPUModelRunner):
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
+        # On main the metadata builders are created later, in
+        # `initialize_metadata_builders` (called from `initialize_kv_cache`),
+        # so the device-metadata providers and the reorder threshold are set up
+        # there instead.
+        if vllm_version_is("0.31.0"):
+            self._init_device_metadata_providers()
+            # Calculate reorder batch threshold (if needed)
+            self.calculate_reorder_batch_threshold()
+
+    def _init_device_metadata_providers(self) -> None:
         device_metadata_providers = {
             id(builder): builder
             for attn_groups in self.attn_groups
@@ -6383,9 +6411,6 @@ class NPUModelRunner(GPUModelRunner):
             self.device_metadata_providers = device_metadata_providers
             for provider in device_metadata_providers.values():
                 provider.enable_device_metadata()
-
-        # Calculate reorder batch threshold (if needed)
-        self.calculate_reorder_batch_threshold()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -6607,9 +6632,14 @@ class NPUModelRunner(GPUModelRunner):
         TODO: Resolve mode first, then apply joint alignment upstream and remove
         this workaround, including the resolver-only TP override.
         """
+        # vLLM #60517 removed `PassConfig.enable_sp` on main; the
+        # `enable_sp(self.vllm_config)` term already covers Ascend SP there.
+        pass_sp = (
+            self.compilation_config.pass_config.enable_sp if vllm_version_is("0.31.0") else False
+        )
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or self.compilation_config.pass_config.enable_sp)
+            and (enable_dsa_cp() or enable_sp(self.vllm_config) or pass_sp)
         )
 
     def _check_and_update_cudagraph_mode(
@@ -6637,16 +6667,25 @@ class NPUModelRunner(GPUModelRunner):
             resolver_tensor_parallel_size = tensor_parallel_size
             if self._should_align_cudagraph_capture_sizes():
                 graph_alignment = math.lcm(self.uniform_decode_query_len, tensor_parallel_size)
-                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
+                # vLLM #60517 dropped the `tensor_parallel_size` argument on
+                # main; the SP-aware lcm is computed here instead.
+                if vllm_version_is("0.31.0"):
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
+                else:
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
                 resolver_tensor_parallel_size = 1
+            # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
+            resolve_kwargs = (
+                {"tensor_parallel_size": resolver_tensor_parallel_size} if vllm_version_is("0.31.0") else {}
+            )
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
+                **resolve_kwargs,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
@@ -6839,6 +6878,11 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 
 @contextmanager
 def update_pass_config(model_runner):
+    # vLLM #60517 removed `PassConfig.enable_sp` on main; the pass-based SP this
+    # context manager toggled no longer exists there, so it is a no-op.
+    if not vllm_version_is("0.31.0"):
+        yield
+        return
     try:
         original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
         model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)

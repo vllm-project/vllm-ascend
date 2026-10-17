@@ -692,6 +692,24 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
+#   3. `xgrammar.GrammarCompiler.compile_json_schema`
+#    Why:
+#       vLLM #58067 (main only, absent from v0.31.0) passes
+#       `separators=(",", ":")` when `disable_any_whitespace` is set. The
+#       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
+#       stricter grammar makes small models loop on `","` until `max_tokens`
+#       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
+#       test). The v0.31.0 lane never passes the argument.
+#    How:
+#       On the main lane, wrap `GrammarCompiler.compile_json_schema` to force
+#       `separators=None`, restoring the legacy (v0.31.0) grammar. Gated by
+#       `vllm_version_is("0.31.0")` so the release lane is untouched.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58067
+#    Future Plan:
+#       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
+#       pinned.
+#
 # ** 20a. File: platform/patch_swa_bounded_replay_legacy.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   Targets: CacheConfig, EngineArgs, Scheduler.schedule, KVCacheManager,
@@ -815,7 +833,7 @@
 #    Why:
 #       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
 #    How:
-#       Removed with the v0.30.0 boundary: the release-only validator override
+#       Removed with the v0.31.0 boundary: the release-only validator override
 #       is no longer applied.
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
@@ -1325,7 +1343,9 @@
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
+#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
+#       upstream vLLM #60335; the v0.31.0 release lane still uses that path).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1638,7 +1658,7 @@
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       Removed with the v0.31.0 boundary: v0.31.0 equals the pinned main and
 #       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files

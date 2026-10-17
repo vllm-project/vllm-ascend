@@ -1173,7 +1173,7 @@ class TestNPUWorker(TestBase):
         result = worker.determine_available_memory()
 
         self.assertEqual(result, 4096)
-        worker.model_runner.profile_run.assert_called_once_with()
+        worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
         worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")

@@ -16,22 +16,58 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
 
+# Upstream uses the attention kernel block size for DCP ownership, which is
+# incorrect when physical KV blocks are larger than kernel blocks. Bind the
+# physical size so ownership uses KV cache blocks while slot lookup uses the
+# kernel-sized block table supplied by the upstream caller.
+if vllm_version_is("0.31.0"):
 
-def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
-    # Upstream uses the attention kernel block size for DCP ownership, which is
-    # incorrect when physical KV blocks are larger than kernel blocks. Bind the
-    # physical size so ownership uses KV cache blocks while slot lookup uses the
-    # kernel-sized block table supplied by the upstream caller.
-    def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
-        prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=kv_cache_block_size)
+    def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
+        # v0.31.0's DFlash caller already forwards the kernel block size, so the
+        # Ascend block table is indexed with the right granularity.
+        def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
+            prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=kv_cache_block_size)
 
-    return prepare_with_block_size
+        return prepare_with_block_size
+
+else:
+
+    def prepare_dflash_inputs_factory(  # type: ignore[misc]
+        kv_cache_block_size: int,
+        block_tables: Any | None = None,
+    ) -> Callable[..., None]:
+        # vLLM main (#57169) dropped ``kernel_block_sizes`` from ``BlockTables``
+        # and the DFlash caller now forwards ``BlockTables.block_sizes``
+        # (physical KV blocks) as the ``block_size`` argument, while
+        # ``AscendBlockTables`` keeps the block table kernel-block addressed by
+        # re-expanding its rows. Restore the kernel block size per group.
+        kernel_block_size_by_ptr: dict[int, int] = {}
+        kernel_block_sizes = getattr(block_tables, "kernel_block_sizes", None)
+        input_block_tables = getattr(block_tables, "input_block_tables", None)
+        if kernel_block_sizes is not None and input_block_tables is not None:
+            kernel_block_size_by_ptr = {
+                table.data_ptr(): int(size) for table, size in zip(input_block_tables, kernel_block_sizes)
+            }
+
+        def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
+            # ``prepare_dflash_inputs`` takes ``block_table`` then ``block_size``
+            # right after ``input_seeds``; upstream passes them positionally.
+            if kernel_block_size_by_ptr and len(args) >= 18:
+                block_table = args[16]
+                if isinstance(block_table, torch.Tensor):
+                    kernel_block_size = kernel_block_size_by_ptr.get(block_table.data_ptr())
+                    if kernel_block_size is not None and kernel_block_size != args[17]:
+                        args = (*args[:17], kernel_block_size, *args[18:])
+            prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=kv_cache_block_size)
+
+        return prepare_with_block_size
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
@@ -132,40 +168,41 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-            self.vllm_config.cache_config.block_size
-        )
+        if vllm_version_is("0.31.0"):
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
+                self.vllm_config.cache_config.block_size
+            )
+        else:
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
+                self.vllm_config.cache_config.block_size,
+                block_tables,
+            )
 
-    def propose(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        last_sampled: torch.Tensor,
-        next_prefill_tokens: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        dp_sync: Any = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: bool = False,
-    ) -> torch.Tensor:
-        self.input_batch = input_batch
-        sync_state = dp_sync
-        if dummy_run and skip_attn_for_dummy_run:
-            # Profiling runs the draft with its own query token count, which
-            # can differ from the target batch. Let forward_context coordinate
-            # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
-            # #54856 (facd9a74a1), which resets the profiling DP counts.
-            sync_state = None
-        with build_attn_metadata_wrapper():
-            return super().propose(
+    # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
+    # vLLM #60335 added `num_speculative_tokens`. Define the per-version public
+    # signature and body.
+    if vllm_version_is("0.31.0"):
+
+        def propose(
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync: Any = None,
+            dummy_run: bool = False,
+            skip_attn_for_dummy_run: bool = False,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+            is_profile: bool = False,
+        ) -> torch.Tensor:
+            return self._propose_impl(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -177,12 +214,152 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                sync_state,
+                dp_sync,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
-                is_profile=is_profile,
+                is_profile,
             )
+
+        def _propose_impl(
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync: Any,
+            dummy_run: bool,
+            skip_attn_for_dummy_run: bool,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+            is_profile: bool,
+        ) -> torch.Tensor:
+            self.input_batch = input_batch
+            sync_state = dp_sync
+            if dummy_run and skip_attn_for_dummy_run:
+                # Profiling runs the draft with its own query token count, which
+                # can differ from the target batch. Let forward_context coordinate
+                # the actual draft counts instead of reusing the target DP state.
+                # TODO: Remove this guard once main2main includes upstream vLLM
+                # #54856 (facd9a74a1), which resets the profiling DP counts.
+                sync_state = None
+            with build_attn_metadata_wrapper():
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                )
+
+    else:
+
+        def propose(  # type: ignore[misc]
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync_state: Any = None,
+            dummy_run: bool = False,
+            skip_attn_for_dummy_run: bool = False,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+            is_profile: bool = False,
+            num_speculative_tokens: int | None = None,
+        ) -> torch.Tensor:
+            return self._propose_impl(  # type: ignore[call-arg]
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                temperature,
+                seeds,
+                dp_sync_state,
+                dummy_run,
+                skip_attn_for_dummy_run,
+                mm_inputs,
+                is_profile,
+                num_speculative_tokens,
+            )
+
+        def _propose_impl(  # type: ignore[misc]
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync: Any,
+            dummy_run: bool,
+            skip_attn_for_dummy_run: bool,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+            is_profile: bool,
+            num_speculative_tokens: int | None,
+        ) -> torch.Tensor:
+            self.input_batch = input_batch
+            sync_state = dp_sync
+            if dummy_run and skip_attn_for_dummy_run:
+                # Profiling runs the draft with its own query token count, which
+                # can differ from the target batch. Let forward_context coordinate
+                # the actual draft counts instead of reusing the target DP state.
+                # TODO: Remove this guard once main2main includes upstream vLLM
+                # #54856 (facd9a74a1), which resets the profiling DP counts.
+                sync_state = None
+            with build_attn_metadata_wrapper():
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )
 
 
 def prepare_dflash_inputs(

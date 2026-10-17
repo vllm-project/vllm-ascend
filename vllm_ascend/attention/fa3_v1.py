@@ -6,6 +6,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendFABackend(AttentionBackend):
@@ -15,6 +16,12 @@ class AscendFABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:

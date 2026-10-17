@@ -28,7 +28,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
-from vllm_ascend.utils import _round_up, enable_dsa_cp
+from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -312,6 +312,12 @@ class AscendIndexerKPoolBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
@@ -455,6 +461,12 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:

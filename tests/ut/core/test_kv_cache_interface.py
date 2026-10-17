@@ -9,7 +9,11 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    HiddenStateCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -25,6 +29,7 @@ from vllm_ascend.core.kv_cache_interface import (
     supports_bounded_replay,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _mla_spec():
@@ -67,6 +72,18 @@ def test_get_storage_block_size_and_dcp_memory():
         parallel_config=SimpleNamespace(decode_context_parallel_size=2),
     )
     assert spec.max_memory_usage_bytes(vllm_config) > 0
+
+
+def test_get_storage_block_size_for_plain_mla_subclass():
+    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` on main; the
+    # v0.31.0 lane keeps it as an optional override. A plain MLA subclass
+    # (HiddenStateCacheSpec) must resolve on both lanes.
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    if vllm_version_is("0.31.0"):
+        expected = spec.block_size if spec.storage_block_size is None else spec.storage_block_size
+    else:
+        expected = spec.block_size
+    assert get_storage_block_size(spec) == expected
 
 
 def test_sliding_window_mla_storage_and_page_size():

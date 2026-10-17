@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
@@ -595,11 +596,13 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
+
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -621,7 +624,7 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
