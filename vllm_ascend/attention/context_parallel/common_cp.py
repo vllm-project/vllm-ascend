@@ -8,16 +8,23 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.utils import model_uses_kpool_indexer
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     """Shard PCP decode requests, including speculative target verification.
 
     The decision uses declared vLLM fields so cloning a draft
-    ``ParallelConfig`` with ``replace()`` remains supported.
+    ``ParallelConfig`` with ``replace()`` remains supported. KPool models
+    keep replicated decodes so every PCP rank advances its TP-sharded
+    Mamba state in the same request order.
     """
     parallel_config = vllm_config.parallel_config
-    return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
+    return (
+        parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.decode_context_parallel_size == 1
+        and not model_uses_kpool_indexer(getattr(vllm_config, "model_config", None))
+    )
 
 
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
