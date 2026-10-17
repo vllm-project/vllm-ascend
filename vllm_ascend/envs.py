@@ -36,6 +36,12 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental GLM-5.3-Flash KDA verify/commit bridge. Non-sensitive.
+    # 0 (default): original AscendC path; 1: RecoverSSM, MRV1 eager/sync only.
+    # Retains native state slots; does not reduce the serving cache allocation.
+    "VLLM_ASCEND_ENABLE_EXPERIMENTAL_KDA_RECOVERSSM": lambda: _strict_binary_env(
+        "VLLM_ASCEND_ENABLE_EXPERIMENTAL_KDA_RECOVERSSM"
+    ),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
