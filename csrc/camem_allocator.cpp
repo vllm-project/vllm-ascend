@@ -25,6 +25,7 @@ extern "C" {
 
 #include <sys/types.h>
 #include "acl/acl.h"
+#include "hccl_comm_wrapper.h"
 
 // Global references to Python callables
 // NOTE: this is borrowed reference, so we don't need to DECREF them.
@@ -329,6 +330,11 @@ static PyMethodDef module_methods[] = {
      "Create and map memory on the device."},
     {"python_unmap_and_release", (PyCFunction)python_unmap_and_release,
      METH_VARARGS, "Unmap and release memory on the device."},
+#ifdef VLLM_ASCEND_HCCL_QOS_CONFIG
+    {"hccl_comm_init_root_info_config",
+     (PyCFunction)python_hccl_comm_init_root_info_config, METH_VARARGS,
+     "Initialize an HCCL communicator with QoS configuration."},
+#endif
     {NULL, NULL, 0, NULL}  // sentinel
 };
 
