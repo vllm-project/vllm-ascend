@@ -21,6 +21,7 @@ import copy
 import gc
 import logging
 from contextlib import AbstractContextManager, nullcontext
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
 
@@ -186,9 +187,9 @@ class NPUWorker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         self.profiler: TorchNPUProfilerWrapper | None = None
         self.npugraph_memory_bytes = 0
-        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
-            # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # Buffers and parameters saved before sleep.
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -256,6 +257,29 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        # Older supported vLLM versions do not expose the retention option.
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+        parameters = dict(model.named_parameters())
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches:
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+        self._sleep_saved_parameters = {
+            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        for name, value in self._sleep_saved_parameters.items():
+            model.get_parameter(name).copy_(value)
+        self._sleep_saved_parameters.clear()
+
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -264,8 +288,11 @@ class NPUWorker(WorkerBase):
         # stays resident and does not need a CPU backup.
         if level == 1:
             self._sleep_saved_buffers = {}
+            self._sleep_saved_parameters = {}
         else:
             model = self.model_runner.model
+            # Level-2 discards the weights pool; retain parameters the sender omits.
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         rl_config = get_ascend_config().rl_config
@@ -300,8 +327,12 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
+        # Do not access or consume saved weights when only the KV pool wakes.
+        wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._sleep_saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
         # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:

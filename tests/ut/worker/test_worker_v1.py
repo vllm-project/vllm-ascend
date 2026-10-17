@@ -428,6 +428,7 @@ class TestNPUWorker(TestBase):
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
+        self.model_config_mock.enable_sleep_mode = False
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -454,6 +455,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -527,6 +530,7 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker initialization with custom cache_dtype"""
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
+        self.model_config_mock.enable_sleep_mode = True
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -546,6 +550,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -743,6 +749,7 @@ class TestNPUWorker(TestBase):
             speculative_config=SimpleNamespace(method="mtp"),
         )
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_parameters = {}
 
         worker.wake_up(tags=["weights"])
 
