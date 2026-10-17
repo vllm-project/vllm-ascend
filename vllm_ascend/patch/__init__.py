@@ -1437,9 +1437,11 @@
 #       Make logits contiguous only when the vocabulary dimension is strided,
 #       cast the keep mask to int32 before reducing it, and use a 4096-element
 #       tile to keep the corrected reduction within the NPU UB limit. Support
-#       both the release three-field bitmask API and the verified-main
-#       four-field compact-ID plus bitmask API with the same packing kernel.
-#       For the four-field API, return a zero-width `token_ids` tensor so its
+#       the release three-field bitmask API, the four-field compact-ID plus
+#       bitmask API, and the five-field request-major API from vLLM #59359
+#       (`cu_num_logits` source rows and `rows_per_request` output slots for
+#       spec decode) with the same packing kernel. For the four- and five-field
+#       APIs, return a zero-width `token_ids` tensor so its
 #       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
 #       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
 #       weights, and reducing the contiguous 8-row axis so the backend emits
