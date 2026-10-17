@@ -14,6 +14,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     scatter_mxfp_k_scale_cache,
 )
+from vllm_ascend.ops.triton.mxfp_k_scale import _scatter_k_scale_kernel
 
 
 def _write_reference(raw, slots, values, blocks, heads, pitch, offset):
@@ -25,8 +26,9 @@ def _write_reference(raw, slots, values, blocks, heads, pitch, offset):
 @pytest.mark.parametrize("padding", [0, 256])
 @pytest.mark.parametrize("offset", [0, 4096])
 @pytest.mark.parametrize("noncontiguous_source", [False, True])
-def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, noncontiguous_source):
-    blocks, tokens, dim = 32, 64, 256
+@pytest.mark.parametrize("tokens", [1, 64, 65])
+def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, noncontiguous_source, tokens):
+    blocks, dim = 32, 256
     pitch = mxfp_packet_size_bytes(heads, 512, dim, dim) + padding
     raw = torch.full((offset + blocks * pitch,), 13, dtype=torch.int8, device="npu")
     cache = mxfp_paged_cache_views(raw[offset:], blocks, heads, dim, dim, 512, page_stride_bytes=pitch)[2]
@@ -61,6 +63,39 @@ def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, nonc
     graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(raw.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("heads", [1, 2])
+def test_token_counts_reuse_compilation(heads, monkeypatch):
+    """Changing token counts must preserve bytes and reuse the compiled kernel."""
+    blocks, dim, max_tokens = 4, 256, 129
+    pitch = mxfp_packet_size_bytes(heads, 512, dim, dim)
+    raw = torch.full((blocks * pitch,), 13, dtype=torch.int8, device="npu")
+    cache = mxfp_paged_cache_views(raw, blocks, heads, dim, dim, 512)[2]
+    expected = raw.cpu()
+    slots = torch.arange(max_tokens, dtype=torch.int64) * 7 + 512
+    indices = mxfp_k_scale_slot_index(slots.npu(), 512)
+    values = torch.arange(max_tokens * heads * 8, dtype=torch.int32).remainder(251).to(torch.uint8)
+    values = values.reshape(max_tokens, heads, dim // 64, 2)
+    source = values.npu()
+    compile_events = []
+    original_compile = _scatter_k_scale_kernel._do_compile
+
+    def record_compile(*args, **kwargs):
+        compile_events.append(args[0])
+        return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(_scatter_k_scale_kernel, "_do_compile", record_compile)
+    first_count = None
+    for tokens in (1, 2, 31, 32, 33, 63, 64, 65, 129):
+        # Prefix slices keep pointer specializations and layout strides fixed.
+        scatter_mxfp_k_scale_cache(source[:tokens], cache, tuple(index[:tokens] for index in indices))
+        torch.npu.synchronize()
+        _write_reference(expected, slots[:tokens], values[:tokens], blocks, heads, pitch, 0)
+        torch.testing.assert_close(raw.cpu(), expected, rtol=0, atol=0)
+        if first_count is None:
+            first_count = len(compile_events)
+        assert len(compile_events) == first_count, (tokens, compile_events)
 
 
 def test_empty_scatter_preserves_cache():

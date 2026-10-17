@@ -40,7 +40,8 @@ All three arguments are required. The Python function returns `None` and updates
 | `cache` | Input/Output | K-scale view of shape `[num_blocks, H, B // 16, G, 16, 2]`, backed by packet-packed KV storage | uint8 | PA_NZ, with explicit six-dimensional strides and an optional storage offset |
 | `slot_index` | Input | Tuple `(block_ids, segment_ids, fragment_ids)`; each tensor has shape `[T]` | int64 in the caller and tests | 1D; each index tensor's stride is used |
 | Return value | Output | N/A; the destination view is modified in place | `None` | N/A |
-| `num_elements`, `num_heads`, `num_groups` | Internal attributes | `T * H * G * 2`, `H`, and `G` | Integer, constexpr | Scalars |
+| `num_elements` | Internal attribute | `T * H * G * 2`; excluded from JIT specialization with `do_not_specialize` | Integer, runtime | Scalar |
+| `num_heads`, `num_groups` | Internal attributes | `H` and `G` | Integer, constexpr | Scalars |
 | Cache and index strides | Internal attributes | Element strides supplied by the input tensor metadata | Integer, constexpr | Scalars |
 | `BLOCK_SIZE`, `num_warps` | Internal attributes | 256 bytes per program and 4 warps | Integer, compile-time launch settings | Scalars |
 
@@ -53,7 +54,7 @@ All three arguments are required. The Python function returns `None` and updates
 - Real tokens must not target the same destination element. Padded rows may target the reserved null slot, whose final value is ignored. Deterministic ordering for overlapping writes is N/A.
 - Source and index storage must not overlap the destination writes. Concurrent writers must address disjoint destination bytes. This kernel preserves writes to unselected pages; it does not synchronize competing writes to the same bytes or replace transfer-completion dependencies required by readers.
 - Byte patterns are preserved exactly, including any non-finite E8M0 encoding already present in the input. Scale validation, saturation, and NaN correction are N/A.
-- Capture and replay keep buffer addresses, shapes, strides, and launch arguments fixed. Values in the captured source/index buffers may change before replay. `num_elements` and layout attributes are compile-time parameters, so different shapes/layouts can produce different compiled variants.
+- Capture and replay keep buffer addresses, shapes, strides, and launch arguments fixed. Values in the captured source/index buffers may change before replay. `num_elements` is a runtime scalar excluded from JIT specialization, so varying token counts between eager calls or separate captures reuses the compiled kernel when other specialization attributes stay fixed. Layout attributes remain compile-time parameters; different layouts can produce different compiled variants.
 - Address arithmetic uses int64. The caller must still supply valid allocated storage for every destination.
 - Forward inference only; autograd backward support is N/A.
 
@@ -81,11 +82,12 @@ pytest --confcutdir=tests/e2e/nightly/single_node/ops -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
 ```
 
-The 18 NPU cases cover:
+The suite defines 52 NPU cases covering:
 
-- Model layout dimensions `B=512`, `D=256`, and `H=1/2`, with 64 token rows. Page padding of 0/256 bytes, storage offsets of 0/4096 bytes, and contiguous/noncontiguous sources yield 16 combinations. Both uint8 and E8M0 source views are exercised.
+- Model layout dimensions `B=512`, `D=256`, and `H=1/2`, with 1, 64, and 65 token rows. Page padding of 0/256 bytes, storage offsets of 0/4096 bytes, and contiguous/noncontiguous sources yield 48 combinations. Both uint8 and E8M0 source views are exercised, including partial 256-byte programs.
 - Eager and ACL graph replay in each combination, changing source values and slot indices in the captured buffers. The complete raw allocation, including unrelated cache components and padding, is checked against a CPU reference.
 - An empty source/index batch preserving the complete cache allocation.
+- Two compilation-reuse cases with `H=1/2`, checking byte-exact results at token counts 1, 2, 31, 32, 33, 63, 64, 65, and 129. Prefix slices keep buffer addresses and strides fixed, and a JIT compilation hook verifies that changing only the token count does not trigger further compilation after the first call.
 - An independently scheduled ACL SDMA transfer of a 4096-byte marker into an unselected page during graph replay. Two submission orders, five delays, and four repetitions exercise 40 interleavings. The scatter addresses block 1 and the transfer addresses block 50.
 
 Every byte-copy comparison requires `rtol=0, atol=0`; the concurrent-transfer marker must be byte-identical. The race test allocates approximately 1.03 GiB of cache storage plus transfer buffers. It requires the CANN Python `acl` module; if that module is unavailable, this specific case is skipped, which must not be reported as concurrent-transfer validation.
