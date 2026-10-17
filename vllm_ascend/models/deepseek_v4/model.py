@@ -115,6 +115,74 @@ if vllm_version_is("0.31.0"):
 else:
     from transformers import DeepseekV4Config
 
+# vLLM #61392 also switched the upstream DeepseekV4Config to group-keyed RoPE
+# parameters: the compressor (CSA/HCA) group carries the checkpoint's YaRN
+# values (`factor`, `beta_fast`, `beta_slow`,
+# `original_max_position_embeddings`), while the `main` group only carries the
+# plain sliding-window RoPE. The v0.31.0 lane still exposes a single flat dict.
+if vllm_version_is("0.31.0"):
+
+    def _dsv4_yarn_rope_parameters(config: DeepseekV4Config) -> dict:
+        return config.rope_parameters
+
+else:
+
+    def _dsv4_yarn_rope_parameters(config: DeepseekV4Config) -> dict:
+        rope_parameters = config.rope_parameters
+        compress = rope_parameters.get("compress")
+        return compress if isinstance(compress, dict) else rope_parameters
+
+
+# vLLM #61392 also folds the legacy `compress_ratios` / `num_hash_layers` fields
+# of the upstream DeepseekV4Config into `layer_types` / `mlp_layer_types`. The
+# model code still reads the legacy attributes, so expose lane-specific
+# accessors and restore `compress_ratios` on main (the utils helpers and
+# `platform.py` / KV-store metadata still index the full list); the v0.31.0 lane
+# keeps them as shipped.
+_DSV4_COMPRESS_RATIO_BY_LAYER_TYPE = {
+    "sliding_attention": 0,
+    "compressed_sparse_attention": 4,
+    "heavily_compressed_attention": 128,
+}
+if vllm_version_is("0.31.0"):
+
+    def _dsv4_compress_ratio(config: DeepseekV4Config, layer_idx: int) -> int:
+        return get_dsv4_compress_ratio(config, layer_idx)
+
+    def _dsv4_num_hash_layers(config: DeepseekV4Config) -> int:
+        return config.num_hash_layers
+
+    def _normalize_dsv4_config(config: DeepseekV4Config) -> DeepseekV4Config:
+        return config
+
+else:
+
+    def _dsv4_compress_ratio(config: DeepseekV4Config, layer_idx: int) -> int:
+        compress_ratios = getattr(config, "compress_ratios", None)
+        if compress_ratios is not None:
+            return compress_ratios[layer_idx] if layer_idx < len(compress_ratios) else 0
+        layer_types = getattr(config, "layer_types", None) or []
+        if layer_idx >= len(layer_types):
+            return 0
+        return _DSV4_COMPRESS_RATIO_BY_LAYER_TYPE.get(layer_types[layer_idx], 0)
+
+    def _dsv4_num_hash_layers(config: DeepseekV4Config) -> int:
+        num_hash_layers = getattr(config, "num_hash_layers", None)
+        if num_hash_layers is not None:
+            return num_hash_layers
+        return sum(1 for layer_type in (getattr(config, "mlp_layer_types", None) or []) if layer_type == "hash_moe")
+
+    def _normalize_dsv4_config(config: DeepseekV4Config) -> DeepseekV4Config:
+        if getattr(config, "compress_ratios", None) is None:
+            config.compress_ratios = [
+                _DSV4_COMPRESS_RATIO_BY_LAYER_TYPE.get(layer_type, 0)
+                for layer_type in (getattr(config, "layer_types", None) or [])
+            ]
+        if getattr(config, "num_hash_layers", None) is None:
+            config.num_hash_layers = _dsv4_num_hash_layers(config)
+        return config
+
+
 sequence_parallel_chunk = sp_shard
 
 
@@ -275,120 +343,250 @@ class DeepseekV2MLP(nn.Module):
 
 
 class DeepseekV4MoE(nn.Module):
-    def __init__(
-        self,
-        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
-        parallel_config: ParallelConfig,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        is_draft_layer: bool = False,
-    ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        layer_idx = int(prefix.split(sep=".")[-2])
-        self.layer_idx = layer_idx
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.5)
-        self.swiglu_limit = getattr(config, "swiglu_limit", None)
+    # v0.31.0 keeps `num_hash_layers` on the config; vLLM main (#61392) folded it
+    # into `mlp_layer_types`, so the public `__init__` is defined per lane.
+    if vllm_version_is("0.31.0"):
 
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
-        self.ep_size = self.ep_group.size()
-        self.n_routed_experts: int = config.n_routed_experts
-        self.n_shared_experts: int = config.n_shared_experts
+        def __init__(
+            self,
+            config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
+            parallel_config: ParallelConfig,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+            is_draft_layer: bool = False,
+        ):
+            super().__init__()
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
+            layer_idx = int(prefix.split(sep=".")[-2])
+            self.layer_idx = layer_idx
+            self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.5)
+            self.swiglu_limit = getattr(config, "swiglu_limit", None)
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+            self.ep_group = get_ep_group().device_group
+            self.ep_rank = get_ep_group().rank_in_group
+            self.ep_size = self.ep_group.size()
+            self.n_routed_experts: int = config.n_routed_experts
+            self.n_shared_experts: int = config.n_shared_experts
 
-        if config.hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
+            self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
-        )
-        self.gate.precast_fp32_weight = True
+            if config.hidden_act != "silu":
+                raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
 
-        # Load balancing settings.
-        eplb_config = parallel_config.eplb_config
-        self.enable_eplb = parallel_config.enable_eplb
+            self.gate = ReplicatedLinear(
+                config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+            )
+            self.gate.precast_fp32_weight = True
 
-        self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+            # Load balancing settings.
+            eplb_config = parallel_config.eplb_config
+            self.enable_eplb = parallel_config.enable_eplb
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
+            self.n_redundant_experts = eplb_config.num_redundant_experts
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+            self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        self.is_fusion_moe_shared_experts_enabled = getattr(get_ascend_config(), "mix_placement", False)
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
-            self.shared_experts = None
-        else:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+            self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
 
-            self.shared_experts = DeepseekV2MLP(
+            self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+            self.is_fusion_moe_shared_experts_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            self.is_fusion_moe_shared_experts_enabled = getattr(get_ascend_config(), "mix_placement", False)
+            if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+                self.shared_experts = None
+            else:
+                intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+
+                self.shared_experts = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    swiglu_limit=self.swiglu_limit,
+                    quant_config=quant_config,
+                    is_sequence_parallel=self.is_sequence_parallel,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
+
+            self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
+            self.gate.bias_vl = None
+            if getattr(config, "vision_n_layers", 0) > 0:
+                self.gate.bias_vl = nn.Parameter(
+                    torch.empty(
+                        config.n_routed_experts,
+                        dtype=torch.float32,
+                    ),
+                    requires_grad=False,
+                )
+            if self.hash:
+                # MC2 dispatch/combine fails
+                # in the dummy profile run if a token repeats an expert id
+                token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+                expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+                token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+
+                self.gate.tid2eid = nn.Parameter(
+                    token_to_expert,
+                    requires_grad=False,
+                )
+                self.gate.e_score_correction_bias = None
+            else:
+                self.gate.tid2eid = None
+                self.gate.e_score_correction_bias = nn.Parameter(
+                    torch.empty(config.n_routed_experts, dtype=torch.float32)
+                )
+
+            self.experts = FusedMoEFactory(
+                shared_experts=self.shared_experts,
+                gate=self.gate,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                swiglu_limit=self.swiglu_limit,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                scoring_func=getattr(config, "scoring_func", "softmax"),
+                # Keep scaling outside the router path so the order matches
+                # DeepSeek V4: normalize top-k weights, then scale routed output.
+                # AITER applies routed_scaling_factor internally.
+                routed_scaling_factor=self.routed_scaling_factor,
+                swiglu_limit=self.swiglu_limit,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                bias_vl=self.gate.bias_vl,
+                image_sentinel_lo=129257,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
+                n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
+                hash_indices_table=self.gate.tid2eid,
             )
 
-        self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
-        self.gate.bias_vl = None
-        if getattr(config, "vision_n_layers", 0) > 0:
-            self.gate.bias_vl = nn.Parameter(
-                torch.empty(
-                    config.n_routed_experts,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
-            )
-        if self.hash:
-            # MC2 dispatch/combine fails
-            # in the dummy profile run if a token repeats an expert id
-            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
-            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
-            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+    else:
 
-            self.gate.tid2eid = nn.Parameter(
-                token_to_expert,
-                requires_grad=False,
-            )
-            self.gate.e_score_correction_bias = None
-        else:
-            self.gate.tid2eid = None
-            self.gate.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
+        def __init__(  # type: ignore[misc]
+            self,
+            config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
+            parallel_config: ParallelConfig,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+            is_draft_layer: bool = False,
+        ):
+            super().__init__()
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
+            layer_idx = int(prefix.split(sep=".")[-2])
+            self.layer_idx = layer_idx
+            self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.5)
+            self.swiglu_limit = getattr(config, "swiglu_limit", None)
 
-        self.experts = FusedMoEFactory(
-            shared_experts=self.shared_experts,
-            gate=self.gate,
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, "scoring_func", "softmax"),
-            # Keep scaling outside the router path so the order matches
-            # DeepSeek V4: normalize top-k weights, then scale routed output.
-            # AITER applies routed_scaling_factor internally.
-            routed_scaling_factor=self.routed_scaling_factor,
-            swiglu_limit=self.swiglu_limit,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            bias_vl=self.gate.bias_vl,
-            image_sentinel_lo=129257,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
-            hash_indices_table=self.gate.tid2eid,
-        )
+            self.ep_group = get_ep_group().device_group
+            self.ep_rank = get_ep_group().rank_in_group
+            self.ep_size = self.ep_group.size()
+            self.n_routed_experts: int = config.n_routed_experts
+            self.n_shared_experts: int = config.n_shared_experts
+
+            self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+            if config.hidden_act != "silu":
+                raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
+
+            self.gate = ReplicatedLinear(
+                config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+            )
+            self.gate.precast_fp32_weight = True
+
+            # Load balancing settings.
+            eplb_config = parallel_config.eplb_config
+            self.enable_eplb = parallel_config.enable_eplb
+
+            self.n_redundant_experts = eplb_config.num_redundant_experts
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+            self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+            self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+            self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
+
+            self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+            self.is_fusion_moe_shared_experts_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            self.is_fusion_moe_shared_experts_enabled = getattr(get_ascend_config(), "mix_placement", False)
+            if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+                self.shared_experts = None
+            else:
+                intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+
+                self.shared_experts = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    swiglu_limit=self.swiglu_limit,
+                    quant_config=quant_config,
+                    is_sequence_parallel=self.is_sequence_parallel,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
+
+            # vLLM main folded `num_hash_layers` into `mlp_layer_types`; keep
+            # honoring the legacy attribute when it is still present.
+            num_hash_layers = getattr(config, "num_hash_layers", None)
+            if num_hash_layers is None:
+                num_hash_layers = sum(1 for layer_type in config.mlp_layer_types if layer_type == "hash_moe")
+            self.hash = layer_idx < num_hash_layers and not is_draft_layer
+            self.gate.bias_vl = None
+            if getattr(config, "vision_n_layers", 0) > 0:
+                self.gate.bias_vl = nn.Parameter(
+                    torch.empty(
+                        config.n_routed_experts,
+                        dtype=torch.float32,
+                    ),
+                    requires_grad=False,
+                )
+            if self.hash:
+                # MC2 dispatch/combine fails
+                # in the dummy profile run if a token repeats an expert id
+                token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+                expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+                token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+
+                self.gate.tid2eid = nn.Parameter(
+                    token_to_expert,
+                    requires_grad=False,
+                )
+                self.gate.e_score_correction_bias = None
+            else:
+                self.gate.tid2eid = None
+                self.gate.e_score_correction_bias = nn.Parameter(
+                    torch.empty(config.n_routed_experts, dtype=torch.float32)
+                )
+
+            self.experts = FusedMoEFactory(
+                shared_experts=self.shared_experts,
+                gate=self.gate,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                scoring_func=getattr(config, "scoring_func", "softmax"),
+                # Keep scaling outside the router path so the order matches
+                # DeepSeek V4: normalize top-k weights, then scale routed output.
+                # AITER applies routed_scaling_factor internally.
+                routed_scaling_factor=self.routed_scaling_factor,
+                swiglu_limit=self.swiglu_limit,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                bias_vl=self.gate.bias_vl,
+                image_sentinel_lo=129257,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,
+                n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
+                hash_indices_table=self.gate.tid2eid,
+            )
 
     def forward(
         self,
@@ -555,7 +753,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
             return_bias=False,
         )
-        self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
+        self.compress_ratio = _dsv4_compress_ratio(config, config_layer_idx)
 
         if self.compress_ratio > 1:
             rope_theta = config.compress_rope_theta
@@ -563,6 +761,7 @@ class DeepseekV4Attention(nn.Module):
         else:
             rope_theta = config.rope_theta
             rope_groups = ["default"]
+        yarn_rope_parameters = _dsv4_yarn_rope_parameters(config)
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -570,10 +769,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
+            scaling_factor=yarn_rope_parameters.get("factor", 1.0),
             base=rope_theta,
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            beta_fast=yarn_rope_parameters.get("beta_fast", 32),
+            beta_slow=yarn_rope_parameters.get("beta_slow", 1),
             rope_groups=rope_groups,
         )
 
@@ -689,12 +888,15 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
+        config = _normalize_dsv4_config(config)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        max_position_embeddings = _dsv4_yarn_rope_parameters(config).get(
+            "original_max_position_embeddings", config.max_position_embeddings
+        )
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
