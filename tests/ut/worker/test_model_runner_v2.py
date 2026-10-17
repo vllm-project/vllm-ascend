@@ -685,12 +685,35 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
     with (
         patch.object(GPUModelRunner, "load_model") as parent_load_model,
         patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=aux_layers),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as start_nz,
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup") as start_early,
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
     ):
+        order = Mock()
+        order.attach_mock(start_nz, "start_nz")
+        order.attach_mock(start_early, "start_early")
+        order.attach_mock(parent_load_model, "parent_load")
+        order.attach_mock(join_nz, "join_nz")
+        order.attach_mock(join_early, "join_early")
         runner.load_model(load_dummy_weights, "load_arg", load_option=True)
 
     parent_load_model.assert_called_once_with(load_dummy_weights, "load_arg", load_option=True)
     assert runner.pd_dspark_aux_layer_ids == aux_layers
     debugger.start.assert_called_once_with(runner.model)
+    # The warmups must be started before weight I/O and joined before the
+    # method returns, which is before memory profiling.
+    start_nz.assert_called_once_with("thread")
+    start_early.assert_called_once_with()
+    join_nz.assert_called_once_with()
+    join_early.assert_called_once_with("load_model")
+    assert [entry[0] for entry in order.mock_calls] == [
+        "start_nz",
+        "start_early",
+        "parent_load",
+        "join_nz",
+        "join_early",
+    ]
 
 
 def test_load_model_skips_dump_in_eager_mode():
@@ -702,6 +725,28 @@ def test_load_model_skips_dump_in_eager_mode():
         runner.load_model()
 
     debugger.start.assert_not_called()
+
+
+def test_load_model_joins_warmups_when_weight_loading_fails():
+    # The background warmup threads touch the NPU device, so a failed load must
+    # not leave them running.
+    runner = _make_runner(need_timing=False)
+
+    with (
+        patch.object(GPUModelRunner, "load_model", side_effect=RuntimeError("OOM")),
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=()),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as start_nz,
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup") as start_early,
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
+        pytest.raises(RuntimeError),
+    ):
+        runner.load_model()
+
+    start_nz.assert_called_once_with("thread")
+    start_early.assert_called_once_with()
+    join_nz.assert_called_once_with()
+    join_early.assert_called_once_with("load_model")
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
