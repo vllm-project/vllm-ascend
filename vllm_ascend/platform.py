@@ -403,7 +403,23 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        super().update_block_size_for_backend(vllm_config)
+        from vllm_ascend.worker.c8_hybrid_layout import (
+            configure_contiguous_c8_hybrid_layout,
+            use_contiguous_c8_hybrid_layout,
+        )
+
+        if use_contiguous_c8_hybrid_layout(vllm_config):
+            # This hook runs after model loading. The generic backend refresh
+            # would replace the early K == SSM sizing with its preferred 512
+            # tokens and recompute padding for a different physical layout.
+            configure_contiguous_c8_hybrid_layout(vllm_config)
+            logger.info(
+                "Preserving C8 hybrid contiguous layout after model loading: block_size=%s, page_bytes=%s",
+                vllm_config.cache_config.block_size,
+                vllm_config.cache_config.mamba_page_size_padded,
+            )
+        else:
+            super().update_block_size_for_backend(vllm_config)
 
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
