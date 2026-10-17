@@ -53,6 +53,38 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
             MoEQuantParams(quant_type=QuantType.W8A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
         )
 
+    def test_low_rank_payload_bypasses_standard_two_gmm_hooks(self):
+        expected = (torch.randn(4, 8), MagicMock())
+        weights = MoEWeights(
+            w1=None,
+            w2=None,
+            low_rank=(MagicMock(), MagicMock(), MagicMock()),
+        )
+        quant_method = MagicMock()
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_low_rank.low_rank_apply_mlp",
+            return_value=expected,
+        ) as low_rank_apply:
+            result = apply_moe_mlp(_mlp_compute_input(weights=weights), quant_method)
+
+        self.assertEqual(result, expected)
+        low_rank_apply.assert_called_once()
+        quant_method.supports_fused_activation.assert_not_called()
+
+    def test_low_rank_rejects_lora_before_running_expert_kernels(self):
+        weights = MoEWeights(w1=None, w2=None, low_rank=(MagicMock(), MagicMock(), MagicMock()))
+        for kwargs in (
+            dict(lora_context=object()),
+            dict(layer=SimpleNamespace(_ascend_moe_lora_context=object())),
+        ):
+            with (
+                self.subTest(kwargs=kwargs),
+                patch("vllm_ascend.ops.fused_moe.moe_low_rank.low_rank_linear") as linear,
+                self.assertRaisesRegex(ValueError, "LoRA"),
+            ):
+                apply_moe_mlp(_mlp_compute_input(weights=weights, **kwargs), MagicMock())
+            linear.assert_not_called()
+
 
 def _w8a8_layer():
     return SimpleNamespace(
