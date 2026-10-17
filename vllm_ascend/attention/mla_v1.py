@@ -41,7 +41,6 @@ from vllm_ascend.attention.flashmla import (
     FlashMLADecode,
     FlashMLAMetadataBuilder,
     get_flashmla_ops,
-    prepare_flashmla_batch_req_state,
     split_flashmla_requests,
 )
 from vllm_ascend.attention.utils import (
@@ -375,12 +374,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.flashmla_state = FlashMLAMetadataBuilder(
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
             )
-
-    def prepare_batch_req_state(self, batch_state, uniform_token_count):
-        """Apply the selected backend's policy before input and graph dispatch."""
-        if self.flashmla_state is not None:
-            return prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
-        return batch_state, uniform_token_count
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
@@ -1061,9 +1054,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
             return False
-        # The token-fused cache requires PROLOG_V3's BF16 writer. Select FIA
-        # for FP16 before allocation instead of using the strided legacy writer.
-        if self.fa_quant_layer or self.dtype != torch.bfloat16 or self.enable_kv_nz:
+        if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # History sees all Q heads in the DCP group; current uses local heads.

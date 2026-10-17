@@ -231,8 +231,7 @@ def test_shared_page_handles_mixed_dtype_views() -> None:
     assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
 
 
-@pytest.mark.parametrize("token_fused", [False, True])
-def test_register_kv_caches_publishes_distinct_mla_layouts(monkeypatch, token_fused) -> None:
+def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
     spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
     raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
     slot_elems = 128 * 576
@@ -273,15 +272,14 @@ def test_register_kv_caches_publishes_distinct_mla_layouts(monkeypatch, token_fu
     monkeypatch.setattr(base_worker, "global_te", transfer_engine)
     monkeypatch.setattr(base_worker, "validate_register_region_count", MagicMock())
 
-    binding = raw_cache.view(4, 128, 1, 576) if token_fused else [nope_cache, rope_cache]
-    worker.register_kv_caches({"layer.0": binding})
+    worker.register_kv_caches({"layer.0": [nope_cache, rope_cache]})
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
     assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
     assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
-    assert metadata.block_shapes == [[(128, 1, 576) if token_fused else (slot_elems,)]]
+    assert metadata.block_shapes == [[(slot_elems,)]]
     assert metadata.block_size_scales == [[1]]
 
 
