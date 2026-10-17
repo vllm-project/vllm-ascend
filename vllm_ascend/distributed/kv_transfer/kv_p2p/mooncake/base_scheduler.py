@@ -134,8 +134,11 @@ class MooncakeBaseConnectorScheduler:
                 # state, not a prompt-aligned attention-block sequence.
                 transfer_block_ids.append(blocks)
             elif any(isinstance(spec, MambaSpec) for spec in group_specs):
-                if self.num_speculative_tokens > 0:
-                    transfer_block_ids.append(blocks[: -self.num_speculative_tokens])
+                num_speculative_blocks = next(
+                    spec.num_speculative_blocks for spec in group_specs if isinstance(spec, MambaSpec)
+                )
+                if num_speculative_blocks > 0:
+                    transfer_block_ids.append(blocks[:-num_speculative_blocks])
                 else:
                     transfer_block_ids.append(blocks)
             else:
