@@ -408,6 +408,7 @@ def build_attn_metadata(
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
+    common_metadata_callback=None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -539,6 +540,8 @@ def build_attn_metadata(
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             **common_attn_metadata_extra_kwargs,
         )
+        if common_metadata_callback is not None:
+            common_metadata_callback(i, common_attn_metadata)
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)

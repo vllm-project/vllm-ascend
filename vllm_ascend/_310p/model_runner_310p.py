@@ -621,8 +621,12 @@ class NPUModelRunner310(NPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        decoder_replay_dummy: bool = False,
         **model_kwargs: dict[str, Any],
     ):
+        # This runner has no decoder replay; keep the runner-only flag out of
+        # model_kwargs when the inherited dummy-run path supplies it.
+        del decoder_replay_dummy
         if self.uses_mrope:
             assert positions is not None
             prepare_mrope_cos_sin_slices_from_runner(self, positions)
