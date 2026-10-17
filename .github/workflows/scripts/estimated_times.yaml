@@ -29,6 +29,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 190
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 280
   tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 560
+  tests/e2e/pull_request/one_card/lora/test_moe_lora_situ.py: 30
   tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 260
   tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 380
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 180

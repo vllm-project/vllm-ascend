@@ -39,6 +39,7 @@ from vllm_ascend.lora.fused_moe import (
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_mlp import _apply_situ
 from vllm_ascend.quantization.quant_type import QuantType
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput, Any], tuple[torch.Tensor, torch.npu.Event | None]]
@@ -111,9 +112,18 @@ def _apply_moe_activation(
     swiglu_limit: float,
     swiglu_alpha: float,
     swiglu_beta: float,
+    *,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
 ) -> torch.Tensor:
     """Match the activation semantics of the common unquantized MoE path."""
     act_name = getattr(activation, "value", activation)
+    if act_name == "situ":
+        return _apply_situ(
+            gate_up_out,
+            beta=1.0 if activation_situ_beta is None else activation_situ_beta,
+            linear_beta=activation_situ_linear_beta,
+        )
     if activation == MoEActivation.SWIGLUOAI:
         return AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out)
     if act_name == "swigluoai_uninterleave":
@@ -243,6 +253,8 @@ def _apply_dynamic_int8_moe_lora(
         mlp_compute_input.swiglu_limit,
         mlp_compute_input.swiglu_alpha,
         mlp_compute_input.swiglu_beta,
+        activation_situ_beta=mlp_compute_input.activation_situ_beta,
+        activation_situ_linear_beta=mlp_compute_input.activation_situ_linear_beta,
     )
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
