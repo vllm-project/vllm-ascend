@@ -364,6 +364,101 @@ def test_compressor_metadata_dsv4_flash_real_metadata(case: CompressorMetadataCa
     assert torch.equal(out_sin.cpu(), expected_sin)
 
 
+@pytest.mark.parametrize("dcp_size", [2, 4])
+@pytest.mark.parametrize("slot_mapping_format", [SLOT_MAPPING_BLOCK_OFFSET, SLOT_MAPPING_FLAT])
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_compressor_metadata_dsv4_c4_dcp_pages(dcp_size: int, slot_mapping_format: int, phase: str):
+    torch.npu.set_device(0)
+    compress_ratio = 4
+    if phase == "prefill":
+        # Start just before a page boundary, pass every owner, and reach the
+        # second local page on ranks 0 and 1. The second request restarts at 0.
+        first_query_len = (dcp_size * KV_BLOCK_SIZE + 4) * compress_ratio
+        query_start_loc = (0, first_query_len, first_query_len + 8)
+        start_pos = ((KV_BLOCK_SIZE - 2) * compress_ratio, 0)
+    else:
+        # Three compression completions at global page boundaries plus one
+        # request that produces no compressed row in this decode step.
+        query_start_loc = (0, 2, 4, 6, 8)
+        start_pos = (
+            (KV_BLOCK_SIZE - 1) * compress_ratio + 2,
+            KV_BLOCK_SIZE * compress_ratio + 2,
+            dcp_size * KV_BLOCK_SIZE * compress_ratio + 2,
+            (dcp_size * KV_BLOCK_SIZE + 3) * compress_ratio + 1,
+        )
+    case = CompressorMetadataCase(
+        name=f"c4_dcp_{phase}",
+        compress_ratio=compress_ratio,
+        query_start_loc=query_start_loc,
+        start_pos=start_pos,
+        block_table=tuple((7 + req * 10, 11 + req * 10) for req in range(len(start_pos))),
+        slot_mapping_format=slot_mapping_format,
+    )
+    rope_cos, rope_sin = _make_rope(case)
+    # Keep global compression order and global RoPE rows on every rank. Only
+    # the cache scatter slots are sharded; padding must still use identity RoPE.
+    compressed_rows = [
+        (req, position)
+        for req, start in enumerate(start_pos)
+        for position in range(
+            start // compress_ratio,
+            (start + query_start_loc[req + 1] - query_start_loc[req]) // compress_ratio,
+        )
+    ]
+    num_rows = len(compressed_rows) + 3
+    expected_cos = torch.ones((num_rows, 1, 1, ROPE_DIM), dtype=rope_cos.dtype)
+    expected_sin = torch.zeros_like(expected_cos)
+    for row, (_, position) in enumerate(compressed_rows):
+        expected_cos[row, 0, 0] = rope_cos[position * compress_ratio]
+        expected_sin[row, 0, 0] = rope_sin[position * compress_ratio]
+    inputs = (
+        rope_cos.npu(),
+        rope_sin.npu(),
+        torch.tensor(query_start_loc, dtype=torch.int32, device="npu"),
+        torch.tensor(start_pos, dtype=torch.int32, device="npu"),
+        torch.tensor(case.block_table, dtype=torch.int32, device="npu"),
+        KV_BLOCK_SIZE,
+        slot_mapping_format,
+        compress_ratio,
+    )
+    out_cos = torch.empty_like(expected_cos, device="npu")
+    out_sin = torch.empty_like(expected_sin, device="npu")
+    slot_shape = (num_rows, 2) if slot_mapping_format == SLOT_MAPPING_BLOCK_OFFSET else (num_rows,)
+    out_slot = torch.empty(slot_shape, dtype=torch.int32, device="npu")
+    pointers = (out_cos.data_ptr(), out_sin.data_ptr(), out_slot.data_ptr())
+
+    for rank in range(dcp_size):
+        expected_slot = torch.full(slot_shape, -1, dtype=torch.int32)
+        if slot_mapping_format == SLOT_MAPPING_BLOCK_OFFSET:
+            expected_slot[:, 1] = KV_BLOCK_SIZE - 1
+        # Enumerate global pages owned by this rank, rather than reproducing
+        # the device's global-to-local arithmetic.
+        owned_pages = {
+            global_page: local_page for local_page, global_page in enumerate(range(rank, 2 * dcp_size, dcp_size))
+        }
+        for row, (req, position) in enumerate(compressed_rows):
+            global_page, offset = divmod(position, KV_BLOCK_SIZE)
+            if global_page in owned_pages:
+                block_id = case.block_table[req][owned_pages[global_page]]
+                if slot_mapping_format == SLOT_MAPPING_BLOCK_OFFSET:
+                    expected_slot[row] = torch.tensor((block_id, offset), dtype=torch.int32)
+                else:
+                    expected_slot[row] = block_id * KV_BLOCK_SIZE + offset
+
+        actual = torch.ops._C_ascend.compressor_metadata(*inputs, num_rows, len(start_pos), dcp_size, rank)
+        out_cos.fill_(53)
+        out_sin.fill_(53)
+        out_slot.fill_(53)
+        actual_out = torch.ops._C_ascend.compressor_metadata_out(
+            *inputs, len(start_pos), out_cos, out_sin, out_slot, dcp_size, rank
+        )
+        torch.npu.synchronize()
+        assert tuple(value.data_ptr() for value in actual_out) == pointers
+        for outputs in (actual, actual_out):
+            for value, expected in zip(outputs, (expected_cos, expected_sin, expected_slot)):
+                torch.testing.assert_close(value.cpu(), expected, rtol=0, atol=0)
+
+
 def test_compressor_metadata_out_cross_stream_buffer_reuse():
     torch.npu.set_device(0)
     cases_by_name = {case.name: case for case in DSV4_FLASH_CASES}

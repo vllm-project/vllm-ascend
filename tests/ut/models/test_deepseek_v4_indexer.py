@@ -456,6 +456,72 @@ class TestIndexerOps:
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3
         assert qli_kwargs["cmp_ratio"] == 4
+        assert qli_kwargs["return_value"] == 0
+
+    @pytest.mark.parametrize("decode", [False, True])
+    def test_dcp_uses_global_prefill_cache_or_merges_local_decode_candidates(self, decode):
+        indexer_ops = AscendIndexerOps(index_topk=3)
+        query = torch.ones((2, 2, 4), dtype=torch.int8)
+        weights = torch.ones((2, 2))
+        query_scale = torch.ones((2, 2))
+        key_cache = torch.empty((4, 32, 1, 4), dtype=torch.int8)
+        scale_cache = torch.empty((4, 32, 1, 1), dtype=torch.float16)
+        gathered_key = torch.empty((8, 32, 1, 4), dtype=torch.int8)
+        gathered_scale = torch.empty((8, 32, 1, 1), dtype=torch.float16)
+        local_indices = torch.tensor([[[0, 1, -1]], [[0, -1, -1]]], dtype=torch.int32)
+        scores = torch.tensor([[[2.0, 1.0, -torch.inf]], [[3.0, -torch.inf, -torch.inf]]])
+        merged_indices = torch.tensor([[[32, 0, -1]], [[32, -1, -1]]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            compressor_dcp_size=8,
+            compressor_dcp_rank=1,
+            dcp_indexer_decode=decode,
+            block_table=torch.tensor([[0], [1]], dtype=torch.int32),
+            dcp_local_block_table=torch.tensor([[0], [1]], dtype=torch.int32),
+            dcp_prefill_kv_gather_block_table=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+            qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([2, 1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.zeros(2, dtype=torch.int32),
+        )
+        with (
+            patch.object(DeviceOperator, "prepare_dsa_indexer_weights", side_effect=lambda value: value),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_query_scale", side_effect=lambda value: value),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_key_scale", side_effect=lambda value: value),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_quant_lightning_indexer_v2",
+                create=True,
+                return_value=(local_indices, scores),
+            ) as qli,
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.gather_dcp_indexer_cache",
+                return_value=(gathered_key, gathered_scale),
+            ) as gather_cache,
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.gather_dcp_topk",
+                return_value=merged_indices,
+            ) as gather_topk,
+        ):
+            actual = indexer_ops.select_topk(query, weights, query_scale, key_cache, scale_cache, metadata)
+
+        kwargs = qli.call_args.kwargs
+        if decode:
+            assert kwargs["return_value"] == 2
+            assert kwargs["mask_mode"] == 0
+            assert kwargs["key"] is key_cache
+            assert kwargs["block_table"] is metadata.dcp_local_block_table
+            gather_cache.assert_not_called()
+            gather_topk.assert_called_once_with(local_indices, scores, 32, 8, 1)
+            assert actual is merged_indices
+        else:
+            assert kwargs["return_value"] == 0
+            assert kwargs["mask_mode"] == 3
+            assert kwargs["key"] is gathered_key
+            assert kwargs["key_dequant_scale"] is gathered_scale
+            assert kwargs["block_table"] is metadata.dcp_prefill_kv_gather_block_table
+            gather_cache.assert_called_once_with(key_cache, scale_cache, metadata)
+            gather_topk.assert_not_called()
+            assert actual is local_indices
 
 
 def _make_vllm_config_for_k_dtype(indexer_kv_dtype: str) -> SimpleNamespace:

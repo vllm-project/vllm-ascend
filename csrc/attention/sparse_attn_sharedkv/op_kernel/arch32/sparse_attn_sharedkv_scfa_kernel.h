@@ -127,6 +127,7 @@ private:
 
     uint32_t tmpBlockIdx = 0U;
     uint32_t aiCoreIdx = 0U;
+    bool cmpOnly = false;
 
     ConstInfo constInfo{};
     TempLoopInfo tempLoopInfo{};
@@ -420,6 +421,7 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::Init(
     }
 
     metadataGm.SetGlobalBuffer((__gm__ uint32_t *)metadata);
+    cmpOnly = metadataGm.GetValue(SAS_CMP_ONLY_FLAG_INDEX) == SAS_CMP_ONLY_FLAG_VALUE;
     InitCalcParamsEach();
 
     pipe = tPipe;
@@ -766,8 +768,13 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::ProcessBalance()
             tempLoopInfo.tndCoreStartKVSplitPos = globalLoopStart ? constInfo.coreStartKVSplitPos : 0;
             uint32_t extraLoop = isEnd ? 2 : 0;
             uint32_t curTopKIdx = 0;
-            for (uint32_t s2LoopIdx = constInfo.s2Start; s2LoopIdx < (s2LoopEnd + extraLoop); s2LoopIdx++) {
-                PreloadPipeline(gloop, cmpLoop, constInfo.s2Start, s2LoopIdx, extraInfo);
+            // Metadata keeps the original-window loop index space so cmp
+            // indices remain relative to oriLoopTimes.  has_ori_kv=false must
+            // nevertheless skip that prefix for every row, including rows
+            // after ProcessBalance resets constInfo.s2Start to zero.
+            uint32_t s2LoopStart = cmpOnly ? Max(constInfo.s2Start, oriSplitNum) : constInfo.s2Start;
+            for (uint32_t s2LoopIdx = s2LoopStart; s2LoopIdx < (s2LoopEnd + extraLoop); s2LoopIdx++) {
+                PreloadPipeline(gloop, cmpLoop, s2LoopStart, s2LoopIdx, extraInfo);
                 ++gloop;
                 if (s2LoopIdx >= tempLoopInfo.oriLoopTimes && s2LoopIdx < s2LoopEnd) { // 用于判断v0使用的循环GM的id
                     ++cmpLoop;

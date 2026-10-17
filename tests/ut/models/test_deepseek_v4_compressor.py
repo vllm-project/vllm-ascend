@@ -31,7 +31,8 @@ class TestCompressorMetadata:
 
         wait.assert_called_once_with(DeviceMetadataStage.COMPRESSOR, 11)
 
-    def test_compute_metadata_flattens_rotary_inputs(self):
+    @pytest.mark.parametrize("dcp_args", [(), (2, 1)])
+    def test_compute_metadata_flattens_rotary_inputs(self, dcp_args):
         compressor = Compressor.__new__(Compressor)
         torch.nn.Module.__init__(compressor)
         compressor.compress_ratio = 4
@@ -52,6 +53,8 @@ class TestCompressorMetadata:
             num_compressed_tokens=3,
             num_actual_reqs=2,
         )
+        if dcp_args:
+            metadata.compressor_dcp_size, metadata.compressor_dcp_rank = dcp_args
         result_cos = torch.ones((3, 4))
         result_sin = torch.zeros((3, 4))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
@@ -90,7 +93,7 @@ class TestCompressorMetadata:
         assert args[2] is query_start_loc
         assert args[3] is start_pos
         assert args[4] is block_table
-        assert args[5:] == (128, 7, 4, 3, 2)
+        assert args[5:] == (128, 7, 4, 3, 2, *dcp_args)
 
 
 class TestCompressorForward:
@@ -178,6 +181,10 @@ class TestCompressorStateCache:
         cache.sliding_window = 64
         vllm_config = SimpleNamespace(
             cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+            parallel_config=SimpleNamespace(
+                decode_context_parallel_size=1,
+                prefill_context_parallel_size=1,
+            ),
         )
 
         spec = cache.get_kv_cache_spec(vllm_config)

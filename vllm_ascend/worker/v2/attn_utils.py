@@ -812,6 +812,20 @@ def _view_dsv4_cache(
     if allocation_bytes < required_bytes:
         raise ValueError("DSA cache view exceeds the backing allocation")
 
+    # Legacy lane-replicated specs store consecutive DCP pages inside each
+    # scheduler page. Scheduler-replicated groups have one ordinary physical
+    # page per block, including when TurboQuant uses an explicit page stride.
+    replication = getattr(kv_cache_spec, "dcp_replicated_size", 1)
+    if replication < 1 or kv_cache_spec.page_size_bytes % replication:
+        raise ValueError(
+            f"DSA page size {kv_cache_spec.page_size_bytes} requires a positive "
+            f"divisor as DCP replication size, got {replication}."
+        )
+    if replication > 1 and page_stride != kv_cache_spec.page_size_bytes:
+        raise ValueError("Lane-replicated DSA caches require contiguous scheduler pages.")
+    num_blocks *= replication
+    physical_page_stride = page_stride // replication
+
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
         get_storage_block_size(kv_cache_spec),
@@ -848,7 +862,7 @@ def _view_dsv4_cache(
         raw_tensor,
         cache_shapes,
         cache_dtypes,
-        page_stride,
+        physical_page_stride,
         overlap_full_kv_cache,
     )
 

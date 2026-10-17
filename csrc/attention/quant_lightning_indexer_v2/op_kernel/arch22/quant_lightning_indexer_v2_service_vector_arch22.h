@@ -59,6 +59,7 @@ public:
     __aicore__ inline void InitVecInputTensor(GlobalTensor<half> weightsGm, GlobalTensor<half> qScaleGm,
                                               GlobalTensor<half> kScaleGm, GlobalTensor<int32_t> indiceOutGm,
                                               GlobalTensor<int32_t> blockTableGm);
+    __aicore__ inline void InitVecValuesTensor(__gm__ uint8_t *sparseValues);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline int32_t AlignS2(int32_t cuS2Len);
     __aicore__ inline void AllocEventID();
@@ -73,6 +74,7 @@ protected:
     GlobalTensor<half> kScaleGm;
     GlobalTensor<half> vec0OutGm;
     GlobalTensor<int32_t> indiceOutGm;
+    GlobalTensor<float> valueOutGm;
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
     GlobalTensor<int32_t> blockTableGm;
@@ -291,6 +293,12 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecInputTensor(GlobalTensor<half
 }
 
 template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::InitVecValuesTensor(__gm__ uint8_t *sparseValues)
+{
+    valueOutGm.SetGlobalBuffer((__gm__ float *)sparseValues);
+}
+
+template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecWorkspaceTensor(GlobalTensor<half> vec0OutGm,
                                                                    GlobalTensor<MM1_OUT_T> mm1ResGm,
                                                                    GlobalTensor<float> vec1ResGm)
@@ -331,6 +339,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::CleanInvalidOutput(int64_t invalidS1
     valueULocal = outQueue_.DeQue<float>();
     QLIV2ServiceVec::CopyOut(indiceOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
     outQueue_.FreeTensor(valueULocal);
+    if (constInfo_.returnFp32Scores) {
+        LocalTensor<float> values = outQueue_.AllocTensor<float>();
+        Duplicate(values.template ReinterpretCast<int32_t>(), QLIV2ServiceVec::NEG_INF, constInfo_.sparseCount);
+        outQueue_.EnQue<float>(values);
+        values = outQueue_.DeQue<float>();
+        QLIV2ServiceVec::CopyOut(valueOutGm[invalidS1offset], values, constInfo_.sparseCount);
+        outQueue_.FreeTensor(values);
+    }
     // mode=1: candidate_topk_index 同步填 -1 (行偏移 = sparse 偏移 / sparseCount * candidateTopkBlocks)
     if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
         uint64_t candOffset = static_cast<uint64_t>(invalidS1offset) / constInfo_.sparseCount *
@@ -891,6 +907,15 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             bool needCopyOutGm = blockS2StartIdx_ == 0 && isS2End;
             // 中间结果保存
             if (needCopyOutGm && !info.isNeedLD) {
+                if (constInfo_.returnFp32Scores) {
+                    LocalTensor<float> values = outQueue_.AllocTensor<float>();
+                    ExtractValue(values, globalTopkUb_[innerS1Idx * BASE_TOPK_VALUE_IDX_SIZE], BASE_TOPK);
+                    outQueue_.EnQue<float>(values);
+                    values = outQueue_.DeQue<float>();
+                    QLIV2ServiceVec::CopyOut(valueOutGm[info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount],
+                                             values, constInfo_.sparseCount);
+                    outQueue_.FreeTensor(values);
+                }
                 LocalTensor<uint32_t> idxULocal = outQueue_.AllocTensor<uint32_t>();
                 ExtractIndex(idxULocal,
                              globalTopkUb_[innerS1Idx * BASE_TOPK_VALUE_IDX_SIZE].template ReinterpretCast<uint32_t>(),
@@ -1120,6 +1145,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
         uint64_t outOffset =
             ldInfo_.indiceOutCoreOffset + (ldInfo_.mStart + j) * constInfo_.kHeadNum * constInfo_.sparseCount;
         AscendC::DataCopyPad(indiceOutGm[outOffset], idxULocal1, copyOutParams);
+        if (constInfo_.returnFp32Scores) {
+            AscendC::DataCopyPad(valueOutGm[outOffset], outValueUb, copyOutParams);
+        }
         SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
     }
     SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
