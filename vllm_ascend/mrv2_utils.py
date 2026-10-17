@@ -124,6 +124,25 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
             reasons.append("p-eagle")
 
+    # VPP (virtual pipeline parallelism) implements its fold-back stage loop,
+    # dual-channel fold communication and engine continuation only on the V1
+    # model runner. The V-shaped layer partition is runner-independent and
+    # would still apply under V2 while the stage loop would not -- silently
+    # corrupting execution order. Always fall back to V1 for vp_size > 1.
+    # Reads follow ascend_config: additional_config first, VPP_SIZE env as
+    # fallback (pydantic rejects the non-vLLM field when passed via
+    # --additional-config).
+    vpp_size = _additional(vllm_config, "virtual_pipeline_parallel_size")
+    if vpp_size is None:
+        import os
+
+        vpp_size = os.getenv("VPP_SIZE", "1")
+    try:
+        if int(vpp_size) > 1:  # type: ignore[arg-type]
+            reasons.append("virtual pipeline parallelism (VPP)")
+    except (TypeError, ValueError):
+        pass
+
     return reasons
 
 
