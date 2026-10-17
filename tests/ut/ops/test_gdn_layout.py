@@ -75,9 +75,13 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
     else:
 
         def fused(q, k, v, *args, **kwargs):
+            # The fused CANN op only accepts bfloat16, so the helper casts
+            # q/k/v before the call (issue #16359) — expect bf16 here even
+            # though the caller passed float32.
             for got, original in zip((q, k), qkv[:2]):
-                torch.testing.assert_close(got, torch.nn.functional.normalize(original, dim=-1).squeeze(0))
-            torch.testing.assert_close(v, qkv[2].squeeze(0))
+                expected = torch.nn.functional.normalize(original, dim=-1).squeeze(0).to(torch.bfloat16)
+                torch.testing.assert_close(got, expected)
+            torch.testing.assert_close(v, qkv[2].squeeze(0).to(torch.bfloat16))
             return output.squeeze(0), kwargs["initial_state"]
 
         with (
