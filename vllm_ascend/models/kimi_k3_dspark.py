@@ -9,10 +9,15 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -338,7 +343,46 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
                     key: value for key, value in mapper.orig_to_new_substr.items() if key != "embed_tokens"
                 },
             )
-        return loader.load_weights(weights, mapper=mapper)
+        checkpoint_lm_head = None
+
+        def weights_without_lm_head():
+            nonlocal checkpoint_lm_head
+            for name, weight in weights:
+                # Intercept before the inherited mapper discards lm_head.
+                if name == "lm_head.weight" or name.endswith(".lm_head.weight"):
+                    if checkpoint_lm_head is not None:
+                        raise ValueError("Multiple K3 DSpark checkpoint LM heads were found.")
+                    checkpoint_lm_head = weight
+                else:
+                    yield name, weight
+
+        loaded_weights = loader.load_weights(weights_without_lm_head(), mapper=mapper)
+        if checkpoint_lm_head is None:
+            logger.debug("No K3 DSpark checkpoint LM head; using target sharing/alignment.")
+            return loaded_weights
+
+        expected_shape = (self.config.vocab_size, self.config.hidden_size)
+        if tuple(checkpoint_lm_head.shape) != expected_shape:
+            raise ValueError(
+                f"K3 DSpark checkpoint LM head shape {tuple(checkpoint_lm_head.shape)} does not match {expected_shape}."
+            )
+        # load_weights runs outside BaseModelLoader's device context.
+        with torch.device(self.model.context_proj.weight.device):
+            lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                params_dtype=self.draft_model_config.dtype,
+                prefix="lm_head",
+            )
+        weight_loader = getattr(lm_head.weight, "weight_loader", default_weight_loader)
+        weight_loader(lm_head.weight, checkpoint_lm_head)
+        self.lm_head = lm_head
+        # The checkpoint head already consumes draft hidden states. Ownership
+        # prevents target sharing/alignment from replacing or rotating it.
+        self.has_own_lm_head = True
+        loaded_weights.add("lm_head.weight")
+        logger.info("Loaded K3 DSpark checkpoint LM head, local shape: %s", tuple(lm_head.weight.shape))
+        return loaded_weights
 
     def embed_input_ids(
         self,
