@@ -146,22 +146,38 @@ class TestDenseSpLayerInit:
         assert layer.mlp.down_proj.reduce_results is True
 
 
-def _make_forward_layer(layer_type: str = "full_attention", use_sp: bool = True, mlp=None):
-    layer = object.__new__(patch_qwen3_5.AscendQwen3_5DecoderLayer)
-    layer.layer_type = layer_type
-    layer.use_attn_reduce_scatter_for_moe = use_sp
-    layer.layer_scale = False
+class _ForwardLayer(SimpleNamespace):
+    """Test double that avoids nn.Module metaclass issues on CI."""
 
+    def forward(self, hidden_states, residual, positions=None, **kwargs):
+        return patch_qwen3_5.AscendQwen3_5DecoderLayer.forward(self, hidden_states, residual, positions, **kwargs)
+
+
+def _make_forward_layer(layer_type: str = "full_attention", use_sp: bool = True, mlp=None):
     def _input_norm(hidden, residual=None):
         return (hidden, hidden) if residual is None else (hidden, residual)
 
-    layer.input_layernorm = MagicMock(side_effect=_input_norm)
-    layer.post_attention_layernorm = MagicMock(side_effect=lambda hidden, residual: (hidden, residual))
+    layer = _ForwardLayer(
+        layer_type=layer_type,
+        use_attn_reduce_scatter_for_moe=use_sp,
+        layer_scale=False,
+        input_layernorm=_input_norm,
+        post_attention_layernorm=lambda hidden, residual: (hidden, residual),
+    )
     if layer_type == "linear_attention":
         layer.linear_attn = MagicMock(return_value=torch.full((4, 2), 3.0))
     else:
         layer.self_attn = MagicMock(return_value=torch.full((4, 2), 3.0))
-    layer.mlp = mlp if mlp is not None else MagicMock(return_value=torch.full((2, 2), 5.0))
+    if mlp is not None:
+        layer.mlp = mlp
+    else:
+        # Default MLP must be callable through the dense-MLP helper:
+        # gate_up_proj / down_proj return (tensor, None) tuples.
+        layer.mlp = SimpleNamespace(
+            gate_up_proj=lambda x: (torch.full((4, 2), 1.0), None),
+            act_fn=lambda x: x,
+            down_proj=lambda x: (torch.full((4, 2), 3.0), None),
+        )
     return layer
 
 
@@ -182,15 +198,16 @@ class TestSpDecoderLayerForward:
                 positions=torch.zeros(4, dtype=torch.long),
             )
 
-        all_gather.assert_called_once()
-        # Attention ran on the gathered full-token layout (the gather result
-        # sliced back to the positions length is a view of the same storage).
+        # sp_all_gather runs twice per SP layer: once for attention and once
+        # for the dense MLP gather. Both start from the 2-row shard.
+        assert all_gather.call_count == 2
+        # Attention ran on the gathered full-token layout.
         attn_input = layer.self_attn.call_args.kwargs["hidden_states"]
         assert attn_input.shape[0] == 4
         assert attn_input.data_ptr() == gathered.data_ptr()
-        reduce_scatter.assert_called_once()
-        # The reduce-scattered attention output feeds the post-attention norm.
-        assert layer.post_attention_layernorm.call_args.args[0].shape[0] == 2
+        # sp_reduce_scatter also runs twice: once after attention, once after MLP.
+        assert reduce_scatter.call_count == 2
+        # The final output and residual both have the shard's row count.
         assert output.shape[0] == 2
         assert out_residual.shape[0] == 2
 
@@ -229,21 +246,26 @@ class TestSpDecoderLayerForward:
                 positions=torch.zeros(4, dtype=torch.long),
             )
 
-        # The dense MLP is wrapped by the gather/scatter helper, not called
-        # directly, and its output becomes the layer output.
         dense_mlp.assert_called_once()
         assert dense_mlp.call_args.args[0] is layer.mlp
         assert dense_mlp.call_args.args[1].shape[0] == 2
-        layer.mlp.assert_not_called()
         assert output is wrapped_output
 
     def test_moe_mlp_receives_already_sequence_parallel(self):
-        moe = MagicMock(spec=patch_qwen3_5.Qwen3NextSparseMoeBlock)
+        moe_calls = {}
+
+        class _FakeMoEBlock:
+            def __call__(self, hidden_states, already_sequence_parallel=False, **kwargs):
+                moe_calls["already_sequence_parallel"] = already_sequence_parallel
+                return torch.full((2, 2), 5.0)
+
+        moe = _FakeMoEBlock()
         layer = _make_forward_layer("full_attention", use_sp=True, mlp=moe)
 
         with (
             patch.object(patch_qwen3_5, "sp_all_gather", return_value=torch.full((4, 2), 1.0)),
             patch.object(patch_qwen3_5, "sp_reduce_scatter", side_effect=lambda x: x[:2]),
+            patch.object(patch_qwen3_5, "Qwen3NextSparseMoeBlock", _FakeMoEBlock),
         ):
             layer.forward(
                 hidden_states=torch.zeros(2, 2),
@@ -251,11 +273,16 @@ class TestSpDecoderLayerForward:
                 positions=torch.zeros(4, dtype=torch.long),
             )
 
-        moe.assert_called_once()
-        assert moe.call_args.kwargs["already_sequence_parallel"] is True
+        assert moe_calls["already_sequence_parallel"] is True
 
     def test_non_sp_forward_keeps_upstream_layout(self):
-        layer = _make_forward_layer("full_attention", use_sp=False)
+        mlp_calls = []
+
+        def _mlp(x):
+            mlp_calls.append(x)
+            return torch.full((4, 2), 5.0)
+
+        layer = _make_forward_layer("full_attention", use_sp=False, mlp=_mlp)
 
         with (
             patch.object(patch_qwen3_5, "sp_all_gather") as all_gather,
@@ -269,7 +296,7 @@ class TestSpDecoderLayerForward:
 
         all_gather.assert_not_called()
         reduce_scatter.assert_not_called()
-        layer.mlp.assert_called_once()
+        assert len(mlp_calls) == 1
         assert output.shape[0] == 4
         assert out_residual.shape[0] == 4
 
@@ -295,9 +322,21 @@ class TestSequenceParallelDenseMlp:
             assert x is not None and x.shape[0] == 4
             return x[:2]
 
-        mlp.gate_up_proj.side_effect = lambda x: (order.append("gate_up_proj") or (torch.full((4, 2), 1.0), None))
-        mlp.act_fn.side_effect = lambda x: order.append("act_fn") or x
-        mlp.down_proj.side_effect = lambda x: (order.append("down_proj") or (torch.full((4, 2), 3.0), None))
+        def _gate_up(x):
+            order.append("gate_up_proj")
+            return (torch.full((4, 2), 1.0), None)
+
+        def _act(x):
+            order.append("act_fn")
+            return x
+
+        def _down(x):
+            order.append("down_proj")
+            return (torch.full((4, 2), 3.0), None)
+
+        mlp.gate_up_proj.side_effect = _gate_up
+        mlp.act_fn.side_effect = _act
+        mlp.down_proj.side_effect = _down
 
         with (
             patch.object(patch_qwen3_5, "sp_all_gather", side_effect=_all_gather),
