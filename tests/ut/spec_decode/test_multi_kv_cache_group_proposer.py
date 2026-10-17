@@ -244,6 +244,28 @@ def test_primary_group_crops_block_table_to_builder_width():
     assert refreshed.block_table_tensor[0, 0] == 99
 
 
+def test_indexer_draft_metadata_preserves_expanded_runtime_pages():
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer._uses_multi_group_kv_cache = True
+    proposer.kv_cache_gid = 0
+    proposer.max_model_len = 8192
+    proposer.vllm_config = MagicMock()
+    pages = torch.arange(72, dtype=torch.int32).reshape(1, 72)
+    proposer._multi_group_block_table_buffers = {0: torch.zeros_like(pages)}
+    block_table = MagicMock()
+    block_table.get_device_tensor.return_value = pages
+    proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[block_table]))
+    builder = SimpleNamespace(logical_block_size=1152, kv_cache_spec=MagicMock())
+    builder.kv_cache_spec.max_num_blocks_per_req.return_value = 8
+    group = SimpleNamespace(kv_cache_group_id=0, get_metadata_builder=lambda: builder)
+    common = SimpleNamespace(num_reqs=1, block_table_tensor=pages, slot_mapping=torch.zeros(6, dtype=torch.int32))
+
+    metadata = proposer._common_attn_metadata_for_draft_group(common, group, num_input_tokens=6)
+
+    assert metadata.block_table_tensor.shape == (1, 72)
+    torch.testing.assert_close(metadata.block_table_tensor, pages)
+
+
 def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer._uses_multi_group_kv_cache = True

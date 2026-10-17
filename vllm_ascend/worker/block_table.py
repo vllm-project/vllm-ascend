@@ -58,6 +58,7 @@ class BlockTable:
             kernel_sizes = [block_size]
             self.max_num_blocks_per_req = max_num_blocks_per_req = 1
         self.is_circular_group = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
+        self.uses_slot_mapping = kv_cache_group is None or kv_cache_group.kv_cache_spec.uses_slot_mapping
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -154,7 +155,7 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        if self.is_circular_group:
+        if self.is_circular_group and not self.uses_slot_mapping:
             self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
             return
         num_tokens = positions.shape[0]
@@ -205,7 +206,7 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.is_circular_group:
+        if self.is_circular_group and not self.uses_slot_mapping:
             self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
             return
         if self.dcp_world_size > 1:
