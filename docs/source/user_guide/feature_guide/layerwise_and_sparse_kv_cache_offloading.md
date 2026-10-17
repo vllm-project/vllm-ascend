@@ -124,7 +124,7 @@ Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... b
 
 Requirements and limitations:
 
-- Sparse Decode Offload is currently not supported on A5 (950DT/950PR). We are actively working on it to support it in the near future.
+- Sparse Decode Offload is currently not supported on 950PR&950DT Products. We are actively working on it to support it in the near future.
 - Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
 - The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
   not supported. INT8 indexer KV is supported separately through

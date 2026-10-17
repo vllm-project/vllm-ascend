@@ -76,7 +76,7 @@ The MemFabric data path is selected at launch through
 detection: `sdma` (default) and `device_rdma` target A3 series nodes, while
 `device_urma` is the connector protocol for 950PR&950DT Products nodes. Connector
 protocol availability does not imply sparse Decode offload support: sparse
-Decode offload rejects A5 (950DT/950PR). Prefill and Decode must use the same
+Decode offload rejects 950PR&950DT Products. Prefill and Decode must use the same
 protocol.
 
 ### Transfer granularity
@@ -300,7 +300,7 @@ sender thread remains alive, Prefill may continue waiting.
 
 ## 8. Current Boundaries
 
-- Sparse Decode Offload is not supported on A5 (950DT/950PR), including the
+- Sparse Decode Offload is not supported on 950PR&950DT Products, including the
   keep-device-cache and overlap paths. Config validation checks the installed
   build's device metadata before offload allocation; it does not require NPU
   initialization or a runtime SoC query.
