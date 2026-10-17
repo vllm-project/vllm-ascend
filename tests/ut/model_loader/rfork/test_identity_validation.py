@@ -972,6 +972,7 @@ def test_planner_rejects_invalid_lease_headers_with_error(
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
         lease_release_max_attempts=1,
         lease_release_retry_interval_sec=1.0,
         heartbeat_interval_sec=1.0,
@@ -1004,6 +1005,7 @@ def test_planner_seed_key_requires_bound_structural_digest(planner_module, monke
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"
@@ -1038,6 +1040,7 @@ def test_planner_verify_structural_digest_binds_and_reports_drift(planner_module
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"
@@ -1061,6 +1064,7 @@ def test_planner_acquires_and_renews_a_ttl_lease(planner_module, monkeypatch):
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"

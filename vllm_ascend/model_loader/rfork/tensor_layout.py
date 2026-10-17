@@ -5,13 +5,15 @@
 
 """Collect live model tensors and adapt their layout for RFork transfer."""
 
+import enum
 import hashlib
-import inspect
 import json
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
+from types import FunctionType, MethodType
 from typing import Any
 
+import regex as re
 import torch
 from torch import nn
 from vllm.logger import logger
@@ -24,10 +26,15 @@ from vllm_ascend.model_loader.rfork.manifest import (
 
 TENSOR_LAYOUT_SAMPLE_LIMIT = 3
 
+# Exact types only: numeric subclasses can carry tensor attributes.
+_TENSOR_ATTRIBUTE_LEAF_TYPES = frozenset({str, bytes, int, float, bool, complex, type(None)})
+
 # Runtime scratch tensors are local execution state, not checkpoint-derived
 # model state.  They must keep the capacity selected by the receiving instance
 # instead of being copied from a seed that may use different scheduler limits.
 _RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer"})
+
+_PLAIN_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _is_runtime_only_tensor(name: str) -> bool:
@@ -39,22 +46,22 @@ def _layout_digest(records: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def build_structural_digest(tensors: list[tuple[str, torch.Tensor]]) -> str:
-    """Digest the transferable tensor set's names, shapes, dtypes, and NPU formats.
+def build_structural_digest(
+    tensors: list[tuple[str, torch.Tensor]], known_formats: dict[str, int] | None = None
+) -> str:
+    """Hash the manifest's tensor IDs, shapes, dtypes, and NPU formats.
 
-    This summarizes exactly what ``validate_weight_manifest`` compares between a
-    seed and a receiver, derived from the built model rather than from
-    configuration fields.  Pass the output of ``collect_transferable_tensors``
-    so runtime-only scratch buffers stay excluded.  ``read_npu_format`` yields
-    ``None`` off-device, which keeps the digest well defined during CPU-only
-    inspection.
+    Pass ``collect_transferable_tensors`` output to exclude runtime buffers.
+    ``known_formats`` reuses NPU formats read during registration.
     """
     records = [
         {
             "name": name,
             "shape": tuple(int(dim) for dim in tensor.shape),
             "dtype": normalize_dtype_name(tensor.dtype),
-            "npu_format": read_npu_format(tensor),
+            "npu_format": (
+                known_formats[name] if known_formats is not None and name in known_formats else read_npu_format(tensor)
+            ),
         }
         for name, tensor in sorted(tensors, key=lambda item: item[0])
     ]
@@ -251,141 +258,194 @@ def validate_transferable_tensor_layout(name: str, tensor: torch.Tensor) -> None
     )
 
 
-def _iter_tensors_in_value(
-    prefix: str,
+def _format_tensor_key(key: Any) -> str | None:
+    """Render a container key as a typed label that is identical across processes."""
+    # Order matters: bool and Enum members subclass int/str.
+    if key is None or isinstance(key, bool):
+        return json.dumps(key)
+    if isinstance(key, enum.Enum):
+        key_type = type(key)
+        enum_type = f"{key_type.__module__}.{key_type.__qualname__}"
+        if isinstance(key, enum.Flag):
+            # Composite Flag members can be unnamed, but their integer values are unique.
+            return f"enum({enum_type}:{int(key.value)})" if isinstance(key.value, int) else None
+        # Plain members are unique by canonical name (aliases resolve to it); values such as NaN may collide.
+        return f"enum({enum_type}.{key.name})" if key.name is not None else None
+    if isinstance(key, str):
+        return json.dumps(str(key), ensure_ascii=True)
+    if isinstance(key, int):
+        return str(int(key))
+    if isinstance(key, float):
+        return f"float({float(key).hex()})"
+    if isinstance(key, torch.dtype):
+        return f"dtype({key})"
+    if type(key) is tuple:
+        items: list[str] = []
+        for item in key:
+            label = _format_tensor_key(item)
+            if label is None:
+                return None
+            items.append(label)
+        return f"({items[0]},)" if len(items) == 1 else f"({','.join(items)})"
+    # Default reprs embed addresses, so unknown key types cannot yield stable IDs.
+    return None
+
+
+def _tensor_child_path(parent_path: str, kind: str, name: Any) -> str:
+    if kind in ("index", "key"):
+        # Typed container labels keep dict keys 1 / "1" and "a.b" / a -> b distinct.
+        label = _format_tensor_key(name)
+        if label is None:
+            name_type = type(name)
+            raise ValueError(
+                "RFork cannot derive a stable tensor ID from container key type "
+                f"{name_type.__module__}.{name_type.__qualname__}"
+            )
+        return f"{parent_path}[{label}]"
+    name = str(name)
+    if not _PLAIN_PATH_SEGMENT.fullmatch(name):
+        return f"{parent_path}[{json.dumps(name, ensure_ascii=True)}]"
+    return f"{parent_path}.{name}" if parent_path else name
+
+
+def _iter_tensor_children(
+    value: Any, scan_objects: bool, processed_layout: bool, registered_only: bool
+) -> Iterator[tuple[str, Any, Any, bool]]:
+    if isinstance(value, nn.Module):
+        # Read local registries: named_parameters/named_modules discard aliases before we can canonicalize them.
+        for kind, members in (("module", value._modules), ("parameter", value._parameters), ("buffer", value._buffers)):
+            for name, item in members.items():
+                if type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                    yield kind, name, item, False
+        if registered_only:
+            return
+        if processed_layout:
+            for name, item in vars(value).items():
+                if not name.startswith("_") and type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                    yield "attribute", name, item, name == "impl"
+        else:
+            impl = getattr(value, "impl", None)
+            if type(impl) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                yield "attribute", "impl", impl, True
+    elif registered_only:
+        return
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            if type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                yield "index", index, item, scan_objects
+    elif isinstance(value, dict):
+        for name, item in value.items():
+            if type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                yield "key", name, item, scan_objects
+    else:
+        for name, item in vars(value).items():
+            if not name.startswith("_") and type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                yield "attribute", name, item, scan_objects
+
+
+def _tensor_child_key(
+    kind: str,
+    name: Any,
     value: Any,
-    visited_object_ids: set[int],
-    scan_objects: bool = False,
-) -> Iterator[tuple[str, torch.Tensor]]:
+    scan_objects: bool,
+    tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]],
+    parent_path: str = "",
+) -> tuple[Any, ...] | None:
     if isinstance(value, torch.Tensor):
-        yield prefix, value
-        return
-    if isinstance(value, (nn.Module, str, bytes)):
-        return
-    # Scan callable instances for tensors, but skip executable function, method, and class objects.
-    if inspect.isfunction(value) or inspect.ismethod(value) or inspect.isclass(value):
-        return
-    if isinstance(value, (list, tuple)):
-        value_id = id(value)
-        if value_id in visited_object_ids:
-            return
-        visited_object_ids.add(value_id)
-        try:
-            for index, item in enumerate(value):
-                yield from _iter_tensors_in_value(f"{prefix}.{index}", item, visited_object_ids, scan_objects)
-        finally:
-            visited_object_ids.remove(value_id)
-        return
-    if isinstance(value, dict):
-        value_id = id(value)
-        if value_id in visited_object_ids:
-            return
-        visited_object_ids.add(value_id)
-        try:
-            for key, item in value.items():
-                yield from _iter_tensors_in_value(f"{prefix}.{key}", item, visited_object_ids, scan_objects)
-        finally:
-            visited_object_ids.remove(value_id)
-        return
-    if callable(value) and (not scan_objects or not hasattr(value, "__dict__")):
-        return
-    if not scan_objects or not hasattr(value, "__dict__"):
-        return
-    value_id = id(value)
-    if value_id in visited_object_ids:
-        return
-    visited_object_ids.add(value_id)
-    try:
-        for attr_name, attr_value in vars(value).items():
-            if not attr_name.startswith("_"):
-                yield from _iter_tensors_in_value(
-                    f"{prefix}.{attr_name}",
-                    attr_value,
-                    visited_object_ids,
-                    scan_objects,
-                )
-    finally:
-        visited_object_ids.remove(value_id)
+        # Reject this alias edge only; another alias may still collect the tensor.
+        if _is_runtime_only_tensor(f"{name}"):
+            return None
+        metadata = tensor_metadata.get(id(value))
+        if metadata is not None:
+            return metadata[1]
+        signature = None
+        if is_transferable_tensor(value):
+            validate_transferable_tensor_layout(_tensor_child_path(parent_path, kind, name), value)
+            signature = (
+                value.data_ptr(),
+                value.numel(),
+                tuple(value.shape),
+                value.dtype,
+                value.device,
+                tuple(value.stride()),
+            )
+        tensor_metadata[id(value)] = (value, signature)
+        return signature
+    if isinstance(value, nn.Module):
+        # Follow modules only through their registration edges.
+        return (id(value), False) if kind == "module" else None
+    if isinstance(value, (str, bytes)):
+        return None
+    if isinstance(value, (list, tuple, dict)):
+        return (id(value), scan_objects)
+    if not scan_objects or isinstance(value, (FunctionType, MethodType, type)):
+        return None
+    return (id(value), scan_objects) if hasattr(value, "__dict__") else None
 
 
-def _try_collect(
-    name: str,
-    tensor: torch.Tensor,
-    seen_names: dict[str, int],
-    seen_tensors: dict[tuple[Any, ...], int],
+def _collect_shortest_path_tensors(
+    model: nn.Module,
+    processed_layout: bool,
+    registered_only: bool,
+    claimed: set[tuple[Any, ...]],
+    tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]],
     collected: list[tuple[str, torch.Tensor]],
 ) -> None:
-    if _is_runtime_only_tensor(name) or not is_transferable_tensor(tensor):
-        return
-    validate_transferable_tensor_layout(name, tensor)
-    data_ptr = tensor.data_ptr()
-    tensor_signature = (
-        data_ptr,
-        tensor.numel(),
-        tuple(tensor.shape),
-        tensor.dtype,
-        tensor.device,
-        tuple(tensor.stride()),
-    )
-    existing_index = seen_names.get(name)
-    if existing_index is not None:
-        existing_tensor = collected[existing_index][1]
-        if existing_tensor is tensor or tensor_signature == (
-            existing_tensor.data_ptr(),
-            existing_tensor.numel(),
-            tuple(existing_tensor.shape),
-            existing_tensor.dtype,
-            existing_tensor.device,
-            tuple(existing_tensor.stride()),
-        ):
-            return
-        raise ValueError(
-            "RFork encountered conflicting tensor entries for logical name "
-            f"{name!r}; shape, dtype, stride, or storage differs."
-        )
+    root_key = (id(model), False)
+    frontier = {root_key: ""}
+    # Keep strong references throughout the scan so object IDs cannot be reused.
+    objects: dict[tuple[Any, ...], tuple[Any, bool]] = {root_key: (model, False)}
+    visited = set(claimed)
 
-    # Parameters and buffers are canonical. An implementation object may expose
-    # the exact same tensor under another public name; transferring that range
-    # twice only bloats the manifest. Distinct views retain separate entries.
-    existing_index = seen_tensors.get(tensor_signature)
-    if existing_index is not None:
-        seen_names[name] = existing_index
-        return
+    while frontier:
+        # IDs in this layer are final. Ignore back edges, cycles, and longer paths.
+        visited.update(frontier)
+        next_frontier: dict[tuple[Any, ...], str] = {}
+        for key, path in frontier.items():
+            value, scan_objects = objects[key]
+            if isinstance(value, torch.Tensor):
+                claimed.add(key)
+                collected.append((path, value))
+                continue
 
-    seen_names[name] = len(collected)
-    seen_tensors[tensor_signature] = len(collected)
-    collected.append((name, tensor))
+            children = _iter_tensor_children(value, scan_objects, processed_layout, registered_only)
+            child_paths: set[str] = set()
+            for kind, name, item, child_scan_objects in children:
+                child_key = _tensor_child_key(kind, name, item, child_scan_objects, tensor_metadata, path)
+                if child_key is None:
+                    continue
+                candidate_path = _tensor_child_path(path, kind, name)
+                # Distinct keys with one label (e.g. two NaN keys) would let swapped subtrees
+                # share IDs and digests; leaf-level ID checks cannot see that collision.
+                if candidate_path in child_paths:
+                    raise ValueError(
+                        f"RFork found distinct container entries with one tensor ID label: {candidate_path!r}"
+                    )
+                child_paths.add(candidate_path)
+                if child_key in visited:
+                    continue
+                previous_path = next_frontier.get(child_key)
+                if previous_path is None or candidate_path < previous_path:
+                    # Same-signature aliases can be distinct objects; keep the one the ID names.
+                    objects[child_key] = (item, child_scan_objects)
+                    next_frontier[child_key] = candidate_path
+        frontier = next_frontier
 
 
 def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> list[tuple[str, torch.Tensor]]:
-    seen: dict[str, int] = {}
-    seen_tensors: dict[tuple[Any, ...], int] = {}
-    collected: list[tuple[str, torch.Tensor]] = []
-    for name, tensor in model.named_parameters():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
-    for name, tensor in model.named_buffers():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
-    for module_prefix, module in model.named_modules():
-        attributes: Iterable[tuple[str, Any, bool]]
-        if processed_layout:
-            attributes = (
-                (name, value, name == "impl")
-                for name, value in vars(module).items()
-                if not name.startswith("_") and not isinstance(value, nn.Module)
-            )
-        else:
-            impl = getattr(module, "impl", None)
-            attributes = () if impl is None or isinstance(impl, nn.Module) else (("impl", impl, True),)
+    """Collect each tensor range once under its canonical shortest-path ID.
 
-        for attr_name, attr_value, scan_objects in attributes:
-            for tensor_name, tensor in _iter_tensors_in_value(
-                attr_name,
-                attr_value,
-                set(),
-                scan_objects,
-            ):
-                full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
-                _try_collect(full_name, tensor, seen, seen_tensors, collected)
+    Registered parameters and buffers take priority over attribute aliases so
+    in-place layout changes reach the registered tensor.
+    """
+    claimed: set[tuple[Any, ...]] = set()
+    tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]] = {}
+    collected: list[tuple[str, torch.Tensor]] = []
+    for registered_only in (True, False):
+        _collect_shortest_path_tensors(model, processed_layout, registered_only, claimed, tensor_metadata, collected)
+    tensor_ids = [tensor_id for tensor_id, _ in collected]
+    if len(tensor_ids) != len(set(tensor_ids)):
+        raise ValueError("RFork encountered conflicting tensor IDs in one model.")
     return collected
 
 

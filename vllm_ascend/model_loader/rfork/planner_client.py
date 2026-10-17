@@ -83,7 +83,7 @@ class RForkPlannerClient:
         if self._structural_digest != digest:
             logger.error(
                 "RFork structural digest changed between registration and seed advertisement: "
-                "bound=%s current=%s; advertising under the registered digest.",
+                "bound=%s current=%s; retaining the registered digest.",
                 self._structural_digest,
                 digest,
             )
@@ -114,12 +114,22 @@ class RForkPlannerClient:
                 "rfork_scheduler_url is not set. Configure it through model_loader_extra_config or RFORK_SCHEDULER_URL."
             )
 
+    def _with_model_identity_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        if not self.config.send_model_identity_headers:
+            return headers
+        return {
+            **headers,
+            "MODEL_URL": self.config.model_url,
+            "DEPLOY_STRATEGY": self.config.model_deploy_strategy_name,
+            "IS_DRAFT": str(self._is_draft_model).lower(),
+        }
+
     def acquire_seed(self) -> SeedLease | None:
         try:
             self._require_planner()
             response = requests.get(
                 f"{self.planner_url}/get_seed",
-                headers={"SEED_KEY": self.seed_key},
+                headers=self._with_model_identity_headers({"SEED_KEY": self.seed_key}),
                 timeout=self.request_timeout_sec,
                 allow_redirects=False,
             )
@@ -183,7 +193,7 @@ class RForkPlannerClient:
         try:
             response = requests.post(
                 f"{self.planner_url}/put_seed",
-                headers=headers,
+                headers=self._with_model_identity_headers(headers),
                 timeout=self.request_timeout_sec,
                 allow_redirects=False,
             )
@@ -220,12 +230,14 @@ class RForkPlannerClient:
             self._require_planner()
             response = requests.post(
                 f"{self.planner_url}/renew_seed_lease",
-                headers={
-                    "SEED_IP": lease.seed_ip,
-                    "SEED_PORT": str(lease.seed_port),
-                    "USER_ID": lease.user_id,
-                    "SEED_RANK": str(lease.seed_rank),
-                },
+                headers=self._with_model_identity_headers(
+                    {
+                        "SEED_IP": lease.seed_ip,
+                        "SEED_PORT": str(lease.seed_port),
+                        "USER_ID": lease.user_id,
+                        "SEED_RANK": str(lease.seed_rank),
+                    }
+                ),
                 timeout=self.request_timeout_sec,
                 allow_redirects=False,
             )
@@ -266,7 +278,7 @@ class RForkPlannerClient:
             try:
                 response = requests.post(
                     f"{self.planner_url}/remove_seed",
-                    headers=headers,
+                    headers=self._with_model_identity_headers(headers),
                     timeout=self.request_timeout_sec,
                 )
                 if response.status_code in (200, 404):
@@ -300,13 +312,15 @@ class RForkPlannerClient:
                 self.last_advertisement = advertisement
             response = requests.post(
                 f"{self.planner_url}/add_seed",
-                headers={
-                    "SEED_KEY": self.seed_key,
-                    "SEED_IP": advertisement.seed_ip,
-                    "SEED_PORT": str(advertisement.seed_port),
-                    "SEED_RANK": str(advertisement.seed_rank),
-                    "SEED_REFCNT": "0",
-                },
+                headers=self._with_model_identity_headers(
+                    {
+                        "SEED_KEY": self.seed_key,
+                        "SEED_IP": advertisement.seed_ip,
+                        "SEED_PORT": str(advertisement.seed_port),
+                        "SEED_RANK": str(advertisement.seed_rank),
+                        "SEED_REFCNT": "0",
+                    }
+                ),
                 timeout=self.request_timeout_sec,
                 allow_redirects=False,
             )
