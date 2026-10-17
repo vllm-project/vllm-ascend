@@ -102,22 +102,6 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
-def conductor_cpu_event_block_size(
-    group_effective_block_size: int,
-    target_effective_block_size: int,
-) -> int | None:
-    """Return CPU ``BlockStored.block_size`` for conductor, or None to skip.
-
-    DSV4 physical MLA pages are 128. Conductor indexes one effective grain
-    ``block_size * compress_ratio``. Grouped block sizes are already that
-    grain, so c128 is 16384 and must not be multiplied by the ratio again.
-    Only the target grain (the c128 group when one exists) is published.
-    """
-    if group_effective_block_size <= 0 or group_effective_block_size != target_effective_block_size:
-        return None
-    return group_effective_block_size
-
-
 @dataclass(frozen=True)
 class _LayerRevokeTask:
     keys: tuple[str, ...]
@@ -1225,59 +1209,80 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
-    def _target_effective_block_size(self) -> int:
-        """Conductor grain. Prefer c128; grouped sizes are already effective."""
-        families = self.token_database.group_cache_families.get("kv") or {}
-        target_group_id = 0
-        for group_id, family in sorted(families.items()):
-            if infer_cache_family_ratio(family) == 128:
-                target_group_id = group_id
-                break
-        return self._get_block_size(target_group_id)
+    def _cpu_event_ranges(
+        self,
+        group_id: int,
+        selected_ranges: list[tuple[int, int]],
+        missing_indices: list[int],
+        logical_success: list[bool] | None,
+    ) -> tuple[int, list[tuple[int, int]]]:
+        """Ranges to publish, already in the grouped token domain.
+
+        Compressed families (ratio > 1) include lookup hits. Uncompressed
+        families publish only blocks this put stored. Grouped block sizes are
+        already the effective grain, so ranges are not multiplied by the ratio.
+        """
+        cache_family = self.token_database.group_cache_families.get("kv", {}).get(group_id)
+        compress_ratio = infer_cache_family_ratio(cache_family)
+        if compress_ratio > 1:
+            return compress_ratio, self._confirmed_store_ranges(selected_ranges, missing_indices, logical_success)
+        if logical_success is None:
+            return compress_ratio, [selected_ranges[index] for index in missing_indices]
+        return compress_ratio, [
+            selected_ranges[missing_indices[index]]
+            for index, succeeded in enumerate(logical_success)
+            if succeeded
+        ]
 
     def _build_cpu_stored_events(
         self,
         req_meta: ReqMeta,
+        group_id: int,
         effective_block_size: int,
+        compress_ratio: int,
         token_len: int,
         stored_ranges: list[tuple[int, int]],
     ) -> list[BlockStored]:
         """Publish complete grains covered by this worker's confirmed ranges.
 
-        ``stored_ranges`` is the post-mask, post-shard selection. A grain is
-        included only when one of those ranges covers it fully, so a TP shard
+        A grain is included only when one range covers it fully, so a TP shard
         cannot advertise another worker's unfinished blocks. Parent hashes stay
-        on the global chain.
+        on the global chain. Compressed groups report the effective block size;
+        uncompressed groups report ``original_block_size``.
         """
-        event_block_size = conductor_cpu_event_block_size(
-            effective_block_size,
-            self._target_effective_block_size(),
+        original_block_size = (
+            req_meta.original_block_size[group_id]
+            if isinstance(req_meta.original_block_size, list)
+            else req_meta.original_block_size
         )
-        if event_block_size is None or token_len < event_block_size:
+        if effective_block_size <= 0 or compress_ratio <= 0:
             return []
-        hash_block_size = getattr(self.token_database, "hash_block_size", event_block_size)
+        event_block_size = effective_block_size if compress_ratio > 1 else original_block_size
+        if event_block_size is None or event_block_size <= 0 or token_len < effective_block_size:
+            return []
+        hash_block_size = getattr(self.token_database, "hash_block_size", effective_block_size)
         try:
             grouped_hashes = get_block_hashes(
                 req_meta.block_hashes,
-                event_block_size,
+                effective_block_size,
                 hash_block_size,
             )
         except AssertionError:
             return []
         all_hashes = [maybe_convert_block_hash(block_hash) for block_hash in grouped_hashes]
-        num_blocks = min(token_len // event_block_size, len(all_hashes))
+        num_blocks = min(token_len // effective_block_size, len(all_hashes))
         stored_blocks = {
             block_idx
             for start, end in stored_ranges
             for block_idx in range(
-                max(0, (start + event_block_size - 1) // event_block_size),
-                min(end // event_block_size, num_blocks),
+                max(0, (start + effective_block_size - 1) // effective_block_size),
+                min(end // effective_block_size, num_blocks),
             )
         }
         stored_events: list[BlockStored] = []
         for block_idx in sorted(stored_blocks):
-            start = block_idx * event_block_size
-            end = start + event_block_size
+            start = block_idx * effective_block_size
+            end = start + effective_block_size
             stored_event = BlockStored(
                 block_hashes=[all_hashes[block_idx]],
                 parent_block_hash=all_hashes[block_idx - 1] if block_idx > 0 else None,
@@ -1296,13 +1301,25 @@ class KVCacheStoreSendingThread(KVTransferThread):
         req_meta: ReqMeta,
         group_id: int,
         token_len: int,
-        stored_ranges: list[tuple[int, int]],
+        selected_ranges: list[tuple[int, int]],
+        missing_indices: list[int],
+        logical_success: list[bool] | None,
     ) -> None:
-        if not self.enable_kv_event or not stored_ranges:
+        if not self.enable_kv_event:
+            return
+        compress_ratio, stored_ranges = self._cpu_event_ranges(
+            group_id,
+            selected_ranges,
+            missing_indices,
+            logical_success,
+        )
+        if not stored_ranges:
             return
         stored_events = self._build_cpu_stored_events(
             req_meta,
+            group_id,
             self._get_block_size(group_id),
+            compress_ratio,
             token_len,
             stored_ranges,
         )
@@ -1443,7 +1460,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
             else:
                 missing_indices = self._get_missing_indices(keys, require_exists_check=self.enable_kv_event)
             if not missing_indices:
-                self._publish_cpu_stored_events(req_meta, group_id, token_len, selected_ranges)
+                self._publish_cpu_stored_events(
+                    req_meta,
+                    group_id,
+                    token_len,
+                    selected_ranges,
+                    missing_indices,
+                    None,
+                )
                 continue
             starts = [starts[index] for index in missing_indices]
             ends = [ends[index] for index in missing_indices]
@@ -1519,7 +1543,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             req_meta,
                             group_id,
                             token_len,
-                            self._confirmed_store_ranges(selected_ranges, missing_indices, logical_success),
+                            selected_ranges,
+                            missing_indices,
+                            logical_success,
                         )
                     logger.error("KV store backend partially failed to put request %s", req_id)
                     return False
@@ -1530,7 +1556,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 req_meta,
                 group_id,
                 token_len,
-                self._confirmed_store_ranges(selected_ranges, missing_indices, None),
+                selected_ranges,
+                missing_indices,
+                None,
             )
         return True
 
