@@ -198,10 +198,6 @@ class KDAStateCopyPlan:
         if any(t.data_ptr() % 16 for t in tensors[1:]):
             raise RuntimeError("unaligned normalized KDA buffer")
         with nullcontext() if torch.npu.current_device() == state.device.index else torch.npu.device(state.device):
-            # CompiledKernel.__getitem__ bypasses the Triton JIT argument binder.
-            # The Ascend launcher omits tl.constexpr arguments already bound
-            # during prepare(). Pass only the nine runtime tensor/scalar args;
-            # TO_CACHE, HAS_FLAGS and BLOCK_SIZE stay in the compiled variant.
             self._compiled[indices.dtype, to_cache][(indices.numel(), self._tiles, 1)](
                 *tensors,
                 *self._scalars,
