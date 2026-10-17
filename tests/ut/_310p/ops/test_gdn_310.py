@@ -16,11 +16,14 @@
 #
 
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+from vllm.model_executor.custom_op import op_registry_oot
+from vllm_ascend._310p.ops.fla import cann_ops, gdn_310
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
     _mask_padded_recurrent_accepted_tokens,
@@ -32,6 +35,60 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 
+
+def test_gdn_310_binds_ops_during_initialization():
+    gating_op, wy_op = Mock(), Mock()
+
+    def initialize_parent(self, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+
+    with (
+        patch.object(gdn_310.GatedDeltaNetAttention, "__init__", autospec=True, side_effect=initialize_parent) as parent,
+        patch.object(cann_ops, "load_cann_gdn_ops", return_value=(gating_op, wy_op)) as load,
+        patch.object(AscendGatedDeltaNetAttention310, "__abstractmethods__", frozenset()),
+    ):
+        attention = AscendGatedDeltaNetAttention310("config", "vllm_config", prefix="gdn")
+        assert attention.fused_gdn_gating_op is gating_op
+        assert attention.chunk_gated_delta_rule_compute_wy_op is wy_op
+        parent.assert_called_once_with(attention, "config", "vllm_config", prefix="gdn")
+        load.assert_called_once_with()
+
+def test_qwen_gdn_registered_subclass_binds_ops():
+    fused_op = object()
+    chunk_op = object()
+
+    def initialize_parent(self, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+
+    with (
+        patch.dict(
+            op_registry_oot,
+            {
+                "QwenGatedDeltaNetAttention":
+                    gdn_310.AscendQwenGatedDeltaNetAttention310,
+            },
+        ),
+        patch.object(
+            gdn_310.QwenGatedDeltaNetAttention,
+            "__init__",
+            autospec=True,
+            side_effect=initialize_parent,
+        ) as parent_init,
+        patch.object(
+            cann_ops,
+            "load_cann_gdn_ops",
+            return_value=(fused_op, chunk_op),
+        ) as load_ops,
+    ):
+        layer = gdn_310.QwenGatedDeltaNetAttention(
+            None, None, prefix="model.layers.0.linear_attn"
+        )
+
+    assert type(layer) is gdn_310.AscendQwenGatedDeltaNetAttention310
+    assert layer.fused_gdn_gating_op is fused_op
+    assert layer.chunk_gated_delta_rule_compute_wy_op is chunk_op
+    parent_init.assert_called_once()
+    load_ops.assert_called_once()
 
 def test_ascend_gdn_attention_310_uses_310p_backend():
     assert AscendGatedDeltaNetAttention310.get_attn_backend(object()) is AscendGDNAttentionBackend310

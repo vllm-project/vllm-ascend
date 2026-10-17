@@ -33,7 +33,10 @@ from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
-    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+    from vllm_ascend._310p.ops.fla.gdn_310 import (
+        AscendGatedDeltaNetAttention310,
+        AscendQwenGatedDeltaNetAttention310,
+    )
 
     if device_type == AscendDeviceType._310P:
         expected_gdn = AscendGatedDeltaNetAttention310
@@ -61,6 +64,17 @@ def test_register_customop_selects_gdn_before_import(device_type):
         utils.register_ascend_customop()
         assert utils.REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] is expected_gdn
         register.assert_any_call(_decorated_op_cls=expected_gdn, name="GatedDeltaNetAttention")
+        if device_type == AscendDeviceType._310P:
+            assert(
+                utils.REGISTERED_ASCEND_OPS["QwenGatedDeltaNetAttention"]
+                is AscendQwenGatedDeltaNetAttention310
+            )
+            register.assert_any_call(
+                _decorated_op_cls=AscendQwenGatedDeltaNetAttention310,
+                name="QwenGatedDeltaNetAttention",
+            )
+        else:
+            assert "QwenGatedDeltaNetAttention" not in utils.REGISTERED_ASCEND_OPS
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
         utils.register_ascend_customop()
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
