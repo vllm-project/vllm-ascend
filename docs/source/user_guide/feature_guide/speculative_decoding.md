@@ -60,8 +60,9 @@ vllm serve path/to/target/model \
   --speculative-config '{"method": "eagle3", "model": "path/to/draft/model", "num_speculative_tokens": 3}'
 ```
 
-> [!NOTE]
-> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
+!!! note
+
+    On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
 
 ## Speculating by matching n-grams in the prompt
 
@@ -214,10 +215,11 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
     --speculative-config '{"num_speculative_tokens": 2, "method":"mtp", "disable_padded_drafter_batch": false}'
     ```
 
-> [!NOTE]
-> Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).
->
-> In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`.
+!!! note
+
+    Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).
+
+    In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`.
 
 ## Speculating using DFlash
 
@@ -548,8 +550,9 @@ Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching using
 
 Suffix Decoding can achieve better performance for tasks with high repetition, such as code-editing, agentic loops (e.g. self-reflection, self-consistency), and RL rollouts.
 
-> [!NOTE]
-> Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`.
+!!! note
+
+    Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`.
 
 - Offline inference
 
@@ -592,8 +595,9 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models. The dumps are then used to train EAGLE/EAGLE-3 drafts.
 
-> [!NOTE]
-> This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+!!! note
+
+    This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
 
 Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
 
@@ -697,8 +701,9 @@ Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, i
 
 This approach adapts how many drafted tokens are verified per request. It can reduce verify cost when the drafter is less confident about later tokens, while still allowing longer speculation when confidence is high.
 
-> [!NOTE]
-> This is an **exploratory** feature and currently targets **model runner v1** only. Supported dynamic methods are `"dspark"` (confidence head) and `"dflash"` (head-free). Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
+!!! note
+
+    This is an **exploratory** feature and currently targets **model runner v1** only. Supported dynamic methods are `"dspark"` (confidence head) and `"dflash"` (head-free). Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
 
 #### How it works
 
@@ -840,8 +845,9 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
-> [!WARNING]
-> Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
+!!! warning
+
+    Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
 
 ### Block Verify
 
@@ -900,8 +906,9 @@ Synthetic mode **decouples the verifier's acceptance logic from draft-model qual
 - **Kernel validation** — because acceptance reduces to `uniform < rate`, the result is fully determined by the inputs. The e2e test compares the Ascend Triton kernel (`SYNTHETIC_MODE=True`) against the PyTorch reference under identical inputs, so the two must agree bit-for-bit.
 - **Stress-testing** the high-acceptance regime of the speculative pipeline.
 
-> [!WARNING]
-> Synthetic mode accepts draft tokens regardless of whether they match the target distribution, so the generated output is **not semantically correct**. Use it for benchmarking and validation only, **never for production serving**.
+!!! warning
+
+    Synthetic mode accepts draft tokens regardless of whether they match the target distribution, so the generated output is **not semantically correct**. Use it for benchmarking and validation only, **never for production serving**.
 
 ### How to use
 
