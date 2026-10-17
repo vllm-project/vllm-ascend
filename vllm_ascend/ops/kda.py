@@ -28,6 +28,7 @@ def run_recurrent_kda(
     *,
     lower_bound: float | None,
     beta_is_preprocessed: bool = True,
+    use_qk_l2norm_in_kernel: bool = True,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Recurrent KDA consumes independent Q/K/V token/head strides directly.
@@ -48,7 +49,7 @@ def run_recurrent_kda(
         output_final_state=False,
         inplace_final_state=True,
         state_v_first=True,
-        use_qk_l2norm_in_kernel=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=True,
         use_beta_sigmoid_in_kernel=not beta_is_preprocessed,
         allow_neg_eigval=False,

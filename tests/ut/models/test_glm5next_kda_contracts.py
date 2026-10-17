@@ -23,9 +23,21 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
 
+    def normalize(x):
+        assert x.is_contiguous()
+        return (x.float() * torch.rsqrt(x.float().square().sum(-1, keepdim=True) + 1e-6)).to(x.dtype)
+
+    monkeypatch.setattr(kda, "l2norm_fwd", normalize, raising=False)
+    normalized_q = normalize(q.contiguous())
+    normalized_k = normalize(k.contiguous())
+
     def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, *, cu_seqlens, ssm_state_indices, **kwargs):
-        # Preserve each view's strides and storage without materializing Q/K/V.
-        assert q_arg is q and k_arg is k and v_arg is v
+        torch.testing.assert_close(q_arg, normalized_q)
+        torch.testing.assert_close(k_arg, normalized_k)
+        assert q_arg.dtype == k_arg.dtype == torch.bfloat16
+        assert q_arg.is_contiguous() and k_arg.is_contiguous()
+        assert v_arg is v
+        assert not kwargs["use_qk_l2norm_in_kernel"]
         assert kwargs["use_gate_in_kernel"] and kwargs["use_beta_sigmoid_in_kernel"]
         assert kwargs["safe_gate"] and kwargs["lower_bound"] == -4.0
         assert state_arg is state
@@ -68,7 +80,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     )
     if direct_output:
         assert out is destination
-    torch.testing.assert_close(out[:, :3], q[:, :3])
+    torch.testing.assert_close(out[:, :3], normalized_q[:, :3])
     assert torch.count_nonzero(out[:, 3:]) == 0
 
 
