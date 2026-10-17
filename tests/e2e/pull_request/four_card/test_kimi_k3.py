@@ -409,6 +409,42 @@ def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
         assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "full-decode-only"])
+def test_k3_gqa_tp2_dcp_replicated_draft_kv(
+    k3_models: dict[str, str], dcp_size: int, enforce_eager: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    args = _engine_args(k3_models, "gqa", tp=2)
+    args["decode_context_parallel_size"] = dcp_size
+    args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
+    args["enforce_eager"] = enforce_eager
+    if enforce_eager:
+        args.pop("compilation_config")
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        # Exercise the first token, block boundaries, chunked prefill, and the
+        # last block-table columns while the target cache is DCP-sharded and
+        # every draft-DCP lane addresses a replicated physical cache range.
+        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((1, 127, 128, 129, 769))])
+        # Three live requests pad to four in the 32-token graph. Hybrid K3
+        # pages give MLA a non-contiguous block stride; exercise graph task
+        # updates after cached history crosses several kernel blocks.
+        _generate(llm, [_prompt(length, salt=i * 17) for i, length in enumerate((129, 769, 1537))])
+        _generate(llm, [_prompt(MAX_MODEL_LEN - OUTPUT_TOKENS, salt=911)])
+
+        prefix = _prompt(PREFIX_CACHE_TOKENS, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.finished
+
+        drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
+        assert drafts and all(isinstance(m, Counter) for m in drafts)
+        assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
+
+
 def _serve_args(args: dict) -> list[str]:
     result = [
         "--served-model-name",

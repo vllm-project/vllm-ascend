@@ -532,7 +532,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
             SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
-        patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
+        patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace", workspace_query),
         patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
