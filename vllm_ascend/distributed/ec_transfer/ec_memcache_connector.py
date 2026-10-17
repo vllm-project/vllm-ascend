@@ -7,12 +7,20 @@ Integrate with vLLM through the ec_connector framework without modifying vLLM:
             "vllm_ascend.distributed.ec_transfer.ec_memcache_connector",
         "ec_role": "ec_both",
         "ec_connector_extra_config": {
-            "recv_buffer_tokens": 8192
+            "recv_buffer_tokens": 8192,
+            "similarity_cache": {
+                "enabled": true,
+                "matcher": "phash_ssim",
+                "max_hamming": 5,
+                "ssim_threshold": 0.99
+            }
         }
     }'
 
 Cache hit rules, adapted from MultiLevelEncoderCacheManager:
   - key = mm_hash (request.mm_features[i].identifier); a hit skips ViT;
+  - when similarity_cache is enabled, an L1 miss may reuse an existing
+    embedding recalled by pHash and verified against the SSIM threshold;
   - only a miss runs ViT, then stores the result in memcache under the image's
     mm_hash.
 
@@ -38,6 +46,10 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import logger
 
+from vllm_ascend.distributed.ec_transfer.perceptual_ssim_cache_matcher import (
+    PhashSSIMCacheMatcher,
+    SimilarityCacheConfig,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
     MmcDirect,
@@ -77,6 +89,9 @@ def _get_recv_buffer_tokens(vllm_config: "VllmConfig") -> int:
 class ECMemcacheConnectorMetadata(ECConnectorMetadata):
     mm_hashes_need_loads: list[str] = field(default_factory=list)
     mm_hashes_need_saves: set[str] = field(default_factory=set)
+    # Only similarity hits need an alternate lookup key. Exact hits omit an
+    # entry and load from Memcache with the request mm_hash itself.
+    mm_hash_to_store_key: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -95,16 +110,37 @@ class ECMemcacheConnector(ECConnectorBase):
         model_config = vllm_config.model_config
 
         self._model_id: str = model_config.model
+        self._similarity_config = SimilarityCacheConfig.from_vllm_config(vllm_config)
+        self._cache_matcher: PhashSSIMCacheMatcher | None = None
 
         if role == ECConnectorRole.SCHEDULER:
-            # This is a metadata-only client of memcache
-            self._backend = MemcacheBackend.create_scheduler_client(vllm_config.parallel_config)
-            # for statistics
+            # Similarity matching persists and reloads resized tensors. Select
+            # the scheduler's final backend capability before the process's
+            # first Memcache initialization; a metadata-only native client
+            # cannot be upgraded by constructing a second backend object.
+            if self._similarity_config.enabled:
+                self._backend = MemcacheBackend.create_scheduler_data_client(vllm_config.parallel_config)
+                hf_config = getattr(model_config, "hf_config", None)
+                vision_config = getattr(hf_config, "vision_config", None)
+                merge_size = int(getattr(vision_config, "spatial_merge_size", 2) or 2)
+                self._cache_matcher = PhashSSIMCacheMatcher(
+                    self._backend,
+                    self._similarity_config,
+                    merge_size=merge_size,
+                )
+            else:
+                self._backend = MemcacheBackend.create_scheduler_client(vllm_config.parallel_config)
+            # Exact hits contain only the current request's original mm_hash.
             self._mm_hash_hits: set[str] = set()
+            # Similarity hits map the current request's original mm_hash to
+            # the similar candidate original mm_hash whose embedding will be loaded.
+            self._similarity_mm_hash_hits: dict[str, str] = {}
             self._mm_hash_hit_count = 0
+            self._similarity_hit_count = 0
             self._miss_count = 0
             # for worker
             self._mm_hashes_need_loads: set[str] = set()
+            self._mm_hash_to_store_key: dict[str, str] = {}
             self._mm_hashes_need_saves: set[str] = set()
         elif role == ECConnectorRole.WORKER:
             # Data-plane client for reading and writing embeddings.
@@ -146,9 +182,11 @@ class ECMemcacheConnector(ECConnectorBase):
             raise ValueError(f"Unknown ECConnectorRole: {role}")
 
         logger.info(
-            "ECMemcacheConnector init: role=%s model=%s",
+            "ECMemcacheConnector init: role=%s model=%s similarity_cache_enabled=%s matcher=%s",
             role,
             self._model_id,
+            self._similarity_config.enabled,
+            self._similarity_config.matcher,
         )
 
     # ==============================
@@ -156,29 +194,13 @@ class ECMemcacheConnector(ECConnectorBase):
     # ==============================
 
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
-        seen_mm_hashes_in_current_request: list[str] = []
-        for feature in request.mm_features:
-            current_image_mm_hash = feature.identifier
-            if (
-                current_image_mm_hash in self._mm_hash_hits
-                or current_image_mm_hash in seen_mm_hashes_in_current_request
-            ):
-                continue
-            seen_mm_hashes_in_current_request.append(current_image_mm_hash)
-
-        exists_res = (
-            self._backend.exists(seen_mm_hashes_in_current_request) if seen_mm_hashes_in_current_request else []
+        similarity_enabled = self._similarity_config.enabled
+        missing_features = self._ensure_exact_cache_available(
+            request,
+            collect_missing=similarity_enabled,
         )
-        if seen_mm_hashes_in_current_request:
-            if not exists_res:
-                logger.debug("EC memcache exists failed: keys=%r", seen_mm_hashes_in_current_request)
-                # If no exists_res returned, fill exists_res with zeros, which means all keys are not exist
-                exists_res = [0] * len(seen_mm_hashes_in_current_request)
-        for current_image_mm_hash, existed in zip(seen_mm_hashes_in_current_request, exists_res):
-            if existed == 1:
-                self._mm_hash_hits.add(current_image_mm_hash)
-                self._mm_hash_hit_count += 1
-                logger.debug("Current mm_hash=%s is available in memcache", current_image_mm_hash)
+        if similarity_enabled:
+            self._ensure_similarity_cache_available(missing_features)
         return True
 
     def has_cache_item(self, identifier: str) -> bool:
@@ -197,17 +219,42 @@ class ECMemcacheConnector(ECConnectorBase):
         feature = request.mm_features[index]
         current_image_mm_hash = feature.identifier
 
+        # If there is an exact hit for current_image_mm_hash, it will certainly be loaded.
         if current_image_mm_hash in self._mm_hash_hits:
             self._mm_hashes_need_loads.add(current_image_mm_hash)
             return
 
+        similarity_enabled = self._similarity_config.enabled
+        if not similarity_enabled:
+            self._miss_count += 1
+            self._mm_hashes_need_saves.add(current_image_mm_hash)
+
+        # If there is a similarity hit for current_image_mm_hash in current batch, it will certainly be loaded.
+        similar_mm_hash = self._similarity_mm_hash_hits.get(current_image_mm_hash)
+        if similar_mm_hash is not None:
+            self._mm_hashes_need_loads.add(similar_mm_hash)
+            return
+
+        # If there is no similarity hit for current_image_mm_hash in current batch, start the similarity lookup process.
+        cache_matcher = self._cache_matcher
+        if cache_matcher is not None:
+            try:
+                similar_mm_hash = cache_matcher.get_or_update_similarity_match(current_image_mm_hash, feature.data)
+                if similar_mm_hash is not None:
+                    self._similarity_hit_count += 1
+                    self._mm_hashes_need_loads.add(similar_mm_hash)
+                    logger.debug("EC similarity match success: mm_hash=%s, similar_mm_hash=%s", current_image_mm_hash, similar_mm_hash)
+                    return
+            except Exception:
+                logger.exception("EC similarity match failed: mm_hash=%s", current_image_mm_hash)
         self._miss_count += 1
         self._mm_hashes_need_saves.add(current_image_mm_hash)
 
+
     @property
     def hit_rate(self) -> float:
-        """Return the cumulative hit rate: L1 hits / total lookups."""
-        hits = self._mm_hash_hit_count
+        """Return the cumulative exact and similarity cache hit rate."""
+        hits = self._mm_hash_hit_count + self._similarity_hit_count
         total = hits + self._miss_count
         if total == 0:
             return 0.0
@@ -215,28 +262,103 @@ class ECMemcacheConnector(ECConnectorBase):
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECMemcacheConnectorMetadata:
         meta = ECMemcacheConnectorMetadata(
-            mm_hashes_need_loads=list(self._mm_hashes_need_loads),
+            mm_hashes_need_loads=self._mm_hashes_need_loads,
             mm_hashes_need_saves=self._mm_hashes_need_saves,
+            mm_hash_to_store_key=self._mm_hash_to_store_key,
         )
         if meta.mm_hashes_need_loads or meta.mm_hashes_need_saves:
             logger.debug(
                 "EC meta: %d loads, %d saves this step | "
-                "EC meta mm_hashes_need_loads: %r, EC meta mm_hashes_need_saves: %r this step | "
-                "full_pixel_hits=%d misses=%d hit_rate=%.2f%%",
+                "EC meta loads: %r, EC meta saves: %r this step | "
+                "exact_hits=%d similarity_hits=%d misses=%d hit_rate=%.2f%%",
                 len(meta.mm_hashes_need_loads),
                 len(meta.mm_hashes_need_saves),
                 meta.mm_hashes_need_loads,
                 meta.mm_hashes_need_saves,
                 self._mm_hash_hit_count,
+                self._similarity_hit_count,
                 self._miss_count,
                 self.hit_rate * 100,
             )
         # ECMemcacheConnectorMetadata will be passed to worker, so states must be cleared before next batch coming
         # and the statistics fields keep remaining
-        self._mm_hashes_need_loads = set()
+        self._mm_hashes_need_loads = []
+        self._mm_hash_to_store_key = {}
         self._mm_hashes_need_saves = set()
         self._mm_hash_hits.clear()
+        self._similarity_mm_hash_hits.clear()
+        if self._cache_matcher is not None:
+            self._cache_matcher.clear_step_state()
         return meta
+
+    # ==============================
+    # Scheduler-side memcache helpers
+    # ==============================
+
+    def _ensure_exact_cache_available(
+        self,
+        request: "Request",
+        *,
+        collect_missing: bool,
+    ) -> list[Any]:
+        seen_mm_hashes_in_current_request: list[str] = []
+        feature_by_mm_hash: dict[str, Any] = {}
+        for feature in request.mm_features:
+            current_image_mm_hash = feature.identifier
+            if (
+                current_image_mm_hash in self._mm_hash_hits
+                or current_image_mm_hash in self._similarity_mm_hash_hits
+                or current_image_mm_hash in seen_mm_hashes_in_current_request
+            ):
+                continue
+            seen_mm_hashes_in_current_request.append(current_image_mm_hash)
+            if collect_missing:
+                feature_by_mm_hash[current_image_mm_hash] = feature
+
+        exists_res = (
+            self._backend.exists(seen_mm_hashes_in_current_request) if seen_mm_hashes_in_current_request else []
+        )
+        if seen_mm_hashes_in_current_request:
+            if not exists_res:
+                logger.debug("EC memcache exists failed: keys=%r", seen_mm_hashes_in_current_request)
+                # If no exists_res returned, fill exists_res with zeros, which means all keys are not exist
+                exists_res = [0] * len(seen_mm_hashes_in_current_request)
+            elif len(exists_res) != len(seen_mm_hashes_in_current_request):
+                logger.debug(
+                    "EC memcache exists returned %d results for %d keys: keys=%r",
+                    len(exists_res),
+                    len(seen_mm_hashes_in_current_request),
+                    seen_mm_hashes_in_current_request,
+                )
+                exists_res = [0] * len(seen_mm_hashes_in_current_request)
+
+        missing_features: list[Any] = []
+        for current_image_mm_hash, existed in zip(
+            seen_mm_hashes_in_current_request,
+            exists_res,
+        ):
+            if existed == 1:
+                self._mm_hash_hits.add(current_image_mm_hash)
+                self._mm_hash_hit_count += 1
+                logger.debug("Current mm_hash=%s is available in memcache", current_image_mm_hash)
+            elif collect_missing:
+                missing_features.append(feature_by_mm_hash[current_image_mm_hash])
+        return missing_features
+
+    def _ensure_similarity_cache_available(
+        self,
+        missing_features: list[Any],
+    ) -> None:
+        matcher = self._cache_matcher
+        if matcher is None or not missing_features:
+            return
+        mm_hashes = [feature.identifier for feature in missing_features]
+        try:
+            matcher.batch_ensure_similarity_cache_available(mm_hashes, missing_features)
+        except Exception:
+            logger.exception("EC similarity batch prewarm failed: mm_hashes=%r", mm_hashes)
+            return
+
 
     # ==============================
     # Worker-side methods
@@ -246,27 +368,31 @@ class ECMemcacheConnector(ECConnectorBase):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, ECMemcacheConnectorMetadata)
         loading_hashes_in_current_step = [
-            current_image_mm_hash
-            for current_image_mm_hash in metadata.mm_hashes_need_loads
-            if current_image_mm_hash not in encoder_cache
+            mm_hash for mm_hash in metadata.mm_hashes_need_loads if mm_hash not in encoder_cache
         ]
         if not loading_hashes_in_current_step:
             return
 
-        embeddings = self._ec_get_batch(loading_hashes_in_current_step)
+        store_keys = [
+            metadata.mm_hash_to_store_key.get(mm_hash, mm_hash) for mm_hash in loading_hashes_in_current_step
+        ]
+        embeddings = self._ec_get_batch(store_keys)
         if not embeddings:
             return
-        for current_image_mm_hash, embedding in zip(loading_hashes_in_current_step, embeddings):
+        for mm_hash, store_key, embedding in zip(loading_hashes_in_current_step, store_keys, embeddings):
             if embedding is None:
                 logger.warning(
-                    "EC LOAD miss: current_image_mm_hash=%s (may be evicted by memcache?)",
-                    current_image_mm_hash,
+                    "EC LOAD miss: request_key=%s store_key=%s (may be evicted by memcache?)",
+                    mm_hash,
+                    store_key,
                 )
                 continue
-            encoder_cache[current_image_mm_hash] = embedding
+            encoder_cache[mm_hash] = embedding
             logger.debug(
-                "EC LOAD: current_image_mm_hash=%s embedding shape=%r",
-                current_image_mm_hash,
+                "EC LOAD: request_key=%s store_key=%s hit_kind=%s embedding shape=%r",
+                mm_hash,
+                store_key,
+                "exact" if mm_hash == store_key else self._similarity_config.matcher,
                 embedding.shape,
             )
 
@@ -283,7 +409,7 @@ class ECMemcacheConnector(ECConnectorBase):
     # ==============================
 
     def _wait_recv_buffer_reusable(self) -> None:
-        event = self._recv_buffer_reuse_event
+        event = getattr(self, "_recv_buffer_reuse_event", None)
         if event is None:
             return
         event.synchronize()
@@ -558,6 +684,10 @@ class ECMemcacheConnector(ECConnectorBase):
             logger.exception("EC PUT failed: mm_hash=%s", mm_hash)
 
     def shutdown(self) -> None:
+        matcher = getattr(self, "_cache_matcher", None)
+        if matcher is not None:
+            matcher.shutdown()
+
         executor = getattr(self, "_put_executor", None)
         if executor is not None:
             executor.shutdown(wait=True)

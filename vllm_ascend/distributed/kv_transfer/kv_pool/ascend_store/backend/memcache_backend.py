@@ -274,6 +274,21 @@ class MemcacheBackend(Backend):
             init_bm=False,
         )
 
+    @classmethod
+    def create_scheduler_data_client(cls, parallel_config: ParallelConfig):
+        """Create the single data-capable Memcache client in a scheduler.
+
+        Memcache initialization is process-global, so a metadata-only client
+        cannot be upgraded later by constructing a second backend object.
+        Callers that need scheduler-side data transfers must select this
+        factory before the process performs its first Memcache initialization.
+        """
+        return cls(
+            parallel_config,
+            device_id=get_scheduler_device_id(parallel_config),
+            init_bm=True,
+        )
+
     def init_store(self, init_bm: bool = True):
         if self.store is not None:
             return
