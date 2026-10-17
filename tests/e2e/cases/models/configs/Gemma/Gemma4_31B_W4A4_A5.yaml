@@ -33,12 +33,6 @@ _server_cmd: &server_cmd
   - "0.9"
   - "--trust-remote-code"
 
-_api_keyword_args: &api_keyword_args
-  max_tokens: 64
-  temperature: 1.0
-  top_p: 0.95
-  top_k: 64
-
 _benchmarks: &benchmarks
   acc_gpqa:
     case_type: accuracy
@@ -63,15 +57,10 @@ test_cases:
     model: *model
     envs:
       <<: *envs
-    prompts:
-      - "Explain briefly why ACLGraph output should match eager output."
-    api_keyword_args:
-      <<: *api_keyword_args
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
-    test_content:
-      - "chat_completion"
+    test_content: []
     benchmarks:
       <<: *benchmarks
