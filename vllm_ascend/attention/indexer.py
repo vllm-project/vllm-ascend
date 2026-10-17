@@ -41,6 +41,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.ops.triton.sfa_indexer_store import can_fuse_store, store_indexer_key_scale
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -213,6 +214,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # non-replicated token across the CP group, DSA-CP all-gathers the
         # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
+        self._dcp_size = parallel_config.decode_context_parallel_size
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
@@ -246,7 +248,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
         return 2 if self.enable_sparse_li_quant else 1
 
-    def _quantize_li_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _quantize_li_tensor(
+        self, x: torch.Tensor, *, defer_scale_cast: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply Hadamard transform and quantize for LI C8 or C4 path."""
         assert self.q_hadamard is not None
         x = x @ self.q_hadamard
@@ -257,7 +261,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             scale = scale.view(*shape_ori[:-1], *scale.shape[-2:])
             return x, scale.view(self.c4_k_scale_cache_dtype)
         x, scale = torch_npu.npu_dynamic_quant(x, dst_type=self.c8_k_cache_dtype)
-        return x, scale.to(self.c8_k_scale_cache_dtype)
+        return x, scale if defer_scale_cast else scale.to(self.c8_k_scale_cache_dtype)
 
     def write_cache(
         self,
@@ -304,6 +308,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        *,
+        defer_scale_cast: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
@@ -344,7 +350,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.enable_sparse_li_quant:
-            k_li, k_li_scale = self._quantize_li_tensor(k_li)
+            if defer_scale_cast:
+                k_li, k_li_scale = self._quantize_li_tensor(k_li, defer_scale_cast=True)
+            else:
+                k_li, k_li_scale = self._quantize_li_tensor(k_li)
             if self.enable_sparse_li_c8:
                 k_li_scale = k_li_scale.unsqueeze(-1)
         else:
@@ -419,14 +428,42 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         inputs."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
-        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
+        # Only the native backend may bypass its ordinary write_cache method.
+        # PCP/DSA-CP and custom cache subclasses keep their established layout.
+        fuse_store = (
+            type(self) is AscendSFAIndexerBackend
+            and getattr(self, "_dcp_size", 1) == 8
+            and not self._pcp_active
+            and not self._dsa_cp_active
+            and self.enable_sparse_li_c8
+            and indexer_metadata.num_actual_tokens > 0
+            and indexer_metadata.num_decode_tokens == indexer_metadata.num_actual_tokens
+            and can_fuse_store(
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                indexer_metadata.slot_mapping,
+                k_hidden_states.shape[0],
+            )
+        )
+        if fuse_store:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, defer_scale_cast=True)
+        else:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         if attn_q_gather_handle is not None:
-            # Keep the k projection overlapped with Q communication, but order
-            # the TP cache gathers after Q to avoid concurrent cross-group AIV
-            # collectives during graph replay. wait() adds a stream dependency.
+            # Preserve main's ordering between Q communication and cache gathers.
             attn_q_gather_handle.wait()
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
-        self.write_cache(k_li, k_li_scale, slot_mapping)
+        if fuse_store:
+            assert k_li_scale is not None
+            store_indexer_key_scale(
+                k_li,
+                k_li_scale,
+                slot_mapping,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+            )
+        else:
+            self.write_cache(k_li, k_li_scale, slot_mapping)
         if not compute_topk:
             return None
 
@@ -1079,8 +1116,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if self.use_pcp:
-            # Preserve the decode boundary for PCP's cache-write gather.
+        if self.use_pcp or self.use_dcp:
+            # PCP's gather and native DCP's fused store need the decode boundary.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
