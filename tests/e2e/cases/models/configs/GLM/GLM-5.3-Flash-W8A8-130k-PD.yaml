@@ -31,6 +31,8 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  # Keep CANN/Torch JIT builds off the shared /root/.cache PVC.
+  TORCH_EXTENSIONS_DIR: "/tmp/torch_extensions/glm53"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
@@ -46,6 +48,7 @@ templates:
     envs:
       <<: *env_common
     server_cmd_template:
+      - --enforce-eager
       - --host
       - "0.0.0.0"
       - --port
@@ -167,7 +170,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 128
     request_rate: 0
-    baseline: 2313.132
+    baseline: 2900
     threshold: 0.97
   acc_aime2025:
     case_type: accuracy
