@@ -331,10 +331,10 @@ class TestAscendModelSlimConfig(TestBase):
             def __init__(self):
                 super().__init__()
                 self.weight = torch.nn.Parameter(torch.empty(1024, dtype=torch.int8), requires_grad=False)
-                self.weight_loader = _make_modelslim_moe_weight_loader(self.weight_loader)
+                self.weight_loader = _make_modelslim_moe_weight_loader(self._load_weight)
                 self.weight.weight_loader = self.weight_loader
 
-            def weight_loader(self, *args, **kwargs):
+            def _load_weight(self, *args, **kwargs):
                 return None
 
         layer = Expert()
