@@ -40,6 +40,74 @@ def _as_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def infer_peer_cp_sizes(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> tuple[int, int]:
+    """Resolve the peer P/D stage's (dcp, pcp) sizes from the store config.
+
+    Mirrors the existing flat ``prefill_*`` / ``decode_*`` convention used by
+    ``infer_tp_mismatch_info``. Missing keys fall back to the local size so
+    single-group deployments (no peer topology) stay authoritative.
+    """
+    local_dcp = _as_positive_int(local_dcp_size, 1)
+    local_pcp = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return local_dcp, local_pcp
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return local_dcp, local_pcp
+    peer_dcp = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp), local_dcp)
+    peer_pcp = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp), local_pcp)
+    return peer_dcp, peer_pcp
+
+
+def infer_decode_only_dcp(
+    local_dcp_size: int | object,
+    local_pcp_size: int | object,
+    peer_dcp_size: int | object,
+    peer_pcp_size: int | object,
+) -> bool:
+    """Whether the PD topology is the supported asymmetric shape.
+
+    Only "decode-only DCP" is supported for the layerwise GVA layout: one side
+    runs decode-context-parallel sharding (dcp>1) while the peer has no DCP
+    (dcp==1), and neither side uses prefill-context-parallel (pcp==1). Every
+    other asymmetry (both sides sharded with unequal sizes, or any pcp>1)
+    still falls back to the explicit mismatch rejection.
+    """
+    l_dcp = _as_positive_int(local_dcp_size, 1)
+    l_pcp = _as_positive_int(local_pcp_size, 1)
+    p_dcp = _as_positive_int(peer_dcp_size, 1)
+    p_pcp = _as_positive_int(peer_pcp_size, 1)
+    if l_pcp != 1 or p_pcp != 1:
+        return False
+    return (l_dcp == 1 and p_dcp > 1) or (l_dcp > 1 and p_dcp == 1)
+
+
+def resolve_layout_dcp_size(
+    is_decode_only_dcp: bool,
+    local_dcp_size: int | object,
+    peer_dcp_size: int | object,
+) -> int:
+    """The single DCP factor used to lay out the shared layerwise GVA region.
+
+    Symmetric topologies keep the local dcp. For decode-only DCP the producer
+    (dcp==1) and the consumer (dcp>1) must agree on one region layout, so both
+    resolve to the peer-sharded size (the max of the two).
+    """
+    local = _as_positive_int(local_dcp_size, 1)
+    peer = _as_positive_int(peer_dcp_size, 1)
+    return max(local, peer) if is_decode_only_dcp else local
+
+
 def infer_dcp_mismatch_info(
     kv_role: str,
     extra_config: Mapping[str, Any] | object,
@@ -60,21 +128,39 @@ def infer_dcp_mismatch_info(
     convention. When the key is absent the single-group path is assumed and
     the local layout is authoritative.
     """
-    local_dcp_size = _as_positive_int(local_dcp_size, 1)
-    local_pcp_size = _as_positive_int(local_pcp_size, 1)
-    if not isinstance(extra_config, Mapping):
-        return False
-    if kv_role == "kv_consumer":
-        peer_dcp_key = "prefill_dcp_size"
-        peer_pcp_key = "prefill_pcp_size"
-    elif kv_role == "kv_producer":
-        peer_dcp_key = "decode_dcp_size"
-        peer_pcp_key = "decode_pcp_size"
-    else:
-        return False
-    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
-    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
-    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
+    local_dcp = _as_positive_int(local_dcp_size, 1)
+    local_pcp = _as_positive_int(local_pcp_size, 1)
+    peer_dcp, peer_pcp = infer_peer_cp_sizes(kv_role, extra_config, local_dcp, local_pcp)
+    return peer_dcp != local_dcp or peer_pcp != local_pcp
+
+
+def layout_independent_block_hashes(
+    prompt_token_ids,
+    block_size: int,
+    caching_hash_fn,
+) -> list:
+    """Chain block hashes over the request's FULL prompt token stream.
+
+    vLLM's own ``Request.block_hashes`` is produced by ``get_request_block_hasher``,
+    which walks ``request.all_token_ids``. Under decode-context parallelism that
+    stream is the **rank-local** (shard-compressed) sequence, so two ranks - or the
+    two P/D stages - running different DCP sizes hash different tokens and can
+    never agree on a pool key. Pool keys must instead be a function of the token
+    content alone, so hash the full prompt in fixed ``block_size`` chunks with the
+    same chaining primitive vLLM uses. Every rank then derives identical hashes.
+    """
+    from vllm.v1.core.kv_cache_utils import hash_block_tokens
+
+    if block_size <= 0:
+        return []
+    hashes: list = []
+    parent = None
+    num_full_blocks = len(prompt_token_ids) // block_size
+    for block_index in range(num_full_blocks):
+        start = block_index * block_size
+        parent = hash_block_tokens(caching_hash_fn, parent, prompt_token_ids[start : start + block_size])
+        hashes.append(parent)
+    return hashes
 
 
 def infer_tp_mismatch_info(
