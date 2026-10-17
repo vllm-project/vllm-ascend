@@ -63,6 +63,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 530
+  tests/e2e/pull_request/one_card/test_decoder_replay_batch.py: 60
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 690
@@ -132,6 +133,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 1230
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 1520
+  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v41_replay_cache.py: 600
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
