@@ -3366,7 +3366,12 @@ def test_release_shared_schedule_submits_complete_shared_after_routed(monkeypatc
     )
     runner.routed_experts = SimpleNamespace(forward_impl=routed)
     runner._prepare_router_input = lambda *_: states
-    runner._apply_router_linear = lambda *_: order.append("router") or logits
+
+    def apply_router_linear(*_):
+        order.append("router")
+        return logits
+
+    runner._apply_router_linear = apply_router_linear
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: internal_router))
     monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *_: True)
     monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: SimpleNamespace(record_event=record))
