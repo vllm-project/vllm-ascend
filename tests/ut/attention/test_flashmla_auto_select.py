@@ -11,9 +11,56 @@ import torch
 
 import vllm_ascend.ops  # noqa: F401  # Register ops before importing attention/device modules.
 from vllm_ascend.attention import mla_v1
+from vllm_ascend.attention import utils as flashmla
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, split_flashmla_requests
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
+
+
+def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeypatch):
+    monkeypatch.setattr(flashmla, "_has_flashmla_module", lambda: True)
+
+    def missing_package(_name):
+        raise ModuleNotFoundError("No module named 'cann_ops_transformer'", name="cann_ops_transformer")
+
+    monkeypatch.setattr(flashmla, "import_module", missing_package)
+    assert flashmla.get_flashmla_ops() is None
+
+    monkeypatch.setattr(flashmla, "import_module", lambda _name: SimpleNamespace(flash_mla=lambda: None))
+    assert flashmla.get_flashmla_ops() is None
+
+    def attention_op():
+        return None
+
+    def metadata_op():
+        return None
+
+    monkeypatch.setattr(
+        flashmla,
+        "import_module",
+        lambda _name: SimpleNamespace(
+            flash_mla=attention_op,
+            flash_mla_metadata=metadata_op,
+        ),
+    )
+    assert flashmla.get_flashmla_ops() == (attention_op, metadata_op)
+
+    def broken_dependency(_name):
+        raise ModuleNotFoundError("No module named 'installed_package_dependency'", name="installed_package_dependency")
+
+    monkeypatch.setattr(flashmla, "import_module", broken_dependency)
+    with pytest.raises(ModuleNotFoundError, match="installed_package_dependency"):
+        flashmla.get_flashmla_ops()
+
+
+def test_flashmla_module_precheck_skips_absent_cann_import(monkeypatch):
+    flashmla._has_flashmla_module.cache_clear()
+    monkeypatch.setattr(flashmla, "find_spec", lambda _name: None)
+    monkeypatch.setattr(flashmla, "import_module", lambda _name: pytest.fail("absent package must not be imported"))
+    try:
+        assert flashmla.get_flashmla_ops() is None
+    finally:
+        flashmla._has_flashmla_module.cache_clear()
 
 
 def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypatch):
