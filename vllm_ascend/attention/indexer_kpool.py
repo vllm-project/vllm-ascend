@@ -2,16 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
+from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.cpp_extension import _get_build_directory
+from torch.utils.file_baton import FileBaton
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,6 +37,28 @@ from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_curr
 from vllm_ascend.utils import _round_up, enable_dsa_cp
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+
+
+_CANN_OPS_INITIALIZATION_LOCK_TIMEOUT = 1800
+
+
+@contextmanager
+def _cann_ops_initialization_lock(cache_dir: str) -> Iterator[None]:
+    # Atomic creation coordinates shared-cache clients without relying on flock.
+    baton = FileBaton(str(Path(cache_dir) / "initialization.lock"))
+    deadline = monotonic() + _CANN_OPS_INITIALIZATION_LOCK_TIMEOUT
+    while not baton.try_acquire():
+        if monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for CANN initialization lock {baton.lock_file_path}. "
+                "A terminated initializer may have left the marker; remove it only "
+                "after confirming all initializers have stopped."
+            )
+        sleep(baton.wait_seconds)
+    try:
+        yield
+    finally:
+        baton.release()
 
 
 @dataclass
@@ -514,7 +542,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.k_cache: Any = vllm_indexer.k_cache
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
-        self._init_cann_ops()
+        self._init_cann_ops(is_moe=vllm_indexer.vllm_config.model_config.is_moe)
         for name in (
             "_key_weight",
             "_gate_weight",
@@ -611,9 +639,17 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             compute_topk=compute_topk,
         )
 
-    def _init_cann_ops(self) -> None:
+    def _init_cann_ops(self, *, is_moe: bool = False) -> None:
         try:
-            import_module("cann_ops_transformer")
+            # The package JIT-compiles operators at import time; concurrent
+            # workers can remove one another's torch extension build locks.
+            cache_dir = _get_build_directory("cann_ops_transformer", verbose=False)
+            with _cann_ops_initialization_lock(cache_dir):
+                import_module("cann_ops_transformer")
+                # These operators otherwise JIT-compile on their first NPU call.
+                for op_name in ("key_pool", "pool_key_indexer"):
+                    module = import_module(f"cann_ops_transformer.ops.attention.{op_name}.{op_name}")
+                    getattr(module, f"{op_name}_op_builder").load()
             adapters = import_module("vllm_ascend.ops.cann_keypool")
             fused = import_module("vllm_ascend.ops.triton.glm5_next_cann_keypool")
             self._gather_retained_hidden = adapters.gather_retained_hidden
@@ -627,6 +663,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 "GLM-5.3-Flash KPool requires cann_ops_transformer with key_pool and pool_key_indexer, "
                 "the matching CANN ops-transformer operator package and Triton cache/index adapters."
             ) from exc
+        if is_moe:
+            # Peers must finish serialized JIT before MoE creates HCCL communicators.
+            get_ep_group().barrier()
 
     def _forward_cann(
         self,
