@@ -875,6 +875,39 @@ def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.Mo
     )
 
 
+def test_mamba_align_with_padded_block_table_rows(monkeypatch: pytest.MonkeyPatch):
+    """vLLM #58737 derives num_reqs from the block table and asserts it equals
+    seq_lens. Ascend's ``unpadded()`` keeps the graph-padded block-table rows, so
+    the GDN builder must hand the helper only the real request rows."""
+    _patch_missing_runtime_cdiv(monkeypatch)
+    batch_spec = BatchSpec(
+        seq_lens=[16, 16, 16, 16],
+        query_lens=[1, 1, 0, 0],
+        name="align_padded_block_table",
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=batch_spec,
+        block_size=4,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.is_prefilling.zero_()
+    # Graph-sized block table (4 rows) with only 2 real requests.
+    common_attn_metadata.block_table_tensor = torch.arange(32, dtype=torch.int32).view(4, 8)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        mamba_cache_mode="align",
+        block_size=4,
+        num_speculative_blocks=2,
+    )
+
+    attn_metadata = builder.build(0, common_attn_metadata, num_actual_reqs=2)
+
+    conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
+    assert conv1d_meta.cache_indices.shape[0] == 2
+
+
 def test_builder_builds_prebuilt_chunk_metadata_with_prefill_query_start_loc(monkeypatch):
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(
