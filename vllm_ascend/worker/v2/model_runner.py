@@ -1276,7 +1276,8 @@ class NPUModelRunner(GPUModelRunner):
         """Use device lengths only for the audited K3/DSpark backends."""
         parallel = self.vllm_config.parallel_config
         if (
-            self.model_config.architecture not in {"KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
+            self.model_config.architecture
+            not in {"KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
             or not getattr(self.speculator, "_draft_mla_uses_device_lengths", False)
             # Other parallel/offload paths have not been audited for host readers.
             or parallel.pipeline_parallel_size != 1
