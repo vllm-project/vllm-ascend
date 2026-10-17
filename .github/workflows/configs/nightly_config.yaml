@@ -97,6 +97,12 @@ a2:
           - Hunyuan-A13B-Instruct
 
 a3:
+  single_node:
+    test_config:
+      - name: GLM-5.3-Flash-W8A8-A3
+        os: linux-aarch64-a3-800t-16
+        config_file_path: GLM-5.3-Flash-W8A8-A3.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
   multi_node:
     test_config:
       - name: GLM-5.3-W8A8C8-A3-200k-PP-PD
@@ -158,6 +164,10 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: GLM-5.3-Flash-W8A8-A3
+        os: linux-aarch64-a3-800i-16
+        config_file_path: GLM-5.3-Flash-W8A8-A3.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
@@ -306,11 +316,6 @@ a3-560t:
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
-#   multi_node:
-#     test_config:
-#       - name: Qwen3-235B-W8A8-EPLB
-#         size: 2
-#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
 #   single_node:
 #     test_config:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp
@@ -318,6 +323,10 @@ a5:
 #         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
   single_node:
     test_config:
+      - name: GLM-5.3-Flash-W8A8-A5
+        os: linux-aarch64-a5-8
+        config_file_path: GLM-5.3-Flash-W8A8-A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: Qwen3_235b_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_235b_w8a8_A5.yaml
