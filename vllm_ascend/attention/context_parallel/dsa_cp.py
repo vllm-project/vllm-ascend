@@ -1,6 +1,6 @@
 import math
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
@@ -53,11 +53,10 @@ from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build
 from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_dsa_cp_full_o_proj, enable_pcp_o_proj_weight_sharding
 from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
     WeightSwitchConfig,
     WeightSwitchMixin,
-    WeightSwitchState,
 )
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -1394,13 +1393,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return attn_metadata
 
 
-class AscendDSACPImpl(AttentionImplBase[Any]):
+class AscendDSACPImpl(OProjWeightSwitchMixin, AttentionImplBase[Any]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_weight_switch_pool_key = "dsa_cp_o_proj"
 
     def __init__(
         self,
@@ -1455,8 +1455,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         # A5 uses full o_proj weight gathering. A3 keeps the activation
         # all-to-all path to avoid gathering the full o_proj weights.
         self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj() and is_950()
-        self.o_proj_weight_switch_config = WeightSwitchConfig.from_group(self.tp_group)
-        self._o_proj_weight_switch_enabled = False
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(self.tp_group))
 
         self.eps = kwargs["eps"]
 
@@ -1560,7 +1559,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
         if self.enable_dsa_cp_full_o_proj:
-            self._enable_o_proj_full_weight_switch()
+            self._enable_o_proj_weight_switch()
 
     @staticmethod
     def update_graph_params(
@@ -1574,87 +1573,18 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         # DSA-CP does not need to update graph params.
         pass
 
-    @staticmethod
-    def _get_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
-        quant_method = layer.quant_method
-        linear_method = getattr(quant_method, "quant_method", quant_method)
-        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
-            raise RuntimeError(
-                "DSA-CP o_proj full-weight switching requires a weight-switch capable method, "
-                f"got {type(linear_method).__name__}."
-            )
-        return linear_method
-
-    def _enable_linear_weight_switch(
+    def _get_o_proj_weight_switch_layers(
         self,
-        layer: torch.nn.Module,
-        name: str,
-    ) -> tuple[WeightSwitchMixin, WeightSwitchState]:
-        linear_method = self._get_weight_switch_method(layer)
-        state = linear_method.enable_weight_switch(
-            layer,
-            self.o_proj_weight_switch_config,
-            pool=AscendDSACPImpl.o_proj_full_pools,
-            pool_key_prefix=(type(linear_method).__qualname__, name, "dsa_cp_o_proj"),
-            clone_local_tensors=True,
-        )
-        return linear_method, state
-
-    def _enable_o_proj_full_weight_switch(self) -> None:
-        """Allocate local/full O-proj buffers in the configured domain."""
-        if self._o_proj_weight_switch_enabled:
-            return
-        self.wo_a_weight_method, self.wo_a_weight_state = self._enable_linear_weight_switch(
-            self.wo_a,
-            "wo_a",
-        )
-        self.wo_b_weight_method, self.wo_b_weight_state = self._enable_linear_weight_switch(
-            self.wo_b,
-            "wo_b",
-        )
-        self._o_proj_weight_switch_enabled = True
-
-    def _maybe_all_gather_o_proj_full_weight(
-        self,
-        enabled: bool,
-    ) -> None:
-        if not enabled:
-            return
-        self._enable_o_proj_full_weight_switch()
-        self.wo_a_weight_method.all_gather_weight(
-            self.wo_a_weight_state,
-            self.o_proj_weight_switch_config,
-        )
-        self.wo_b_weight_method.all_gather_weight(
-            self.wo_b_weight_state,
-            self.o_proj_weight_switch_config,
+    ) -> tuple[tuple[str, torch.nn.Module, WeightSwitchMixin], ...]:
+        return (
+            ("wo_a", self.wo_a, self._resolve_o_proj_weight_switch_method(self.wo_a)),
+            ("wo_b", self.wo_b, self._resolve_o_proj_weight_switch_method(self.wo_b)),
         )
 
-    def _switch_o_proj_to_full_weight(self) -> None:
-        self.wo_a_weight_method.wait_weight_all_gather(self.wo_a_weight_state)
-        self.wo_b_weight_method.wait_weight_all_gather(self.wo_b_weight_state)
-        self.wo_a_weight_method.switch_weight(
-            self.wo_a,
-            self.wo_a_weight_state,
-            use_full_weight=True,
-        )
-        self.wo_b_weight_method.switch_weight(
-            self.wo_b,
-            self.wo_b_weight_state,
-            use_full_weight=True,
-        )
-
-    def _switch_o_proj_to_local_weight(self) -> None:
-        self.wo_a_weight_method.switch_weight(
-            self.wo_a,
-            self.wo_a_weight_state,
-            use_full_weight=False,
-        )
-        self.wo_b_weight_method.switch_weight(
-            self.wo_b,
-            self.wo_b_weight_state,
-            use_full_weight=False,
-        )
+    def _get_o_proj_weight_switch_enable_kwargs(self) -> dict[str, Any]:
+        # DSA-CP needs stable private local aliases before switching module
+        # parameters to the gathered full views.
+        return {"clone_local_tensors": True}
 
     def _apply_wo_b(
         self,
@@ -1707,6 +1637,25 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         output: torch.Tensor | None = None,
         need_gather_q_kv: bool = False,
     ) -> torch.Tensor:
+        with self._o_proj_forward_context():
+            return self._forward_impl(
+                layer_name,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                output,
+                need_gather_q_kv,
+            )
+
+    def _forward_impl(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: DSACPMetadataDict,
+        output: torch.Tensor | None = None,
+        need_gather_q_kv: bool = False,
+    ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
@@ -1721,6 +1670,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             AscendAttentionState.SpecDecoding,
         }
         full_gather_wo_a_enabled = self.tp_size > 1 and self.enable_dsa_cp_full_o_proj and not is_decode
+        self._set_o_proj_use_full_weight(full_gather_wo_a_enabled)
         local_attn_output = self._forward(
             layer_name,
             hidden_states,
@@ -1738,16 +1688,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         # Keep gathered projection weights alive until all asynchronous NPU
         # consumers, including reduce-scatter and the output copy, are queued.
         # V4.1 calls _forward_o_proj only without temporary gathered weights.
-        if full_gather_wo_a_enabled:
-            self._switch_o_proj_to_full_weight()
-        try:
-            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled=full_gather_wo_a_enabled)
+        switch_context = self._use_full_o_proj_weight_switches() if full_gather_wo_a_enabled else nullcontext()
+        with switch_context:
+            projected_output = self._forward_o_proj(
+                o_proj_input,
+                full_gather_wo_a_enabled=full_gather_wo_a_enabled,
+            )
             if need_gather_q_kv and not full_gather_wo_a_enabled:
                 projected_output = sp_reduce_scatter(projected_output)
             output[...] = projected_output
-        finally:
-            if full_gather_wo_a_enabled:
-                self._switch_o_proj_to_local_weight()
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
@@ -1866,7 +1815,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+        self._set_o_proj_use_full_weight(full_gather_wo_a_enabled)
+        if self._o_proj_uses_full_weight():
+            self._all_gather_o_proj_weight_switches()
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
@@ -2568,11 +2519,12 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
 
 
-class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
+class AscendDSAPCPImpl(OProjWeightSwitchMixin, dsa_v1.AscendDSAImpl):
     """Use ordinary decode updates or global PCP prefill cache updates."""
 
     supports_pcp: ClassVar[bool] = True
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_weight_switch_pool_key = "dsa_pcp_o_proj"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -2583,18 +2535,18 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
 
         # V4 and V4.1 share this projector; the batch context selects its O path.
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
+        self._initialize_o_proj_weight_switch(None)
         if not self.enable_pcp_o_proj_weight_sharding:
             return
 
-        self._pcp_o_proj_weight_switches = None
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
         self._pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         # Fall back to ordinary O weights if groups or quantization cannot be sharded.
-        pcp_size = get_pcp_group().world_size
+        pcp_size = self._get_o_proj_weight_switch_config().world_size
         try:
             if self.n_local_groups % pcp_size != 0:
                 raise ValueError(f"n_local_groups={self.n_local_groups} is not divisible by pcp_size={pcp_size}")
-            self._get_pcp_weight_switch_method(self.wo_a)
-            self._get_pcp_weight_switch_method(self.wo_b)
+            self._prepare_o_proj_weight_load_shards()
         except (RuntimeError, ValueError) as exc:
             logger.warning_once(
                 "DSA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
@@ -2603,25 +2555,15 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             self.enable_pcp_o_proj_weight_sharding = False
             return
 
-        # Configure PCP weight loading before the model weights are loaded.
-        self._prepare_pcp_o_proj_weight_shards()
         # Sharded decode needs exchange buffers allocated before graph capture.
         if self._pcp_decode_sharded:
             self._initialize_pcp_o_proj_exchange_buffers()
 
-    @staticmethod
-    def _get_pcp_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
-        quant_method = layer.quant_method
-        linear_method = getattr(quant_method, "quant_method", quant_method)
-        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
-            raise RuntimeError(
-                "DSA-PCP O-proj weight sharding requires a weight-switch capable method, "
-                f"got {type(linear_method).__name__}."
-            )
-        return linear_method
-
-    def _prepare_pcp_o_proj_weight_shards(self) -> None:
+    def _prepare_o_proj_weight_load_shards(self):
         pcp_group = get_pcp_group()
+        if getattr(self, "_weight_switch_config", None) is None:
+            self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(pcp_group, shard_axis="input"))
+
         if self.n_local_groups % pcp_group.world_size != 0:
             raise ValueError(
                 "DSA-PCP O-proj weight sharding requires n_local_groups to be "
@@ -2629,29 +2571,22 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
                 f"n_local_groups={self.n_local_groups}, pcp_size={pcp_group.world_size}."
             )
 
-        self.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group)
-        load_partition = WeightLoadPartition.from_nested_groups(get_tp_group(), pcp_group)
-        self.wo_a_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_a)
-        self.wo_b_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_b)
-        self.wo_a_pcp_weight_method.prepare_layer_for_parallel_output_weight_load(
-            self.wo_a,
-            self.pcp_o_proj_weight_switch_config,
-            load_partition,
-        )
-        self.wo_b_pcp_weight_method.prepare_layer_for_parallel_weight_load(
-            self.wo_b,
-            self.pcp_o_proj_weight_switch_config,
-            load_partition,
-        )
-
+        load_states = super()._prepare_o_proj_weight_load_shards()
         # wo_a post-processing reshapes the raw output shard into a batched
-        # group layout. Keep its layer/method metadata aligned with the
-        # PCP-local resident shard; the attention implementation itself keeps
-        # the TP-local group count because runtime all-gather restores it.
+        # group layout. Keep its metadata aligned with the PCP-local resident
+        # shard; runtime attention restores the TP-local group count.
         local_groups = self.n_local_groups // pcp_group.world_size
         self.wo_a.n_local_groups = local_groups
-        if hasattr(self.wo_a_pcp_weight_method, "n_local_groups"):
-            self.wo_a_pcp_weight_method.n_local_groups = local_groups
+        wo_a_method = self._resolve_o_proj_weight_switch_method(self.wo_a)
+        if hasattr(wo_a_method, "n_local_groups"):
+            wo_a_method.n_local_groups = local_groups
+        return load_states
+
+    def _get_o_proj_weight_load_specs(self):
+        return (
+            ("wo_a", self.wo_a, self._resolve_o_proj_weight_switch_method(self.wo_a), "output"),
+            ("wo_b", self.wo_b, self._resolve_o_proj_weight_switch_method(self.wo_b), "input"),
+        )
 
     def _initialize_pcp_o_proj_exchange_buffers(self) -> None:
         """Allocate activation-typed collective storage before graph capture."""
@@ -2719,68 +2654,28 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         needs_global_metadata: bool,
         has_prefill: bool,
     ) -> Generator[None, None, None]:
-        """Own the O-projection mode and weight lifetime for V4 and V4.1.
-
-        Callers translate their metadata into global batch facts before cache
-        preparation. Prefill gathers weights, sharded decode exchanges
-        activations, and replicated decode/profile uses resident local weights.
-        """
-        try:
+        """Own PCP O-proj mode while preserving activation exchange semantics."""
+        with self._o_proj_forward_context():
             self._pcp_o_proj_use_activation_exchange = (
                 self.enable_pcp_o_proj_weight_sharding
                 and needs_global_metadata
                 and self._pcp_decode_sharded
                 and not has_prefill
             )
-            self._pcp_o_proj_use_full_weight = (
+            self._set_o_proj_use_full_weight(
                 self.enable_pcp_o_proj_weight_sharding
                 and needs_global_metadata
                 and not self._pcp_o_proj_use_activation_exchange
             )
-            # V4.1 calls O projection directly rather than DSA forward. Prepare
-            # persistent aliases during warmup, before either caller captures.
             if self.enable_pcp_o_proj_weight_sharding:
-                self._get_pcp_o_proj_weight_switches()
+                self._prepare_o_proj_weight_switches()
             yield
-        finally:
-            # An empty query rank or an early return may skip O projection.
-            # Drain launched weight gathers and restore resident shards.
-            if self.enable_pcp_o_proj_weight_sharding:
-                for layer, method, state in self._pcp_o_proj_weight_switches or ():
-                    if state.handles:
-                        method.wait_weight_all_gather(state)
-                    if self._pcp_o_proj_use_full_weight:
-                        method.switch_weight(layer, state, use_full_weight=False)
-
-    def _maybe_all_gather_pcp_o_proj_weights(self) -> None:
-        if not self._pcp_o_proj_use_full_weight:
-            return
-
-        for _, method, state in self._get_pcp_o_proj_weight_switches():
-            method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
-
-    def _get_pcp_o_proj_weight_switches(self):
-        if self._pcp_o_proj_weight_switches is None:
-            weight_switches = []
-            for name, layer, method in (
-                ("wo_a", self.wo_a, self.wo_a_pcp_weight_method),
-                ("wo_b", self.wo_b, self.wo_b_pcp_weight_method),
-            ):
-                state = method.enable_weight_switch(
-                    layer,
-                    self.pcp_o_proj_weight_switch_config,
-                    pool=AscendDSAPCPImpl.o_proj_full_pools,
-                    pool_key_prefix=(type(method).__qualname__, name, "dsa_pcp_o_proj"),
-                )
-                weight_switches.append((layer, method, state))
-            self._pcp_o_proj_weight_switches = tuple(weight_switches)
-        return self._pcp_o_proj_weight_switches
 
     def _project_o_proj_with_local_weights(self, group_input: torch.Tensor) -> torch.Tensor:
         """Project only the O groups owned by this PCP rank, then reduce TP."""
         pcp_group = get_pcp_group()
         projected = self._wo_a_bmm(group_input).reshape(group_input.shape[0], -1)
-        linear_method = self._get_pcp_weight_switch_method(self.wo_b)
+        linear_method = self._resolve_o_proj_weight_switch_method(self.wo_b)
         if isinstance(linear_method, AscendLinearScheme):
             tp_group = get_tp_group()
             # The complete O-projection bias belongs to only one TP/PCP shard.
@@ -2834,18 +2729,11 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             return super()._forward_o_proj(o_proj_input, output)
         if self._pcp_o_proj_use_activation_exchange:
             return self._forward_o_proj_with_sharded_tokens(o_proj_input, output)
-        if not self._pcp_o_proj_use_full_weight:
+        if not self._o_proj_uses_full_weight():
             return self._forward_o_proj_with_local_weights(o_proj_input, output)
 
-        weight_switches = self._get_pcp_o_proj_weight_switches()
-        for layer, method, state in weight_switches:
-            method.wait_weight_all_gather(state)
-            method.switch_weight(layer, state, use_full_weight=True)
-        try:
+        with self._use_full_o_proj_weight_switches():
             return super()._forward_o_proj(o_proj_input, output)
-        finally:
-            for layer, method, state in weight_switches:
-                method.switch_weight(layer, state, use_full_weight=False)
 
     def _gather_and_restore_hidden_states(
         self,
@@ -2996,7 +2884,12 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         # Every rank must join the weight gathers, including ranks that return
         # before local attention. Launch after the cache collectives to overlap
         # local attention on nonempty ranks.
-        self._maybe_all_gather_pcp_o_proj_weights()
+        if self._o_proj_uses_full_weight():
+            self._all_gather_o_proj_weight_switches()
+        if self._o_proj_uses_full_weight() and pcp_metadata.num_actual_tokens == 0:
+            for _, method, state in self._weight_switch_states or ():
+                method.wait_weight_all_gather(state)
+
         return True
 
     def _get_o_proj_input_shape(

@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -97,11 +98,11 @@ def _projector(
     projector.support_fp8_attention = False
     projector.enable_pcp_o_proj_weight_sharding = sharding
     projector._pcp_decode_sharded = decode_sharded
-    projector._pcp_o_proj_weight_switches = None
+    projector._weight_switch_states = None
     projector.wo_a_pcp_weight_method = projector.wo_a.quant_method
     projector.wo_b_pcp_weight_method = projector.wo_b.quant_method
     group = SimpleNamespace(world_size=world, rank_in_group=rank, device_group=object())
-    projector.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(group)
+    projector._weight_switch_config = WeightSwitchConfig.from_group(group)
     projector.vllm_config = SimpleNamespace(
         num_speculative_tokens=speculative_tokens,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
@@ -132,7 +133,7 @@ def _projector(
 
     def exchange(destination, source, *, group):
         events.append("exchange")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
+        assert group is projector._weight_switch_config.group.device_group
         assert source.data_ptr() == projector._pcp_o_proj_ag_in_buf.data_ptr()
         assert destination.data_ptr() == projector._pcp_o_proj_ag_out_buf.data_ptr()
         peers = projector.peer_inputs
@@ -141,7 +142,7 @@ def _projector(
 
     def scatter(destination, source, *, group):
         events.append("scatter")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
+        assert group is projector._weight_switch_config.group.device_group
         assert source.data_ptr() == projector._pcp_o_proj_rs_in_buf.data_ptr()
         assert destination.data_ptr() == projector._pcp_o_proj_rs_out_buf.data_ptr()
         destination.copy_(reduce(source).chunk(world)[rank])
@@ -768,7 +769,7 @@ class TestPCPBatchLifecycle:
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
         assert not state.events
-        switches = state.projector._pcp_o_proj_weight_switches or ()
+        switches = state.projector._weight_switch_states or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())
             for layer, _, weight in switches
@@ -803,7 +804,7 @@ class TestPCPBatchLifecycle:
         state = runtime()
         projector = state.projector
         with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+            switches = projector._prepare_o_proj_weight_switches()
         addresses = [layer.weight.data_ptr() for layer, _, _ in switches]
 
         def fail(*args, **kwargs):
@@ -939,6 +940,8 @@ class TestPCPProjectionPartition:
         tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank)
         monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: tp_group)
+        monkeypatch.setattr(vllm_distributed, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(vllm_distributed, "get_tp_group", lambda: tp_group)
         impl = dsa_cp.AscendDSAPCPImpl.__new__(dsa_cp.AscendDSAPCPImpl)
         impl.n_local_groups = pcp_size
         impl.wo_a, impl.wo_b = torch.nn.Module(), torch.nn.Module()
@@ -973,7 +976,7 @@ class TestPCPProjectionPartition:
                     parameter.weight_loader = lambda parameter, value: parameter.data.copy_(value)
                     layer.register_parameter(attr, parameter)
                     checkpoints.append((layer, parameter, full, 0))
-        impl._prepare_pcp_o_proj_weight_shards()
+        impl._prepare_o_proj_weight_load_shards()
         composed_rank = tp_rank * pcp_size + pcp_rank
         for layer, parameter, full, axis in checkpoints:
             parameter.weight_loader(parameter, full)
@@ -983,10 +986,10 @@ class TestPCPProjectionPartition:
             assert layer.tp_group is tp_group
         assert impl.n_local_groups == pcp_size
         assert impl.wo_a.n_local_groups == 1
-        assert impl.pcp_o_proj_weight_switch_config.group is group
+        assert impl._weight_switch_config.group is group
         impl.wo_a.quant_method.supports_weight_switch = False
         with pytest.raises(RuntimeError, match="weight-switch capable"):
-            impl._get_pcp_weight_switch_method(impl.wo_a)
+            impl._resolve_o_proj_weight_switch_method(impl.wo_a)
 
     @pytest.mark.parametrize("world,rank", [(2, 0), (2, 1), (4, 3)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
@@ -1074,7 +1077,8 @@ class TestPCPProjectionPartition:
             output = torch.empty_like(hidden)
             impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
             with projector._o_proj_batch(needs_global_metadata=True, has_prefill=True):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+                if projector._o_proj_uses_full_weight():
+                    projector._all_gather_o_proj_weight_switches()
                 impl._project_output(attn, hidden.view(1, 2, 2), hidden, None, projected=output)
             outputs.append(output[0, 0].item())
         assert outputs == [3.0, 30.0]
@@ -1091,7 +1095,7 @@ class TestPCPProjectionPartition:
         full_scale = torch.cat((projector.wo_a.weight_scale, projector.wo_a.weight_scale + 1))
         expected_parts = {}
         with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+            switches = projector._prepare_o_proj_weight_switches()
             for layer, _, weight in switches:
                 for name, part in weight.gather_parts.items():
                     full = (
@@ -1123,7 +1127,8 @@ class TestPCPProjectionPartition:
         addresses = [getattr(layer, name).data_ptr() for layer, _, weight in switches for name in weight.gather_parts]
         for has_prefill in (True, False, True):
             with projector._o_proj_batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+                if projector._o_proj_uses_full_weight():
+                    projector._all_gather_o_proj_weight_switches()
                 output = torch.empty_like(projector.reference_input)
                 projector._forward_o_proj(projector.reference_input.view(2, 2, 2), output)
                 torch.testing.assert_close(output, projector.reference_input)

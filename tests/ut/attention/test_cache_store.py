@@ -235,7 +235,7 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
         patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.scatter_cache", return_value=None) as store,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
-        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
+        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta)
     store.assert_called_once()
     target, indices, updates = store.call_args.args
     assert target.data_ptr() == cache.data_ptr() and target.shape == (32 * 128, 656)
@@ -273,9 +273,7 @@ def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, 
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.DeviceOperator", device_op.BaseDeviceAdaptor)
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    result = impl._store_parallel_kv(
-        k_pe, k_nope, scale, None, [], (cache,), slots, metadata(num_actual_tokens=tokens), False
-    )
+    result = impl._store_parallel_kv(k_pe, k_nope, scale, None, [], (cache,), slots, metadata(num_actual_tokens=tokens))
     assert result[0] is k_pe and result[1] is k_nope
     reference = torch.full_like(cache, -7)
     reference.view(-1, 656)[slots[:tokens].long()] = packed[:tokens]

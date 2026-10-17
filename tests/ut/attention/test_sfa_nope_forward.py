@@ -99,9 +99,9 @@ def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
             "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async", return_value=(gathered, None)
         ) as gather,
     ):
-        full_kv, handles = impl._prepare_kv_for_parallel(k_pe, k_nope, scale, False)
+        full_kv, handles = impl._prepare_kv_for_parallel(k_pe, k_nope, scale)
     torch.testing.assert_close(gather.call_args.args[0], inputs * 2)
-    impl._store_parallel_kv(k_pe, k_nope, scale, full_kv, handles, (cache,), slots, metadata, False)
+    impl._store_parallel_kv(k_pe, k_nope, scale, full_kv, handles, (cache,), slots, metadata)
     torch.testing.assert_close(cache.view(4, 8)[:3], gathered[:3])
     assert cache.view(4, 8)[3].count_nonzero() == 0
 
@@ -137,7 +137,6 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
             actual_seq_lengths_query=torch.tensor([1 if rank == 0 else 0]),
             actual_seq_lengths_key=torch.tensor([1 if rank == 0 else 0]),
             kv_slot_mapping=metadata.slot_mapping[:8],
-            gather_full_o_proj=False,
             topk_num_tokens=8,
         )
     )

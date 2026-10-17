@@ -13,6 +13,7 @@ from vllm_ascend.weight_switch import (
     WeightSwitchMixin,
     WeightSwitchRepeatSpec,
 )
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 
 def _weight_switch_config() -> WeightSwitchConfig:
@@ -40,6 +41,17 @@ class _TestLinearMethod(WeightSwitchMixin):
         WeightSwitchGatherSpec("weight", gather_dim=1),
         WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
+
+
+class _OProjLoadAdapter(OProjWeightSwitchMixin):
+    def __init__(self, layer, config, load_partition):
+        self.o_proj = layer
+        self.o_proj_full_pools = {}
+        self._load_partition = load_partition
+        self._initialize_o_proj_weight_switch(config)
+
+    def _get_o_proj_weight_load_partition(self):
+        return self._load_partition
 
 
 def _input_sharded_layer() -> SimpleNamespace:
@@ -131,6 +143,45 @@ def test_prepare_layer_for_parallel_weight_load_uses_one_composed_checkpoint_sli
 
     state = method.enable_weight_switch(layer, config)
     assert state.gather_parts["weight"].full_tensor.shape == (3, 4)
+
+
+def test_o_proj_mixin_prepares_pcp_load_shard_before_runtime_switching() -> None:
+    class _LoadLayer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_size = 8
+            self.input_size_per_partition = 4
+            self.output_size = 3
+            self.output_size_per_partition = 3
+            self.weight = torch.nn.Parameter(torch.empty(3, 4), requires_grad=False)
+            self.weight.input_dim = 1
+
+            def tp_weight_loader(*args, **kwargs):
+                raise AssertionError("direct loading must not call the original TP loader")
+
+            self.weight.weight_loader = tp_weight_loader
+
+    class _LoadMethod(WeightSwitchMixin):
+        supports_weight_switch = True
+        weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+
+    layer = _LoadLayer()
+    layer.quant_method = _LoadMethod()
+    config = WeightSwitchConfig(group=object(), world_size=2, rank=1, shard_axis="input")
+    partition = WeightLoadPartition(world_size=4, rank=1)
+    adapter = _OProjLoadAdapter(layer, config, partition)
+
+    states = adapter._prepare_o_proj_weight_load_shards()
+    assert states["o_proj"] is not None
+    assert adapter._get_o_proj_weight_load_state("o_proj") is states["o_proj"]
+    assert layer.input_size_per_partition == 2
+
+    layer.weight.weight_loader(layer.weight, torch.arange(24, dtype=torch.float32).reshape(3, 8))
+
+    torch.testing.assert_close(
+        layer.weight,
+        torch.tensor([[2.0, 3.0], [10.0, 11.0], [18.0, 19.0]]),
+    )
 
 
 def test_enable_output_sharded_state_moves_gather_dim_and_reuses_pool() -> None:
