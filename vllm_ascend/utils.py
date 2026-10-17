@@ -867,7 +867,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulWithClamp": AscendSiluAndMulWithClamp,
+        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
@@ -994,6 +994,69 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+def _flashcomm_switch_enabled(vllm_config) -> bool:
+    """Whether the user explicitly turned on the FlashComm switch.
+
+    Mirrors the ``enable_flashcomm1`` read in
+    ``AscendConfig.derive_and_validate`` (additional_config first, then the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var) so this predicate and the
+    config-time resolution can never diverge.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    switch = additional_config.get("enable_flashcomm1", False)
+    if isinstance(switch, str):
+        return switch.strip().lower() in ("1", "true")
+    if bool(switch):
+        return True
+    return os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+
+
+# Dense (non-MoE) model families that run sequence parallelism through the
+# FlashComm switch on Ascend. The Qwen3.5 dense family covers Qwen3.5-27B,
+# Qwen3.6-27B and Qwen3.8-27B dense checkpoints (model_type "qwen3_5_text").
+DENSE_SP_MODEL_TYPES = ("qwen3_5_text",)
+
+
+def enable_dense_sp(vllm_config=None) -> bool:
+    """Dense-model sequence parallelism for the Qwen3.5 dense family.
+
+    Upstream gates sequence parallelism on ``use_sequence_parallel_moe``,
+    which requires an MoE checkpoint with expert parallelism. On Ascend the
+    FlashComm switch additionally covers the dense Qwen3.5 family: hidden
+    states and the residual stay sequence-sharded across the whole decoder
+    stack, attention (full and GDN) gathers before / reduce-scatters after its
+    sequence-parallel output projection, and the dense MLP gathers around its
+    TP-sharded weights. Enabled with TP > 1, PP == 1 and
+    ``additional_config.enable_flashcomm1`` (or the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var).
+    """
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    if vllm_config is None:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = getattr(parallel_config, "tensor_parallel_size", 0)
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 0)
+    if tp_size <= 1 or pp_size != 1:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(hf_text_config, "model_type", None) not in DENSE_SP_MODEL_TYPES:
+        return False
+
+    return _flashcomm_switch_enabled(vllm_config)
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -1006,7 +1069,7 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe) or enable_dense_sp(vllm_config)
 
 
 # TODO remove it after vllm has this func
