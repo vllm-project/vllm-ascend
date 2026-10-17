@@ -23,6 +23,43 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all Atlas 800I A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+### Torch compilation
+
+The text backbone (`Glm5NextModel`) and MTP draft (`Glm5NextMTP`) support
+`torch.compile` with the Ascend backend and `FULL_DECODE_ONLY` ACL graphs.
+The token dimension is dynamic for `input_ids`, `positions`, `inputs_embeds`,
+and `intermediate_tensors`; MTP also marks `hidden_states` dynamic.
+
+For three speculative tokens and up to 32 concurrent requests, add these
+options to the serving command with model runner V1:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=0
+# Options for vllm serve:
+# --max-num-seqs 32
+# --compilation-config '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128]}'
+# --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":false}'
+```
+
+Leave the backend unset to select the Ascend compiler. The speculative
+`enforce_eager` option must be `false` to compile the draft model as well.
+With three draft tokens, each request verifies four tokens, so capture every
+multiple of four up to `4 * max_num_seqs`. Without MTP, omit the speculative
+configuration and capture every integer size from 1 to `max_num_seqs`.
+
+The exact capture sizes preserve eager tensor shapes. With the MXFP8
+checkpoint on Ascend 950DT, padding to a larger capture size changed MoE
+outputs and generated tokens. Sparse capture-size lists have not passed
+strict eager correctness validation for this configuration.
+
+Validation covered text inputs on eight Ascend 950DT NPUs with TP8 and EP:
+fixed-input greedy decoding against eager, continuous batching up to 32
+requests, target and draft graph replay, recurrent state updates, and AOT
+cache loading after restart. ACL graph capture alone does not establish
+Dynamo compilation; check both models' compiler logs and compare outputs
+against eager with the same speculative configuration and execution shapes.
+Multimodal inputs and other hardware require separate validation.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

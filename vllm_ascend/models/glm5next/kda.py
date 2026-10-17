@@ -26,6 +26,7 @@ from vllm.model_executor.utils import set_weight_attrs
 # through the OOT registration in `vllm_ascend.utils` rather than by import.
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -225,9 +226,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # Prepared by the attention post-load hook, before any graph capture.
+        self.register_buffer("_merged_conv_weight", None, persistent=False)
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
@@ -271,6 +271,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def get_attn_backend(self):
         return AscendGDNHostMetadataBackend
 
+    @torch.no_grad()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        # Capture records the packing operations without executing them. A
+        # lazily cached result would only become initialized when that specific
+        # graph replays, leaving prefill and other graph sizes with stale data.
+        self._merged_conv_weight = (
+            torch.cat([module.weight.flatten(1) for module in (self.q_conv1d, self.k_conv1d, self.v_conv1d)], dim=0)
+            .transpose(0, 1)
+            .to(dtype=act_dtype)
+            .contiguous()
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -307,14 +319,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        # Keep the layer's dispatch outside piecewise graph compilation.
-        self._forward(
+        # Metadata and recurrent cache updates must execute on every invocation,
+        # including when Dynamo traces a profiling run without metadata.
+        core_attn_out = torch.ops.vllm.glm5next_kda_forward(
             qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
+            g2=g2,
             core_attn_out=core_attn_out,
+            layer_name=self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
@@ -368,27 +382,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if self._conv_state_dim_first:
             conv_state = conv_state.transpose(-1, -2)
 
-        # One merged short-conv over q|k|v instead of three separate calls. The
-        # 1D conv is independent per channel, so concatenating q/k/v along the
-        # channel dim preserves the independent q/k/v convolutions.
-        # The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = (
-                torch.cat(
-                    [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                    dim=0,
-                )
-                .transpose(0, 1)
-                .to(dtype=qkv_proj_states.dtype)
-                .contiguous()
-            )
+        # Packing is independent per channel and runs once after weight load.
+        # It must never allocate a persistent weight inside a captured graph.
         conv_weights = self._merged_conv_weight
+        assert conv_weights is not None, "KDA convolution weights must be prepared before forward"
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
@@ -538,3 +535,37 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+def glm5next_kda_forward(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    g2: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward(qkv_proj_states, g1, beta, core_attn_out)
+    # Triton kernel_side_table indices belong to this process. Keep the gated
+    # norm inside the custom op so serialized FX/AOT graphs do not retain them.
+    return layer.o_norm(core_attn_out, g2)
+
+
+def glm5next_kda_forward_fake(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    g2: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(core_attn_out)
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward",
+    op_func=glm5next_kda_forward,
+    mutates_args=["core_attn_out"],
+    fake_impl=glm5next_kda_forward_fake,
+)

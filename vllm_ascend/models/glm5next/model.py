@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal
 import torch
 import torch_npu
 from torch import nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -548,6 +549,7 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "inputs_embeds": 0, "intermediate_tensors": 0})
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
