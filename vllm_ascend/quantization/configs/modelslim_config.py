@@ -108,6 +108,8 @@ def _make_modelslim_moe_weight_loader(
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
+BAILING_HYBRID_MODEL_TYPES = ("bailing_hybrid", "bailing_hybrid_v3_mtp")
+
 # key: model_type
 # value: dict of fused module name -> list of original module names
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
@@ -150,7 +152,6 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
             "up_proj",
         ],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        "o_proj": ["dense"],
     },
     # The step3.5 MTP draft (speculative.py sets model_type="step3p5_mtp")
     # reuses the same fused module layout as the verifier.
@@ -550,6 +551,28 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        if model_type in BAILING_HYBRID_MODEL_TYPES:
+            # V3 maps checkpoint attention names to self_attn before lookup.
+            # Older Bailing models also query linear_attn against descriptions
+            # that still use attention. Prefer the direct name in every case.
+            candidates = [prefix]
+            for namespace in ("self_attn", "linear_attn", "attention"):
+                if f".{namespace}." in prefix:
+                    candidates.extend(
+                        prefix.replace(f".{namespace}.", f".{alias}.")
+                        for alias in ("self_attn", "attention")
+                        if alias != namespace
+                    )
+                    break
+            if prefix.endswith(".o_proj"):
+                # KDA owns a real o_proj; only legacy MLA uses dense instead.
+                candidates.extend(candidate.removesuffix(".o_proj") + ".dense" for candidate in list(candidates))
+            if prefix.endswith(".shared_head.head"):
+                # The MTP loader can share the checkpoint's global LM head.
+                candidates.append("lm_head")
+            for candidate in candidates:
+                if self._has_quant_weight(candidate):
+                    return candidate
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
         # initialize lm_head with prefix="lm_head", while the quant description
         # key is mapped to "language_model.lm_head.weight".
@@ -679,10 +702,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
-        if model_type in ["bailing_hybrid"]:
-            # Adapt to bailing_hybrid architecture: update layer names to MoE convention
-            prefix = prefix.replace("linear_attn", "attention")
-            prefix = prefix.replace("self_attn", "attention")
         self._update_packed_modules_mapping(model_type)
         runtime_prefix = prefix
         prefix = self.quant_prefix_mapper(model_type, prefix)
