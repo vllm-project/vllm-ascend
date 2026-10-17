@@ -252,3 +252,17 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
         for name, value in vars(padded_batch).items():
             if name != "num_reqs":
                 assert getattr(restored.input_batch, name) is value
+
+
+def test_adaptive_verification_patch_installs_ascend_estimator(monkeypatch):
+    import vllm.v1.worker.gpu.spec_decode.speculator as speculator_module
+
+    from vllm_ascend.patch.worker.patch_v2 import patch_adaptive_verification
+    from vllm_ascend.worker.v2.spec_decode.acceptance_estimator import (
+        AscendOnlineAcceptanceEstimator,
+    )
+
+    monkeypatch.setattr(speculator_module, "OnlineAcceptanceEstimator", object())
+    importlib.reload(patch_adaptive_verification)
+
+    assert speculator_module.OnlineAcceptanceEstimator is AscendOnlineAcceptanceEstimator
