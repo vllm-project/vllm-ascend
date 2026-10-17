@@ -809,7 +809,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
 ### 5.2 Eight-Node PD Separation Deployment
 
-The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. 950DT Products uses DP4/TP8 on each side, while A3 uses DP4/TP16 on each side.
+The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. Prefill uses DP1/PP4 with layer partition `25,25,24,19`, while Decode uses DP4/PP1. Both sides use TP8 on 950DT Products or TP16 on A3.
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
@@ -848,12 +848,17 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
     unset LD_PRELOAD
     export PYTHONHASHSEED=0
     export VLLM_SERVER_DEV_MODE=1
+    export VLLM_HOST_IP=${local_ip}
+    export VLLM_PP_LAYER_PARTITION="25,25,24,19"
 
     SPECULATIVE_CONFIG="$(
       printf \
       '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"draft_sample_method":"greedy","enforce_eager":true}' \
       "$DRAFT_MODEL_PATH"
     )"
+
+    HEADLESS_ARGS=()
+    if [ "$4" -ne 0 ]; then HEADLESS_ARGS=(--headless); fi
 
     vllm serve <YOUR_MODEL_PATH> \
         --host 0.0.0.0 \
@@ -863,9 +868,13 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
         --tool-call-parser kimi_k3 \
         --tokenizer-mode kimi_k3 \
         --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
+        --pipeline-parallel-size 4 \
+        --nnodes 4 \
+        --node-rank $4 \
+        --distributed-executor-backend mp \
+        --master-addr $5 \
+        --master-port $6 \
+        "${HEADLESS_ARGS[@]}" \
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
@@ -881,7 +890,7 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
         --mm-processor-cache-gb 1 \
         --skip-mm-profiling \
         --enable-prefix-caching \
-        --additional-config '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"enable_force_eplb":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk": 2}' \
         --kv-transfer-config \
         '{
@@ -890,8 +899,10 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
           "kv_port": "'"$KV_PORT"'",
           "kv_connector_extra_config": {
             "prefill": {
-              "dp_size": 4,
-              "tp_size": '"$7"'
+              "dp_size": 1,
+              "tp_size": '"$7"',
+              "pp_size": 4,
+              "pp_layer_partition": "25,25,24,19"
             },
             "decode": {
               "dp_size": 4,
@@ -957,7 +968,7 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
         --skip-mm-profiling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --enable-prefix-caching \
-        --additional-config '{"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"enable_force_eplb":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
@@ -966,8 +977,10 @@ The Prefill and Decode templates below assume equal tensor-parallel sizes on bot
           "kv_port": "'"$KV_PORT"'",
           "kv_connector_extra_config": {
             "prefill": {
-              "dp_size": 4,
-              "tp_size": '"$7"'
+              "dp_size": 1,
+              "tp_size": '"$7"',
+              "pp_size": 4,
+              "pp_layer_partition": "25,25,24,19"
             },
             "decode": {
               "dp_size": 4,
@@ -985,7 +998,7 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
 
     ```shell
     python launch_online_dp.py \
-        --dp-size 4 \
+        --dp-size <DP_SIZE> \
         --tp-size 8 \
         --dp-size-local 1 \
         --dp-rank-start <LOCAL_DP_RANK> \
@@ -998,7 +1011,7 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
 
     ```shell
     python launch_online_dp.py \
-        --dp-size 4 \
+        --dp-size <DP_SIZE> \
         --tp-size 16 \
         --dp-size-local 1 \
         --dp-rank-start <LOCAL_DP_RANK> \
@@ -1007,7 +1020,7 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
         --vllm-start-port <VLLM_START_PORT>
     ```
 
-Use ranks `0` through `3` for each four-node side. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
+Set `<DP_SIZE>` to `1` for Prefill and `4` for Decode. Use ranks `0` through `3` for each four-node side; the Prefill template interprets the launcher's `--dp-rank-start` as the PP node rank, while Decode uses it as the DP rank. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
 
 After the engines start, configure and start the load-balancing proxy as described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service).
 
@@ -1016,9 +1029,10 @@ Key PD settings:
 | Setting                      | Value                        | Description                                             |
 | ---------------------------- | ---------------------------- | ------------------------------------------------------- |
 | Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
-| `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
+| `--dp-size`                  | `1` for P, `4` for D         | One Prefill DP rank across four PP nodes; four Decode DP ranks. |
+| `--pipeline-parallel-size`   | `4` for P; `1` (default) for D | Prefill uses layer partition `25,25,24,19`.             |
 | `--tp-size`                  | `8` on 950DT Products; `16` on A3 | Uses all devices in a node.                           |
-| `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
+| `--dp-size-local`            | `1`                          | Launches one template process per node.                 |
 | `KV_PORT`                    | `<PREFILL_KV_PORT>` for P, `<DECODE_KV_PORT>` for D | Separates producer and consumer KV traffic.             |
 | `--max-num-seqs`             | `32`                         | Sets the maximum active sequences for each DP rank.      |
 | `--mm-processor-cache-gb`    | `1`                          | Allocates 1 GiB per process for multimodal caching.      |
@@ -1137,7 +1151,7 @@ Wait until every node prints `Successfully initialized MemCache.` before startin
 
 As in Section 5.2, the pooled Prefill and Decode templates require equal TP on both sides. Their connector TP sizes are taken from `$7`; the A3 pooled deployment below uses TP16.
 
-Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for each role. The fourth template argument is the global DP rank. The examples map Prefill ranks `0` through `3` to MemCache lookup RPC ports `0` through `3`, and Decode ranks `0` through `3` to lookup RPC ports `4` through `7`.
+Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for each role. The fourth template argument is the PP node rank for Prefill and the global DP rank for Decode. The examples map Prefill node ranks `0` through `3` to MemCache lookup RPC ports `0` through `3`, and Decode ranks `0` through `3` to lookup RPC ports `4` through `7`.
 
 === "Prefill"
 
@@ -1163,6 +1177,8 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     unset LD_PRELOAD
     export VLLM_SERVER_DEV_MODE=1
+    export VLLM_HOST_IP=${local_ip}
+    export VLLM_PP_LAYER_PARTITION="25,25,24,19"
     export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
     export PYTHONHASHSEED=0
 
@@ -1172,6 +1188,9 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
       "$DRAFT_MODEL_PATH"
     )"
 
+    HEADLESS_ARGS=()
+    if [ "$4" -ne 0 ]; then HEADLESS_ARGS=(--headless); fi
+
     vllm serve <YOUR_MODEL_PATH> \
         --host 0.0.0.0 \
         --port $2 \
@@ -1180,9 +1199,13 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
         --tool-call-parser kimi_k3 \
         --tokenizer-mode kimi_k3 \
         --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
+        --pipeline-parallel-size 4 \
+        --nnodes 4 \
+        --node-rank $4 \
+        --distributed-executor-backend mp \
+        --master-addr $5 \
+        --master-port $6 \
+        "${HEADLESS_ARGS[@]}" \
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
@@ -1198,7 +1221,7 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
         --mm-processor-cache-gb 1 \
         --skip-mm-profiling \
         --enable-prefix-caching \
-        --additional-config '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"enable_force_eplb":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
@@ -1212,8 +1235,10 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
                 "kv_port": "'"$KV_PORT"'",
                 "kv_connector_extra_config": {
                   "prefill": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
+                    "dp_size": 1,
+                    "tp_size": '"$7"',
+                    "pp_size": 4,
+                    "pp_layer_partition": "25,25,24,19"
                   },
                   "decode": {
                     "dp_size": 4,
@@ -1294,7 +1319,7 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
         --skip-mm-profiling \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --enable-prefix-caching \
-        --additional-config '{"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"enable_force_eplb":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
@@ -1308,8 +1333,10 @@ Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for 
                 "kv_port": "'"$KV_PORT"'",
                 "kv_connector_extra_config": {
                   "prefill": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
+                    "dp_size": 1,
+                    "tp_size": '"$7"',
+                    "pp_size": 4,
+                    "pp_layer_partition": "25,25,24,19"
                   },
                   "decode": {
                     "dp_size": 4,
@@ -1338,7 +1365,7 @@ Use the same launcher command for both groups. Replace the placeholders with the
 
 ```shell
 python launch_online_dp.py \
-    --dp-size 4 \
+    --dp-size <DP_SIZE> \
     --tp-size 16 \
     --dp-size-local 1 \
     --dp-rank-start <LOCAL_DP_RANK> \
@@ -1349,7 +1376,8 @@ python launch_online_dp.py \
 
 | Placeholder | Prefill group | Decode group |
 | --- | --- | --- |
-| `<LOCAL_DP_RANK>` | Local rank from `0` through `3` | Local rank from `0` through `3` |
+| `<DP_SIZE>` | `1` | `4` |
+| `<LOCAL_DP_RANK>` | PP node rank from `0` through `3` | DP rank from `0` through `3` |
 | `<PD_MASTER_IP>` | Prefill master IP | Decode master IP |
 | `<DP_RPC_PORT>` | Prefill DP RPC port | Decode DP RPC port |
 | `<VLLM_START_PORT>` | Prefill node's starting service port | Decode node's starting service port |
