@@ -1,9 +1,13 @@
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.logger import logger
+from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.compilation.acl_graph import (
@@ -15,6 +19,133 @@ from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
+
+
+class AscendV2KVBlockZeroer(KVBlockZeroer):
+    """Zero V2 caches whose forward-context binding is a tensor tuple/list.
+
+    Upstream's V2 zeroer only walks ``torch.Tensor`` bindings. Ascend attention
+    caches can expose ``(key_cache, value_cache)`` (and component-major MLA)
+    as multiple logical views. Build one upstream zeroer per component; this
+    also keeps views sharing one backing storage from being skipped.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        attn_groups_iter: Iterable[AttentionGroup],
+        kernel_block_sizes: list[int],
+        static_forward_context: dict[str, Any],
+        num_blocks: int,
+        runner_only_attn_layers: set[str] | None = None,
+        cache_dtype: str | None = None,
+    ) -> None:
+        # The upstream constructor changed between v0.28 and main. Set the two
+        # fields consumed by this subclass directly, then delegate each logical
+        # component to the version-specific upstream constructor below.
+        self.device = device
+        self._meta = None
+        runner_only_attn_layers = runner_only_attn_layers or set()
+        groups = list(attn_groups_iter)
+        # The 4th component of an mxfp8 tuple is the static checkpoint V
+        # scale: clearing a recycled block must preserve it.
+        layer_caches: dict[str, Any] = {}
+        for group in groups:
+            for layer_name in group.layer_names:
+                if layer_name in runner_only_attn_layers:
+                    continue
+                kv_cache = static_forward_context[layer_name].kv_cache
+                if cache_dtype == "mxfp8" and isinstance(kv_cache, tuple) and len(kv_cache) == 4:
+                    kv_cache = kv_cache[:3]
+                layer_caches[layer_name] = kv_cache
+        component_count = 1
+        for kv_cache in layer_caches.values():
+            if isinstance(kv_cache, (tuple, list)):
+                component_count = max(component_count, len(kv_cache))
+
+        self._zeroers: list[KVBlockZeroer] = []
+        for component_id in range(component_count):
+            component_groups: list[AttentionGroup] = []
+            component_context: dict[str, Any] = {}
+            for group in groups:
+                layer_names: list[str] = []
+                for layer_name in group.layer_names:
+                    if layer_name in runner_only_attn_layers:
+                        continue
+                    kv_cache = layer_caches[layer_name]
+                    component = None
+                    if isinstance(kv_cache, torch.Tensor) and component_id == 0:
+                        component = kv_cache
+                    elif isinstance(kv_cache, (tuple, list)) and component_id < len(kv_cache):
+                        component = kv_cache[component_id]
+                    if component is not None:
+                        layer_names.append(layer_name)
+                        component_context[layer_name] = SimpleNamespace(kv_cache=component)
+                if layer_names:
+                    component_groups.append(replace(group, layer_names=layer_names))
+
+            if not component_groups:
+                continue
+            self._zeroers.append(
+                KVBlockZeroer(
+                    device,
+                    attn_groups_iter=component_groups,
+                    kernel_block_sizes=kernel_block_sizes,
+                    static_forward_context=component_context,
+                    num_blocks=num_blocks,
+                    runner_only_attn_layers=runner_only_attn_layers,
+                )
+            )
+
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        for zeroer in self._zeroers:
+            zeroer.zero_block_ids(block_ids)
+
+    def warmup(self, num_kv_blocks: int) -> None:
+        for zeroer in self._zeroers:
+            zeroer.warmup(num_kv_blocks)
+
+
+class C8KVBlockZeroer:
+    """Zero recycled blocks via a delegate, then restore static C8 V scales.
+
+    A decorator around any KVBlockZeroer (or None): the delegate clears the
+    dynamic components, this class restores the checkpoint V-scale constants
+    that hybrid page reuse may have overwritten. Composition instead of
+    inheritance keeps the delegate swappable (re-wrapped on reinitialization,
+    unwrapped on shutdown) and optional (restore-only when no zeroer exists).
+    """
+
+    def __init__(self, delegate: Any, entries: list[tuple[Any, Any, int]], fill: Callable) -> None:
+        self.delegate = delegate
+        self.entries = entries
+        self.fill = fill
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.delegate, name)
+
+    def warmup(self, num_kv_blocks: int) -> None:
+        # The upstream warmup path forwards to the delegate when present.
+        warmup = getattr(self.delegate, "warmup", None)
+        if warmup is not None:
+            warmup(num_kv_blocks)
+
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        if not block_ids:
+            return
+        # Validate the whole batch before any device write.
+        for _, cache, ratio in self.entries:
+            num_blocks = cache.shape[0] // ratio
+            for block_id in block_ids:
+                if block_id < 0 or block_id >= num_blocks:
+                    raise IndexError(f"C8 physical block ID out of range: {block_id}")
+        if self.delegate is not None:
+            self.delegate.zero_block_ids(block_ids)
+        for value_scale, value_scale_cache, ratio in self.entries:
+            for block_id in block_ids:
+                start = block_id * ratio
+                self.fill(value_scale, value_scale_cache[start : start + ratio])
+
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -35,6 +166,8 @@ def torch_cuda_wrapper():
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        # GPU V2 prefetch/offload calls this CUDA API during load_model.
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
         breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
         logger.info_once("Wrapping torch.cuda with torch.npu.")

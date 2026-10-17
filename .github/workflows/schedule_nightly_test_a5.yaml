@@ -77,6 +77,12 @@ on:
         description: 'JSON object containing optional bisect parameters'
         required: false
         default: '{}'
+        type: string
+      download_path:
+        description: 'File or directory in the test container to upload as a GitHub artifact'
+        required: false
+        default: ''
+        type: string
         
 permissions:
   contents: read
@@ -240,6 +246,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -286,6 +293,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}

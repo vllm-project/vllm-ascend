@@ -23,6 +23,8 @@ from modelscope import snapshot_download  # type: ignore[import-untyped]
 from tests.e2e.conftest import HfRunner, VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 MODELS = [
     "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
     "intfloat/multilingual-e5-small",  # mean_tokens

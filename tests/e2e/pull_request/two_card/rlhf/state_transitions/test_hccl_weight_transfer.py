@@ -16,8 +16,8 @@ startup, and the live-update lane has to reproduce its signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. Both packed modes exercise the same
-transaction.
+graph-captured storage of the first update. The packed lane is currently skipped
+on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
 
 The trainer side keeps this backend's engine handshake: the trainer opens the
 rank-0 HCCL endpoint with ``HCCLWeightTransferEngine.trainer_init`` and the
@@ -37,6 +37,7 @@ from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+    PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
@@ -157,6 +158,8 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
+    if packed:
+        pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))

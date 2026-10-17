@@ -190,8 +190,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         )
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
         if use_eagle:
-            for manager in self.single_type_managers:
-                if isinstance(manager, MambaManager):
+            for group_id, manager in enumerate(self.single_type_managers):
+                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
                     manager.drop_eagle_checkpoint_block = True
 
         # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved

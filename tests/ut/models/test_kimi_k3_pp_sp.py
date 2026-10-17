@@ -16,8 +16,6 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.utils import vllm_version_is
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -25,9 +23,7 @@ def _keep_definition(item, allowed):
     if getattr(item, "name", None) in allowed:
         return True
     if isinstance(item, ast.If):
-        # Version gates wrap the production method in an if/else at class scope;
-        # keep the whole gate so exec selects the branch matching the installed
-        # vLLM (requires ``vllm_version_is`` in the target namespace).
+        # Keep requested definitions nested in class-scope conditionals.
         return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
     return False
 
@@ -227,7 +223,6 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
-        "vllm_version_is": vllm_version_is,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.

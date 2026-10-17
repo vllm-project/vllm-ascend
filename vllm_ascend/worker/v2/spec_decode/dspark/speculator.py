@@ -423,6 +423,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        # TODO: Remove the adaptive verification condition once upstream vLLM
+        # synchronizes the draft DP shape independently of the target.
         # Replicated drafts consume global requests, unlike sharded targets.
         # Adaptive verification also negotiates the draft shape independently.
         # Every DP rank must synchronize the draft batch independently.

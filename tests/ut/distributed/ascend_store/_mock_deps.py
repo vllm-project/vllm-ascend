@@ -47,6 +47,8 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.int8 = "int8"  # type: ignore[attr-defined]
     _torch.dtype = str  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    _torch.empty = MagicMock()  # type: ignore[attr-defined]
+    _torch.uint8 = "uint8"  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
     _torch.distributed = MagicMock()  # type: ignore[attr-defined]
@@ -87,8 +89,13 @@ _vllm_mock_modules = [
     "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
+    "vllm.model_executor.layers.attention",
+    "vllm.model_executor.layers.attention_layer_base",
     "vllm.model_executor.layers.linear",
     "vllm.model_executor.layers.quantization",
+    "vllm.model_executor.models",
+    "vllm.model_executor.models.extract_hidden_states",
+    "vllm.model_executor.models.utils",
     "vllm.platforms",
     "vllm.platforms.interface",
     "vllm.utils",
@@ -123,6 +130,11 @@ if _MOCK_VLLM_DEPS:
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+    sys.modules["vllm.utils.torch_utils"].get_dtype_size = lambda dtype: {  # type: ignore[attr-defined]
+        "int8": 1,
+        "float16": 2,
+        "float32": 4,
+    }[dtype]
 
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
@@ -336,6 +348,9 @@ class _FakeSingleTypeKVCacheManager:
         pcp_world_size=1,
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        scale = kv_cache_spec.block_size // block_pool.hash_block_size
+        if scale > 1:
+            block_hashes = [block_hashes[i] for i in range(scale - 1, len(block_hashes), scale)]
         max_blocks = max_length // kv_cache_spec.block_size
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)

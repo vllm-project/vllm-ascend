@@ -25,7 +25,6 @@ from vllm.logger import logger
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
-from vllm_ascend.utils import vllm_version_is
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
@@ -173,10 +172,7 @@ class AscendEplbState(_eplb_state.EplbState):
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
-        if vllm_version_is("0.30.0"):
-            if self.cuda_device_index is None:
-                self.cuda_device_index = torch.accelerator.current_device_index()
-        elif self.device_index is None:
+        if self.device_index is None:
             self.device_index = torch.accelerator.current_device_index()
 
     @property
@@ -577,6 +573,12 @@ class AscendEplbState(_eplb_state.EplbState):
         model_state._eplb_ready_flag = flag
         model_state._eplb_ready_work = work
         return False
+
+    def update_mapping(self, model_config, expanded_physical_to_logical: torch.Tensor) -> None:
+        super().update_mapping(model_config, expanded_physical_to_logical)
+        # Verified main updates a live state during elastic EP. Refresh the
+        # Ascend replica table in place so captured graphs use the new mapping.
+        refresh_model_routing_tables(self.model_states[model_config.compute_hash()])
 
     @classmethod
     def from_mapping(

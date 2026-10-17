@@ -2,6 +2,8 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib import import_module
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -10,11 +12,21 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
@@ -25,6 +37,81 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
+# MLA models keep the FIA-compatible component-major cache layout on A5.
+# N1 is the post-TP local head count, not the global model configuration.
+MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+def supports_strided_mla_cache(
+    vllm_config: VllmConfig,
+    attn_module: AttentionLayerBase | None,
+    kv_cache_spec: KVCacheSpec,
+) -> bool:
+    """Share the writer contract between post-load weights and cache allocation.
+
+    Attention post-load hooks see upstream MLA specs before the runners add
+    Ascend layout metadata, so inspect the geometry and layer markers directly.
+    """
+    if not isinstance(attn_module, MLAAttention) or not isinstance(
+        kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+    ):
+        return False
+    if (
+        get_kv_cache_compression_ratio(kv_cache_spec) != 1
+        or getattr(kv_cache_spec, "model_version", None) is not None
+        or getattr(attn_module, "model_version", None) is not None
+        or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
+        or getattr(attn_module, "indexes_kv_by_block_stride", False)
+        or getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
+        or not supports_component_major_mla_pd(vllm_config)
+        or getattr(attn_module, "indexer", None) is not None
+    ):
+        return False
+    impl = getattr(attn_module, "impl", None)
+    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+        return False
+    if getattr(impl, "dcp_enabled", False):
+        buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
+        if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
+            return False
+        if not buffers_are_sufficient():
+            return False
+    if getattr(impl, "fa_quant_layer", False) or getattr(impl, "enable_kv_nz", False):
+        return False
+    # Wide A5 draft inputs use the prepared scatter adapter instead of PROLOG_V3.
+    supports_strided_writer = getattr(impl, "supports_strided_mla_writer", None)
+    return supports_strided_writer is not None and supports_strided_writer()
+
+
+@lru_cache(maxsize=1)
+def _has_flashmla_module() -> bool:
+    """Whether the CANN ops-transformer distribution is discoverable."""
+    return find_spec("cann_ops_transformer") is not None
+
+
+def get_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two FlashMLA APIs in the active CANN operator package.
+
+    An absent package or API permits FIA selection before KV cache allocation.
+    Import failures inside an installed package remain errors rather than
+    silently selecting a different cache layout.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
+    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
 
 
 class PreprocessType(enum.Enum):

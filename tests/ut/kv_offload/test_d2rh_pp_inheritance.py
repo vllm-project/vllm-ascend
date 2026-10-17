@@ -47,6 +47,7 @@ def make_worker(worker_cls, role):
     worker.kv_role = role
     worker.use_hybrid = False
     worker._is_hma_required = True
+    worker._use_request_level_recv_errors = True
     worker.engine_id = "engine"
     worker.engine = object()
     worker.te_rpc_port = 1234

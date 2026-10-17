@@ -50,7 +50,8 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
         start = end
 
 
-@pytest.mark.parametrize("max_pool_seq_len", [0, 4, 512, 2050])
+# Cover both sides of the 128-pool score tile, including replay with shorter visibility.
+@pytest.mark.parametrize("max_pool_seq_len", [0, 4, 127, 128, 129, 512, 2050])
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_graph, monkeypatch):

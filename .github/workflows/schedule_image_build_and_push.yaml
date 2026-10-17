@@ -82,12 +82,12 @@ on:
       mem_deps:
         description: 'Memcache and Memfabric versions (JSON object: {"memcache":["date","version"],"memfabric":["date","version"]})'
         required: false
-        default: '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}'
+        default: '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}'
         type: string
       torch_npu:
         description: 'Torch NPU version and date (JSON array: ["date", "version"])'
         required: false
-        default: '["20261011.6", "26.2.0"]'
+        default: '["20261015.5", "26.2.0"]'
         type: string
       cann:
         description: 'CANN URL, version and image tag (JSON array: ["url", "version", "image_tag"])'
@@ -97,7 +97,7 @@ on:
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
-        default: '["20261007182438", "3.6.0%2Bdev20261007182438"]'
+        default: '["20261013220622", "3.6.0%2Bdev20261013220622"]'
         type: string
       chips:
         description: 'Chips to build (JSON array: ["a2","a3","310p","a5"]). Default builds all.'
@@ -167,14 +167,14 @@ jobs:
       schedule_tag_pattern: 'main'
       build_type: ${{ needs.setup-matrix.outputs.build_type }}
       cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
-      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[1] }}
-      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[0] }}
-      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[1] }}
-      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[0] }}
-      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[1] }}
-      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[1] }}
+      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memcache[1] }}
+      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memcache[0] }}
+      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memfabric[1] }}
+      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memfabric[0] }}
+      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20261015.5", "26.2.0"]')[1] }}
+      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20261015.5", "26.2.0"]')[0] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20261013220622", "3.6.0%2Bdev20261013220622"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20261013220622", "3.6.0%2Bdev20261013220622"]')[1] }}
       
       build_args: |
         ${{ needs.setup-matrix.outputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
@@ -215,14 +215,14 @@ jobs:
       branch_ref: ''
       build_type: ${{ needs.setup-matrix.outputs.build_type }}
       cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
-      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[1] }}
-      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memcache[0] }}
-      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[1] }}
-      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261010.5","1.3.0"],"memfabric":["20261010.5","1.3.0"]}').memfabric[0] }}
-      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[1] }}
-      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20261011.6", "26.2.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20261007182438", "3.6.0%2Bdev20261007182438"]')[1] }}
+      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memcache[1] }}
+      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memcache[0] }}
+      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memfabric[1] }}
+      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261014.5","1.3.0"],"memfabric":["20261014.5","1.3.0"]}').memfabric[0] }}
+      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20261015.5", "26.2.0"]')[1] }}
+      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20261015.5", "26.2.0"]')[0] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20261013220622", "3.6.0%2Bdev20261013220622"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20261013220622", "3.6.0%2Bdev20261013220622"]')[1] }}
 
       build_args: |
         ${{ needs.setup-matrix.outputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
