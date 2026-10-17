@@ -16,6 +16,29 @@
 #
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.logger import logger
+
+
+def _register_with_class_name_alias(name: str, module_path: str, class_name: str) -> None:
+    """Register a connector under its config name and, when they differ, under
+    its class name as well.
+
+    MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
+    those keys through KVConnectorFactory, which is otherwise indexed by the
+    ``kv_connector`` config name. Without the class-name alias, stats
+    reconstruction raises ValueError and tears down EngineCore.
+    """
+    KVConnectorFactory.register_connector(name, module_path, class_name)
+    if class_name != name:
+        if class_name in KVConnectorFactory._registry:
+            logger.warning(
+                "Class name '%s' is already registered under a different "
+                "config name; overriding it with the alias for module %s.",
+                class_name,
+                module_path,
+            )
+        KVConnectorFactory._registry.pop(class_name, None)
+        KVConnectorFactory.register_connector(class_name, module_path, class_name)
 
 
 def register_connector():
@@ -49,7 +72,7 @@ def register_connector():
     KVConnectorFactory.register_connector(
         "MooncakeD2RHConnectorV1",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_d2rh_connector",
-        "MooncakeConnector",
+        "MooncakeD2RHConnectorV1",
     )
 
     KVConnectorFactory.register_connector(
@@ -88,7 +111,7 @@ def register_connector():
         "MooncakeLayerwiseConnector",
     )
 
-    KVConnectorFactory.register_connector(
+    _register_with_class_name_alias(
         "UCMConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector",
         "UCMConnectorV1",
@@ -100,7 +123,7 @@ def register_connector():
     # upstream scheduler, manager, metrics, and transfer lifecycle.
     if "OffloadingConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("OffloadingConnector")
-    KVConnectorFactory.register_connector(
+    _register_with_class_name_alias(
         "OffloadingConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
@@ -109,6 +132,11 @@ def register_connector():
     # Override the upstream SimpleCPUOffloadConnector with the NPU
     # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
     # Only override if the upstream module exists in this vLLM version.
+    # Class-name alias is required from upstream v0.31.0 on: there the
+    # upstream SimpleCPUOffloadConnector overrides
+    # ``get_kv_connector_stats`` and so emits stats whose key (the class
+    # name) must resolve at the factory. On v0.30.0 the alias is a
+    # harmless no-op because that connector emits no stats.
     try:
         import vllm.v1.simple_kv_offload  # noqa: F401
     except ImportError:
@@ -116,12 +144,14 @@ def register_connector():
     else:
         if "SimpleCPUOffloadConnector" in KVConnectorFactory._registry:
             KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
-        KVConnectorFactory.register_connector(
+        _register_with_class_name_alias(
             "SimpleCPUOffloadConnector",
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
             "AscendSimpleCPUOffloadConnector",
         )
 
+    # No class-name alias here: this connector does not override
+    # get_kv_connector_stats, so it never emits stats to reconstruct.
     KVConnectorFactory.register_connector(
         "PreemptOffloadConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector",
