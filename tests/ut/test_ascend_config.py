@@ -884,12 +884,12 @@ class TestShortRequestFirstConfig(TestBase):
 
 class TestSparseKVOffloadConfig(TestBase):
     @patch("vllm_ascend.ascend_config.is_950", return_value=True)
-    def test_a5_rejects_sparse_offload(self, mock_is_950):
+    def test_950_rejects_sparse_offload(self, mock_is_950):
         for keep_device_kv_cache in (False, True):
             for use_fused_overlap in (False, True):
                 with (
                     self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
-                    self.assertRaisesRegex(ValueError, "not supported on A5"),
+                    self.assertRaisesRegex(ValueError, "not supported on 950PR&950DT Products"),
                 ):
                     SparseKVOffloadConfig.from_additional_config(
                         SimpleNamespace(speculative_config=None),

@@ -1701,7 +1701,7 @@ class SparseKVOffloadConfig:
             return
 
         if is_950():
-            raise ValueError("Sparse KV offload is not supported on A5 (950DT/950PR)")
+            raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
