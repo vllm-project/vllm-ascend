@@ -50,8 +50,9 @@ cd ..
 
 # Install requirements
 cd vllm-ascend
-# For Linux:
-pip install -r requirements-dev.txt
+# For Linux (the Ascend index provides packages such as triton-ascend):
+pip install -r requirements-dev.txt \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 # For non-Linux:
 cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
