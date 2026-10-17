@@ -83,6 +83,11 @@ on:
         type: string
         default: '9.1.0_20260731131545'
         description: "CANN version for base image tag"
+      cann_swr_url:
+        required: false
+        type: string
+        default: ''
+        description: "CANN base image URL override. Empty keeps the registry/build-type default."
       base_image_date:
         required: false
         type: string
@@ -160,7 +165,7 @@ jobs:
       swr_temp_repo: ${{ inputs.build_type == 'daily' && format('{0}/atlas_inference/vllm-atlas-temp', inputs.swr_registry) || format('{0}/atlas_ci/vllm-atlas-temp', inputs.swr_registry) }}
       cann_version: ${{ inputs.cann_version }}
       cann_image_version: ${{ inputs.build_type == 'daily' && inputs.cann_version || '9.1.0' }}
-      cann_swr_url: ${{ inputs.build_type == 'daily' && format('{0}/atlas_inference/cann', inputs.swr_registry) || format('{0}/base_image/ascend-ci/cann', inputs.swr_registry) }}
+      cann_swr_url: ${{ inputs.cann_swr_url || inputs.build_type == 'daily' && format('{0}/atlas_inference/cann', inputs.swr_registry) || format('{0}/base_image/ascend-ci/cann', inputs.swr_registry) }}
       memcache_version: ${{ inputs.memcache_version }}
       memcache_date: ${{ inputs.memcache_date }}
       memfabric_version: ${{ inputs.memfabric_version }}
