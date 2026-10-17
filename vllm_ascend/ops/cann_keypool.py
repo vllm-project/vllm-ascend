@@ -4,6 +4,8 @@
 
 import torch
 
+from vllm_ascend.ops.triton.glm5_next_cann_keypool import prepare_nonempty_keypool_inputs
+
 
 def _cache_rows(cache):
     width = cache.shape[-1]
@@ -48,7 +50,7 @@ def pool_key_indexer_nonempty(
     """Keep CANN's TND indexer out of its unsafe zero-work paths.
 
     Short DSA-CP shards can have queries but no completed pool. On A3 the
-    zero-work kernel clears B*T output rows although TND only allocates T.
+    zero-work kernel initializes B*T output rows although TND only allocates T.
     A trailing dummy request guarantees work, including fully padded replay.
     Empty real histories use one physical pool; index packing discards these
     candidates using the original positions, so they cannot enter attention.
@@ -57,12 +59,9 @@ def pool_key_indexer_nonempty(
     if layout_q != "TND" or layout_k != "PA_BBND" or mask_mode != 3:
         raise ValueError("The KPool empty-work adapter requires causal TND/PA_BBND inputs.")
     tokens = query.shape[0]
-    query_padded = torch.cat((query, torch.zeros_like(query[:1])))
-    weights_padded = torch.cat((weights, torch.zeros_like(weights[:1])))
-    query_ends = torch.cat((actual_seq_q, actual_seq_q.new_full((1,), tokens + 1)))
-    key_lengths = torch.cat((actual_seq_k.clamp_min(1), actual_seq_k.new_ones((1,))))
-    tails = torch.cat((pool_tail_k, pool_tail_k.new_zeros((1,))))
-    tables = torch.cat((block_table, torch.zeros_like(block_table[:1])))
+    query_padded, weights_padded, query_ends, key_lengths, tails, tables = prepare_nonempty_keypool_inputs(
+        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table
+    )
     indices, values = op(
         query_padded,
         pool_key,

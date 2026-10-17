@@ -1,61 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
-from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
+from vllm_ascend.ops import cann_keypool as adapters
 
 
-@pytest.mark.parametrize(
-    "ends,lengths,tails",
-    [
-        ([3, 3], [0, 0], [3, 0]),  # CP rank 0, no completed pool.
-        ([0, 3], [0, 0], [0, 3]),  # CP rank 2, leading empty request.
-        ([0, 0], [0, 0], [0, 0]),  # Entirely padded graph replay.
-        ([2, 3], [800, 900], [1, 2]),  # Real selection must remain unchanged.
-    ],
-)
-def test_empty_work_guard_preserves_live_requests_and_hides_dummy(ends, lengths, tails):
+def test_empty_work_guard_uses_fused_inputs_and_hides_dummy(monkeypatch):
     query = torch.randn(5, 2, 8)
     weights = torch.randn(5, 2)
     cache = torch.randn(16, 32, 1, 8)
     table = torch.arange(8, dtype=torch.int32).view(2, 4)
-    q_ends = torch.tensor(ends, dtype=torch.int64)
-    k_lengths = torch.tensor(lengths, dtype=torch.int64)
-    tail = torch.tensor(tails, dtype=torch.int64)
-    originals = [x.clone() for x in (query, weights, table, q_ends, k_lengths, tail)]
-
-    def checked_kernel(q, k, w, tk, **kwargs):
-        # Model the unsafe precondition: no usable query/key work. The adapter
-        # must prevent it even when all real requests are padding.
-        qlen = torch.diff(kwargs["actual_seq_q"], prepend=torch.zeros(1, dtype=torch.int64))
-        assert torch.any((qlen > 0) & (kwargs["actual_seq_k"] > 0))
-        assert torch.all(kwargs["actual_seq_k"] > 0)
-        torch.testing.assert_close(q[:-1], query)
-        torch.testing.assert_close(w[:-1], weights)
-        torch.testing.assert_close(kwargs["actual_seq_q"][:-1], q_ends)
-        torch.testing.assert_close(kwargs["block_table"][:-1], table)
-        torch.testing.assert_close(tk[:-1], tail)
-        nonempty = k_lengths > 0
-        torch.testing.assert_close(kwargs["actual_seq_k"][:-1][nonempty], k_lengths[nonempty])
-        assert k is cache
-        # A dummy result must never become one of the real query rows.
-        indices = torch.arange(q.shape[0], dtype=torch.int32)[:, None].expand(-1, 7).clone()
-        indices[-1] = 99999
-        return indices, torch.empty(0)
-
-    result, _ = pool_key_indexer_nonempty(
-        checked_kernel,
+    ends = torch.tensor([0, 3], dtype=torch.int64)
+    lengths = torch.zeros(2, dtype=torch.int64)
+    tails = torch.tensor([0, 3], dtype=torch.int64)
+    prepared = (
+        torch.empty(6, 2, 8),
+        torch.empty(6, 2),
+        torch.empty(3, dtype=torch.int64),
+        torch.empty(3, dtype=torch.int64),
+        torch.empty(3, dtype=torch.int64),
+        torch.empty(3, 4, dtype=torch.int32),
+    )
+    prepare = MagicMock(return_value=prepared)
+    monkeypatch.setattr(adapters, "prepare_nonempty_keypool_inputs", prepare)
+    indices = torch.arange(6, dtype=torch.int32)[:, None].expand(-1, 7).clone()
+    indices[-1] = 99999
+    values = torch.empty(0)
+    op = MagicMock(return_value=(indices, values))
+    actual, actual_values = adapters.pool_key_indexer_nonempty(
+        op,
         query,
         cache,
         weights,
-        tail,
-        actual_seq_q=q_ends,
-        actual_seq_k=k_lengths,
+        tails,
+        actual_seq_q=ends,
+        actual_seq_k=lengths,
         block_table=table,
         topk=4,
         pool_size=4,
     )
-    torch.testing.assert_close(result, torch.arange(5, dtype=torch.int32)[:, None].expand(-1, 7))
-    for actual, original in zip((query, weights, table, q_ends, k_lengths, tail), originals):
-        torch.testing.assert_close(actual, original)
+    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table)
+    op.assert_called_once_with(
+        prepared[0],
+        cache,
+        prepared[1],
+        prepared[4],
+        actual_seq_q=prepared[2],
+        actual_seq_k=prepared[3],
+        block_table=prepared[5],
+        layout_q="TND",
+        layout_k="PA_BBND",
+        topk=4,
+        pool_size=4,
+        mask_mode=3,
+    )
+    torch.testing.assert_close(actual, indices[:-1])
+    assert actual_values is values
+
+
+@pytest.mark.parametrize("unsupported", [{"layout_q": "BSND"}, {"layout_k": "BSND"}, {"mask_mode": 0}])
+def test_empty_work_guard_rejects_unsupported_layouts(unsupported):
+    op = MagicMock()
+    with pytest.raises(ValueError, match="causal TND/PA_BBND"):
+        adapters.pool_key_indexer_nonempty(
+            op,
+            None,
+            None,
+            None,
+            None,
+            actual_seq_q=None,
+            actual_seq_k=None,
+            block_table=None,
+            topk=4,
+            pool_size=4,
+            **unsupported,
+        )
+    op.assert_not_called()

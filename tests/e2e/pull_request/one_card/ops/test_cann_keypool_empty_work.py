@@ -12,8 +12,38 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
-from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices
+from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices, prepare_nonempty_keypool_inputs
 from vllm_ascend.utils import bootstrap_custom_op_env
+
+
+@pytest.mark.parametrize("tokens,requests,columns", [(1, 1, 1), (5, 2, 128), (65, 64, 1025), (257, 4, 65)])
+@pytest.mark.parametrize("strided", [False, True])
+def test_fused_sentinel_inputs_match_reference(tokens, requests, columns, strided):
+    torch.manual_seed(1024)
+    device = "npu:0"
+    step = 2 if strided else 1
+    query = torch.randn(tokens, 32, 128 * step, device=device, dtype=torch.bfloat16)[..., ::step]
+    weights = torch.randn(tokens, 32 * step, device=device, dtype=torch.bfloat16)[:, ::step]
+    ends = torch.arange(requests * step, device=device, dtype=torch.int64)[::step] * tokens // (requests * step)
+    lengths = torch.arange(requests * step, device=device, dtype=torch.int64)[::step]
+    tails = lengths % 4
+    table = torch.arange(requests * columns * step, device=device, dtype=torch.int32).view(requests, -1)[:, ::step]
+    inputs = (query, weights, ends, lengths, tails, table)
+    originals = tuple(t.clone() for t in inputs)
+    expected = (
+        torch.cat((query, torch.zeros_like(query[:1]))),
+        torch.cat((weights, torch.zeros_like(weights[:1]))),
+        torch.cat((ends, ends.new_full((1,), tokens + 1))),
+        torch.cat((lengths.clamp_min(1), lengths.new_ones((1,)))),
+        torch.cat((tails, tails.new_zeros((1,)))),
+        torch.cat((table, torch.zeros_like(table[:1]))),
+    )
+    actual = prepare_nonempty_keypool_inputs(*inputs)
+    for result, reference in zip(actual, expected):
+        assert result.is_contiguous()
+        torch.testing.assert_close(result.cpu(), reference.cpu(), rtol=0, atol=0)
+    for value, original in zip(inputs, originals):
+        torch.testing.assert_close(value.cpu(), original.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("graph_mode", [False, True])
