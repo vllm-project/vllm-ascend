@@ -19,9 +19,21 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+
+
+def maybe_record_event() -> torch.npu.Event | None:
+    """Record the overlap event unless configuration proves it is unused."""
+    try:
+        overlap = get_ascend_config().multistream_overlap_shared_expert
+    except RuntimeError:
+        return torch.npu.current_stream().record_event()
+    if overlap:
+        return torch.npu.current_stream().record_event()
+    return None
 
 
 def apply_moe_mlp(

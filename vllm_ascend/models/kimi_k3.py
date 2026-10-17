@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
@@ -91,6 +90,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
+from vllm_ascend.ops.linear import AscendReplicatedLinear
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -328,6 +328,28 @@ def is_moe_layer_idx(config, layer_idx: int) -> bool:
     )
 
 
+class KimiK3RouterLinear(AscendReplicatedLinear):
+    """Kimi's external router: BF16 operands with FP32 output logits."""
+
+    def __init__(self, input_size: int, output_size: int, prefix: str = "") -> None:
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=None,
+            prefix=prefix,
+        )
+        # FusedMoEFactory consumes this attribute to validate the external
+        # router contract. Keep it aligned with forward(), which asks the
+        # matmul kernel to emit FP32 logits from BF16 operands.
+        self.out_dtype = torch.float32
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        logits = torch.mm(hidden_states, self.weight.T, out_dtype=torch.float32)
+        return logits, None
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -361,11 +383,9 @@ class AscendKimiMoE(nn.Module):
         activation_situ_beta = config.activation_situ_beta if config.hidden_act == "situ" else None
         activation_situ_linear_beta = config.activation_situ_linear_beta if config.hidden_act == "situ" else None
 
-        self.gate = GateLinear(
+        self.gate = KimiK3RouterLinear(
             input_size=hidden_size,
             output_size=num_experts,
-            bias=False,
-            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts, dtype=torch.float32))
@@ -418,6 +438,7 @@ class AscendKimiMoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
+            gate=self.gate,
             num_experts=num_experts,
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
@@ -433,6 +454,7 @@ class AscendKimiMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=config.moe_router_activation_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            router_logits_dtype=self.gate.out_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
@@ -452,7 +474,12 @@ class AscendKimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
+        if self.experts.is_internal_router:
+            # Keep the original token-local input for the gate even when the
+            # routed input is transformed and shared input is all-gathered.
+            router_logits = hidden_states
+        else:
+            router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,

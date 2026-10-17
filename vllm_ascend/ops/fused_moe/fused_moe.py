@@ -33,6 +33,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -40,6 +41,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -133,6 +135,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
+        # Submit latent W4A8 SP shared experts after routed forward.
+        # Other paths retain early shared preparation/Gate-Up.
+        self._defer_shared_submission = (
+            self.quant_type is QuantType.W4A8
+            and self._can_overlap_sp_shared_with(self.routed_input_transform)
+            and self._can_overlap_sp_shared_with(self.routed_output_transform)
+        )
+
         setup_moe_comm_method(self.moe_config)
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
@@ -159,17 +169,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
-        Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
-        including the runtime-aware reduction hooks (#16550), is inherited
+        Latent W4A8 SP shared experts use ordinary tensor Add. Other paths
+        retain foreach combine. Reduction hooks and router precision are
         unchanged.
-
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -232,7 +234,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            if getattr(self, "_defer_shared_submission", False):
+                result = shared_output + fused_output
+            else:
+                result = torch._foreach_add([shared_output], [fused_output])[0]
         else:
             result = fused_output
 
@@ -434,7 +439,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def _prepare_router_and_milestones(
         self,
         prepared_shared_input: PreparedSharedExpertInput,
-        shared_hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
@@ -442,12 +446,31 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         torch.npu.Event,
         SubmittedSharedExpertGateUp | None,
     ]:
+        if getattr(self, "_defer_shared_submission", False):
+            # Match the v0.27.1 submission topology: record the producer
+            # milestones now, enqueue the complete routed path, then submit the
+            # whole shared wait/kernel chain in one forward call.  The router
+            # must keep using the token-local input; prepared_shared_input may
+            # contain an SP all-gathered tensor with a different token count.
+            if self.is_internal_router:
+                router_input = self._prepare_router_input(router_logits, router_logits)
+                shared_input_ready = maybe_record_event()
+                router_logits = self._apply_router_linear(router_input)
+                del router_input
+                router_output_ready = torch.npu.current_stream().record_event()
+            else:
+                shared_input_ready = maybe_record_event()
+                router_output_ready = shared_input_ready
+            return router_logits, shared_input_ready, router_output_ready, None
+
         if self.is_internal_router:
-            router_input = self._prepare_router_input(shared_hidden_states, router_logits)
+            # Keep the router on local tokens even when the shared MLP consumes
+            # the all-gathered SP tensor.
+            router_input = self._prepare_router_input(router_logits, router_logits)
             # Release shared Vector/AIV preparation after any external FP32
             # router-input Cast. Gates using their registered forward path may
             # still prepare their input internally.
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
             prepared_execution = self._prepare_shared_for_router_overlap(
                 prepared_shared_input,
                 shared_input_ready,
@@ -456,7 +479,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             del router_input
             router_output_ready = torch.npu.current_stream().record_event()
         else:
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
             prepared_execution = self._prepare_shared_for_router_overlap(
                 prepared_shared_input,
                 shared_input_ready,
@@ -504,7 +527,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             router_logits, shared_input_ready, router_output_ready, submitted_gate_up = (
                 self._prepare_router_and_milestones(
                     prepared_shared_input,
-                    shared_hidden_states,
                     router_logits,
                 )
             )
