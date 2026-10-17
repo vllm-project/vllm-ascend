@@ -115,3 +115,63 @@ def test_apply_grammar_bitmask_business_shape():
     torch.npu.synchronize()
 
     assert torch.equal(actual.cpu(), expected)
+
+
+def test_apply_grammar_bitmask_small_tail_and_strided_mask():
+    """Cover tail vocab words, inactive rows, and a padded bitmask stride."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(17)
+
+    rows = 8
+    logits_per_req = 2
+    vocab_size = 32017
+    block_size = 8192
+    mask_stride = 8
+    mask_words = (vocab_size + 31) // 32
+    padded_mask_words = mask_words + 5
+
+    logits = torch.randn(rows, vocab_size, dtype=torch.float32, generator=generator).to(torch.bfloat16)
+    cu_num_logits = torch.tensor([0, 2, 4, 6], dtype=torch.int32)
+    req_idx = torch.arange(rows) // 2
+    position = torch.tensor([0, 1, 0, 1, 0, 1, 2, 3], dtype=torch.int32)
+    active = position < logits_per_req
+    mapping = (req_idx * mask_stride + position).to(torch.int32)
+    logit_rows = req_idx * logits_per_req + torch.clamp(position, max=logits_per_req - 1)
+
+    bitmask_storage = torch.randint(
+        -(2**31),
+        2**31 - 1,
+        (rows, padded_mask_words),
+        dtype=torch.int32,
+        generator=generator,
+    )
+    bitmask = bitmask_storage[:, :mask_words]
+    bitmask[:, 0] = -1
+    bitmask[:, 1] = 0
+    bitmask[:, 2] = 0x55555555
+    bitmask[:, mask_words - 1] = -1
+
+    bit_values = torch.ones(32, dtype=torch.int64) << torch.arange(32, dtype=torch.int64)
+    blocked = (bitmask.to(torch.int64)[:, :, None] & bit_values[None, None, :]) == 0
+    blocked = blocked.reshape(rows, -1)[:, :vocab_size]
+    blocked &= active[:, None]
+    expected = logits.clone()
+    mapped = expected.index_select(0, logit_rows.to(torch.int64))
+    mapped.masked_fill_(blocked, -float("inf"))
+    expected.index_copy_(0, logit_rows.to(torch.int64), mapped)
+
+    actual = logits.to("npu")
+    _apply_grammar_bitmask_kernel[(rows, triton.cdiv(vocab_size, block_size))](
+        actual,
+        actual.stride(0),
+        mapping.to("npu"),
+        cu_num_logits.to("npu"),
+        bitmask.to("npu"),
+        bitmask.stride(0),
+        vocab_size,
+        MASK_STRIDE=mask_stride,
+        BLOCK_SIZE=block_size,
+    )
+    torch.npu.synchronize()
+
+    assert torch.equal(actual.cpu(), expected)
