@@ -34,21 +34,48 @@ fi
 
 # ---- full mode ----
 # ---- memfabric_hybrid ----
-echo "Install memfabric_hybrid based on architecture..."
-if [ "$ARCH" = "x86_64" ]; then
-    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/release/1.3/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
-else
-    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/release/1.3/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+echo "Resolving memfabric_hybrid wheel url..."
+DOWNLOAD_URL_MF="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/mf_version.json"
+wget -q --no-check-certificate --tries=3 --timeout=30 "${DOWNLOAD_URL_MF}" -O mf_version.json
+if [ ! -f "mf_version.json" ]; then
+    echo "ERROR: download mf_version.json failed" >&2
+    exit 1
 fi
+MF_RAW=$(cat ./mf_version.json)
+MF_VAL=$(echo "${MF_RAW}" | sed -n "s/.*\"${MEMFABRIC_VERSION}\": \"\([^\"]*\)\".*/\1/p")
+
+if [[ -z "${MF_VAL}" ]]; then
+    echo "ERROR: ${MEMFABRIC_VERSION} not found in mf_version.json" >&2
+    exit 1
+fi
+# split PATH_PART 和 WHL_NAME
+PATH_PART="${MF_VAL%%:*}"
+WHL_NAME_MF="${MF_VAL#*:}"
+MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/${PATH_PART}/${WHL_NAME_MF}"
+
+echo "Install memfabric_hybrid: ${MEMFABRIC_URL}"
 python3 -m pip install "$MEMFABRIC_URL" --force-reinstall --no-deps
 
 # ---- memcache_hybrid ----
-echo "Install memcache_hybrid based on architecture..."
-if [ "$ARCH" = "x86_64" ]; then
-    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/release/1.3/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
-else
-    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/release/1.3/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+echo "Resolving memcache_hybrid wheel url..."
+DOWNLOAD_URL_MC="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/mc_version.json"
+wget -q --no-check-certificate --tries=3 --timeout=30 "${DOWNLOAD_URL_MC}" -O mc_version.json
+if [ ! -f "mc_version.json" ]; then
+    echo "ERROR: download mc_version.json failed" >&2
+    exit 1
 fi
+MC_RAW=$(cat ./mc_version.json)
+MC_VAL=$(echo "${MC_RAW}" | sed -n "s/.*\"${MEMCACHE_VERSION}\": \"\([^\"]*\)\".*/\1/p")
+
+if [[ -z "${MC_VAL}" ]]; then
+    echo "ERROR: ${MEMCACHE_VERSION} not found in mc_version.json" >&2
+    exit 1
+fi
+PATH_PART="${MC_VAL%%:*}"
+WHL_NAME_MC="${MC_VAL#*:}"
+MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/${PATH_PART}/${WHL_NAME_MC}"
+
+echo "Install memcache_hybrid: ${MEMCACHE_URL}"
 python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
 
 # ---- mfcli kernel install ----
