@@ -16,8 +16,8 @@ class TestGlobalTE(unittest.TestCase):
         # Mooncake is optional; these unit tests only exercise singleton state.
         mooncake = ModuleType("mooncake")
         engine_module = ModuleType("mooncake.engine")
-        engine_module.TransferEngine = MagicMock()
-        mooncake.engine = engine_module
+        engine_module.__dict__["TransferEngine"] = MagicMock()
+        mooncake.__dict__["engine"] = engine_module
         modules = patch.dict("sys.modules", {"mooncake": mooncake, "mooncake.engine": engine_module})
         modules.start()
         self.addCleanup(modules.stop)
@@ -49,15 +49,16 @@ class TestGlobalTE(unittest.TestCase):
             def __exit__(self, *args):
                 lock.release()
 
-        global_te.transfer_engine_lock = ObservedLock()
-
         def second_getter():
             result = global_te.get_transfer_engine("localhost", None)
             was_ready = result.ready
             observed.set()
             return result, was_ready
 
-        with patch("mooncake.engine.TransferEngine", return_value=engine) as factory:
+        with (
+            patch.object(global_te, "transfer_engine_lock", ObservedLock()),
+            patch("mooncake.engine.TransferEngine", return_value=engine) as factory,
+        ):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 first = pool.submit(global_te.get_transfer_engine, "localhost", None)
                 try:
