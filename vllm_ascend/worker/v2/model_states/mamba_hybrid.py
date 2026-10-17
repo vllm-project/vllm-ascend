@@ -273,6 +273,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             idx_mapping,
         )
 
+    def finish_execution(self, *, failed: bool) -> None:
+        if failed:
+            self._pending_bulk_copy = None
+        super().finish_execution(failed=failed)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,

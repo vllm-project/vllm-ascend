@@ -26,7 +26,8 @@ def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load):
         events.append("copy")
         memory["running"] = memory["source"]
 
-    state = SimpleNamespace(
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state.__dict__.update(
         _align_mode=True,
         _pending_bulk_copy=None,
         _mamba_state_idx_gpu=None,
@@ -78,7 +79,8 @@ def test_pre_forward_passes_input_batch_and_metadata():
     inner = SimpleNamespace(pre_forward=Mock())
     copy = Mock()
     wrapped = MambaCopyKVConnector(inner, copy)
-    scheduler_output, input_batch, attn_metadata = object(), object(), {}
+    scheduler_output, input_batch = object(), object()
+    attn_metadata: dict[str, object] = {}
     wrapped.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
     inner.pre_forward.assert_called_once_with(scheduler_output, input_batch, attn_metadata=attn_metadata)
     copy.assert_called_once_with()
@@ -133,3 +135,23 @@ def test_wrappers_keep_runner_state_independent():
     second.pre_forward(None)
     assert copy_a.call_count == 1
     copy_b.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failed", [True, False])
+def test_finish_execution_cleans_failed_copy_and_finishes_metadata(failed):
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    ctx = Mock()
+    pending = (ctx, 1, Mock())
+    state._pending_bulk_copy = pending
+    state.device_metadata = Mock()
+
+    state.finish_execution(failed=failed)
+
+    assert state._pending_bulk_copy is (None if failed else pending)
+    state.device_metadata.finish.assert_called_once_with()
+    if failed:
+        # A failed load must not leave stale state to copy on a later hook.
+        state.copy_state_after_kv_load()
+        ctx.run_fused_precopy.assert_not_called()
