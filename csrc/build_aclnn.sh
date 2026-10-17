@@ -217,6 +217,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "swiglu_group_quant"
         "situ_mx_quant"
         "grouped_matmul_situ_quant"
+        "grouped_matmul_swiglu_quant_v2"
         "indexer_compress_epilog_v2"
         "attn_res_fwd"
         "chunk_fwd_o_vllm"
