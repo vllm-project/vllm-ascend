@@ -178,6 +178,22 @@ Single-node deployment completes both Prefill and Decode within the same node. `
 
 The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` with your local directory if needed.
 
+!!! note "Deploying W8A8 weights on 310P"
+
+    The W8A8 checkpoints listed in [Model Weight](#31-model-weight) use the
+    310P Model Runner V2 path. Before starting the service, enable Model Runner
+    V2 and replace `MODEL_PATH` with the corresponding W8A8 checkpoint:
+
+    ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export MODEL_PATH=Eco-Tech/Qwen3.5-9B-W8A8-310P
+    ```
+
+    Then use the same deployment command for the selected model size and add
+    `--quantization ascend`. Keep graph execution enabled for normal serving;
+    use `--enforce-eager` only when debugging or isolating graph-related
+    compatibility problems.
+
 === "Qwen3.5-2B"
 
     Startup Command:
@@ -388,7 +404,24 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 >
 > **Atlas 300I DUO / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I DUO, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
 
-### 9.2 Tuning Guidelines
+### 9.2 ACLGraph for W8A8 Serving
+
+W8A8 decode can contain many small quantization, format-conversion, and linear
+kernels. In eager mode, host dispatch gaps between these kernels can limit the
+end-to-end benefit of quantization. ACLGraph replay reduces this launch
+overhead, so graph execution is recommended for steady-state W8A8 serving on
+310P.
+
+Graph execution has two operational costs: compilation increases service
+startup time, and captured graphs consume additional device memory. For
+short-lived jobs where cold-start latency matters more than steady-state token
+latency, compare both modes with the expected request mix. If capture sizes are
+configured manually, include the common runtime batch sizes; requests outside
+the captured range can fall back to eager execution. See the
+[Graph Mode Guide](../../user_guide/feature_guide/graph_mode.md) for mode and
+capture-size details.
+
+### 9.3 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
