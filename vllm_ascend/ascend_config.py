@@ -567,8 +567,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -735,18 +736,16 @@ class AscendConfig:
             )
 
         # enable_shared_expert_dp = val and ep and tp>1
-        from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_dense_sp, enable_sp, flashcomm1_enabled
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        # FlashComm remains the SP MoE switch on Ascend.
-        flashcomm_explicitly_enabled = validate_additional_config_bool(
-            (vc.additional_config or {}).get("enable_flashcomm1", False),
-            "additional_config.enable_flashcomm1",
-        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        # FlashComm selects the native MoE SP path or the opt-in Qwen3.5
+        # dense path supplied by the Ascend model patch.
+        flashcomm_explicitly_enabled = flashcomm1_enabled(vc)
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
@@ -759,8 +758,13 @@ class AscendConfig:
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
+        elif enable_dense_sp(vc):
+            logger.info_once("FlashComm1 is enabled for Qwen3.5-family dense sequence parallelism.")
         elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current model or parallel "
+                "configuration does not support sequence parallelism. Disabling"
+            )
         else:
             logger.info_once("FlashComm1 is enabled.")
 

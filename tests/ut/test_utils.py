@@ -233,6 +233,105 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
+    def test_enable_sp_supports_opt_in_qwen3_5_dense(self):
+        text_config = SimpleNamespace(model_type="qwen3_5_text")
+        vllm_config = SimpleNamespace(
+            additional_config={"enable_flashcomm1": True},
+            model_config=SimpleNamespace(
+                hf_config=text_config,
+                hf_text_config=text_config,
+            ),
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+                data_parallel_size=1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+            ),
+            use_v2_model_runner=False,
+        )
+
+        standard_profile = mock.Mock()
+        standard_profile.supports.return_value = True
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(
+                utils,
+                "get_current_hardware_profile",
+                return_value=standard_profile,
+            ),
+        ):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            self.assertTrue(utils.enable_dense_sp(vllm_config))
+            self.assertTrue(utils.enable_sp(vllm_config))
+
+    def test_qwen3_5_dense_sp_rejects_unsupported_topologies(self):
+        text_config = SimpleNamespace(model_type="qwen3_5_text")
+
+        def make_config(**parallel_overrides):
+            parallel = {
+                "use_sequence_parallel_moe": False,
+                "tensor_parallel_size": 2,
+                "pipeline_parallel_size": 1,
+                "data_parallel_size": 1,
+                "prefill_context_parallel_size": 1,
+                "decode_context_parallel_size": 1,
+            }
+            parallel.update(parallel_overrides)
+            return SimpleNamespace(
+                additional_config={"enable_flashcomm1": True},
+                model_config=SimpleNamespace(
+                    hf_config=text_config,
+                    hf_text_config=text_config,
+                ),
+                parallel_config=SimpleNamespace(**parallel),
+                use_v2_model_runner=False,
+            )
+
+        standard_profile = mock.Mock()
+        standard_profile.supports.return_value = True
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(
+                utils,
+                "get_current_hardware_profile",
+                return_value=standard_profile,
+            ),
+        ):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            self.assertFalse(utils.enable_dense_sp(make_config(tensor_parallel_size=1)))
+            self.assertFalse(utils.enable_dense_sp(make_config(pipeline_parallel_size=2)))
+            self.assertFalse(utils.enable_dense_sp(make_config(data_parallel_size=2)))
+
+    def test_qwen3_5_dense_sp_supports_qwen3_8_multimodal_wrapper(self):
+        text_config = SimpleNamespace(model_type="qwen3_5_text")
+        vllm_config = SimpleNamespace(
+            additional_config={"enable_flashcomm1": True},
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="qwen3_5"),
+                hf_text_config=text_config,
+            ),
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+                data_parallel_size=1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+            ),
+            use_v2_model_runner=False,
+        )
+
+        standard_profile = mock.Mock()
+        standard_profile.supports.return_value = True
+        with mock.patch.object(
+            utils,
+            "get_current_hardware_profile",
+            return_value=standard_profile,
+        ):
+            self.assertTrue(utils.enable_dense_sp(vllm_config))
+
     def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
         ascend_config = SimpleNamespace(enable_dsa_cp=True)
 
