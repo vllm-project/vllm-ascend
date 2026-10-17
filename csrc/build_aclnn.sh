@@ -126,7 +126,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
         "mla_preprocess"
@@ -180,7 +179,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
         "mla_preprocess"
@@ -223,7 +221,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
-        "sparse_attention_score"
         "msa_index_score"
     )
 
