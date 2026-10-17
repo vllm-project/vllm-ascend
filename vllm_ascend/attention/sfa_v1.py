@@ -311,9 +311,13 @@ class SparseMLAMetadataState:
             if positions.numel() > self.length_buffer.shape[0]:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
             mask = self.valid_mask_buffer[: positions.numel()]
-            mask.fill_(True)
-            if metadata.num_actual_tokens < positions.numel():
-                mask[metadata.num_actual_tokens :].zero_()
+            if metadata.num_actual_tokens_tensor is not None:
+                valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens_tensor
+                mask[:, 0].copy_(valid)
+            else:
+                mask.fill_(True)
+                if metadata.num_actual_tokens < positions.numel():
+                    mask[metadata.num_actual_tokens :].zero_()
             metadata.smla_valid_mask = mask
             metadata.smla_topk_length = self.length_buffer[: positions.numel()]
             metadata.smla_metadata = self.metadata_buffer
@@ -440,6 +444,8 @@ class AscendSFAMetadata:
     query_start_loc: torch.Tensor | None = None
     max_query_len: int = 0
     max_seq_len: int = 0
+    # MTP graphs keep a fixed row capacity while device-side active counts vary.
+    num_actual_tokens_tensor: torch.Tensor | None = None
     smla_metadata: torch.Tensor | None = None
     smla_topk_length: torch.Tensor | None = None
     smla_valid_mask: torch.Tensor | None = None
@@ -706,6 +712,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             query_start_loc=common_attn_metadata.query_start_loc[: num_reqs + 1],
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
+            num_actual_tokens_tensor=getattr(common_attn_metadata, "num_actual_tokens_tensor", None),
             block_size=block_size,
             **parallel_metadata,
         )

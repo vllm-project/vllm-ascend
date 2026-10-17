@@ -116,6 +116,7 @@ def test_initialize_attn_backend_delegates_single_kv_cache_group():
 
 def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer._draft_block_table_width = MagicMock(return_value=2)
     proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache", "draft.indexer.tail_cache"}
     proposer.vllm_config = MagicMock()
     proposer.device = torch.device("cpu")
@@ -480,3 +481,44 @@ def test_full_graph_later_draft_accepts_missing_cpu_sequence_lengths():
     assert updated.seq_lens[:2].tolist() == [12, 22]
     assert updated.seq_lens_cpu is None
     assert updated._seq_lens_cpu is None
+
+
+def test_secondary_draft_group_pads_rows_beyond_max_num_seqs_with_fixed_storage():
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer._uses_multi_group_kv_cache = True
+    proposer.kv_cache_gid = 0
+    proposer._draft_block_table_width = MagicMock(return_value=1)
+    proposer._multi_group_slot_mapping_buffers = {(1, 1): torch.zeros(180, dtype=torch.int32)}
+    padded_table = torch.full((180, 1), 99, dtype=torch.int32)
+    proposer._multi_group_block_table_buffers = {1: padded_table}
+    source_table = torch.arange(30, dtype=torch.int32).view(30, 1)
+    block_table = MagicMock()
+    block_table.get_device_tensor.return_value = source_table
+    block_table.is_circular_group = False
+    block_table.slot_mapping.gpu = torch.zeros(180, dtype=torch.int32)
+    proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[None, block_table]))
+    group = SimpleNamespace(kv_cache_group_id=1)
+    common = SimpleNamespace(
+        num_reqs=36,
+        num_actual_tokens=5,
+        query_start_loc=torch.arange(37, dtype=torch.int32),
+        positions=torch.arange(5, dtype=torch.int32),
+        block_table_tensor=torch.empty(36, 1, dtype=torch.int32),
+    )
+    metadata = proposer._common_attn_metadata_for_draft_group(common, group, 36, draft_index=1)
+    assert metadata.block_table_tensor.shape == (36, 1)
+    assert metadata.block_table_tensor.data_ptr() == padded_table.data_ptr()
+    torch.testing.assert_close(metadata.block_table_tensor[:30], source_table)
+    assert torch.count_nonzero(metadata.block_table_tensor[30:]) == 0
+    assert torch.all(metadata.slot_mapping[5:] == -1)
+    assert block_table.compute_slot_mapping.call_args.args[0] == 30
+    # The tail builder's copy now fits, while a later graph bucket keeps the same storage.
+    torch.empty(36, 1, dtype=torch.int32).copy_(metadata.block_table_tensor)
+    common.num_reqs = 48
+    common.query_start_loc = torch.arange(49, dtype=torch.int32)
+    source_table.add_(100)
+    metadata = proposer._common_attn_metadata_for_draft_group(common, group, 48, draft_index=1)
+    assert metadata.block_table_tensor.shape == (48, 1)
+    assert metadata.block_table_tensor.data_ptr() == padded_table.data_ptr()
+    torch.testing.assert_close(metadata.block_table_tensor[:30], source_table)
+    assert torch.count_nonzero(metadata.block_table_tensor[30:]) == 0
