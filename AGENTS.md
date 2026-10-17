@@ -22,6 +22,7 @@ Read linked documentation when it applies to the current task, using the relevan
     - [vLLM Ascend Plugin Architecture](#vllm-ascend-plugin-architecture)
     - [Patching Requirement](#patching-requirement)
     - [Model Runner Changes](#model-runner-changes)
+- [Release Notes](#release-notes)
 - [Commit Messages and Pull Requests](#commit-messages-and-pull-requests)
     - [Commit Message Format](#commit-message-format)
 - [Quick Start for Contributors](#quick-start-for-contributors)
@@ -172,6 +173,25 @@ Reviewers must verify:
 - `vllm_ascend/worker/model_runner_v1.py` - vLLM v1 model runner
 - `vllm_ascend/worker/v2/model_runner.py` - vLLM v2 model runner
 - `vllm_ascend/_310p/model_runner_310p.py` - Ascend 310P model runner
+
+---
+
+## Release Notes
+
+Every PR with a user-facing change must ship a release note fragment in the same PR.
+
+**Required for**: new models, hardware, or operators; new features; changes to user-facing
+APIs, parameters, environment variables, or configuration; breaking changes, deprecations,
+and default behavior changes; dependency and toolchain updates (CANN, torch_npu,
+triton-ascend, vLLM alignment); measurable performance improvements; and important bug fixes.
+
+**Not required for**: internal refactors, tests, CI, build scripts, tooling, and
+documentation edits.
+
+Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml`. See
+`release_notes/README.md` for the principles and the field rules. When in doubt, add a
+fragment: the release manager drops extra entries at release time. Reviewers confirm the
+fragment together with the code; there is no CI gate.
 
 ---
 
