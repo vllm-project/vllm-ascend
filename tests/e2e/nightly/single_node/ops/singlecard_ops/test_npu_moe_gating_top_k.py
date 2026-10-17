@@ -5,9 +5,7 @@ import numpy
 import pytest
 import torch
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
+from vllm_ascend.device.device_op import DeviceOperator
 
 # Fix random seed to ensure test reproducibility
 RTOL_TOLERANCE = 1e-5
@@ -114,7 +112,7 @@ def moe_gating_top_k_numpy_ref(
 
 # pytest parameterized decorators (cover all test scenarios)
 @pytest.mark.parametrize("group_select_mode", [0, 1])
-@pytest.mark.parametrize("renorm", [1])
+@pytest.mark.parametrize("renorm", [0, 1])
 @pytest.mark.parametrize("norm_type", [0, 1])
 @pytest.mark.parametrize("group_count", [1, 8])
 @pytest.mark.parametrize("k_ranges", [4, 16, 32])
@@ -133,11 +131,11 @@ def test_npu_moe_gating_topk_compare(
     """Ascend NPU MOE Gating TopK operator test.
 
     Compare NPU kernel results with NumPy reference implementation
-    to verify the correctness of Ascend custom op.
+    to verify the correctness of the CANN operator.
 
     Args:
         group_select_mode: Group selection mode (0: max, 1: top2 sum)
-        renorm: Whether to renormalize output (fixed to 1 in test)
+        renorm: Whether to renormalize output
         norm_type: Normalization type (0: softmax, 1: sigmoid)
         group_count: Number of expert groups
         k_ranges: Number of top-k experts to select
@@ -152,7 +150,7 @@ def test_npu_moe_gating_topk_compare(
 
     # Skip invalid cases: k cannot exceed num_experts per group
     if k > dim1 // group_count:
-        return
+        pytest.skip("k exceeds the number of experts in the selected group")
 
     # Construct test inputs
     x = numpy.random.uniform(-2, 2, (dim0, dim1)).astype(numpy.float32)
@@ -163,7 +161,7 @@ def test_npu_moe_gating_topk_compare(
     # Fix k_group value to avoid irreproducibility caused by random.randint
     k_group = min(1, group_count)
     out_flag = False
-    routed_scaling_factor = 1.0
+    routed_scaling_factor = 2.5
     eps = 1e-20
 
     # Calculate NumPy reference results
@@ -182,7 +180,7 @@ def test_npu_moe_gating_topk_compare(
     )
 
     # Calculate NPU operator results
-    y_npu, expert_idx_npu, out_npu = torch.ops._C_ascend.moe_gating_top_k(
+    y_npu, expert_idx_npu, out_npu = DeviceOperator.moe_gating_top_k(
         x_tensor.npu(),
         k=k,
         k_group=k_group,
@@ -199,6 +197,7 @@ def test_npu_moe_gating_topk_compare(
     # Verify consistency between NPU and NumPy results
     assert numpy.allclose(y.cpu().numpy(), y_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE)
     assert numpy.allclose(expert_idx, expert_idx_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE)
+    assert expert_idx_npu.dtype == torch.int32
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
