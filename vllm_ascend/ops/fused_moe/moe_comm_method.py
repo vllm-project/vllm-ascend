@@ -158,6 +158,13 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        # Optional Cube arbitration: Gate-Up was submitted before dispatch.
+        # Do not start routed GMM1 until that side-stream Cube stage completes.
+        # This is a performance throttle, not a routed-data dependency.
+        gate_up_done = getattr(_EXTRA_CTX, "shared_gate_up_done", None)
+        if gate_up_done is not None:
+            torch.npu.current_stream().wait_event(gate_up_done)
+
         shared_activation_overlap_start_evt = None
         if self.shared_activation_overlaps_routed_gmm1:
             shared_activation_overlap_start_evt = torch.npu.current_stream().record_event()

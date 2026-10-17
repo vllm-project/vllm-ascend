@@ -30,7 +30,9 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
@@ -38,9 +40,11 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
     PreparedSharedExpertExecution,
+    SharedExpertMLPPath,
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -445,8 +449,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def _prepare_router_and_milestones(
         self,
         prepared_shared_input: PreparedSharedExpertInput,
-        shared_hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        record_gate_up_done: bool = False,
     ) -> tuple[
         torch.Tensor,
         torch.npu.Event | None,
@@ -457,7 +461,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # which runs only when multistream overlap is enabled; skip the record
         # (notably slow host-side) when it is off.
         if self.is_internal_router:
-            router_input = self._prepare_router_input(shared_hidden_states, router_logits)
+            # router_logits carries the caller's token-local gate input. The
+            # shared input may instead contain all-gathered SP tokens.
+            router_input = self._prepare_router_input(router_logits, router_logits)
             # Release shared Vector/AIV preparation only after the router input
             # Cast. It then overlaps the Cube-heavy gate matmul instead of
             # competing with another Vector/AIV operation.
@@ -475,20 +481,44 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 shared_input_ready,
             )
             router_output_ready = shared_input_ready
-        # Submit Gate-Up now, before routed_experts.forward_impl enqueues TopK
-        # and dispatch. The auxiliary stream waits for router_output_ready, so
-        # Gate-Up starts together with routed TopK and can cover dispatch.
+        # Submit Gate-Up before routed TopK/dispatch, so its Cube work can
+        # cover the Vector/communication work in that window.
         shared_experts = self.ascend_shared_experts
         assert shared_experts is not None
         submitted_gate_up = (
             shared_experts.enqueue_gate_up_after_router(
                 prepared_execution,
                 router_output_ready,
+                **({"record_done_event": True} if record_gate_up_done else {}),
             )
             if prepared_execution is not None
             else None
         )
         return router_logits, shared_input_ready, router_output_ready, submitted_gate_up
+
+    def _should_serialize_shared_gate_up(self) -> bool:
+        """Arbitrate two Cube stages only for the measured unfused INT path.
+
+        This is a scheduling throttle, not a data dependency. Other models and
+        quantization paths retain the existing early-Gate-Up schedule.
+        """
+        shared_experts = self.ascend_shared_experts
+        activation = getattr(self.routed_experts, "activation", None)
+        shared_gate_up = getattr(getattr(shared_experts, "layer", None), "gate_up_proj", None)
+        shared_down = getattr(getattr(shared_experts, "layer", None), "down_proj", None)
+        return bool(
+            self._can_overlap_sp_shared_with(getattr(self, "routed_input_transform", None))
+            and getattr(self, "quant_type", None) is QuantType.W4A8
+            and _EXTRA_CTX.moe_comm_type in {MoECommType.ALLGATHER, MoECommType.ALLTOALL, MoECommType.MC2}
+            and getattr(activation, "value", activation) == "situ"
+            and shared_experts is not None
+            and shared_experts.situ_activation is not None
+            and not has_lora(shared_experts.lora_context)
+            and getattr(getattr(shared_gate_up, "weight", None), "dtype", None) == torch.int8
+            and getattr(getattr(shared_down, "weight", None), "dtype", None) == torch.int8
+            and shared_experts._select_mlp_path() is SharedExpertMLPPath.A8_INT_FUSED
+            and not get_current_hardware_profile().supports(HardwareCapability.GMM_DEQUANT_SITU_QUANT)
+        )
 
     def _forward_impl(
         self,
@@ -514,18 +544,34 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if shared_input_is_gathered
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
+            serialize_gate_up = self._should_serialize_shared_gate_up()
             router_logits, shared_input_ready, router_output_ready, submitted_gate_up = (
                 self._prepare_router_and_milestones(
                     prepared_shared_input,
-                    shared_hidden_states,
                     router_logits,
+                    record_gate_up_done=serialize_gate_up,
                 )
             )
-            routed_out, milestones = self.routed_experts.forward_impl(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+            if serialize_gate_up and (submitted_gate_up is None or submitted_gate_up.gate_up_done is None):
+                raise RuntimeError("Shared Gate-Up did not expose its completion event.")
+            if serialize_gate_up:
+                assert submitted_gate_up is not None
+                previous_gate_up_done = getattr(_EXTRA_CTX, "shared_gate_up_done", None)
+                try:
+                    _EXTRA_CTX.shared_gate_up_done = submitted_gate_up.gate_up_done
+                    routed_out, milestones = self.routed_experts.forward_impl(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                        input_ids=input_ids,
+                    )
+                finally:
+                    _EXTRA_CTX.shared_gate_up_done = previous_gate_up_done
+            else:
+                routed_out, milestones = self.routed_experts.forward_impl(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
             assert isinstance(milestones, RoutedMoEMilestones)
             milestones.shared_input_ready = shared_input_ready
             milestones.router_output_ready = router_output_ready
