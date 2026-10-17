@@ -40,13 +40,6 @@ The checkpoint directory must contain the model configuration, tokenizer, image 
 
 For DSpark speculative decoding in mixed or PD separation deployments, download the [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) GQA draft-model checkpoint in addition to the target-model checkpoint.
 
-For the Kimi K3 **MLA** DSpark adapter, a draft checkpoint containing
-`lm_head.weight` uses its own output head. The weight must have shape
-`(vocab_size, hidden_size)` from the draft configuration; duplicate or
-incompatible heads are rejected. This head is already in the draft hidden-state
-basis and is preserved during target QuaRot alignment. If the checkpoint has no
-output head, the existing target-head sharing/alignment behavior is retained.
-
 **Path description**: Download the target model weights to a directory of your choice and record its absolute path. The deployment commands below use `<YOUR_MODEL_PATH>` for this directory and `<YOUR_DRAFT_MODEL_PATH>` for the DSpark draft checkpoint directory. Replace both placeholders with the actual paths before running the commands. Use the same paths on every node, preferably in a shared directory such as `/root/.cache/`, and ensure that the directories are mounted inside each container.
 
 ### 3.2 Verify Multi-node Communication (Optional)
