@@ -59,6 +59,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.debug.kv_guard_runtime import get_guard
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -503,6 +504,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.request_task_counts_lock = threading.Lock()
 
         self.task_tracker = KVCacheTaskTracker()
+        self._kv_guard = get_guard(vllm_config)
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
@@ -749,7 +751,8 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
             if all_tasks_done:
-                if transfer_failed or self._is_failed_recv_request(request_id):
+                transfer_failed = transfer_failed or self._is_failed_recv_request(request_id)
+                if transfer_failed:
                     with self.pending_reformat_lock:
                         self.pending_reformat.pop(request_id, None)
                 else:
@@ -766,6 +769,9 @@ class KVCacheRecvingThread(threading.Thread):
                             e,
                         )
                 # Drain the failure with completion, after all local writes end.
+                guard = getattr(self, "_kv_guard", None)
+                if guard is not None:
+                    guard.transfer("error" if transfer_failed else "load", req_meta)
                 self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)

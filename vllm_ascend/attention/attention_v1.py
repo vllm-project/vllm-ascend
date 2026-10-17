@@ -743,6 +743,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
             ),
+            kv_guard=getattr(self, "_kv_guard", None),
         )
         return output, num_tokens
 
@@ -810,6 +811,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
             },
             FIAV2ParamProvider(self._layer_name),
+            kv_guard=getattr(self, "_kv_guard", None),
         )
         return output, num_tokens
 
@@ -848,6 +850,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
             },
             PAParamProvider(self._layer_name),
+            kv_guard=getattr(self, "_kv_guard", None),
         )
         return output
 
@@ -928,6 +931,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.read(self._layer_name, block_table, actual_seq_lengths_kv)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -1071,6 +1077,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         seq_lens_list = attn_metadata.seq_lens_list
         num_tokens = int(actual_seq_qlen[-1])
 
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.read(self._layer_name, block_table, seq_lens_list)
         # decode part
         if num_decode_tokens > 0:
             decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
@@ -1136,6 +1145,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.read(self._layer_name, attn_metadata.block_tables, attn_metadata.seq_lens)
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
@@ -1189,6 +1201,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.write(layer.layer_name, slot_mapping)
         DeviceOperator.reshape_and_cache(
             key=key,
             value=value,
@@ -1223,6 +1238,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
+            guard = getattr(self, "_kv_guard", None)
+            if guard is not None:
+                guard.write(self._layer_name, slots_to_cache)
             DeviceOperator.reshape_and_cache(
                 key=key_to_cache,
                 value=value_to_cache,

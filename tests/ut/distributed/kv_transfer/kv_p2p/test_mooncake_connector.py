@@ -5108,6 +5108,36 @@ def test_unused_remote_ports_are_notified_once_by_primary_receiver(primary, has_
     assert sent == ([("r", "idle-peer", 7000, ports)] if primary and has_ports else [])
 
 
+def test_guard_does_not_mark_receive_valid_when_another_pull_failed_during_transfer():
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver._is_failed_recv_request = MagicMock(side_effect=[False, True])
+    receiver._transfer_kv_cache_all_groups = MagicMock()
+    receiver._mark_request_task_done = MagicMock(return_value=True)
+    receiver.pending_reformat_lock = threading.Lock()
+    receiver.pending_reformat = {"r": object()}
+    receiver.proc_not_transfer_request_lock = threading.Lock()
+    receiver.proc_not_transfer_request = {}
+    receiver._reformat_pending_kv_caches = MagicMock()
+    receiver._clear_failed_recv_request = MagicMock()
+    receiver.task_tracker = MagicMock()
+    receiver.request_queue = MagicMock()
+    receiver._send_done_signal_to_free_remote_port = MagicMock()
+    receiver._send_done_recv_signal = MagicMock()
+    receiver._kv_guard = MagicMock()
+    meta = {
+        "request_id": "r",
+        "remote_request_id": "remote-r",
+        "remote_host": "host",
+        "remote_handshake_port": 1,
+        "remote_port_send_num": {},
+        "all_task_done": True,
+    }
+    receiver._handle_request(meta)
+    receiver._kv_guard.transfer.assert_called_once_with("error", meta)
+    receiver._reformat_pending_kv_caches.assert_not_called()
+    receiver.task_tracker.update_done_task_count.assert_called_once_with("r")
+
+
 @pytest.mark.parametrize("pulls", [1, 2, 4])
 def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatch, pulls):
     """Validate PD's CPU reshape arithmetic, not the external NPU scatter op."""
