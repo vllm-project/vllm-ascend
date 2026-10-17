@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,6 +24,8 @@ class TestReusePublicationFence(unittest.TestCase):
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
                     worker.tp_size = tp_size
+                    worker._save_disabled = threading.Event()
+                    worker.kv_recv_thread = None
                     calls: list[str] = []
                     worker._drain_deferred_last_save = lambda calls=calls: calls.append("drain")
                     worker.process_layer_data = lambda requests, calls=calls: calls.append("prepare")

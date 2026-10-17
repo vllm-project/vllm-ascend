@@ -2398,7 +2398,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker._prepare_load_gvas([request])
 
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
+        self.assertFalse(request.load_spec.can_load)
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
@@ -2446,7 +2446,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
-    def test_multi_group_load_failure_stops_before_forward(self):
+    def test_multi_group_load_failure_reports_request_and_releases_leases(self):
         worker = self._make_gva_worker(2)
         valid_info = MagicMock()
         valid_info.size.return_value = 64
@@ -2469,14 +2469,26 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "multi-group KV load failed",
-        ):
-            worker._prepare_load_gvas([request])
-
+        worker._prepare_load_gvas([request])
+        self.assertFalse(request.load_spec.can_load)
+        self.assertFalse(request.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+        self.assertEqual(worker.get_failed_requests(), {request.req_id})
+        self.assertEqual(worker.get_failed_requests(), set())
         group0_key = worker._make_layerwise_full_key(0, "h0")
+        self.assertIn(group0_key, worker._step_load_keys)
+        worker.kv_recv_thread = MagicMock()
+        with patch.object(worker, "_drain_attention_transfers") as drain:
+
+            def release(keys):
+                drain.assert_called_once_with(full=True)
+                return -1
+
+            worker.m_store.batch_remove_lease.side_effect = release
+            worker.get_finished(set(), AscendConnectorMetadata(set()))
+            worker.get_finished(set(), AscendConnectorMetadata(set()))
         worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+        worker.m_store.batch_write_finish.assert_not_called()
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
         worker = self._make_worker()
@@ -2558,6 +2570,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         cases = (
             ([-3102, 0], [0, 0], True),
+            ([202, 0], [202, 0], True),
             ([0, MEMCACHE_SSD_HIT_GVA], [0, 0], True),
             ([MEMCACHE_SSD_HIT_GVA, MEMCACHE_SSD_HIT_GVA], [0, 0], False),
             ([202, MEMCACHE_SSD_HIT_GVA], [202, 0], False),
@@ -2585,6 +2598,11 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
                     worker._alloc_gvas_for_save([request])
 
+                if has_failure:
+                    worker.m_store.batch_write_finish.assert_not_called()
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {7, 8})
+                    continue
                 self.assertEqual(request.block_gvas_by_group_np[0].dtype, np.dtype(np.int64))
                 self.assertEqual(request.block_gvas_by_group_np[0].tolist(), expected)
                 expected_keys = [
@@ -2618,6 +2636,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
                     worker._alloc_gvas_for_save([request])
 
+                if gva <= 0:
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {1})
                 self.assertEqual(request.partial_save_gva_per_group, [0])
                 self.assertEqual(logger.error.called, gva <= 0)
                 self.assertEqual(request.save_keys, [])

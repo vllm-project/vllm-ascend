@@ -136,6 +136,24 @@ class TestLookupKeyServer(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    def test_hybrid_failures_use_request_results(self):
+        for layerwise in (False, True):
+            with self.subTest(layerwise=layerwise):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = layerwise
+                connector.connector_worker = MagicMock(load_async=True)
+                connector.connector_worker.get_failed_requests.return_value = {"r1"}
+                connector.get_finished = MagicMock(return_value=(set(), set()))
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVConnectorTransferResults"
+                ) as results:
+                    connector.get_transfer_results(set())
+                results.assert_called_once_with(
+                    finished_sending=set(),
+                    finished_recving=set() if layerwise else {"r1"},
+                    failed_recving={"r1"},
+                )
+
     def test_bind_metadata_prepares_only_layerwise_workers(self):
         for use_layerwise in (False, True):
             with self.subTest(use_layerwise=use_layerwise):
