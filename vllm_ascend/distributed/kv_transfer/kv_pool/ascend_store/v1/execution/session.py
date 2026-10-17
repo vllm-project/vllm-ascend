@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import wait as wait_futures
 from functools import partial
 from typing import Any, Generic, TypeVar
 
@@ -179,7 +180,13 @@ class Session(Generic[LoadResult]):
     def pending_load_layers(self) -> tuple[int, ...]:
         return self.load_order[self._load_pos :]
 
+    def end_step(self, finish_load: Callable[[], None] | None = None, *, wait: bool = True) -> None:
+        """Detach compute callbacks and abort Load; Store remains caller-owned and is not drained here."""
+        self.clear_callbacks()
+        self.abort_load(finish_load, wait=wait)
+
     def abort_load(self, finish: Callable[[], None] | None = None, *, wait: bool = True) -> None:
+        """Abort queued Load; wait=True drains submitted tasks and cleanup without claiming layer results."""
         self._load_aborted.set()
         for position, future in enumerate(self._load_futures):
             gate = self._load_gates[self.load_order[position]]
@@ -188,6 +195,8 @@ class Session(Generic[LoadResult]):
         if finish is not None:
             self.finish_load(finish)
         if wait:
+            # Task completion must not depend on an optional cleanup or stop at the first failed layer.
+            wait_futures(self._load_futures)
             self.wait_load_finished()
 
     def clear_callbacks(self) -> None:

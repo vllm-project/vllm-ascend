@@ -254,8 +254,15 @@ def test_blocked_store_does_not_block_load_and_retains_state_after_end_step(monk
         worker.save_layer("layers.1.group.0")
         assert sum(call[0] == "batch_copy_get" for call in backend.calls) == 2
         assert not any(call[0] == "batch_copy_put" for call in backend.calls)
+        gate = worker._session._get_or_create_compute_start_gate(1)
+        callback = Mock()
+        gate.on_start = callback
         worker.end_step()
         assert worker._session is None and worker._store_state is None
+        assert gate.on_start is None
+        callback.assert_not_called()
+        assert worker._pending_store_batch is not None and not worker._pending_store_batch.future.done()
+        assert not resources.closed
         assert worker.take_released_store_job_ids() == set()
         release_store.set()
         (completion,) = worker.fence_previous_store()

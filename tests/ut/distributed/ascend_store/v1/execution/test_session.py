@@ -203,6 +203,158 @@ def test_abort_wakes_prefetch_without_starting_cancelled_io(session, finish, mon
     finish.assert_called_once_with()
 
 
+@pytest.mark.parametrize("first_load_fails", (False, True))
+def test_abort_waits_for_all_submitted_loads_without_cleanup(first_load_fails, session):
+    session.load_order = (0, 1)
+    session._start_gate_factory = lambda: FakeLoadStartGate(opened=True)
+    load_started = threading.Event()
+    release_load = threading.Event()
+    abort_started = threading.Event()
+    error = RuntimeError("first Load failed")
+
+    def load(layer_id):
+        if layer_id == 0:
+            if first_load_fails:
+                raise error
+            return layer_id
+        load_started.set()
+        assert release_load.wait(timeout=5)
+        return layer_id
+
+    def run_hooks():
+        session.prefetch_loads(0, load)
+        assert load_started.wait(timeout=2)
+        abort_started.set()
+        session.abort_load(wait=True)
+
+    with ThreadPoolExecutor(max_workers=1) as hooks:
+        aborted = hooks.submit(run_hooks)
+        try:
+            assert abort_started.wait(timeout=2)
+            with pytest.raises(TimeoutError):
+                aborted.result(timeout=0.05)
+            release_load.set()
+            aborted.result(timeout=5)
+            assert all(future.done() for future in session._load_futures)
+            assert session._load_futures[0].exception() is (error if first_load_fails else None)
+        finally:
+            release_load.set()
+
+
+@pytest.mark.parametrize("with_cleanup", (False, True))
+@pytest.mark.parametrize("exit_operation", ("abort_load", "end_step"))
+def test_nonblocking_exit_keeps_running_load_and_optional_cleanup_asynchronous(
+    exit_operation, with_cleanup, session, finish
+):
+    session.load_order = (0,)
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    def load(layer_id):
+        load_started.set()
+        assert release_load.wait(timeout=5)
+        return layer_id
+
+    try:
+        session.prefetch_loads(0, load)
+        assert load_started.wait(timeout=2)
+        getattr(session, exit_operation)(finish if with_cleanup else None, wait=False)
+        assert not session._load_futures[0].done()
+        finish.assert_not_called()
+        release_load.set()
+        assert session._load_futures[0].result(timeout=5) == 0
+        session.wait_load_finished()
+        assert finish.call_count == int(with_cleanup)
+    finally:
+        release_load.set()
+
+
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+def test_abort_waits_for_cleanup_and_propagates_its_error(cleanup_fails, session):
+    session.load_order = (0,)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    error = RuntimeError("cleanup failed")
+
+    def finish():
+        assert session._load_futures[0].done()
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=5)
+        if cleanup_fails:
+            raise error
+
+    def run_hooks():
+        session.prefetch_loads(0, int)
+        session.abort_load(finish)
+
+    with ThreadPoolExecutor(max_workers=1) as hooks:
+        aborted = hooks.submit(run_hooks)
+        try:
+            assert cleanup_started.wait(timeout=2)
+            assert not aborted.done()
+            release_cleanup.set()
+            if cleanup_fails:
+                with pytest.raises(RuntimeError) as raised:
+                    aborted.result(timeout=5)
+                assert raised.value is error
+            else:
+                aborted.result(timeout=5)
+        finally:
+            release_cleanup.set()
+
+
+def test_end_step_detaches_callbacks_before_abort_and_leaves_store_running(session, finish, monkeypatch):
+    session.load_order = (0, 1)
+    gate = FakeLoadStartGate()
+    gate_waiting = threading.Event()
+    store_started = threading.Event()
+    release_store = threading.Event()
+    entry = Mock()
+    copied = []
+    wait, cancel = gate.wait, gate.cancel
+
+    def wait_at_gate(timeout):
+        gate_waiting.set()
+        return wait(timeout)
+
+    def cancel_after_detaching():
+        assert gate.on_start is None
+        cancel()
+
+    def store(source_ready, layer_id):
+        store_started.set()
+        assert release_store.wait(timeout=5)
+
+    monkeypatch.setattr(gate, "wait", wait_at_gate)
+    monkeypatch.setattr(gate, "cancel", cancel_after_detaching)
+    session._start_gate_factory = lambda: gate
+    opening = session._store_submit(lambda: None)
+    try:
+        session.prefetch_loads(0, copied.append)
+        assert gate_waiting.wait(timeout=2)
+        session.bind_store_to_compute_start(0, entry)
+        session.store_layer(9, opening, object, store)
+        assert store_started.wait(timeout=2)
+        session.end_step(finish)
+        session.end_step(finish)
+        assert copied == [0]
+        assert all(future.done() for future in session._load_futures)
+        finish.assert_called_once_with()
+        entry.assert_not_called()
+        assert gate.on_start is None
+        assert not session._store_futures[9].done()
+        store_finish = Mock()
+        closing = session.finish_store(opening, store_finish)
+        assert not closing.done()
+        store_finish.assert_not_called()
+        release_store.set()
+        closing.result(timeout=5)
+        store_finish.assert_called_once_with(opening, session._store_futures)
+    finally:
+        gate.on_start = None
+        release_store.set()
+
+
 def test_last_load_waits_for_cleanup_and_preserves_the_opaque_result(session):
     session.load_order = (2,)
     result = object()

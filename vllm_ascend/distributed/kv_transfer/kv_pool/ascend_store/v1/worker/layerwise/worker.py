@@ -627,9 +627,9 @@ class LayerwiseWorker(KVPoolWorker):
             return _failed_load_completions(self._load_batch, layer_id)
 
     def end_step(self) -> None:
-        if self._session is not None:
-            self._session.clear_callbacks()
-        self._abort_load()
+        if self._session is not None or self._load_session_keys:
+            finish_load = self._finish_load if self._load_session_keys else None
+            self._get_session().end_step(finish_load)
         closing_batch = self._prepare_store_close()
         if closing_batch is not None:
             self._track_store_batch(closing_batch)
@@ -639,9 +639,9 @@ class LayerwiseWorker(KVPoolWorker):
         super().end_step()
 
     def close(self) -> None:
-        if self._session is not None:
-            self._session.clear_callbacks()
-        self._abort_load(wait=False)
+        if self._session is not None or self._load_session_keys:
+            finish_load = self._finish_load if self._load_session_keys else None
+            self._get_session().end_step(finish_load, wait=False)
         super().close()
 
     def _check_execution_results(self) -> None:
