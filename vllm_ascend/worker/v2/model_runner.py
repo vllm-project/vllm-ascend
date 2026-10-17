@@ -284,9 +284,30 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
-        self.pd_dspark_aux_layer_ids = aux_layers
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            join_early_kernel_warmup,
+            start_early_kernel_warmup,
+        )
+        from vllm_ascend.model_executor.warmup.nz_warmup import (
+            join_nz_warm_thread,
+            start_nz_warm_thread,
+        )
+
+        # Overlap the one-off NZ cast and Triton compile with weight I/O.
+        # Every model goes through here.
+        start_nz_warm_thread("thread")
+        start_early_kernel_warmup()
+        try:
+            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+            super().load_model(load_dummy_weights, *args, **kwargs)
+            self.pd_dspark_aux_layer_ids = aux_layers
+        finally:
+            # Join even when weight loading fails: these threads touch the NPU
+            # device and must not outlive this call. Joining here is also before
+            # memory profiling.
+            join_nz_warm_thread()
+            join_early_kernel_warmup("load_model")
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
