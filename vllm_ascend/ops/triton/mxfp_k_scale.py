@@ -6,14 +6,14 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_elements"])
 def _scatter_k_scale_kernel(
     source,
     cache,
     block_ids,
     segment_ids,
     fragment_ids,
-    num_elements: tl.constexpr,
+    num_elements,
     num_heads: tl.constexpr,
     num_groups: tl.constexpr,
     block_stride: tl.constexpr,
