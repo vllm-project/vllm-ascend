@@ -65,6 +65,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu.warmup import warmup_kernels
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -891,6 +892,16 @@ class NPUWorker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+    def _warmup_v2_model_runner(self) -> None:
+        def execute_model(scheduler_output: SchedulerOutput):
+            output = self.execute_model(scheduler_output)
+            # Cached Triton kernels can reach sampling before queued NPU
+            # forward work completes. Serialize these startup-only steps.
+            torch.npu.synchronize()
+            return output
+
+        warmup_kernels(self.model_runner, execute_model, self.sample_tokens)
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
@@ -918,6 +929,20 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
 
         kernel_warmup(self)
+
+        if self.use_v2_model_runner:
+            # Exercise scheduler inputs, speculative sampling, and request-state
+            # updates before graph capture. Two requests retain mixed spec/non-spec
+            # coverage without sorting full-batch logits after KV cache allocation.
+            max_warmup_reqs = 2
+            scheduler_config = self.model_runner.scheduler_config
+            warmup_scheduler_config = copy.copy(scheduler_config)
+            warmup_scheduler_config.max_num_seqs = min(scheduler_config.max_num_seqs, max_warmup_reqs)
+            self.model_runner.scheduler_config = warmup_scheduler_config
+            try:
+                self._warmup_v2_model_runner()
+            finally:
+                self.model_runner.scheduler_config = scheduler_config
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
