@@ -144,10 +144,10 @@ class BuildManager:
                 "[build] compiling/installing (this can take a while); follow progress with: tail -f %s", log_file
             )
         if decision.reinstall_reqs:
-            self._run(self.opt.pip_requirements_cmd, log_file, "pip install requirements")
+            self._run(self.opt.pip_requirements_cmd, log_file, "uv pip install requirements")
         if decision.rebuild:
             self._clean_artifacts()
-            self._run(self.opt.pip_install_cmd, log_file, "pip install -e .")
+            self._run(self.opt.pip_install_cmd, log_file, "uv pip install -e .")
 
         # Only advance the baseline once the binary actually matches the source.
         if decision.rebuild or self.last_built_commit is None:
