@@ -47,6 +47,28 @@ def test_expected_versions_falls_back_to_pyproject(tmp_path: Path):
     assert expected_versions(tmp_path).torch_npu == "2.10.0.post3"
 
 
+def test_expected_versions_prefers_layered_runtime_requirements(tmp_path: Path):
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements/runtime.txt").write_text("torch-npu==2.10.0.post4\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[build-system]\nrequires = ["torch-npu==2.10.0.post3"]\n', encoding="utf-8"
+    )
+
+    assert expected_versions(tmp_path).torch_npu == "2.10.0.post4"
+
+
+def test_expected_versions_reads_layered_requirements_at_commit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    contents = {
+        "requirements.txt": "-r requirements/runtime.txt\n",
+        "requirements/runtime.txt": "torch-npu==2.10.0.post4\n",
+        "pyproject.toml": '[build-system]\nrequires = ["torch-npu==2.10.0.post3"]\n',
+    }
+    monkeypatch.setattr(git_ops, "file_at_commit", lambda repo, commit, path: contents.get(path))
+
+    assert expected_versions(tmp_path, "a" * 40).torch_npu == "2.10.0.post4"
+
+
 def test_expected_versions_at_commit_reads_all_files_without_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
