@@ -85,6 +85,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -328,6 +329,27 @@ def is_moe_layer_idx(config, layer_idx: int) -> bool:
     )
 
 
+def _k3_external_router_logits(hidden_states: torch.Tensor, gate: GateLinear, force_bf16: bool) -> torch.Tensor:
+    """Compute Kimi's external Router with FP32 logits in either mode."""
+    if not force_bf16:
+        logits, _ = gate(hidden_states)
+        return logits
+    if gate.weight.dtype != torch.bfloat16 or gate.bias is not None:
+        raise ValueError(
+            f"Forced BF16 Router requires a bias-free BF16 gate weight, "
+            f"got weight={gate.weight.dtype}, bias={gate.bias is not None}."
+        )
+    return torch.mm(hidden_states.to(torch.bfloat16), gate.weight.T, out_dtype=torch.float32)
+
+
+def _prepare_k3_external_router_weight(gate: GateLinear) -> None:
+    """Convert the loaded gate once, before warmup and graph capture."""
+    if gate.bias is not None:
+        raise ValueError("Forced BF16 Router requires a bias-free gate.")
+    if gate.weight.dtype != torch.bfloat16:
+        gate.weight.data = gate.weight.data.to(torch.bfloat16)
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -361,11 +383,13 @@ class AscendKimiMoE(nn.Module):
         activation_situ_beta = config.activation_situ_beta if config.hidden_act == "situ" else None
         activation_situ_linear_beta = config.activation_situ_linear_beta if config.hidden_act == "situ" else None
 
+        self._force_router_bf16 = ascend_envs.VLLM_ASCEND_FORCE_ROUTER_BF16
         self.gate = GateLinear(
             input_size=hidden_size,
             output_size=num_experts,
             bias=False,
             out_dtype=torch.float32,
+            params_dtype=torch.bfloat16 if self._force_router_bf16 else None,
             prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts, dtype=torch.float32))
@@ -452,7 +476,7 @@ class AscendKimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = _k3_external_router_logits(hidden_states, self.gate, self._force_router_bf16)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -986,9 +1010,14 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(
+        loaded = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        if ascend_envs.VLLM_ASCEND_FORCE_ROUTER_BF16:
+            for module in self.modules():
+                if isinstance(module, AscendKimiMoE):
+                    _prepare_k3_external_router_weight(module.gate)
+        return loaded
 
     def forward(
         self,
