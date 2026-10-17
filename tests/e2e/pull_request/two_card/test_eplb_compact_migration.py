@@ -14,6 +14,7 @@ from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.network_utils import get_open_port
 
 import vllm_ascend.patch.platform  # noqa: F401
+from tests.e2e.pull_request.eplb_compact_utils import nz_tensor, require_native_nz_copy
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.ops.fused_moe.routed_experts import EplbExpertTensorList
@@ -144,4 +145,13 @@ def _migration_worker(rank, port, fp4):
 @pytest.mark.parametrize("fp4", [False, True])
 def test_compact_eplb_nz_migration_replays_gmm_graph(monkeypatch, fp4):
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    torch.npu.set_device(0)
+    # Match both worker projections, including the uint8-packed FP4 carrier.
+    # Skip in the parent only for the ordinary allocator's known copy_ gap.
+    for n, k in ((512, 512), (512, 256)):
+        if fp4:
+            raw = torch.randint(0, 256, (n, k // 2), dtype=torch.uint8)
+        else:
+            raw = torch.randint(-3, 4, (n, k), dtype=torch.int8).to(torch.float8_e4m3fn)
+        require_native_nz_copy(nz_tensor(raw, fp4=fp4))
     mp.spawn(_migration_worker, args=(get_open_port(), fp4), nprocs=2, join=True)
