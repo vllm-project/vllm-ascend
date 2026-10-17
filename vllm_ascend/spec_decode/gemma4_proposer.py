@@ -36,6 +36,9 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):
     """Reuse vLLM's Gemma4 proposer with Ascend execution support."""
 
+    def uses_per_group_kernel_block_sizes(self) -> bool:
+        return True
+
     def _setup_centroids_cuda_graphs(self) -> None:
         # Centroid sampling runs eagerly on NPU; ACL graph capture is handled by
         # AscendSpecDecodeBaseProposer.
