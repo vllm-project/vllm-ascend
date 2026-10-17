@@ -48,6 +48,13 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
+# Empty placeholder tensors for the FUSED_MC2 weight payload: the MC2 operators
+# require positional scale/bias arguments even when the payload is unused.
+# They are shared immutable stand-ins, so allocate them once instead of per
+# call in get_fused_mc2_weights.
+_EMPTY_INT64_SCALES = [torch.tensor([], dtype=torch.int64)]
+_EMPTY_FP32_SCALES = [torch.tensor([], dtype=torch.float32)]
+
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """Unquantized MoE method with Ascend-specific kernels.
@@ -194,10 +201,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 )
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            w1_scale = _EMPTY_INT64_SCALES
+            w2_scale = _EMPTY_INT64_SCALES
+            w1_scale_bias = _EMPTY_FP32_SCALES
+            w2_scale_bias = _EMPTY_FP32_SCALES
         return MoEWeights(
             w1=w1,
             w2=w2,
