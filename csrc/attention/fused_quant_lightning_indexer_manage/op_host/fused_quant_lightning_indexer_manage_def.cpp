@@ -50,6 +50,11 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND}).AutoContiguous();
 
+        // A5 requires explicit element strides; the A3 compatibility API supplies unused values.
+        this->Attr("key_stride").Int();
+        this->Attr("scale_stride").Int();
+        this->Attr("weight_stride").Int();
+
         this->Output("topk_src_ids").ParamType(REQUIRED)
             .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("topk_dst_slots").ParamType(REQUIRED)
@@ -73,6 +78,53 @@ public:
             .ExtendCfgInfo("jitCompile.flag", "static_false,dynamic_false");
         this->AICore().AddConfig("ascend910b", config);
         this->AICore().AddConfig("ascend910_93", config);
+        OpAICoreConfig config95;
+        config95.Input("index_weights").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
+        config95.Input("query_dequant_scale").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("query").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_FLOAT8_E4M3FN}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("index_key_dequant_scale").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
+        config95.Input("index_key_cache").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_FLOAT8_E4M3FN}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
+        config95.Input("index_block_table").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("actual_seq_lengths_query").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("actual_seq_lengths_key").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("offload_seq_lengths_key").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("num_cache_tokens").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("request_state").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("req_pool_entries").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Input("cache_slots_pool").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        config95.Output("topk_src_ids").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("topk_dst_slots").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("topk_miss_counts").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("miss_src_ids").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("miss_dst_slots").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("miss_counts").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.Output("cache_slots_pool_out").ParamType(REQUIRED)
+            .DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        config95.DynamicCompileStaticFlag(true).DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true).DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false).PrecisionReduceFlag(true)
+            .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
+            .ExtendCfgInfo("jitCompile.flag", "static_false,dynamic_false");
+        this->AICore().AddConfig("ascend950", config95);
     }
 };
 OP_ADD(FusedQuantLightningIndexerManage);
