@@ -150,7 +150,7 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
       base_os: ${{ matrix.build_meta.base_os }}
-      cann_image_version: ${{ needs.setup-matrix.outputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", 9.2.0_20261014151900"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
+      cann_image_version: ${{ needs.setup-matrix.outputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20261014151900"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
       cann_swr_url: ${{ needs.setup-matrix.outputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20261014151900"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       
       # ===== Dynamic SWR repositories based on build_type =====
