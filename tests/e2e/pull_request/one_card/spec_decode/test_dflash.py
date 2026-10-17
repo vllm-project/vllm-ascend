@@ -81,17 +81,18 @@ def test_dflash_acceptance(
     assert match
 
 
-def _get_dflash_query_buffer_state(worker):
-    runner = worker.model_runner
-    runtime_mode, descriptor = runner.cudagraph_dispatcher.dispatch(4, uniform_decode=False)
-    return {
-        "drafter": type(runner.drafter).__name__,
-        "use_graph": runner.drafter.use_cuda_graph,
-        "runtime_mode": runtime_mode.name,
-        "num_tokens": descriptor.num_tokens,
-        "positions": runner.drafter.positions.numel(),
-        "device": runner.drafter.positions.device.type,
-    }
+class DFlashQueryBufferProbe:
+    def dflash_query_buffer_state(self):
+        runner = self.model_runner
+        runtime_mode, descriptor = runner.cudagraph_dispatcher.dispatch(4, uniform_decode=False)
+        return {
+            "drafter": type(runner.drafter).__name__,
+            "use_graph": runner.drafter.use_cuda_graph,
+            "runtime_mode": runtime_mode.name,
+            "num_tokens": descriptor.num_tokens,
+            "positions": runner.drafter.positions.numel(),
+            "device": runner.drafter.positions.device.type,
+        }
 
 
 def test_dflash_padded_query_buffers():
@@ -113,6 +114,7 @@ def test_dflash_padded_query_buffers():
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.8,
         enable_prefix_caching=False,
+        worker_extension_cls=f"{__name__}.DFlashQueryBufferProbe",
         compilation_config=compilation_config,
         speculative_config={
             "method": "dflash",
@@ -124,7 +126,7 @@ def test_dflash_padded_query_buffers():
     ) as llm:
         # The sole bucket pads even a single four-token draft query to 256.
         # The unpatched allocation is only 32 * (1 + 3) = 128 positions.
-        assert llm.model.collective_rpc(_get_dflash_query_buffer_state, timeout=30) == [
+        assert llm.model.collective_rpc("dflash_query_buffer_state", timeout=30) == [
             {
                 "drafter": "AscendDflashProposer",
                 "use_graph": True,
