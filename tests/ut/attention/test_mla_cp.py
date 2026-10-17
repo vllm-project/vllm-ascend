@@ -497,6 +497,7 @@ def test_mla_dcp_fia_v2_preserves_strided_cache_and_lse(monkeypatch, fia_v2_boun
         cp_seq_len=[4] * num_decodes,
     )
     metadata = SimpleNamespace(
+        external_flashmla=None,
         causal=False,
         decode=decode,
         attn_state=AscendAttentionState.DecodeOnly,
