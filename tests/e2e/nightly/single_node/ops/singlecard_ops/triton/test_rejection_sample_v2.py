@@ -3,11 +3,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
+from vllm_ascend.model_executor.warmup.v2_rejection_sampler_warmup import (
+    warmup_v2_model_dtype_rejection_sampler,
+)
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
@@ -15,6 +19,27 @@ VOCAB_SIZE = 4096
 pytest.importorskip("triton")
 if not (hasattr(torch, "npu") and torch.npu.is_available()):
     pytest.skip("NPU required for MRV2 rejection sampler tests", allow_module_level=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("with_draft_logits", [False, True])
+@pytest.mark.parametrize("synthetic", [False, True])
+def test_model_dtype_rejection_sampler_warmup(dtype, with_draft_logits, synthetic):
+    """Exercise the startup inputs against real Triton Ascend kernels."""
+    device = torch.device("npu")
+    draft_logits = torch.zeros(1, 2, VOCAB_SIZE, dtype=torch.float32, device=device) if with_draft_logits else None
+    rates = torch.tensor([0.5, 0.25], dtype=torch.float32, device=device) if synthetic else None
+    runner = SimpleNamespace(
+        is_last_pp_rank=True,
+        num_speculative_steps=2,
+        model_config=SimpleNamespace(dtype=dtype, get_vocab_size=lambda: VOCAB_SIZE),
+        speculator=SimpleNamespace(draft_logits=draft_logits),
+        rejection_sampler=SimpleNamespace(synthetic_conditional_rates=rates),
+        device=device,
+    )
+    warmup_v2_model_dtype_rejection_sampler(runner)
+    # Surface asynchronous launch errors before the test completes.
+    torch.npu.synchronize()
 
 
 def _build_rejection_sample_inputs(
