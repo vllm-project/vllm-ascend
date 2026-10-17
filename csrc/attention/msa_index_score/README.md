@@ -139,7 +139,34 @@ uses `2e-2`.
   element.
 - The 950PR&950DT Products implementation is under `op_kernel/arch35`. It uses native
   Cube FP8 tiling keys 4/5/6 without a scale or an intermediate FP16 cast.
-- 950PR&950DT Products uses the operator-private Catlass snapshot under
-  `op_kernel/catlass`, derived from v1.3.1-notla. A2/A3 continue to use the
-  repository Catlass submodule. The `msa_` prefix isolates only the A5-specific
-  snapshot because its interfaces and implementation differ.
+- A2/A3 and 950PR&950DT Products use the operator-private Catlass snapshot
+  under `op_kernel/catlass`, derived from v1.3.1-notla. The `msa_` header names
+  keep this snapshot isolated from the repository Catlass submodule.
+- Non-quantized A2/A3 decode estimates the number of M tasks and partitions
+  visible KV tiles when doing so reduces the estimated per-core workload.
+  Quantized K-gather and 950PR&950DT Products retain their existing scheduling.
+- A2/A3 score widths above the UB staging window use direct stores. Invalid
+  output tails are filled in aligned contiguous chunks; store events are
+  separate from the S16 ping-pong events. This also covers overallocated
+  block tables with short or empty KV sequences.
+
+The A2/A3 scheduling and score-store changes are ported from
+[ops-transformer-ar](https://gitcode.com/oscillated/ops-transformer-ar), commit
+`044f648f741bb1f3b1bc5d6adf39afd992fe8a86`. The existing Torch schema and
+Ascend 950 implementation are retained.
+
+Run the framework-level numerical and graph replay regressions with:
+
+```bash
+pytest -sv tests/e2e/pull_request/one_card/test_msa_index_score.py
+```
+
+Compare graph execution latency for two installed builds using identical inputs:
+
+```bash
+python benchmarks/benchmark_msa_index_score.py --batch 1 8 32 \
+  --kv-len 4096 65536 131072 --distribution uniform ramp
+```
+
+The benchmark emits JSON records with all sample timings. These measure the
+operator through the Torch registration; they are not end-to-end model latency.

@@ -75,6 +75,7 @@ def _run_case(
     kv_lens: tuple[int, ...],
     table_width: int,
     page_axis_gap: int,
+    graph_replay: bool = False,
 ) -> None:
     if dtype == torch.float8_e4m3fn and not _is_ascend_950():
         pytest.skip("FLOAT8_E4M3FN MsaIndexScore requires Ascend 950")
@@ -137,19 +138,38 @@ def _run_case(
         )
     )
 
-    actual = torch.ops._C_ascend.npu_msa_index_score(
-        query,
-        key,
-        block_table.npu(),
-        start_loc.npu(),
-        atten_mask=atten_mask,
-        actual_seq_qlen=actual_seq_qlen.npu(),
-        actual_seq_klen=actual_seq_klen.npu(),
-        layout_key="BBND",
-        sparse_mode=3,
-        init_blocks=0,
-        local_blocks=0,
-    )
+    # Keep all captured input tensors alive across graph replays.
+    block_table_npu = block_table.npu()
+    start_loc_npu = start_loc.npu()
+    actual_seq_qlen_npu = actual_seq_qlen.npu()
+    actual_seq_klen_npu = actual_seq_klen.npu()
+
+    def invoke():
+        return torch.ops._C_ascend.npu_msa_index_score(
+            query,
+            key,
+            block_table_npu,
+            start_loc_npu,
+            atten_mask=atten_mask,
+            actual_seq_qlen=actual_seq_qlen_npu,
+            actual_seq_klen=actual_seq_klen_npu,
+            layout_key="BBND",
+            sparse_mode=3,
+            init_blocks=0,
+            local_blocks=0,
+        )
+
+    if graph_replay:
+        for _ in range(3):
+            invoke()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            actual = invoke()
+        for _ in range(3):
+            graph.replay()
+    else:
+        actual = invoke()
     torch.npu.synchronize()
 
     actual_cpu = actual.float().cpu()
@@ -169,6 +189,16 @@ def _run_case(
         rtol=tolerance,
         atol=tolerance,
     )
+
+    if graph_replay:
+        # A replay must consume current input values and initialize every score
+        # column again, including padding beyond the visible KV range.
+        query.zero_()
+        graph.replay()
+        torch.npu.synchronize()
+        replay_cpu = actual.float().cpu()
+        torch.testing.assert_close(replay_cpu <= FILL_THRESHOLD, expected_fill, rtol=0, atol=0)
+        torch.testing.assert_close(replay_cpu[valid], torch.zeros_like(replay_cpu[valid]), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -192,3 +222,45 @@ def test_msa_index_score_matches_cpu_golden(
     page_axis_gap: int,
 ) -> None:
     _run_case(dtype, q_lens, kv_lens, table_width, page_axis_gap)
+
+
+@pytest.mark.parametrize("graph_replay", [False, True], ids=["eager", "graph-replay"])
+@pytest.mark.parametrize(
+    ("dtype", "q_lens", "kv_lens", "table_width", "page_axis_gap"),
+    [
+        # Cross the 256-column staging boundary and exercise direct score stores.
+        pytest.param(torch.bfloat16, (1,), (257 * BLOCK_SIZE - 1,), 257, 1, id="bf16-wide-score"),
+        pytest.param(torch.float16, (2,), (275 * BLOCK_SIZE - 1,), 275, 1, id="fp16-wide-score"),
+        # Most output columns are padding; all must be filled for every chunk.
+        pytest.param(torch.bfloat16, (1, 1), (65536, 16384), 2064, 1, id="bf16-wide-table-short-kv"),
+        pytest.param(torch.bfloat16, (1, 1), (0, 0), 257, 1, id="bf16-empty-kv-wide-score"),
+        pytest.param(torch.bfloat16, (17, 0, 1), (300, 0, 129), 8, 1, id="bf16-empty-query-request"),
+        pytest.param(
+            torch.bfloat16,
+            (1,) * 8,
+            (4096, 3072, 2048, 1024, 4095, 3071, 2047, 1023),
+            32,
+            1,
+            id="bf16-short-kv-decode-batch",
+        ),
+        pytest.param(
+            torch.bfloat16,
+            (1,) * 32,
+            tuple(257 * (i + 1) for i in range(32)),
+            72,
+            1,
+            id="bf16-imbalanced-decode-batch",
+        ),
+        pytest.param(torch.bfloat16, (1,), (257 * BLOCK_SIZE - 1,), 257, 2, id="bf16-wide-strided-key"),
+    ],
+)
+@torch.inference_mode()
+def test_msa_index_score_decode_scheduling_and_wide_scores(
+    dtype: torch.dtype,
+    q_lens: tuple[int, ...],
+    kv_lens: tuple[int, ...],
+    table_width: int,
+    page_axis_gap: int,
+    graph_replay: bool,
+) -> None:
+    _run_case(dtype, q_lens, kv_lens, table_width, page_axis_gap, graph_replay)
