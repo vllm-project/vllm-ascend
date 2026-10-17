@@ -64,6 +64,7 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 torch_npu.profiler.ProfilerActivity.CPU,
                 torch_npu.profiler.ProfilerActivity.NPU,
             ],
+            record_shapes=profiler_config.torch_profiler_record_shapes,
             with_stack=False,
             profile_memory=profiler_config.torch_profiler_with_memory,
             # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
