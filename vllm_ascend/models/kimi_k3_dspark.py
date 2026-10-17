@@ -357,40 +357,31 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
                     yield name, weight
 
         loaded_weights = loader.load_weights(weights_without_lm_head(), mapper=mapper)
-        if checkpoint_lm_head is not None:
-            expected_shape = (self.config.vocab_size, self.config.hidden_size)
-            if tuple(checkpoint_lm_head.shape) != expected_shape:
-                raise ValueError(
-                    f"K3 DSpark checkpoint LM head shape {tuple(checkpoint_lm_head.shape)} "
-                    f"does not match {expected_shape}."
-                )
-            # The checkpoint head already consumes draft hidden states. Do not
-            # rotate it with the target's QuaRot matrix. The ownership flag also
-            # makes align_draft_weights skip rebuilding it from target weights.
-            # load_weights runs outside BaseModelLoader's device context.
-            with torch.device(self.model.context_proj.weight.device):
-                self.lm_head = ParallelLMHead(
-                    self.config.vocab_size,
-                    self.config.hidden_size,
-                    params_dtype=self.draft_model_config.dtype,
-                    prefix="lm_head",
-                )
-            weight_loader = getattr(self.lm_head.weight, "weight_loader", default_weight_loader)
-            weight_loader(self.lm_head.weight, checkpoint_lm_head)
-            self.has_own_lm_head = True
-            loaded_weights.add("lm_head.weight")
-            logger.info(
-                "[K3 DSpark checkpoint head] Loaded draft lm_head.weight; "
-                "full_shape=%s, local_shape=%s, dtype=%s, has_own_lm_head=True",
-                expected_shape,
-                tuple(self.lm_head.weight.shape),
-                self.lm_head.weight.dtype,
+        if checkpoint_lm_head is None:
+            logger.debug("No K3 DSpark checkpoint LM head; using target sharing/alignment.")
+            return loaded_weights
+
+        expected_shape = (self.config.vocab_size, self.config.hidden_size)
+        if tuple(checkpoint_lm_head.shape) != expected_shape:
+            raise ValueError(
+                f"K3 DSpark checkpoint LM head shape {tuple(checkpoint_lm_head.shape)} does not match {expected_shape}."
             )
-        else:
-            logger.info(
-                "[K3 DSpark checkpoint head] No draft lm_head.weight found; "
-                "using existing target sharing/alignment behavior."
+        # load_weights runs outside BaseModelLoader's device context.
+        with torch.device(self.model.context_proj.weight.device):
+            lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                params_dtype=self.draft_model_config.dtype,
+                prefix="lm_head",
             )
+        weight_loader = getattr(lm_head.weight, "weight_loader", default_weight_loader)
+        weight_loader(lm_head.weight, checkpoint_lm_head)
+        self.lm_head = lm_head
+        # The checkpoint head already consumes draft hidden states. Ownership
+        # prevents target sharing/alignment from replacing or rotating it.
+        self.has_own_lm_head = True
+        loaded_weights.add("lm_head.weight")
+        logger.info("Loaded K3 DSpark checkpoint LM head, local shape: %s", tuple(lm_head.weight.shape))
         return loaded_weights
 
     def embed_input_ids(
