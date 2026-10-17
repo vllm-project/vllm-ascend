@@ -147,9 +147,26 @@ Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
 omit it or set it to `stair` to run STAIR.
 
+#### HIXL Weight Compaction (Experimental)
+
+With Model Runner V2, set `--additional-config '{"eplb_config":{"compact_weights":true}}'` with
+`--eplb-config.communicator hixl` to pack all participating expert storages and
+receive buffers into one registered allocation per rank. The default is `false`.
+Compaction preserves native NZ storage descriptors and parameter aliases. It
+runs before address exchange, profiling, and graph capture, and keeps
+`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` unchanged. It uses no MemPool.
+NZ migration requires a `torch_npu` build with native-NZ `copy_` support.
+
+The allocation remains owned by the live storages, which HIXL pins until
+deregistration. The memory profile counts this allocation as non-Torch memory.
+The original weights and compact allocation coexist during the initial copy,
+so initialization peak memory can increase even when steady memory decreases.
+Validate full-model accuracy, graph replay, migration, and memory use on the
+target runtime before using this experimental option in production.
+
 #### MRv2 Load Collection Phase
 
-`load_collection_phase` is the only MRv2 EPLB field under
+`load_collection_phase` is configured under
 `additional_config.eplb_config`. It controls which batch phases contribute to
 the upstream load window; it does not disable routing or MoE computation for
 non-matching batches.

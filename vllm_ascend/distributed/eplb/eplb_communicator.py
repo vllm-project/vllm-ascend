@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib import import_module
 from typing import Any
 
 import numpy as np
@@ -170,6 +171,7 @@ class _HixlSession:
         self._acl_context: Any = None
         self._registered_handles: list[int] = []
         self._storage_refs: list[Any] = []
+        self._compact_region: tuple[int, int] | None = None
         self._requests: list[int] = []
         self._remote_engines: dict[int, str] = {}
         self._usable = False
@@ -178,6 +180,7 @@ class _HixlSession:
     def initialize(self, communicators: dict[str, "AscendHixlEplbCommunicator"]) -> None:
         local_engine = ""
         local_meta: dict[str, _ExpertMetadata] = {}
+        tensors: list[torch.Tensor] = []
 
         def preflight() -> None:
             self._hixl = _resolve_hixl_module()
@@ -185,10 +188,20 @@ class _HixlSession:
                 if communicator._cpu_group is not self._cpu_group:
                     raise ValueError("HIXL EPLB models must share one CPU group")
                 communicator._prepare()
-                local_meta[key] = communicator._local_send_meta()
             self._device = next(iter(communicators.values()))._device
             if any(c._device != self._device for c in communicators.values()):
                 raise ValueError("HIXL EPLB models must share one NPU device")
+            tensors.extend(
+                tensor
+                for communicator in communicators.values()
+                for views in (*communicator._all_expert_weights, communicator._expert_buffer)
+                for tensor in communicator._iter_storage_tensors(views)
+            )
+            if any(c._compact_weights for c in communicators.values()):
+                torch.npu.set_device(self._device)
+                self._compact_tensor_storages(tensors)
+            for key, communicator in communicators.items():
+                local_meta[key] = communicator._local_send_meta()
 
         def initialize_engine() -> None:
             import acl  # type: ignore[import-not-found, import-untyped]  # NPU worker runtime.
@@ -210,12 +223,6 @@ class _HixlSession:
             self._initialize_phase(
                 lambda: self._exchange_remote_state(local_engine, communicators, local_meta), "metadata exchange"
             )
-            tensors = [
-                tensor
-                for communicator in communicators.values()
-                for views in (*communicator._all_expert_weights, communicator._expert_buffer)
-                for tensor in communicator._iter_storage_tensors(views)
-            ]
             self._initialize_phase(lambda: self._register_tensor_segments(tensors), "registration")
             self._connect_peers()
             self._usable = True
@@ -255,6 +262,15 @@ class _HixlSession:
         Holding the underlying storage keeps these pages allocated, including
         when a tensor is rebound to another storage during model rebuilding.
         """
+        if self._compact_region is not None:
+            self._storage_refs.extend(tensor.untyped_storage() for tensor in tensors)
+            if self._rank == 0:
+                logger.info(
+                    "Registering 1 compact NPU memory region (%.2f GiB) for HIXL EPLB.",
+                    self._compact_region[1] / 1024**3,
+                )
+            self._register_region(*self._compact_region)
+            return
         regions: list[tuple[int, int]] = []
         for tensor in tensors:
             storage = tensor.untyped_storage()
@@ -290,6 +306,26 @@ class _HixlSession:
             )
         for start, size in ordered_regions:
             self._register_region(start, size)
+
+    def _compact_tensor_storages(self, tensors: Sequence[torch.Tensor]) -> None:
+        # Runs before addresses are exchanged or any graph is captured. The
+        # native op moves each distinct StorageImpl once, preserving NZ metadata
+        # and all model/parameter/EPLB aliases of that storage.
+        started = time.perf_counter()
+        import_module("vllm_ascend.vllm_ascend_C")
+        torch.npu.empty_cache()
+        address, capacity, payload, count = torch.ops._C_ascend.compact_eplb_weights(list(tensors))
+        self._compact_region = (address, capacity)
+        # Return the original cached blocks before HIXL allocates its resources.
+        torch.npu.empty_cache()
+        if self._rank == 0:
+            logger.info(
+                "Compacted %d EPLB storages: %.2f GiB payload, %d bytes padding, %.3f s.",
+                count,
+                payload / 1024**3,
+                capacity - payload,
+                time.perf_counter() - started,
+            )
 
     def _register_region(self, address: int, size: int) -> None:
         assert self._engine is not None
@@ -473,12 +509,14 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         cpu_group: ProcessGroup,
         all_expert_weights: Sequence[Sequence[Any]],
         expert_buffer: Sequence[Any],
+        compact_weights: bool = False,
     ) -> None:
         self._cpu_group = cpu_group
         self._rank = cpu_group.rank()
         self._world_size = cpu_group.size()
         self._all_expert_weights = all_expert_weights
         self._expert_buffer = expert_buffer
+        self._compact_weights = compact_weights
         self._session: _HixlSession | None = None
         self._remote_send_meta: dict[int, _ExpertMetadata] = {}
         self._expert_to_src_row: list[dict[int, int]] | None = None

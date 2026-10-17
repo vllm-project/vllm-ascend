@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import routed_experts as _routed_exper
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_communicator import (
     AscendGlooEplbCommunicator,
     AscendHixlEplbCommunicator,
@@ -351,6 +352,7 @@ def _wrap_communicator_factory(original_factory):
                 cpu_group=bound.arguments["group_coordinator"].cpu_group,
                 all_expert_weights=bound.arguments["expert_weights"],
                 expert_buffer=bound.arguments["expert_buffer"],
+                compact_weights=get_ascend_config().eplb_config.compact_weights,
             )
         return original_factory(*bound.args, **bound.kwargs)
 

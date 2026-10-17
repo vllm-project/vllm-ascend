@@ -299,6 +299,37 @@ def test_registration_merges_live_ranges_without_bridging_holes(monkeypatch, ran
     assert communicator._storage_refs == []
 
 
+def test_compact_registration_pins_storages_and_registers_whole_parent(monkeypatch):
+    session = _bare_session(monkeypatch)
+    session._compact_region = (2_097_152, 4_194_304)
+    tensors = [_Tensor(2_097_152, session._device), _Tensor(4_194_816, session._device)]
+    session._register_tensor_segments(tensors)
+    assert [(d.addr, d.len) for d in session._engine.registered] == [session._compact_region]
+    assert len(session._storage_refs) == len(tensors)
+    session.close()
+    assert session._storage_refs == []
+
+
+def test_compaction_precedes_address_exchange(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    models["main"]._compact_weights = True
+    compact = MagicMock()
+
+    def move(tensors):
+        assert not engine.registered and not engine.connected
+        for tensor in tensors:
+            tensor._address += 2_097_152
+        session._compact_region = (2_097_152, 8_388_608)
+        compact()
+
+    monkeypatch.setattr(session, "_compact_tensor_storages", move)
+    session.initialize(models)
+    compact.assert_called_once_with()
+    assert len(engine.registered) == 1
+    assert models["main"]._remote_send_meta[1][(0, 0)][0][0] == 1000 + 2_097_152 + 10_000
+    session.close()
+
+
 @pytest.mark.parametrize("region_count", [4000, 4001])
 def test_registration_region_limit_is_checked_before_any_backend_call(monkeypatch, region_count):
     session = _bare_session(monkeypatch)

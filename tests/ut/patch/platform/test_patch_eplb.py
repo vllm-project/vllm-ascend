@@ -259,10 +259,16 @@ def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
     gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
 
 
-def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch):
+@pytest.mark.parametrize("compact_weights", [False, True, "false", "true"])
+def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch, compact_weights):
     communicator = object()
     hixl_cls = MagicMock(return_value=communicator)
     monkeypatch.setattr(patch_eplb, "AscendHixlEplbCommunicator", hixl_cls)
+    monkeypatch.setattr(
+        patch_eplb,
+        "get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=EplbConfig(compact_weights=compact_weights)),
+    )
     coordinator = MagicMock()
     weights = [[object()]]
     buffer = [object()]
@@ -279,6 +285,7 @@ def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch):
         cpu_group=coordinator.cpu_group,
         all_expert_weights=weights,
         expert_buffer=buffer,
+        compact_weights=EplbConfig(compact_weights=compact_weights).compact_weights,
     )
 
 

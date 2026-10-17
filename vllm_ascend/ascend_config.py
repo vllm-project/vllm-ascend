@@ -283,6 +283,8 @@ class EplbConfig:
     """
 
     dynamic_eplb: bool = False
+    # Pack HIXL expert weights and receive buffers before profile/graph capture.
+    compact_weights: bool = False
     expert_map_path: str | None = None
     expert_heat_collection_interval: int = 600
     algorithm_execution_interval: int = 50

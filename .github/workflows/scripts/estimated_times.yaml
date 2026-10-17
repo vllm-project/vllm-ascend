@@ -100,6 +100,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 290
   tests/e2e/pull_request/two_card/test_hixl_eplb_registration.py: 300
+  tests/e2e/pull_request/two_card/test_eplb_compact_migration.py: 120
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 650
   tests/e2e/pull_request/two_card/test_pipeline_parallel.py: 280
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 470
@@ -155,6 +156,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_mla_precision.py: 210
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 90
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 50
+  tests/e2e/pull_request/one_card/test_eplb_compact.py: 40
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 80
