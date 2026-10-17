@@ -117,7 +117,11 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
 @pytest.mark.parametrize("draft", [False, True])
 def test_ring_bypasses_position_to_page_mapping(draft):
     mapping = torch.zeros(8, dtype=torch.int64)
-    table = SimpleNamespace(is_circular_group=True, slot_mapping=SimpleNamespace(gpu=mapping))
+    table = SimpleNamespace(
+        is_circular_group=True,
+        uses_slot_mapping=ring_spec().uses_slot_mapping,
+        slot_mapping=SimpleNamespace(gpu=mapping),
+    )
     if draft:
         BlockTable.compute_slot_mapping_draft(table, Mock(), Mock())
     else:
