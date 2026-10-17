@@ -149,13 +149,39 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        self.block_pool = BlockPool(
-            num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
+        group_num_blocks = getattr(kv_cache_config, "group_num_blocks", None)
+        if (
+            group_num_blocks
+            and len(group_num_blocks) == len(kv_cache_config.kv_cache_groups)
+            and len(set(group_num_blocks)) > 1
+        ):
+            # Window-capped per-group pools (Plan B): one BlockPool per KV
+            # cache group (sliding groups window-sized, full group the rest).
+            # The NPU runner sizes each layer's buffer by its group's block
+            # count (see model_runner_v1), so groups no longer share one pool.
+            from vllm_ascend.patch.platform.patch_per_group_pools import PerGroupBlockPools
+
+            self.block_pools = [
+                BlockPool(
+                    num_gpu_blocks=nb,
+                    enable_caching=enable_caching,
+                    hash_block_size=hash_block_size,
+                    enable_kv_cache_events=enable_kv_cache_events,
+                    metrics_collector=metrics_collector,
+                )
+                for nb in group_num_blocks
+            ]
+            self.block_pool = PerGroupBlockPools(self.block_pools)
+        else:
+            single_pool = BlockPool(
+                num_gpu_blocks=kv_cache_config.num_blocks,
+                enable_caching=enable_caching,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
+            )
+            self.block_pools = [single_pool] * len(kv_cache_config.kv_cache_groups)
+            self.block_pool = single_pool
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
@@ -177,7 +203,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
-                block_pool=self.block_pool,
+                block_pool=self.block_pools[i],
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
