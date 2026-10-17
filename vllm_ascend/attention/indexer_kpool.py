@@ -747,10 +747,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # below still uses the original lengths/positions: it discards the
         # placeholder history and reconstructs the real unpooled tail.
         selection_seq_lens = query_metadata.seq_lens.clamp_min(1)
+        cum_query_lens = query_metadata.cum_query_lens
+        assert cum_query_lens is not None
         selection_query_lens = torch.where(
-            query_metadata.cum_query_lens[-1:] > 0,
-            query_metadata.cum_query_lens,
-            torch.ones_like(query_metadata.cum_query_lens),
+            cum_query_lens[-1:] > 0,
+            cum_query_lens,
+            torch.ones_like(cum_query_lens),
         )
         indices, _ = self._pool_key_indexer(
             query,
