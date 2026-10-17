@@ -306,6 +306,12 @@ a3-560t:
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
+  multi_node:
+    test_config:
+      - name: GLM-5.3-Flash-W8A8-A5-PD
+        size: 2
+        config_file_path: GLM-5.3-Flash-W8A8-A5-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
 #   multi_node:
 #     test_config:
 #       - name: Qwen3-235B-W8A8-EPLB
