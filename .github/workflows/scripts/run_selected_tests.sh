@@ -6,8 +6,12 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
-# Set to true temporarily to run all selected targets before reporting failure.
+# Set to true (or export CONTINUE_ON_ERROR=true) to run all selected targets
+# before reporting failure.
 continue_on_error=false
+if [ "${CONTINUE_ON_ERROR:-}" = "true" ]; then
+  continue_on_error=true
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

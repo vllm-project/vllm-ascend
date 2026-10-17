@@ -360,6 +360,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          CONTINUE_ON_ERROR: ${{ inputs.continue_on_error }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
