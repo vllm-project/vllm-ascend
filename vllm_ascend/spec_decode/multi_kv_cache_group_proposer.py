@@ -331,6 +331,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
+        batch_descriptor=None,
     ):
         if not self._uses_multi_group_kv_cache:
             return super().build_draft_attn_metadata(

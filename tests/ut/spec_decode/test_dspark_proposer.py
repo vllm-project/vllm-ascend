@@ -39,7 +39,12 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.worker.dcp_utils import DCPManager
-from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataExecutor,
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+    DeviceMetadataTaskProvider,
+)
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -51,17 +56,21 @@ _HIDDEN_SIZE = 16
 
 
 @pytest.mark.parametrize(
-    ("dcp_size", "pcp_enabled", "expected_submit"),
+    ("dcp_size", "pcp_enabled", "expected_run"),
     [(1, False, True), (2, False, False), (1, True, False)],
 )
-def test_build_draft_metadata_submits_only_non_cp_device_tasks(
+def test_build_draft_metadata_runs_only_non_cp_device_tasks_inline(
     dcp_size: int,
     pcp_enabled: bool,
-    expected_submit: bool,
+    expected_run: bool,
 ):
-    tasks = [DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, group_id) for group_id in (7, 9)]
+    ran = []
+    tasks = [
+        DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda gid=group_id: ran.append(gid), group_id)
+        for group_id in (7, 9)
+    ]
 
-    class DraftMetadataProvider:
+    class DraftMetadataProvider(DeviceMetadataTaskProvider):
         def __init__(self, task):
             self.enabled = False
             self.task = task
@@ -98,6 +107,13 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
         _get_primary_draft_attn_group=lambda: groups[0],
+        # The DSpark draft runs its deferred metadata kernels inline (sync
+        # contract): a dedicated executor instance is returned only for the
+        # eligible (non-CP) case and nothing is ever submitted to the runner's
+        # executor.
+        _dspark_device_metadata_executor=(
+            lambda: DeviceMetadataExecutor() if (dcp_size == 1 and not pcp_enabled) else None
+        ),
     )
     common_attn_metadata = SimpleNamespace(
         num_reqs=1,
@@ -114,10 +130,10 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
 
     assert metadata[0]["draft.attn.0"] is first
     assert all(not builder.enabled for builder in builders)
-    if expected_submit:
-        executor.submit.assert_called_once_with(tasks)
-    else:
-        executor.submit.assert_not_called()
+    # Eligible (non-CP) draft metadata tasks run inline on the current
+    # stream; the runner's executor is never used.
+    assert ran == ([7, 9] if expected_run else [])
+    executor.submit.assert_not_called()
 
 
 @pytest.mark.parametrize("has_task", [True, False])
@@ -140,6 +156,12 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer.runner = runner
     proposer.method = "dspark"
+    proposer._draft_target_positions = None
+    proposer.max_num_tokens = 8
+    # DSpark keeps a private device-metadata executor; it never touches the
+    # runner's (target-owned) executor.
+    proposer._dspark_device_metadata_executor = lambda: executor
+    executor.submission_in_flight = has_task
     proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
     proposer.hidden_size = 4
     proposer.use_cuda_graph = False
@@ -649,7 +671,10 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
 
         def runnable(**kwargs):
             # One local request contributes five query tokens, while DP sync pads the draft input to eight tokens.
-            assert proposer._dflash_num_context == 8
+            # The capture-side num_context is bucket-aligned with the replay
+            # side: num_reqs * (1 + num_speculative_tokens) = 1 * (1 + 5) = 6
+            # (the DP-padded token count would bake a wrong slice length).
+            assert proposer._dflash_num_context == 6
             proposer._pad_draft_buffers(num_actual_tokens=5, num_input_tokens=8)
 
         monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context)
@@ -666,7 +691,7 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
 
         proposer.dummy_run(num_tokens=5, num_reqs=1, is_profile=False)
 
-        assert proposer._dflash_num_context == 8
+        assert proposer._dflash_num_context == 6
         proposer._runnable.assert_called_once()
 
     def test_dspark_dummy_run_clears_all_group_buffers_before_forward(self, monkeypatch):
@@ -734,7 +759,10 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             hf_config=hf_config,
             draft_sample_method=draft_sample_method,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        # Sized for the largest graph bucket the runner can dispatch a draft
+        # step to (max_num_seqs * (1 + num_speculative_tokens)); the per-query
+        # capacity alone is too small once the draft is padded to the bucket.
+        expected_max_query_tokens = _MAX_BATCH_SIZE * max(expected_num_query_per_req, 1 + _NUM_SPECULATIVE_TOKENS)
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
