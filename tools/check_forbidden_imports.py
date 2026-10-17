@@ -56,6 +56,8 @@ CHECK_IMPORTS = {
             # The doctest selector runs in a minimal CPU workflow before
             # project dependencies are installed.
             "tests/e2e/doctests/scripts/doctest_helper.py",
+            # Profiling indexes run in minimal CPU jobs without third-party dependencies.
+            "tools/profiling/artifacts.py",
         },
     ),
     "triton": ForbiddenImport(
