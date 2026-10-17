@@ -480,6 +480,13 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     def kv_cache(self):
         return self._attention_layer.kv_cache
 
+    @kv_cache.setter
+    def kv_cache(self, value):
+        # Upstream clear_layer_kv_caches() detaches the KV cache tensors on
+        # teardown by assigning ``layer.kv_cache``; delegate the assignment to
+        # the wrapped attention layer, whose ``kv_cache`` is a plain attribute.
+        self._attention_layer.kv_cache = value
+
     @property
     def kv_cache_dtype(self):
         return self._attention_layer.kv_cache_dtype
