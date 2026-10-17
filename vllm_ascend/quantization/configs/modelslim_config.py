@@ -100,7 +100,7 @@ def _make_modelslim_moe_weight_loader(
     if not isinstance(weight_loader, MethodType):
         # Preserve the existing interface for callables without a bound owner.
         @wraps(weight_loader)
-        def modelslim_moe_weight_loader(
+        def plain_weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
             weight_name: str,
@@ -117,7 +117,7 @@ def _make_modelslim_moe_weight_loader(
                 return_success=return_success,
             )
 
-        return modelslim_moe_weight_loader
+        return plain_weight_loader
 
     owner = weight_loader.__self__
     unbound_loader = weight_loader.__func__
