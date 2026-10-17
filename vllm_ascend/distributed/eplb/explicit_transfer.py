@@ -9,7 +9,110 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch_npu
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
+
+
+def copy_expert_tensor_(destination: torch.Tensor, source: torch.Tensor) -> None:
+    """Copy one expert tensor while preserving its Ascend storage format.
+
+    Ascend 950 does not implement device-to-device ``Tensor.copy_`` when
+    both tensors use an internal format such as FRACTAL_NZ. EPLB buffers are
+    created with ``empty_like``, so matching internal-format tensors have the
+    same physical layout and can be copied byte-for-byte without another
+    format conversion.
+    """
+    if destination.device.type == "npu" and source.device.type == "npu":
+        destination_format = int(torch_npu.get_npu_format(destination))
+        source_format = int(torch_npu.get_npu_format(source))
+        if destination.shape != source.shape or destination.dtype != source.dtype:
+            raise ValueError("EPLB tensors must have matching shape and dtype")
+        if destination_format != source_format:
+            format_cast_kwargs = {}
+            if destination_format != int(torch_npu.Format.ND):
+                format_cast_kwargs["customize_dtype"] = destination.dtype
+            source = torch_npu.npu_format_cast(source, destination_format, **format_cast_kwargs)
+            source_format = destination_format
+        if destination_format == source_format and destination_format != int(torch_npu.Format.ND):
+            torch_npu.copy_memory_(destination, source)
+            return
+    destination.copy_(source, non_blocking=True)
+
+
+def requires_format_aware_copy(
+    expert_weights: Sequence[torch.Tensor | Sequence[torch.Tensor]],
+) -> bool:
+    """Return whether any EPLB weight uses a non-ND NPU format."""
+    for weight in expert_weights:
+        if isinstance(weight, (torch.Tensor, Sequence)):
+            tensors = weight
+        else:
+            continue
+        for tensor in tensors:
+            if (
+                isinstance(tensor, torch.Tensor)
+                and tensor.device.type == "npu"
+                and int(torch_npu.get_npu_format(tensor)) != int(torch_npu.Format.ND)
+            ):
+                return True
+    return False
+
+
+def commit_staged_expert_weights(
+    expert_weights: Sequence[torch.Tensor | Sequence[torch.Tensor]],
+    expert_weight_buffers: Sequence[torch.Tensor | Sequence[torch.Tensor]],
+    transfer_metadata: TransferMetadata,
+    new_indices: np.ndarray,
+    ep_rank: int,
+) -> None:
+    """Commit staged EPLB weights using an Ascend-format-aware copy."""
+    is_unchanged = transfer_metadata.is_unchanged
+    is_received_locally = transfer_metadata.is_received_locally
+    recv_primary_mask = transfer_metadata.recv_primary_mask
+    recv_count = transfer_metadata.recv_count
+    recv_expert_ids = transfer_metadata.recv_expert_ids
+    recv_dst_rows = transfer_metadata.recv_dst_rows
+    num_local_experts = is_unchanged.shape[0]
+
+    copy_mask = np.logical_or(is_received_locally, recv_primary_mask)
+    destination_mask = np.logical_and(~is_unchanged, copy_mask)
+    for destination in np.nonzero(destination_mask)[0].tolist():
+        for weight, buffer in zip(expert_weights, expert_weight_buffers):
+            copy_expert_tensor_(weight[destination], buffer[destination])
+
+    if recv_count == 0:
+        return
+
+    base = ep_rank * num_local_experts
+    local_experts = new_indices[base + np.arange(num_local_experts, dtype=np.int32)]
+    duplicate_mask = np.logical_and(
+        np.logical_and(~is_unchanged, ~is_received_locally),
+        np.logical_and(~recv_primary_mask, local_experts != -1),
+    )
+    if not bool(duplicate_mask.any()):
+        return
+
+    duplicate_destinations = np.nonzero(duplicate_mask)[0]
+    duplicate_experts = local_experts[duplicate_destinations]
+    primary_experts = recv_expert_ids[:recv_count]
+    primary_destinations = recv_dst_rows[:recv_count]
+    order = np.argsort(primary_experts, kind="stable")
+    primary_experts = primary_experts[order]
+    primary_destinations = primary_destinations[order]
+    positions = np.asarray(
+        np.searchsorted(primary_experts, duplicate_experts),
+        dtype=np.intp,
+    )
+    valid = np.logical_and(
+        positions < primary_experts.shape[0],
+        primary_experts[np.minimum(positions, primary_experts.shape[0] - 1)] == duplicate_experts,
+    )
+    for destination, source in zip(
+        duplicate_destinations[valid].tolist(),
+        primary_destinations[positions[valid]].tolist(),
+    ):
+        for weight in expert_weights:
+            copy_expert_tensor_(weight[destination], weight[source])
 
 
 def stage_explicit_layer_transfer(
@@ -122,7 +225,7 @@ def stage_explicit_layer_transfer(
                         is_unchanged[dst_slot] = src_slot == dst_slot
                         if src_slot != dst_slot:
                             for weight, buffer in zip(expert_weights, expert_weight_buffers):
-                                buffer[dst_slot].copy_(weight[src_slot], non_blocking=True)
+                                copy_expert_tensor_(buffer[dst_slot], weight[src_slot])
                     continue
                 if ep_rank == src_rank:
                     communicator.add_send([weight[src_slot] for weight in expert_weights], dst_rank, expert)
