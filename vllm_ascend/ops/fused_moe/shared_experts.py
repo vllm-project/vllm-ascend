@@ -724,6 +724,16 @@ class AscendSharedExperts:
             return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
+    def record_output_ready(self) -> torch.npu.Event:
+        """Mark already-submitted shared work from outside the opaque op.
+
+        Call only after shared forward has queued its output collective and
+        before independent routed-output work. That work must not append to
+        the shared stream or modify the shared output. The consumer must
+        still wait on the returned event before reading the shared output.
+        """
+        return shared_experts_calculation_stream().record_event()
+
     def wait_for_output(self) -> None:
         """Join a deferred SP shared-output collective on the current stream."""
         # This join is intentionally stream-based. The shared forward executes

@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
@@ -91,6 +90,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
+from vllm_ascend.ops.linear import AscendReplicatedLinear
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -328,6 +328,24 @@ def is_moe_layer_idx(config, layer_idx: int) -> bool:
     )
 
 
+class KimiK3RouterLinear(AscendReplicatedLinear):
+    """Kimi's external router: BF16 operands with FP32 output logits."""
+
+    def __init__(self, input_size: int, output_size: int, prefix: str = "") -> None:
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=None,
+            prefix=prefix,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        logits = torch.mm(hidden_states, self.weight.T, out_dtype=torch.float32)
+        return logits, None
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -361,11 +379,9 @@ class AscendKimiMoE(nn.Module):
         activation_situ_beta = config.activation_situ_beta if config.hidden_act == "situ" else None
         activation_situ_linear_beta = config.activation_situ_linear_beta if config.hidden_act == "situ" else None
 
-        self.gate = GateLinear(
+        self.gate = KimiK3RouterLinear(
             input_size=hidden_size,
             output_size=num_experts,
-            bias=False,
-            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts, dtype=torch.float32))

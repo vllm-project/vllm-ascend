@@ -1468,7 +1468,6 @@ class TestUpstreamConfigCompatibility(TestBase):
                 )
             )
         )
-
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(kimi_k3))
         kimi_k3.model_config.hf_text_config.routed_expert_hidden_size = 8193
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(kimi_k3))
