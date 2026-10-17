@@ -89,12 +89,24 @@ rm_broken = len(rm_errors) > 0
 part_errors: list[str] = []
 # Collect actual runner keys used in routing
 actual_runner_keys: set[str] = set()
+# Longest pattern wins, matching select_tests.py. Directory patterns such as
+# one_card would otherwise hide a more specific route.
 for p in all_expanded_files:
-    for pat_str, rc in _rm.items():
+    for pat_str, rc in sorted(_rm.items(), key=lambda item: len(item[0]), reverse=True):
         if re.compile(pat_str).search(p):
             for rk in rc.values():
                 actual_runner_keys.add(rk)
             break
+
+# select_tests.py moves curated_tests.a5 one_card files onto a5-4 after the
+# directory route. Those files never appear in runner_mapping.
+for target in (meta.get("curated_tests", {}) or {}).get("a5", []) or []:
+    if not isinstance(target, str):
+        continue
+    normalized = target.replace("\\", "/").rstrip("/")
+    if "/one_card/" in f"/{normalized}/" and "_310p" not in Path(normalized).name:
+        actual_runner_keys.add("a5-4")
+        break
 
 for key in sorted(actual_runner_keys - _part.keys()):
     part_errors.append(f"Referenced partition {key!r}: missing configuration")
