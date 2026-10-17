@@ -44,6 +44,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    balanced_prefill_row_shard,
     build_compressor_metadata_out,
     build_vision_bidirectional_swa_indices,
 )
@@ -108,6 +109,146 @@ def test_build_vision_bidirectional_swa_indices():
         [45, 46, -1, -1, -1, -1],
         [46, 47, -1, -1, -1, -1],
     ]
+
+
+def _prefill_row_costs(seq_lens: list[int], query_lens: list[int], compress_ratio: int) -> list[int]:
+    return [
+        (seq_len - query_len + 1 + row) // compress_ratio
+        for seq_len, query_len in zip(seq_lens, query_lens)
+        for row in range(query_len)
+    ]
+
+
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    ("seq_lens", "query_lens"),
+    [
+        ([16384], [16384]),
+        ([216384], [16384]),
+        ([8192, 9007, 69536], [8192, 7, 4096]),
+        ([500000 + 4096, 12288], [4096, 12288]),
+    ],
+)
+def test_balanced_prefill_row_shard_balances_indexer_work(
+    tp_size: int,
+    seq_lens: list[int],
+    query_lens: list[int],
+):
+    sizes = balanced_prefill_row_shard(
+        torch.tensor(seq_lens),
+        torch.tensor(query_lens),
+        compress_ratio=4,
+        tp_size=tp_size,
+        min_rows_per_rank=1,
+    )
+
+    assert sizes is not None
+    assert len(sizes) == tp_size
+    assert min(sizes) > 0
+    assert sum(sizes) == sum(query_lens)
+
+    costs = _prefill_row_costs(seq_lens, query_lens, 4)
+
+    def imbalance(parts: tuple[int, ...] | list[int]) -> float:
+        rank_costs = []
+        offset = 0
+        for size in parts:
+            rank_costs.append(sum(costs[offset : offset + size]))
+            offset += size
+        return max(rank_costs) / (sum(rank_costs) / len(rank_costs))
+
+    rows = sum(query_lens)
+    base, remainder = divmod(rows, tp_size)
+    equal_sizes = [base + (rank < remainder) for rank in range(tp_size)]
+    assert imbalance(sizes) <= imbalance(equal_sizes) + 1e-9
+    assert imbalance(sizes) < 1.02
+
+
+def test_balanced_prefill_row_shard_declines_unsupported_workloads():
+    rows = 4095
+    seq_lens = torch.tensor([rows])
+    query_lens = torch.tensor([rows])
+
+    assert balanced_prefill_row_shard(seq_lens, query_lens, 4, 4, 1024) is None
+    assert balanced_prefill_row_shard(seq_lens, query_lens, 4, 1, 1) is None
+
+
+def test_prepare_prefill_row_shard_rebases_cross_request_metadata():
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder.compressor_ratio = 4
+    builder.device = "cpu"
+    builder.block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    builder.prefill_row_shard_qli_metadata_buffer = torch.zeros(
+        DSA_METADATA_BUFFER_SIZE,
+        dtype=torch.int32,
+    )
+    builder._prefill_row_sharding_supported = MagicMock(return_value=True)
+    common_attn_metadata = SimpleNamespace(query_start_loc_cpu=torch.tensor([0, 4, 10], dtype=torch.int32))
+
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=2,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank",
+            return_value=1,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.balanced_prefill_row_shard",
+            return_value=(3, 7),
+        ),
+    ):
+        shard = builder._prepare_prefill_row_shard(
+            common_attn_metadata,
+            seq_lens_cpu=torch.tensor([8, 10]),
+            num_actual_reqs=2,
+            full_graph_mode=False,
+        )
+
+    assert shard is not None
+    assert (shard.start, shard.stop, shard.sizes) == (3, 10, (3, 7))
+    assert torch.equal(shard.block_table, builder.block_table)
+    assert torch.equal(shard.qli_cu_seqlens_q, torch.tensor([0, 1, 7], dtype=torch.int32))
+    assert torch.equal(shard.qli_seqused_k, torch.tensor([2, 2], dtype=torch.int32))
+    assert torch.equal(shard.qli_cmp_residual_k, torch.tensor([0, 2], dtype=torch.int32))
+    assert shard.max_seqlen_q == 6
+    assert shard.max_seqlen_kv == 10
+
+
+def test_prefill_row_sharding_gate_is_conservative():
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder.compressor_ratio = 4
+    builder.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4"))
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+    )
+    builder.num_decode_tokens = 0
+    builder.num_prefills = 1
+
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.envs.VLLM_ASCEND_DSV4_PREFILL_INDEXER_TP_SHARD",
+            True,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=4,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_config",
+            return_value=SimpleNamespace(enable_dsa_cp=False),
+        ),
+    ):
+        assert builder._prefill_row_sharding_supported(full_graph_mode=False)
+
+        builder.num_decode_tokens = 1
+        assert not builder._prefill_row_sharding_supported(full_graph_mode=False)
+        builder.num_decode_tokens = 0
+        assert not builder._prefill_row_sharding_supported(full_graph_mode=True)
 
 
 def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
