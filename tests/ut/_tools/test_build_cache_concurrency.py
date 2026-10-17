@@ -245,32 +245,48 @@ def test_many_parallel_hits_complete_without_hang(tmp_path: Path):
     shutil.rmtree(state, ignore_errors=True)
     shutil.rmtree(tmp_path / "seed-stages", ignore_errors=True)
 
+    # All 32 hits serialize publication. Allow contention on shared CI
+    # runners; the dedicated lock-timeout tests above cover fail-fast behavior.
+    lock_timeout_seconds = 30
+    batch_timeout_seconds = 60
     env = os.environ.copy()
     env.update(
         {
-            "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": "5",
-            "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": "5",
+            "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": str(lock_timeout_seconds),
+            "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": str(lock_timeout_seconds),
         }
     )
 
     processes = []
-    for command, _ in commands:
-        processes.append(
-            subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-        )
-
     outputs = []
-    for proc in processes:
-        stdout, stderr = proc.communicate(timeout=20)
-        outputs.append((proc.returncode, stdout, stderr))
+    deadline = time.monotonic() + batch_timeout_seconds
+    try:
+        for command, _ in commands:
+            processes.append(
+                subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+            )
 
-    assert all(code == 0 for code, _, _ in outputs), outputs
+        # Bound the whole wave, rather than giving each child a fresh timeout.
+        for proc in processes:
+            stdout, stderr = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+            outputs.append((proc.returncode, stdout, stderr))
+    finally:
+        # A timeout or spawn failure must not leave publishers running after
+        # pytest starts cleaning up the temporary build tree.
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+        for proc in processes:
+            proc.communicate()
+
+    failures = [output for output in outputs if output[0] != 0]
+    assert not failures, failures
     assert all("[build-cache] HIT" in stdout for _, stdout, _ in outputs)
     assert all(counter.read_text() == "1" for _, counter in commands)
     assert len(list(publish.glob("*.o"))) == action_count
