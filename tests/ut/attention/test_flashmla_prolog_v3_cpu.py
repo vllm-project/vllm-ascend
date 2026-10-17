@@ -16,12 +16,23 @@ MLA = "vllm_ascend/attention/mla_v1.py"
 
 def load(path, name, scope, owner=None):
     nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
+    constants = [
+        node
+        for node in nodes
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PROLOG_V3_SUPPORTED_INPUT_SIZES" for target in node.targets
+        )
+    ]
     if owner:
         nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == owner).body
     node = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == name)
     node.decorator_list = []
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[future, node], type_ignores=[])), path, "exec"), scope)
+    exec(
+        compile(ast.fix_missing_locations(ast.Module(body=[future, *constants, node], type_ignores=[])), path, "exec"),
+        scope,
+    )
     return scope[name]
 
 
@@ -107,7 +118,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         use_mla_rope=True,
         enable_kv_nz=False,
         fa_quant_layer=False,
-        fused_qkv_a_proj=object(),
+        fused_qkv_a_proj=SimpleNamespace(input_size=7168),
         q_proj=SimpleNamespace(_chunk_size=0),
         q_lora_rank=4,
         supports_prolog_v3_quantization=lambda: True,
@@ -124,6 +135,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     )
     for name in (
         "supports_prolog_v3_dtype",
+        "_supports_strided_mla_projection",
         "supports_prolog_v3_writer",
         "_validate_prolog_v3_cache",
         "_cache_requires_prolog_v3_writer",
