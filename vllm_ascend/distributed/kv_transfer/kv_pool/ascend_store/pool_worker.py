@@ -943,8 +943,29 @@ class KVPoolWorker:
         block_size_scale = tensor_num_blocks // self.num_blocks
         block_len = cache[0].numel() * cache.element_size() * block_size_scale
         block_stride = cache.stride(0) * cache.element_size() * block_size_scale
-        region_len = (self.num_blocks - 1) * block_stride + block_len if self.num_blocks else 0
+        # Registration covers the physical span, including gaps between kernel
+        # blocks inside one scheduler block and non-contiguous inner views.
+        region_len = (
+            (1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))) * cache.element_size()
+            if cache.numel()
+            else 0
+        )
         return block_len, block_stride, region_len, block_size_scale
+
+    def _get_cache_transfer_segments(self, cache: torch.Tensor) -> list[tuple[int, int, int]]:
+        """Describe full-block pool transfers without crossing kernel-page gaps.
+
+        Layerwise partial-block transfers retain their existing descriptor
+        contract. Non-layerwise pooling saves/loads complete scheduler blocks.
+        """
+        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
+        physical_bytes = block_len // scale
+        physical_stride = block_stride // scale
+        if self.use_layerwise or scale == 1 or physical_stride == physical_bytes:
+            return [(cache.data_ptr(), block_len, block_stride)]
+        if not cache[0].is_contiguous():
+            raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
+        return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
 
     @staticmethod
     def _get_storage_key(cache: torch.Tensor) -> int:
@@ -1010,11 +1031,10 @@ class KVPoolWorker:
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 for cache in self._as_cache_tuple(cache_or_caches):
-                    base_addr = cache.data_ptr()
-                    block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                    group_addrs.append(base_addr)
-                    group_block_lens.append(block_len)
-                    group_block_strides.append(block_stride)
+                    for base_addr, block_len, block_stride in self._get_cache_transfer_segments(cache):
+                        group_addrs.append(base_addr)
+                        group_block_lens.append(block_len)
+                        group_block_strides.append(block_stride)
             layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
