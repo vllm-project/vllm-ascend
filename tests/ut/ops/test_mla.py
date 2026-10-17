@@ -716,6 +716,7 @@ def test_mla_sp_no_metadata_keeps_zero_output_local(profiling, turboquant):
     context = SimpleNamespace(no_compile_layers={"layer": wrapper}, attn_metadata=None, in_profile_run=profiling)
     with (
         patch("vllm_ascend.ops.mla.get_forward_context", return_value=context),
+        patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False),
         patch("vllm.distributed.tensor_model_parallel_all_gather") as gather,
         patch("torch.distributed.reduce_scatter_tensor", side_effect=lambda out, x, **kw: out.copy_(x[:2])) as scatter,
     ):
