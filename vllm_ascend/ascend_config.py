@@ -29,6 +29,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -535,7 +536,7 @@ class AscendConfig:
             "sparse_kv_offload_config": {
                 "enabled": false,
                 "topk_buffer_size": -1,
-                "dram_size_per_dp_GB": 128,
+                "dram_size_per_dp_GB": 110,
                 "keep_device_kv_cache": false
             }
         }
@@ -1678,7 +1679,7 @@ class SparseKVOffloadConfig:
     enabled: bool = False
     # -1 resolves to (1 + num_speculative_tokens) * 2048.
     topk_buffer_size: int = -1
-    dram_size_per_dp_GB: int = 128
+    dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
@@ -1713,6 +1714,13 @@ class SparseKVOffloadConfig:
     def _validate_preconditions(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
+
+        if is_950():
+            raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
+            raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")
