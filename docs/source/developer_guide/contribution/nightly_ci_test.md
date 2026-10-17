@@ -178,6 +178,12 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
     A3 will queue a large number of jobs — prefer targeting specific test names when
     possible.
 
+**Single-node tests** (`a3.single_node.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `DeepSeek-V4.1-Flash-W8A8-DSpark-MRV2-PCP` | DeepSeek-V4.1-Flash W8A8, MRV2 + DP2 + TP2 + PCP4 + EP + DSpark, GPQA accuracy and DSpark acceptance, 16 NPUs |
+
 ### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
 
 **Single-node tests** (`a3-560t.single_node.test_config`):
