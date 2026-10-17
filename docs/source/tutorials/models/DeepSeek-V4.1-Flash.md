@@ -51,6 +51,13 @@ The official 1017 update is available from
 [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
 on Hugging Face.
 
+The Ascend W8A8 checkpoint used by this guide will be published as
+[Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
+on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
+After the checkpoint is available, download it to the same absolute path on
+every server and replace the checkpoint-path placeholder in each serving
+command.
+
 For the Ascend W8A8 checkpoint of the 1017 update, refer to
 [Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)
 on ModelScope. Use a checkpoint that includes the DSpark draft parameters and
