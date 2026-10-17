@@ -41,10 +41,12 @@ import types
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.distributed.weight_transfer.base import WeightTransferEngine
 
-from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+    NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
+    PackedNpuBufferImporter,
 )
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
@@ -90,7 +92,7 @@ def test_init_passes_model_to_super():
     def fake_init_v1(self, config, vllm_config, device, model):
         captured["args"] = (config, vllm_config, device, model)
 
-    with patch.object(npu_ipc_engine.WeightTransferEngine, "__init__", fake_init_v1):
+    with patch.object(WeightTransferEngine, "__init__", fake_init_v1):
         device = torch.device("npu:0")
         NPUIPCWeightTransferEngine("config", "vllm_config", device, "model")
 
@@ -108,15 +110,13 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
 
     captured = {}
 
-    with patch(f"{_MODULE}.reduce_tensor", fake_reduce):
-        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-            NPUIPCTrainerWeightTransferEngine,
-        )
-
-        engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
-        engine.client = MagicMock()
-        engine.is_sender = True
-        engine.npu_uuid = "node-0"
+    with (
+        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+        patch("torch.cuda.get_device_properties", side_effect=AssertionError("unexpected CUDA access")),
+    ):
+        engine = NPUIPCTrainerWeightTransferEngine(client=MagicMock(), source=MagicMock())
         engine._do_send = lambda **kw: captured.update(kw)
         engine._all_gather_and_merge_handles = lambda x: x
         engine._post_send_sync = MagicMock()
@@ -171,7 +171,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     ):
         engine.receive_weights(update_info)
 
-    mock_uuid.assert_called_once_with()
+    mock_uuid.assert_called_once_with(device_index)
     engine.model.load_weights.assert_called_once()
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
@@ -190,16 +190,38 @@ def test_start_weight_update():
     mock_init.assert_called_once_with(engine.model)
 
 
+def test_npu_importer_reuses_mapping_until_export_changes_or_closes():
+    """Chunks of one export share one rebuild; subsequent exports replace it."""
+    packed = torch.zeros(8, dtype=torch.uint8)
+    args = ("first-export", 8, 0, 0, 0, 0, 99, None)
+    importer = PackedNpuBufferImporter()
+    rebuild = MagicMock(return_value=packed)
+    with _patch_rebuild_npu_tensor(rebuild):
+        assert importer.rebuild_for_device(args, 2) is packed
+        assert importer.rebuild_for_device(args, 2) is packed
+        rebuild.assert_called_once_with(*args[:6], 2, None)
+        assert args[6] == 99
+
+        next_args = ("next-export", *args[1:])
+        assert importer.rebuild_for_device(next_args, 2) is packed
+        assert rebuild.call_count == 2
+        importer.close()
+        assert importer.rebuild_for_device(next_args, 2) is packed
+        assert rebuild.call_count == 3
+
+
 def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    engine._packed_importer = MagicMock()
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
     mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+    engine._packed_importer.close.assert_called_once_with()
 
 
 def test_receive_packed_weights_loads_model():
@@ -216,6 +238,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -234,5 +257,7 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        rebuild_func=engine._packed_importer.rebuild_for_device,
+        device=engine.device,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)

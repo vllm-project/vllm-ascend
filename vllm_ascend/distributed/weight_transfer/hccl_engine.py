@@ -11,12 +11,12 @@ import torch
 if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
-from vllm.config import VllmConfig
-from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferEngine,
     WeightTransferInitInfo,
-    WeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLWeightTransferEngine,
+    NCCLWeightTransferUpdateInfo,
 )
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
@@ -68,15 +68,9 @@ class HCCLTrainerSendWeightsArgs:
 
 
 @dataclass
-class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
+class HCCLWeightTransferUpdateInfo(NCCLWeightTransferUpdateInfo):
     """Update info for HCCL weight transfer backend."""
 
-    names: list[str]
-    """Names of the parameters to transfer (e.g. ``model.layers.0.weight``)."""
-    dtype_names: list[str]
-    """Torch dtype names (e.g. ``bfloat16``, ``float32``) for each parameter."""
-    shapes: list[list[int]]
-    """Shapes of each parameter as integer lists."""
     packed: bool = False
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
@@ -88,21 +82,8 @@ class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Number of buffers for double/triple buffering during packed transfer.
     Both producer and consumer must use the same value."""
 
-    def __post_init__(self):
-        """Validate that all lists have the same length."""
-        num_params = len(self.names)
-        if len(self.dtype_names) != num_params:
-            raise ValueError(
-                f"`dtype_names` should be of the same size as `names`: "
-                f"got {len(self.dtype_names)} and {len(self.names)}"
-            )
-        if len(self.shapes) != num_params:
-            raise ValueError(
-                f"`shapes` should be of the same size as `names`: got {len(self.shapes)} and {len(self.names)}"
-            )
 
-
-class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, HCCLWeightTransferUpdateInfo]):
+class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
     """
     Weight transfer engine using HCCL for communication between trainer and workers.
 
@@ -113,30 +94,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     # Define backend-specific dataclass types
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
-
-    def __init__(  # type: ignore[misc]
-        self,
-        config: WeightTransferConfig,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        model: torch.nn.Module,
-    ) -> None:
-        super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
-
-    def start_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
-
-    def finish_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
@@ -159,7 +116,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
-        device = torch.accelerator.current_device_index()
+        device = self.device.index
         self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
             init_info.master_address,
             init_info.master_port,
@@ -200,13 +157,14 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 post_unpack_func=self.model.load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
+                device=self.device,
             )
         else:
             # Use simple one-by-one broadcasting
             for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
                 dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device="npu")
-                self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
+                weight = torch.empty(shape, dtype=dtype, device=self.device)
+                self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream(self.device))
                 self.model.load_weights([(name, weight)])
                 del weight
 
