@@ -2,13 +2,13 @@
 
 ## Feature Introduction
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component has its own sharding size, normally along the data-parallel (DP) axis; LM head can additionally span DP and standard TP, reducing per-device weight memory. The feature supports MoE models only.
 
 In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded GEMM modules (LM head, o_proj, and MLP).
 
 ### Working Principle
 
-All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
+By default, all four knobs shard weights over a process group built along the DP axis (LM-head sizes above DP use the DP × TP group described below), and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
 - **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
@@ -19,7 +19,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
-| MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model, sizes evenly divide `data_parallel_size` |
+| MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model; DP-axis sizes divide DP, or LM-head sizes above DP satisfy the [configuration limit](#configuration-limit) |
 | P/D-disaggregated decode (D) node with all four knobs | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
 #### Component & Execution Mode Support
@@ -82,7 +82,15 @@ Prompt logprobs is also not supported with LM head TP: a request asking for prom
 
 #### Configuration Limit
 
-The Fine-Grained TP size for any component must:
+LM head also supports a size **larger than DP**, up to `DP * TP`. In this mode,
+the size must be a multiple of standard TP and divide `DP * TP`; PCP must be 1.
+Each LM-head group contains complete standard TP groups. Replicated hidden-state
+rows are split across TP before the LM-head exchange and restored afterwards,
+so the larger group does not compute duplicate rows. This applies to both the
+target and supported speculative draft heads. Sizes at or below DP retain the
+existing DP-axis behavior described below.
+
+For embedding / o_proj / MLP, and the legacy DP-axis LM head, the size must:
 
 - Be **≤ the data-parallel (DP) size**, and  
 - **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
@@ -90,6 +98,10 @@ The Fine-Grained TP size for any component must:
 Violating these constraints fails at configuration load with `finegrained tp sizes must divide by data_parallel_size.`
 
 #### Standard Tensor Parallelism Requirement
+
+The LM-head option above DP size is the exception to the DP-axis behavior in
+the table below: it combines complete TP groups across DP, with a vocabulary
+shard of `vocab / lmhead_tensor_parallel_size` on each rank.
 
 Fine-grained TP shards the configured layer **across the data-parallel (DP) dimension**, not the standard tensor-parallel (TP) dimension. Whether a knob can be combined with standard TP therefore differs per component:
 
@@ -99,6 +111,29 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 | `embedding` / LM head | **Can be combined.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — replacing the standard TP sharding of these modules instead of composing with it. Scenario 1 shows a stacked example. |
 
 ## Feature Usage
+
+### LM head across DP and TP
+
+For DP4/TP4, configure the following to shard the LM head across all 16 ranks:
+
+```bash
+--data-parallel-size 4 --tensor-parallel-size 4 --enable-expert-parallel \
+--additional-config '{"finegrained_tp_config":{"lmhead_tensor_parallel_size":16}}'
+```
+
+Attention and other layers keep standard TP4. For a vocabulary of 200064,
+the LM-head weight has 12504 vocabulary rows per rank rather than 50016.
+
+Unquantized LM heads also honor `weight_nz_mode`: setting it to `2` converts
+eligible BF16/FP16 weights to FRACTAL_NZ once after loading. This applies to
+the target and draft LM heads independently of their TP sizes. Modes `0` and
+`1` retain ND for BF16/FP16 on hardware without a mandatory NZ policy.
+Heads tied to token embeddings retain the embedding storage layout; quantized
+heads continue to use their quantization method. NZ conversion does not run
+on every forward pass.
+This reduces weight storage; end-to-end speedup also depends on token counts
+and the additional cross-DP communication. A value of 4 uses the legacy
+DP-axis group and does not produce a 16-way vocabulary shard.
 
 ### Usage Example
 
