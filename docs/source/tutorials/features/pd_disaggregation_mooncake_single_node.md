@@ -278,3 +278,121 @@ curl http://192.0.0.1:8080/v1/chat/completions \
         "temperature": 0
     }'
 ```
+
+## MooncakeConnectorV2 (experimental)
+
+!!! note "Experimental feature"
+
+    MooncakeConnectorV2 is currently experimental. Its configuration and supported feature combinations may change as development continues.
+
+MooncakeConnectorV2 is a refactored version of MooncakeConnectorV1, with design improvements and support for more features. It uses asynchronous, decoder-initiated KV-cache transfers. Its capabilities and restrictions are summarized below; support for an individual feature does not imply that every model and feature combination has been validated.
+
+| Feature | Support and restrictions |
+| --- | --- |
+| Parallel deployment | TP, DP, PP, PCP, and DCP, including per-rank endpoint discovery and PP layer mapping. GQA CP is outside the validated scope below. |
+| Different P/D TP sizes | Cache-layout-aware transfer for MLA, GQA, and Mamba state. Supported TP ratios and head/state shapes depend on the cache type; arbitrary P/D TP combinations are not supported. |
+| KVPP | Supported for **pure MLA models only**. Do not enable KVPP and DCP together on the producer. A KVPP producer can transfer to a DCP decoder. |
+| Hybrid cache groups | Attention KV caches and Mamba convolution/recurrent states, including hybrid model cache-group mapping. |
+| GQA | **Experimental; only the `LBHNC` and `HND` KV-cache layouts are supported.** Validated with Qwen3 pure GQA models and Qwen3.5 GQA + Mamba hybrid models. **GQA CP (PCP/DCP) and GQA C8 (INT8 KV cache) are not included in this validation.** |
+| P/D block sizes and scales | Full-attention/MLA paths can map different logical block sizes/scales when the underlying kernel block size and physical transfer layout are compatible. SWA requires equal P/D logical block sizes. |
+| Prefix-cache reuse | Accounts for local prefix-cache hits when determining the KV blocks to receive, including hybrid cache groups. |
+| Model Runner V2 cache layouts | Includes compressed attention/indexer and hybrid state handling used by GLM-5.3-Flash. This does not imply support for every model-specific cache specification. |
+| Receive failure handling | Reports failed KV loads to the scheduler for the configured `kv_load_failure_policy`, and notifies the producer to release retained blocks. |
+| Completion and cleanup | Decoder completion notifications release producer blocks; timeout cleanup handles requests whose completion notification is missing. |
+| Transfer metrics | Transfer duration, transferred bytes, and failed-transfer metrics. |
+
+### Layout and port configuration
+
+GQA is supported only with the `LBHNC` or `HND` KV-cache layout. Set `VLLM_KV_CACHE_LAYOUT=LBHNC` or `VLLM_KV_CACHE_LAYOUT=HND` in **both** P and D startup scripts, using the same value on both sides. Select `MooncakeConnectorV2`, with `kv_producer` on P and `kv_consumer` on D. Use compatible vLLM/vLLM-Ascend versions and the same model weights on both sides.
+
+If `kv_port` is omitted from `--kv-transfer-config`, MooncakeConnectorV2 derives its endpoints from vLLM's default `kv_port` (currently `14579`). It does not derive the KV endpoints from the HTTP `--port`.
+
+- **Single-host PD or multiple instances on one host:** explicitly configure a different `kv_port` for each instance, and reserve non-overlapping port ranges. Different HTTP ports alone are insufficient.
+- **Multiple hosts with one instance per host:** `kv_port` can be omitted. Each host can use the same default port, provided the required ports are free and reachable.
+- Each instance reserves worker handshake ports starting at `kv_port`, followed by scheduler control ports. Reserve `DP * PP * PCP * TP + DP` consecutive ports per instance. For the TP=DP=PP=PCP=1 examples below, this is two ports per instance. Increase the spacing when scaling parallelism, and keep these ranges separate from API, proxy, and distributed communication ports.
+
+### Complete GQA startup example
+
+Complete the environment and Mooncake installation steps earlier in this guide first. Run the scripts from the vllm-ascend repository root in separate terminals. Replace the model path, host IPs, network interface, and NPU IDs with your deployment values. These examples use Qwen3-8B with one NPU per role; for Qwen3.5, replace the model path on both sides with the same GQA + Mamba model and choose enough NPUs and matching TP settings for that model.
+
+The examples keep CP, KVPP, and KV-cache quantization disabled. To try `HND`, replace `LBHNC` with `HND` in both startup scripts.
+
+This example deploys P and D on `192.168.0.1`, using NPU 0 and NPU 1. P reserves KV ports `30000`–`30001`; D reserves `30100`–`30101`. Their API ports are `8100` and `8200`.
+
+#### Prefiller
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ASCEND_RT_VISIBLE_DEVICES=0
+export VLLM_HOST_IP=192.168.0.1
+export HCCL_IF_IP=192.168.0.1
+export GLOO_SOCKET_IFNAME=eth0
+export TP_SOCKET_IFNAME=eth0
+export HCCL_SOCKET_IFNAME=eth0
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_KV_CACHE_LAYOUT=LBHNC
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+
+vllm serve /models/Qwen3-8B \
+    --host 0.0.0.0 \
+    --port 8100 \
+    --served-model-name qwen3 \
+    --tensor-parallel-size 1 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000}'
+```
+
+#### Decoder
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ASCEND_RT_VISIBLE_DEVICES=1
+export VLLM_HOST_IP=192.168.0.1
+export HCCL_IF_IP=192.168.0.1
+export GLOO_SOCKET_IFNAME=eth0
+export TP_SOCKET_IFNAME=eth0
+export HCCL_SOCKET_IFNAME=eth0
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_KV_CACHE_LAYOUT=LBHNC
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+
+vllm serve /models/Qwen3-8B \
+    --host 0.0.0.0 \
+    --port 8200 \
+    --served-model-name qwen3 \
+    --tensor-parallel-size 1 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100}'
+```
+
+#### Proxy and verification
+
+After both P and D are ready, start the proxy on `192.168.0.1`:
+
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --prefiller-hosts 192.168.0.1 \
+    --prefiller-ports 8100 \
+    --decoder-hosts 192.168.0.1 \
+    --decoder-ports 8200
+```
+
+Send a request from another terminal:
+
+```bash
+curl http://192.168.0.1:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"qwen3","messages":[{"role":"user","content":"Explain prefill and decode in one paragraph."}],"max_tokens":128,"temperature":0}'
+```
