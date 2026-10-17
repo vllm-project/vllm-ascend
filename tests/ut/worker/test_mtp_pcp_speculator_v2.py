@@ -82,6 +82,40 @@ def _config(additional_config, pp_size=2):
     )
 
 
+@pytest.mark.parametrize("enable_expert_parallel", [False, True])
+def test_eagle_load_draft_model_exposes_draft_runner_type(enable_expert_parallel: bool) -> None:
+    target_model_config = SimpleNamespace(runner_type="generate", architecture="target", num_experts=256)
+    draft_model_config = SimpleNamespace(runner_type="draft", architecture="eagle3", num_experts=0)
+    target_config = SimpleNamespace(
+        model_config=target_model_config,
+        parallel_config=SimpleNamespace(enable_expert_parallel=enable_expert_parallel),
+        speculative_config=SimpleNamespace(draft_model_config=draft_model_config),
+    )
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.vllm_config = target_config
+    speculator.draft_model_config = draft_model_config
+    target_model = MagicMock()
+
+    with patch("vllm_ascend.worker.v2.spec_decode.eagle.speculator.load_eagle_model") as load_eagle:
+        result = speculator.load_draft_model(target_model, {"target.layer"})
+
+    assert result is load_eagle.return_value
+    load_eagle.assert_called_once()
+    loaded_target, load_config = load_eagle.call_args.args
+    assert loaded_target is target_model
+    assert load_config is not target_config
+    assert load_config.model_config is not target_model_config
+    assert load_config.model_config is not draft_model_config
+    assert load_config.model_config.runner_type == "draft"
+    assert load_config.model_config.architecture == "target"
+    assert load_config.model_config.num_experts == 256
+    assert load_config.parallel_config is target_config.parallel_config
+    assert load_config.speculative_config is target_config.speculative_config
+    assert speculator.vllm_config is target_config
+    assert target_model_config.runner_type == "generate"
+    assert draft_model_config.runner_type == "draft"
+
+
 def _make_padded_input_batch() -> MagicMock:
     input_batch = MagicMock(spec=AscendInputBatch)
     input_batch.num_reqs = 2
