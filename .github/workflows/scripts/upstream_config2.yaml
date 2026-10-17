@@ -8,9 +8,9 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/transformers_utils/test_dspark_mla_config.py
     estimated_time: 20
-  - name: tests/v1/distributed/test_dense_dp_world_size.py
+  - name: tests/models/language/generation/test_granite.py
     estimated_time: 20
-  - name: tests/v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash.py
+  - name: tests/transformers_utils/test_dspark_mla_config.py
     estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
