@@ -483,6 +483,11 @@ class KVCacheRecvingThread(threading.Thread):
             defaultdict(dict)
         )
         self.pending_reformat_lock = threading.Lock()
+        # Serialize receive-side NPU submissions on a dedicated device stream.
+        # A Python lock alone still shares the model thread's default stream.
+        self.reformat_execution_lock = threading.Lock()
+        self.reformat_stream: torch.npu.Stream | None = None
+        self.reformat_error: Exception | None = None
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         first_kv_cache = next(iter(self.kv_caches.values()))
@@ -615,10 +620,12 @@ class KVCacheRecvingThread(threading.Thread):
         Returns:
             A set of request IDs that have been completed.
         """
+        self._raise_if_reformat_failed()
         return self.task_tracker.get_and_clear_finished_requests()
 
     def get_and_clear_invalid_block_ids(self) -> set[int]:
         """Get and clear block ids that failed to load."""
+        self._raise_if_reformat_failed()
         with self.failed_recv_requests_lock:
             invalid_block_ids = self.invalid_block_ids
             self.invalid_block_ids = set()
@@ -765,8 +772,12 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
-                # Drain the failure with completion, after all local writes end.
-                self.task_tracker.update_done_task_count(request_id)
+                # A failed fence leaves device work and block ownership unknown.
+                # Surface it on the model worker thread instead of publishing a
+                # completion that would let the scheduler recycle these blocks.
+                if self.reformat_error is None:
+                    # Drain failures with completion, after all local writes end.
+                    self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
             self.request_queue.task_done()
@@ -1087,16 +1098,40 @@ class KVCacheRecvingThread(threading.Thread):
         with self.pending_reformat_lock:
             self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
 
+    def _raise_if_reformat_failed(self) -> None:
+        if self.reformat_error is not None:
+            raise RuntimeError("Mooncake KV reformat failed to complete on the device") from self.reformat_error
+
+    def _synchronize_reformat_stream(self) -> None:
+        try:
+            torch.npu.current_stream().synchronize()
+        except Exception as exc:
+            self.reformat_error = exc
+            raise
+
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
             shard_reformats = self.pending_reformat.pop(request_id, {})
-        for shard_idx in sorted(shard_reformats):
-            logger.debug(
-                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
-                request_id,
-                shard_idx,
-            )
-            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+        if not shard_reformats:
+            return
+        with self.reformat_execution_lock:
+            self._raise_if_reformat_failed()
+            if self.reformat_stream is None:
+                device = next(iter(self.kv_caches.values()))[0].device
+                self.reformat_stream = torch.npu.Stream(device=device)
+            with torch.npu.stream(self.reformat_stream):
+                try:
+                    for shard_idx in sorted(shard_reformats):
+                        logger.debug(
+                            "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
+                            request_id,
+                            shard_idx,
+                        )
+                        self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+                finally:
+                    # Host completion is published only after all reformat work,
+                    # including work submitted before an exception, is drained.
+                    self._synchronize_reformat_stream()
 
     def _apply_kv_cache_reformat(
         self,
@@ -1358,66 +1393,71 @@ class KVCacheRecvingThread(threading.Thread):
         num_kv_heads, k_head_dim, v_head_dim = self._get_kv_cache_dims_from_tensors(kv_caches)
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
-        num_blocks = len(flat_block_ids)
-        num_tokens = num_blocks * self.block_size
+        if not flat_block_ids:
+            return
+        try:
+            block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
+            num_blocks = len(flat_block_ids)
+            num_tokens = num_blocks * self.block_size
 
-        # Create device tensors for copy operations
-        block_table = block_ids_tensor.view(1, -1)
-        block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
-        seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
+            # Create device tensors for copy operations
+            block_table = block_ids_tensor.view(1, -1)
+            block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+            seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
-        k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
-        v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
+            k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
+            v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
 
-        # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
-        slot_mapping = (
-            block_offsets.reshape((1, self.block_size)) + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
-        ).flatten()
+            # Create slot mapping for reshape operations
+            block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
+            slot_mapping = (
+                block_offsets.reshape((1, self.block_size))
+                + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
+            ).flatten()
 
-        # FIXME: Right now, if we skip synchronization at this point, the system
-        # will crash in GQA scenarios. However, we still haven't identified the
-        # root cause.
-        torch.npu.synchronize()
+            # Preserve the existing input visibility fence until all producer
+            # dependencies can be represented with explicit stream events.
+            torch.npu.synchronize()
 
-        # Process each layer in the KV cache
-        for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
-            # Load cache data into buffers
-            torch_npu.npu_gather_pa_kv_cache(
-                k_cache_layer,
-                v_cache_layer,
-                block_table,
-                block_len_tensor,
-                seq_offset=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
-            )
-            if need_cat_cache:
-                self._cat_kv_cache(
+            # Process each layer in the KV cache
+            for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
+                # Load cache data into buffers
+                torch_npu.npu_gather_pa_kv_cache(
                     k_cache_layer,
                     v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    tp_num_need_pulls,
-                    num_blocks,
-                    num_tokens,
-                    slot_mapping,
-                    num_kv_heads,
+                    block_table,
+                    block_len_tensor,
+                    seq_offset=seq_start_tensor,
+                    key=k_buffer,
+                    value=v_buffer,
                 )
-            if need_nz_cache:
-                self._nz_kv_cache(
-                    k_cache_layer,
-                    v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    slot_mapping,
-                    num_kv_heads,
-                    k_head_dim,
-                    v_head_dim,
-                )
-        # Clean up buffers
-        del k_buffer, v_buffer
+                if need_cat_cache:
+                    self._cat_kv_cache(
+                        k_cache_layer,
+                        v_cache_layer,
+                        k_buffer,
+                        v_buffer,
+                        tp_num_need_pulls,
+                        num_blocks,
+                        num_tokens,
+                        slot_mapping,
+                        num_kv_heads,
+                    )
+                if need_nz_cache:
+                    self._nz_kv_cache(
+                        k_cache_layer,
+                        v_cache_layer,
+                        k_buffer,
+                        v_buffer,
+                        slot_mapping,
+                        num_kv_heads,
+                        k_head_dim,
+                        v_head_dim,
+                    )
+        finally:
+            # Drain reformat work on both success and Python/operator failure.
+            # A failed fence poisons the receiver and prevents block reuse.
+            self._synchronize_reformat_stream()
 
     def _cat_kv_cache(
         self,
