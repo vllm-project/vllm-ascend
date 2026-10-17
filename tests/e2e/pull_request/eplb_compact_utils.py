@@ -28,7 +28,9 @@ def storage_bytes(tensor):
     torch.npu.synchronize()
     storage = tensor.untyped_storage()
     host = (ctypes.c_ubyte * storage.nbytes())()
-    assert acl.rt.memcpy(ctypes.addressof(host), len(host), storage.data_ptr(), len(host), ACL_MEMCPY_DEVICE_TO_HOST) == 0
+    assert (
+        acl.rt.memcpy(ctypes.addressof(host), len(host), storage.data_ptr(), len(host), ACL_MEMCPY_DEVICE_TO_HOST) == 0
+    )
     return bytes(host)
 
 
