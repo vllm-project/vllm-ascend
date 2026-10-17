@@ -46,8 +46,8 @@ def _prepare_update(lses, previous_anchor):
     candidates = list(lses)
     if previous_anchor is not None:
         candidates[0] = previous_anchor
-    candidates = torch.stack(candidates)
-    anchor = candidates.masked_fill(~torch.isfinite(candidates), -torch.inf).amax(0)
+    scores = torch.stack(candidates)
+    anchor = scores.masked_fill(~torch.isfinite(scores), -torch.inf).amax(0)
     relative = [lse - anchor for lse in lses]
     if previous_anchor is not None:
         relative[0] = lses[0] + (previous_anchor - anchor)
