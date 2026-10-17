@@ -5,7 +5,7 @@
 _model: &model "/root/.cache/modelscope/hub/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4"
 
 _envs: &envs
-  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
   VLLM_USE_MODELSCOPE: "true"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
@@ -17,11 +17,8 @@ _envs: &envs
   VLLM_RPC_TIMEOUT: "6000"
 
 _server_cmd: &server_cmd
-  - "--no-enable-prefix-caching"
   - "--tensor-parallel-size"
   - "4"
-  - "--data-parallel-size"
-  - "2"
   - "--quantization"
   - "ascend"
   - "--port"
