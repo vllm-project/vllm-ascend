@@ -1515,14 +1515,16 @@ function build_example_for_ci()
     EXAMPLE_NAME="$1"
     EXAMPLE_MODE="eager"
     PKG_MODE="cust"
-    build_example || local eager_result=$?       # 避免函数随build_example一起退出
+    local eager_result=0
+    build_example || eager_result=$?       # 避免函数随build_example一起退出
     if [ $eager_result -ne 0 ] && [ $eager_result -ne 2 ]; then
         echo "Error: Eager Example failed with exit code: $eager_result"
         exit $eager_result
     fi
 
     EXAMPLE_MODE="graph"
-    build_example || local geir_result=$?
+    local geir_result=0
+    build_example || geir_result=$?
     if [ $geir_result -ne 0 ] && [ $geir_result -ne 2 ]; then
         echo "Error: Graph Example failed with exit code: $geir_result"
         exit $geir_result
