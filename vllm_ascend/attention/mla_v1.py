@@ -73,6 +73,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -96,6 +97,12 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_builder_cls():

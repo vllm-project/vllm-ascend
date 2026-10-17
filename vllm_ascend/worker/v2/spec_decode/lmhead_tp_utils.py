@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows, vllm_version_is
 
 
 class LmheadTPDraftSamplingMixin:
@@ -61,7 +61,48 @@ class LmheadTPDraftSamplingMixin:
                 "read the request mapping and write those buffers out of bounds."
             )
 
-    def sample_draft(
+    if vllm_version_is("0.31.0"):
+
+        def sample_draft(
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            draft_step: torch.Tensor,
+            draft_logits: torch.Tensor | None,
+        ):
+            return self._sample_draft(
+                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits, {}
+            )
+
+    else:
+        # vLLM #59554 added `num_steps` to `Speculator.sample_draft`; DFlash
+        # passes it so the draft watermarker can key its draw by the step count.
+        def sample_draft(
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            draft_step: torch.Tensor,
+            draft_logits: torch.Tensor | None,
+            num_steps: int = 1,
+        ):
+            return self._sample_draft(
+                hidden_states,
+                positions,
+                idx_mapping,
+                temperature,
+                seeds,
+                draft_step,
+                draft_logits,
+                {"num_steps": num_steps},
+            )
+
+    def _sample_draft(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
@@ -70,10 +111,18 @@ class LmheadTPDraftSamplingMixin:
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
+        extra_kwargs: dict[str, Any],
     ):
         if not lmhead_tp_enable():
             return super().sample_draft(  # type: ignore[misc]
-                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+                hidden_states,
+                positions,
+                idx_mapping,
+                temperature,
+                seeds,
+                draft_step,
+                draft_logits,
+                **extra_kwargs,
             )
         if draft_logits is not None:
             raise NotImplementedError(
@@ -90,6 +139,13 @@ class LmheadTPDraftSamplingMixin:
             "max_num_reqs * (num_speculative_steps + 1)",
         )
         out = super().sample_draft(  # type: ignore[misc]
-            padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+            padded,
+            positions,
+            idx_mapping,
+            temperature,
+            seeds,
+            draft_step,
+            draft_logits,
+            **extra_kwargs,
         )
         return out[:num_logits]

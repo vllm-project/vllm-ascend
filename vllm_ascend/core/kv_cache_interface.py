@@ -25,6 +25,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -42,8 +44,11 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
     if isinstance(kv_cache_spec, MLAAttentionSpec):
-        storage_block_size = kv_cache_spec.storage_block_size
-        return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
+        # vLLM #57169 removed the MLA `storage_block_size` override on main.
+        if vllm_version_is("0.31.0"):
+            storage_block_size = kv_cache_spec.storage_block_size
+            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
+        return kv_cache_spec.block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 

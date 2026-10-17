@@ -57,6 +57,7 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
 from vllm_ascend.worker.v2 import utils as v2_utils
@@ -768,7 +769,17 @@ def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
 
     assert len(RecordingZeroer.calls) == 2
     assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
-    assert all(call["attn_groups"] == [group] for call in RecordingZeroer.calls)
+    for call in RecordingZeroer.calls:
+        [component_group] = call["attn_groups"]
+        if vllm_version_is("0.31.0"):
+            assert component_group == group
+        else:
+            # vLLM main made AttentionGroup identity-comparable, so match on
+            # the fields the zeroer preserves.
+            assert component_group.backend is group.backend
+            assert component_group.layer_names == group.layer_names
+            assert component_group.kv_cache_spec == group.kv_cache_spec
+            assert component_group.kv_cache_group_id == group.kv_cache_group_id
     for component_id, call in enumerate(RecordingZeroer.calls):
         assert call["static_forward_context"] == {
             "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])

@@ -32,7 +32,6 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -265,13 +264,11 @@ def test_p_eagle_acceptance(
 @pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
+@pytest.mark.skip(reason="vLLM #57934: Model Runner V1 rejects DFlash candidate-head, remove it after drop MRV1")
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    if not vllm_version_is("0.30.0"):
-        pytest.skip("vLLM #57934: Model Runner V1 rejects DFlash candidate-head drafts on main")
-
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

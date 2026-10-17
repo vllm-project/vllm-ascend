@@ -25,6 +25,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -33,10 +34,13 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
+    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -76,6 +80,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     GPU state indices), while the actual state copies execute one layer at a
     time right after that layer's KV load finishes.
     """
+
+    # Annotated locally because mypy (``--follow-imports skip``) does not
+    # analyze the upstream base class body where these are defined.
+    _mamba_ctx: MambaSpecDecodeGPUContext | None
+    _mamba_state_copy_funcs: Any
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -193,6 +202,55 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             HAS_IDX_MAPPING=True,
         )
         pending.pending_layers.discard(layer_name)
+
+    # vLLM main removed `MambaHybridModelState._ensure_align_ctx` and moved the
+    # align-context creation into `initialize_kv_cache`; the v0.31.0 lane still
+    # ships the lazy helper. On main that context is not always present by the
+    # time `preprocess_state` runs (e.g. it can be torn down by the CUDA-graph
+    # memory profiler or skipped on a profiling model state), so keep the
+    # v0.31.0 lazy (re)creation semantics. `initialize_from_forward_context`'s
+    # second block-table argument is optional on main.
+    if vllm_version_is("0.31.0"):
+
+        def _ensure_align_ctx(
+            self,
+            kv_cache_config: KVCacheConfig,
+            mamba_group_ids: list[int],
+            block_tables: tuple[torch.Tensor, ...],
+        ) -> MambaSpecDecodeGPUContext:
+            return super()._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+
+    else:
+
+        def _ensure_align_ctx(
+            self,
+            kv_cache_config: KVCacheConfig,
+            mamba_group_ids: list[int],
+            block_tables: tuple[torch.Tensor, ...],
+        ) -> MambaSpecDecodeGPUContext:
+            if self._mamba_ctx is None:
+                if self._mamba_state_copy_funcs is None:
+                    mamba_groups = get_mamba_groups(kv_cache_config)
+                    mamba_types = {spec.mamba_type for spec in mamba_groups}
+                    copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+                    validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+                    self._mamba_state_copy_funcs = copy_funcs
+                self._mamba_ctx = MambaSpecDecodeGPUContext.create(
+                    max_num_reqs=self.max_num_reqs,
+                    kv_cache_config=kv_cache_config,
+                    copy_funcs=self._mamba_state_copy_funcs,
+                    device=self.device,
+                    make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
+                )
+            ctx = self._mamba_ctx
+            if not ctx.is_initialized:
+                ctx.initialize_from_forward_context(
+                    kv_cache_config,
+                    self.vllm_config.compilation_config.static_forward_context,
+                    self._mamba_state_copy_funcs,
+                    [block_tables[gid] for gid in mamba_group_ids],
+                )
+            return ctx
 
     def preprocess_state(
         self,

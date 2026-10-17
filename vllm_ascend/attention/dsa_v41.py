@@ -42,7 +42,7 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -1517,6 +1517,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @staticmethod
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_impl_cls():

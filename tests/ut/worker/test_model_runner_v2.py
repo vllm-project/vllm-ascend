@@ -24,7 +24,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -163,7 +162,7 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
         has_prefill=bool(is_prefilling.any()),
-        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
+        max_seq_len_np=None,
         prefill_runs_as_decode_np=None,
         decode_graph_eligible=not bool(is_prefilling.any()),
     )
@@ -317,9 +316,8 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
         "valid_dummy_state_slots": False,
+        "randomize_inputs": False,
     }
-    if vllm_version_is("0.31.0"):
-        expected_kwargs["randomize_inputs"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -1359,7 +1357,7 @@ def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
         patch.object(GPUModelRunner, "profile_run") as parent,
     ):
         runner.profile_run(randomize_inputs=randomize_inputs)
-    profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+    profile_kwargs = {"randomize_inputs": randomize_inputs}
     runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True, **profile_kwargs)
     parent.assert_called_once_with(**profile_kwargs)
 
@@ -1381,7 +1379,7 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("randomize_inputs", [False, True])
 def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail, randomize_inputs):
-    expected_randomize = randomize_inputs if vllm_version_is("0.31.0") else False
+    expected_randomize = randomize_inputs
     runner = _make_runner()
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
     runner.max_num_tokens = tokens
@@ -1539,7 +1537,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         has_prefill=True,
         decode_graph_eligible=False,
         prefill_runs_as_decode_np=None,
-        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
+        max_seq_len_np=None,
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
@@ -1602,10 +1600,7 @@ def _run_prepare_inputs(
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
         assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
-        if vllm_version_is("0.31.0"):
-            assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
-        else:
-            assert "max_seq_len_np" not in make_batch.call_args.kwargs
+        assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
         return prepared, batch
 
 

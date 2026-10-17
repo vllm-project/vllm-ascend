@@ -18,7 +18,6 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -53,7 +52,20 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_config_from_groups,
+        is_kv_cache_spec_uniform,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_config_from_groups,
+        is_kv_cache_spec_uniform,
+    )
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -1837,6 +1849,7 @@ class MockKVCacheConfig:
     def __init__(self, kv_cache_groups=None, num_blocks=10):
         self.kv_cache_groups = kv_cache_groups or [MockKVCacheGroup()]
         self.num_blocks = num_blocks
+        self.transfer_group_ids = tuple(range(len(self.kv_cache_groups)))
 
 
 @pytest.fixture
@@ -2657,6 +2670,22 @@ class TestMooncakeConnectorForScheduler(unittest.TestCase):
         request = MockRequest("req1")
         connector.get_num_new_matched_tokens(request, 0)
         mock_method.assert_called_once_with(request, 0)
+
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only scheduler hook")
+    def test_scheduler_tracks_kv_cache_config_for_loaded_groups(self):
+        config = MockVllmConfig()
+        kv_cache_config = MockKVCacheConfig()
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            connector = MooncakeConnector(config, KVConnectorRole.SCHEDULER, kv_cache_config)
+        # vLLM main's scheduler calls get_loaded_kv_cache_group_ids(request);
+        # the base tracks _kv_cache_config only when super().__init__ runs.
+        assert connector.get_loaded_kv_cache_group_ids(MockRequest("req1")) == kv_cache_config.transfer_group_ids
 
 
 class MockKVCacheBlocks:

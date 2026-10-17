@@ -5,7 +5,18 @@ from types import SimpleNamespace
 from typing import get_args
 
 import vllm.config.speculative as speculative_config
-from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
+
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
+# package on main; the release lane (v0.31.0) still ships them under
+# `vllm.transformers_utils.configs.glm5_next`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.glm5_next import (  # type: ignore[import-not-found]
+        Glm5NextTextConfig,
+    )
+else:
+    from transformers import Glm5NextTextConfig
 
 from vllm_ascend.models.glm5next.model import (
     Glm5NextForConditionalGeneration,

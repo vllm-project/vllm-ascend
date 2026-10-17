@@ -23,12 +23,14 @@ import logging
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
@@ -53,7 +55,6 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -110,8 +111,37 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+
+# vLLM #57516 reclaims cached memory inside `load_model` via
+# `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable memory pool
+# `torch.npu.empty_cache()` trips "captures_underway.empty()", so on main
+# neutralize it while weights load; the pool is reclaimed by sleep()/wake_up().
+if vllm_version_is("0.31.0"):
+
+    def _load_model_empty_cache_context() -> AbstractContextManager:
+        return nullcontext()
+
+else:
+
+    def _load_model_empty_cache_context() -> AbstractContextManager:
+        return patch("torch.npu.empty_cache", lambda: None)
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -595,11 +625,13 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
+
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -621,7 +653,7 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
@@ -869,11 +901,13 @@ class NPUWorker(WorkerBase):
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
-
             context = nullcontext()  # type: ignore
 
-        with context, set_current_vllm_config(self.vllm_config):
+        empty_cache_context = (
+            _load_model_empty_cache_context() if self.vllm_config.model_config.enable_sleep_mode else nullcontext()
+        )
+
+        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():

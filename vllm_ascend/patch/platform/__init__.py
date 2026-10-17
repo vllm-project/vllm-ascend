@@ -49,7 +49,7 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 
-# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.30.0+).
+# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.31.0+).
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
 
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
@@ -79,7 +79,8 @@ import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils`
+#   1. `vllm.v1.core.kv_cache_utils` (v0.31.0) /
+#      `vllm.v1.core.kv_cache_planning` (main, vLLM #61183)
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
 #       topology, where MLA and compressed indexer caches share block IDs while
