@@ -160,6 +160,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 parallel_config=parallel_config,
                 cache_config=replace(self.vllm_config.cache_config),
             )
+        draft_config.parallel_config.data_parallel_index = source_parallel_config.data_parallel_index
         # V1 parity: swap in the draft model config after validation —
         # re-validating would reject the dense head (fine-grained TP is MoE-only).
         draft_config.model_config = self.draft_model_config

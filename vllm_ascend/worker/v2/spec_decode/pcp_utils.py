@@ -166,5 +166,6 @@ def prepare_replicated_pcp_config(
             ),
             engram_config=engram_config,
         )
+        vllm_config.parallel_config.data_parallel_index = target_parallel_config.data_parallel_index
         vllm_config.parallel_config.decode_context_parallel_size = target_parallel_config.decode_context_parallel_size
     return vllm_config, replicated_pcp
