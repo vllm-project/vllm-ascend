@@ -194,6 +194,7 @@ def fused_recurrent_kda(
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
+        "HAS_VALID_TOKENS": lambda args: args["num_valid_tokens"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["T", "eps", "G_ROW_STRIDE", "G_COL_STRIDE"])
@@ -208,6 +209,7 @@ def layer_norm_gated_fwd_kernel(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
+    num_valid_tokens,
     T,  # number of rows in x
     G_ROW_STRIDE,
     G_COL_STRIDE,
@@ -224,6 +226,7 @@ def layer_norm_gated_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_VALID_TOKENS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
 
@@ -281,6 +284,9 @@ def layer_norm_gated_fwd_kernel(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
+    if HAS_VALID_TOKENS:
+        b_y = tl.where(rows[:, None] < tl.load(num_valid_tokens) * H, b_y, 0.0)
+
     # Write output
     tl.store(y + offsets, b_y.to(y.dtype.element_ty), mask)
 
@@ -291,6 +297,7 @@ def layer_norm_gated_fwd_kernel(
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
+        "HAS_VALID_TOKENS": lambda args: args["num_valid_tokens"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["G_ROW_STRIDE", "G_COL_STRIDE"])
@@ -305,9 +312,11 @@ def layer_norm_gated_fwd_kernel1(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
+    num_valid_tokens,
     G_ROW_STRIDE,
     G_COL_STRIDE,
     D: tl.constexpr,  # number of columns in x
+    H: tl.constexpr,
     STRIDED_GATE: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -316,6 +325,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_VALID_TOKENS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
     x += i_t * D
@@ -367,6 +377,9 @@ def layer_norm_gated_fwd_kernel1(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
+    if HAS_VALID_TOKENS:
+        b_y = tl.where(i_t < tl.load(num_valid_tokens) * H, b_y, 0.0)
+
     # Write output
     tl.store(y + o_d, b_y, mask=m_d)
 
@@ -383,6 +396,8 @@ def layer_norm_gated_fwd(
     residual_dtype: torch.dtype = None,
     is_rms_norm: bool = False,
     return_stats: bool = True,
+    num_valid_tokens: torch.Tensor | None = None,
+    heads_per_token: int = 1,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -422,11 +437,12 @@ def layer_norm_gated_fwd(
             mean=mean,
             rstd=rstd,
             eps=eps,
+            num_valid_tokens=num_valid_tokens,
             T=T,
             G_ROW_STRIDE=g.stride(0),
             G_COL_STRIDE=g.stride(1),
             D=D,
-            H=1,
+            H=heads_per_token,
             PACKED_GATE=False,
             STRIDED_GATE=strided_gate,
             STORE_RSTD=return_stats,
@@ -448,9 +464,11 @@ def layer_norm_gated_fwd(
             mean=mean,
             rstd=rstd,
             eps=eps,
+            num_valid_tokens=num_valid_tokens,
             G_ROW_STRIDE=g.stride(0),
             G_COL_STRIDE=g.stride(1),
             D=D,
+            H=heads_per_token,
             STRIDED_GATE=strided_gate,
             BD=BD,
             ACTIVATION=activation,
@@ -478,8 +496,10 @@ def rms_norm_gated(
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
     out: torch.Tensor | None = None,
+    num_valid_tokens: torch.Tensor | None = None,
 ):
     x_shape_og = x.shape
+    heads_per_token = g.shape[-2] if g.ndim > 2 else 1
     # K3 gates are views into the packed BFG projection. Flattening their
     # token/head dimensions would materialize the projection gaps each layer.
     if (
@@ -535,6 +555,7 @@ def rms_norm_gated(
                 mean=None,
                 rstd=None,
                 eps=eps,
+                num_valid_tokens=num_valid_tokens,
                 T=rows,
                 G_ROW_STRIDE=x.shape[-1],
                 G_COL_STRIDE=1,
@@ -575,6 +596,8 @@ def rms_norm_gated(
         residual_dtype=residual_dtype,
         is_rms_norm=True,
         return_stats=False,
+        num_valid_tokens=num_valid_tokens,
+        heads_per_token=heads_per_token,
     )
     y = y.reshape(x_shape_og)
     if out is not None:

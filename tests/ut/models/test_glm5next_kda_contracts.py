@@ -69,7 +69,10 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     if direct_output:
         assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    if direct_output:
+        assert torch.count_nonzero(out[:, 3:]) == 0
+    else:
+        assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])

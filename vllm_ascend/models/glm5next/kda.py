@@ -314,7 +314,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             beta=beta,
             core_attn_out=core_attn_out,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
+        attn_metadata = get_forward_context().attn_metadata
+        metadata = attn_metadata.get(self.prefix) if attn_metadata is not None else None
+        num_valid_tokens = None
+        if metadata is not None:
+            # FULL replay must read live device lengths, rather than captured CPU counts.
+            for starts in (metadata.non_spec_query_start_loc, metadata.spec_query_start_loc):
+                if starts is not None:
+                    end = starts[-1]
+                    num_valid_tokens = end if num_valid_tokens is None else num_valid_tokens + end
+        core_attn_out = self.o_norm(core_attn_out, g2, out=core_attn_out, num_valid_tokens=num_valid_tokens)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
