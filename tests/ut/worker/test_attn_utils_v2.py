@@ -513,7 +513,8 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     attn_module.qk_rope_head_dim = 64
     attn_module.impl = SimpleNamespace(
         fa_quant_layer=False,
-        supports_prolog_v3_writer=lambda: True,
+        supports_prolog_v3_writer=lambda: False,
+        supports_strided_mla_writer=lambda: True,
     )
     backend = MagicMock()
     backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
@@ -641,7 +642,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     torch.nn.Module.__init__(attn_module)
     attn_module.impl = SimpleNamespace(
         fa_quant_layer=False,
-        supports_prolog_v3_writer=lambda: True,
+        supports_strided_mla_writer=lambda: True,
     )
     spec = AscendMLAAttentionSpec(
         block_size=384,
@@ -704,9 +705,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.enable_kv_nz = False
 
-    attn_module.impl.supports_prolog_v3_writer = lambda: False
+    attn_module.impl.supports_strided_mla_writer = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.supports_prolog_v3_writer = lambda: True
+    attn_module.impl.supports_strided_mla_writer = lambda: True
     assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
 
     monkeypatch.setattr(

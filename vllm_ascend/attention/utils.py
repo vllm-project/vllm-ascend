@@ -79,8 +79,9 @@ def supports_strided_mla_cache(
             return False
     if getattr(impl, "fa_quant_layer", False) or getattr(impl, "enable_kv_nz", False):
         return False
-    supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
-    return supports_prolog_writer is not None and supports_prolog_writer()
+    # Wide A5 draft inputs use the prepared scatter adapter instead of PROLOG_V3.
+    supports_strided_writer = getattr(impl, "supports_strided_mla_writer", None)
+    return supports_strided_writer is not None and supports_strided_writer()
 
 
 @lru_cache(maxsize=1)
