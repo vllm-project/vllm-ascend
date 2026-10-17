@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
@@ -161,3 +162,68 @@ def test_pcp_dcp_minimum_raises_workspace_above_configured_capacity(ascend_confi
 
     assert AscendMlaDCPMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config) == 131072
     assert ascend_config.chunked_prefill_workspace_size == 4096
+
+
+@pytest.mark.parametrize("configured_capacity", [4096, 65536, 131071])
+def test_pcp_dcp_minimum_override_is_reported(ascend_config, mock_logger, configured_capacity):
+    ascend_config.chunked_prefill_workspace_size = configured_capacity
+    config = _vllm_config(max_num_seqs=32, pcp_size=2, dcp_size=16)
+
+    assert AscendMlaDCPMetadataBuilder.determine_chunked_prefill_workspace_size(config) == 131072
+    mock_logger.warning_once.assert_called_once()
+    message, *args = mock_logger.warning_once.call_args.args
+    assert "context-parallel minimum" in message
+    assert args == [131072, configured_capacity, "additional_config.chunked_prefill_workspace_size", 131072]
+    assert ascend_config.chunked_prefill_workspace_size == configured_capacity
+
+
+@pytest.mark.parametrize(
+    "builder_cls,pcp_size,dcp_size,expected,alignment,fragments",
+    [
+        (AscendMLAMetadataBuilder, 2, 1, 8192, 128, 64),
+        (AscendMlaDCPMetadataBuilder, 1, 16, 65536, 2048, 32),
+    ],
+)
+def test_small_capacity_fits_single_axis_context_chunks(
+    ascend_config, mock_logger, monkeypatch, builder_cls, pcp_size, dcp_size, expected, alignment, fragments
+):
+    ascend_config.chunked_prefill_workspace_size = 4096
+    config = _vllm_config(max_num_seqs=32, pcp_size=pcp_size, dcp_size=dcp_size)
+    workspace_size = builder_cls.determine_chunked_prefill_workspace_size(config)
+    assert workspace_size == expected
+    mock_logger.warning_once.assert_called_once()
+    assert "context-parallel minimum" in mock_logger.warning_once.call_args.args[0]
+
+    # Exercise the chunk planner used by both builders with the full batch.
+    builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.chunked_prefill_enabled = True
+    builder.chunked_prefill_workspace_size = workspace_size
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.block_size = alignment
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = fragments
+    builder.query_lens = torch.ones(fragments, dtype=torch.int32)
+    builder.seq_lens = torch.full((fragments,), 4097, dtype=torch.int32)
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", zeros_without_pinning)
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda tensor: tensor)
+    monkeypatch.setattr(torch.Tensor, "npu", lambda tensor: tensor, raising=False)
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=fragments))
+    assert builder.max_context_chunk == alignment
+    assert max(metadata.seq_tot) <= workspace_size
+    assert metadata.chunk_seq_lens.sum(0).tolist() == [4096] * fragments
+
+
+@pytest.mark.parametrize("configured_capacity", [131072, 262144])
+def test_context_parallel_floor_within_capacity_does_not_warn(ascend_config, mock_logger, configured_capacity):
+    ascend_config.chunked_prefill_workspace_size = configured_capacity
+    config = _vllm_config(max_num_seqs=32, pcp_size=2, dcp_size=16)
+
+    assert AscendMlaDCPMetadataBuilder.determine_chunked_prefill_workspace_size(config) == 131072
+    mock_logger.warning_once.assert_not_called()

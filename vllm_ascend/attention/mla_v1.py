@@ -434,7 +434,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-        return ascend_chunked_prefill_workspace_size(vllm_config)
+        # PCP can expand each global request into two local fragments.
+        fragments_per_request = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
+        min_workspace_size = (
+            fragments_per_request * vllm_config.scheduler_config.max_num_seqs * vllm_config.cache_config.block_size
+        )
+        return ascend_chunked_prefill_workspace_size(vllm_config, min_workspace_size=min_workspace_size)
 
     @classmethod
     def get_cudagraph_support(

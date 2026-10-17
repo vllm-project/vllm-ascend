@@ -31,7 +31,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     use_history_current_split_decode,
 )
-from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
+    AscendCommonAttentionMetadata,
+    ascend_chunked_prefill_workspace_size,
+)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -117,19 +121,16 @@ class AscendMlaDCPMetadataBuilder(
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-        workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
-            chunk_alignment = lcm(
-                vllm_config.cache_config.block_size,
-                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
-            )
-            # The shared plan reserves two local fragments per global PCP
-            # request. After halving the budget, each request must still fit
-            # one aligned DCP chunk.
-            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
-            workspace_size = max(workspace_size, min_workspace_size)
-        return workspace_size
+        chunk_alignment = lcm(
+            vllm_config.cache_config.block_size,
+            parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
+        )
+        # DCP needs one aligned chunk per request, including DCP-only runs.
+        # PCP additionally reserves two local fragments per global request.
+        fragments_per_request = 2 if parallel_config.prefill_context_parallel_size > 1 else 1
+        min_workspace_size = fragments_per_request * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
+        return ascend_chunked_prefill_workspace_size(vllm_config, min_workspace_size=min_workspace_size)
 
     def __init__(
         self,
