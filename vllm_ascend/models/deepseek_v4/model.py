@@ -79,6 +79,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -123,6 +124,10 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         self.dtype = dtype
+        if cache_config.cache_dtype == "auto" and get_current_hardware_profile().supports(
+            HardwareCapability.DSV4_COMPRESSED_CACHE
+        ):
+            self.dtype = torch.float8_e4m3fn
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
