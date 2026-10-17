@@ -39,6 +39,31 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     _SPEC_GRAPH_PAD_SLOT_ID = PAD_SLOT_ID
     _USE_COMMON_KERNEL_METADATA = False
 
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata,
+        num_accepted_tokens=None,
+        num_decode_draft_tokens_cpu=None,
+        fast_build: bool = False,
+        num_actual_reqs: int | None = None,
+    ):
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            fast_build=fast_build,
+            num_actual_reqs=num_actual_reqs,
+        )
+        # Pure prefill reuses this host vector as chunk-kernel cu_seqlens.
+        # Speculative decode does not take the chunk path.
+        if metadata.num_prefills > 0 and metadata.spec_sequence_masks is None:
+            # Clone so a later step cannot overwrite this host vector mid-forward.
+            host_cu = common_attn_metadata.query_start_loc_cpu
+            metadata.non_spec_query_start_loc_cpu = host_cu.detach().clone()
+        return metadata
+
     def _can_pad_spec_decode(self, graph_request_count: int, num_spec_decode_tokens: int) -> bool:
         # MTP token buffers can hold (1 + K) tokens per request. Do not apply
         # the common single-token limit to 310P concurrent spec replay.
