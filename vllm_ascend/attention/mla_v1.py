@@ -3418,6 +3418,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         return output_padded
 
 
+def all_mla_use_flashmla(model: torch.nn.Module) -> bool:
+    """Return whether a loaded model has MLA layers and all select FlashMLA."""
+    mla_impls = [layer.impl for layer in model.modules() if isinstance(getattr(layer, "impl", None), AscendMLAImpl)]
+    return bool(mla_impls) and all(getattr(impl, "use_flashmla", False) for impl in mla_impls)
+
+
 # mla_nope_zero_rope_cache: the paged key_rope operand is cache-sized
 # (num_blocks x block_size x 64), so rebuilding it on every MLA layer of every
 # step would allocate hundreds of MB per call. It is read-only zeros, so one
