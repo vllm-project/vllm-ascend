@@ -680,6 +680,10 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.enable_dsa_cp and self.xlite_graph_config.enabled and not self.xlite_graph_config.full_mode:
+            raise ValueError("DSA-CP with xlite requires xlite_graph_config.full_mode=true.")
+        # xlite implements indexer-only CP and keeps the native attention TP layout.
+        native_dsa_cp = self.enable_dsa_cp and not self.xlite_graph_config.enabled
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
@@ -751,12 +755,13 @@ class AscendConfig:
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
-        # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
+        # Native DSA-CP depends on FlashComm; xlite indexer CP does not.
+        # Auto-enable FlashComm when native DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
-        if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
+        if native_dsa_cp and not flashcomm_explicitly_enabled:
             logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
 
-        effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
+        effective_flashcomm = flashcomm_explicitly_enabled or native_dsa_cp
 
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
@@ -768,7 +773,7 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
-        if self.enable_dsa_cp:
+        if native_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
             if tp_size > 1:
                 migration = (
@@ -796,11 +801,14 @@ class AscendConfig:
         has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
             vc.model_config.hf_text_config, "index_topk"
         )
-        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
+        if native_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
             logger.warning_once(
                 "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
             )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
+        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer
+        # xlite partitions indexer queries in its own TP runtime, independently of SP MoE.
+        if not self.xlite_graph_config.enabled:
+            self.enable_dsa_cp = self.enable_dsa_cp and vc.parallel_config.use_sequence_parallel_moe
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
