@@ -1,0 +1,76 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Hitest
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-hitest:
+    runs-on: linux-amd64-cpu-8-hk
+    # 完全移除container，原生runner直接读取secrets，无任何透传限制
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Git safe directory config
+        run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      # 跳过pre-commit lint，直接执行业务脚本，规避pip/pip3缺失问题
+      - name: Execute hitest entry
+        env:
+          AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
+          X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
+          APP_KEY: ${{ secrets.AUROGON_APPKEY }}
+          APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+        run: |
+          echo "====DEBUG ENV START===="
+          echo "AUROGON_API_PREFIX=$AUROGON_API_PREFIX"
+          echo "X_APIG_APPCODE length: ${#X_APIG_APPCODE}"
+          echo "APP_KEY length: ${#APP_KEY}"
+          echo "APP_SECRET length: ${#APP_SECRET}"
+          echo "====DEBUG ENV END===="
+          python3 .github/workflows/scripts/run_hitest.py
+
+      - name: Upload recommended pytest paths artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recommended-pytest-paths
+          path: .github/workflows/scripts/recommended_pytest_paths.txt
+          if-no-files-found: warn
+          retention-days: 14
