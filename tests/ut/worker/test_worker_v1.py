@@ -1164,6 +1164,7 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()
@@ -1270,6 +1271,7 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()
@@ -1299,16 +1301,23 @@ class TestNPUWorker(TestBase):
             expected_result = int(10000 * 0.9 - 6000)
             self.assertEqual(result, expected_result)
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
     def test_determine_available_memory_memory_profiling_error(
-        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
+        self,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
+        mock_torch_mem_get_info,
+        mock_memory_profiling,
+        mock_get_ascend_config,
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
 
+        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
         # Mock memory_profiling where free memory after profile > init free memory (error case)
         mock_profile_result = MagicMock()
         mock_profile_result.non_kv_cache_memory = 2000
@@ -1378,6 +1387,7 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()

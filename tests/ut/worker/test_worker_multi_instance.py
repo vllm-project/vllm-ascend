@@ -45,7 +45,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         model_memory_usage: int | None = None,
     ):
         """Return a minimally-configured NPUWorker mock with memory state set."""
-        from vllm_ascend.worker.worker import NPUWorker
+        from vllm_ascend.worker.worker import NPUWorker, get_ascend_config
+
+        get_ascend_config().eplb_config.compact_weights = False
 
         if model_memory_usage is None:
             model_memory_usage = int(0.5 * GiB_bytes)  # Qwen3-0.6B ~0.5 GiB
@@ -119,6 +121,33 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     # ------------------------------------------------------------------ #
     # Tests
     # ------------------------------------------------------------------ #
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_compact_weights_count_driver_consumption_once(self, mock_logger, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        worker = self._make_worker(48 * GiB_bytes, 60 * GiB_bytes, 64 * GiB_bytes, 16 * GiB_bytes)
+        mock_get_ascend_config.return_value.eplb_config.compact_weights = True
+        profile = self._make_profile_result(35 * GiB_bytes, 16 * GiB_bytes)
+        profile.non_torch_increase = 25 * GiB_bytes
+        profile.before_profile.torch_peak = 4 * GiB_bytes
+        profile.after_profile.torch_allocated = 4 * GiB_bytes
+        with (
+            self._patch_memory_profiling(profile),
+            patch(
+                "vllm_ascend.worker.worker.torch.npu.memory_stats",
+                return_value={"allocated_bytes.all.peak": 10 * GiB_bytes},
+            ),
+        ):
+            available = worker.determine_available_memory()
+        # 25 GiB driver consumption includes the external weights already;
+        # only the 6 GiB transient activation headroom is added.
+        self.assertEqual(profile.non_kv_cache_memory, 31 * GiB_bytes)
+        self.assertEqual(available, 17 * GiB_bytes)
+        self.assertEqual(
+            worker.model_runner.model_memory_usage + worker.peak_activation_memory + worker.non_torch_memory,
+            profile.non_kv_cache_memory,
+        )
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")

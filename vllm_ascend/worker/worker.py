@@ -612,10 +612,23 @@ class NPUWorker(WorkerBase):
         profile_result.non_kv_cache_memory = (
             profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
         )
+        if get_ascend_config().eplb_config.compact_weights:
+            # Compaction moves already-accounted weights outside the caching
+            # allocator. Count driver consumption once, plus transient Torch
+            # activation headroom, including the pre-graph peak above.
+            profile_result.non_kv_cache_memory = (
+                self.init_snapshot.free_memory
+                - profile_result.after_profile.free_memory
+                + max(0, profile_torch_peak - profile_result.after_profile.torch_allocated)
+            )
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
-        self.non_torch_memory = profile_result.non_torch_increase
+        # Keep the later KV-cache suggestion consistent with this budget;
+        # compacted weights are already included in the weights category.
+        self.non_torch_memory = (
+            profile_result.non_kv_cache_memory - profile_result.weights_memory - self.peak_activation_memory
+        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (

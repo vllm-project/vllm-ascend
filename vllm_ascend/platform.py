@@ -972,11 +972,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        supported_eplb_fields = {"load_collection_phase", "stair_config"}
+        supported_eplb_fields = {"compact_weights", "load_collection_phase", "stair_config"}
         unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
         if unsupported_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
+                "Model Runner V2 only accepts 'compact_weights', 'load_collection_phase' and 'stair_config' in "
                 "additional_config.eplb_config; unsupported fields: "
                 f"{', '.join(unsupported_eplb_fields)}."
             )
@@ -1007,9 +1007,9 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.use_async = True
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
+    elif {"compact_weights", "load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "compact_weights, stair_config and load_collection_phase are only supported by Model Runner V2; "
             "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
