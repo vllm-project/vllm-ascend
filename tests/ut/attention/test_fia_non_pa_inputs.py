@@ -30,6 +30,7 @@ def _make_impl(impl_cls=AscendAttentionBackendImpl):
     impl.sliding_window = None
     impl.sinks = None
     impl.enable_c8_quant = False
+    impl.enable_prefill_bnsd = False
     impl._use_max_workspace_for_fia_graph = False
     impl._layer_name = "layer"
     return impl
