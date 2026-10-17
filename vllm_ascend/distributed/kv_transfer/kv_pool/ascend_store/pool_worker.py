@@ -1005,12 +1005,6 @@ class KVPoolWorker:
         layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
             if getattr(self, "use_kvpp", False):
-                # The address tables below are built from the layers this rank
-                # registered, so the group-local index carried by the transfer
-                # tasks has to be owner-relative as well. The model-level index
-                # built from the full layer list walks past the registered
-                # entries and build_addrs() indexes the offsets array out of
-                # bounds.
                 self.physical_layer_to_group_layers.setdefault(phys, []).append(
                     (group_id, len(layer_cache_entry_offsets) - 1)
                 )
@@ -1130,8 +1124,6 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
-            # Drop the model-level map and rebuild it from the owner-filtered
-            # table in _infer_cache_group_metadata.
             self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {
@@ -2189,17 +2181,11 @@ class KVPoolWorker:
         if self.use_block_key_layerwise:
             # The map and buffer builders both use stage-local physical layer
             # indices. A group's dense layer index is a third, distinct axis.
-            # Under KVPP the transfer tasks are indexed against the
-            # owner-filtered address tables, so only the owner-relative map
-            # built by _infer_cache_group_metadata is valid here: falling back
-            # to local_layer would index past those tables.
             if self.num_kv_cache_groups == 1 and not getattr(self, "use_kvpp", False):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
                 if getattr(self, "use_kvpp", False):
-                    # This rank is not the owner of the layer: it neither saves
-                    # nor loads it here.
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
@@ -2823,16 +2809,6 @@ class KVPoolWorker:
             )
             return True
 
-        # Advance every rank through the same global layer window instead of
-        # counting local submissions. With KVPP a rank owns only a contiguous
-        # share of the layers, so a window counted in *local* submissions lets a
-        # rank skip the layers it does not own and submit its whole partition
-        # during the first few model layers. Load(L) is then no longer
-        # prefetched: it is fetched at the very front of the forward and
-        # competes with compute there. A model-layer window keeps the designed
-        # schedule: load(L) is submitted at model layer L - P, so its H2D
-        # overlaps the P layers of compute before the one that needs it.
-        # Layers this rank does not own are skipped by submit_layer_load().
         window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
