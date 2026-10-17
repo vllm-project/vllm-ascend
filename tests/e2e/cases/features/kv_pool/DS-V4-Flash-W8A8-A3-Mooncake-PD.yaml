@@ -12,7 +12,6 @@ dp_load_balancing: external
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   ACL_OP_INIT_MODE: "1"
   ASCEND_ENABLE_USE_FABRIC_MEM: "1"
   SERVER_PORT: "${PORT}"
