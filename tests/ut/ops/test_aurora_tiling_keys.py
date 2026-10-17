@@ -18,7 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TILING_HEADERS = (
-    REPO_ROOT / "csrc/attention/sparse_flash_mla/op_kernel/sparse_flash_mla_template_tiling_key.h",
+    REPO_ROOT / "csrc/attention/sparse_flash_mla_vllm/op_kernel/sparse_flash_mla_vllm_template_tiling_key.h",
     REPO_ROOT / "csrc/attention/quant_lightning_indexer_v2/op_kernel/quant_lightning_indexer_v2_template_tiling_key.h",
     REPO_ROOT / "csrc/attention/compressor/op_kernel/arch32/compressor_template_tiling_key.h",
     REPO_ROOT / "csrc/attention/compressor/op_kernel/arch35/compressor_template_tiling_key.h",
@@ -235,25 +235,25 @@ class AuroraTilingKeysTest(unittest.TestCase):
                 for vectorize in vectorize_flags:
                     expected.add((0, 1, 2, mode, split_g, head_ratio_one, batch_consistency, vectorize))
             with self.subTest(arch=arch):
-                selected = self.matrices["sparse_flash_mla", arch]
+                selected = self.matrices["sparse_flash_mla_vllm", arch]
                 self.assertEqual(set(selected), expected)
                 self.assertEqual(len(selected), 6 if arch == 220 else 12)
                 self.assertEqual(len(selected), len(set(selected)))
 
     def test_sparse_mla_architectures_exclude_each_others_specializations(self):
-        a2a3 = set(self.matrices["sparse_flash_mla", 220])
-        a5 = set(self.matrices["sparse_flash_mla", 310])
+        a2a3 = set(self.matrices["sparse_flash_mla_vllm", 220])
+        a5 = set(self.matrices["sparse_flash_mla_vllm", 310])
         self.assertTrue(all(key[4] == 0 and key[7] == 0 for key in a2a3))
         self.assertTrue(all(key[5] == 0 for key in a5))
         self.assertEqual(len(a2a3 & a5), 4)
-        host = self.matrices["sparse_flash_mla", None]
+        host = self.matrices["sparse_flash_mla_vllm", None]
         self.assertEqual(set(host), a2a3 | a5)
         self.assertEqual(len(host), 14)
 
     def test_sparse_mla_scope_and_a2a3_qli_quantization(self):
         for arch in (None, 220, 310):
             with self.subTest(arch=arch):
-                for key in self.matrices["sparse_flash_mla", arch]:
+                for key in self.matrices["sparse_flash_mla_vllm", arch]:
                     self.assertEqual(key[1:3], (1, 2))  # TND / PA_BBND
                     self.assertIn(key[3], (0, 2))  # SWA / CSA
                 if arch != 310:
@@ -296,7 +296,7 @@ class AuroraTilingKeysTest(unittest.TestCase):
         ]
         for arch in (None, 220, 310):
             with self.subTest(arch=arch):
-                self.assertEqual(self.declarations["sparse_flash_mla", arch], expected)
+                self.assertEqual(self.declarations["sparse_flash_mla_vllm", arch], expected)
                 qk_types = [36, 34, 40, 2] if arch == 310 else [2]
                 self.assertEqual(
                     self.declarations["quant_lightning_indexer_v2", arch],

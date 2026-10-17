@@ -1059,24 +1059,24 @@ def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
 
 def test_bundled_ascendc_index_score_registers_a5_fp8_kernel() -> None:
     repo_root = Path(msa_m3_module.__file__).parents[3]
-    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
-    op_def = (op_root / "op_host" / "msa_index_score_def.cpp").read_text(encoding="utf-8")
-    kernel = (op_root / "op_kernel" / "msa_index_score.cpp").read_text(encoding="utf-8")
-    adapter = (op_root / "msa_index_score_torch_adpt.h").read_text(encoding="utf-8")
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score_vllm"
+    op_def = (op_root / "op_host" / "msa_index_score_vllm_def.cpp").read_text(encoding="utf-8")
+    kernel = (op_root / "op_kernel" / "msa_index_score_vllm.cpp").read_text(encoding="utf-8")
+    adapter = (op_root / "msa_index_score_vllm_torch_adpt.h").read_text(encoding="utf-8")
     build_script = (repo_root / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
     a5_build_branch = build_script.split('elif [[ "$SOC_VERSION" =~ ^ascend950 ]]', 1)[1].split("else", 1)[0]
 
     assert 'AddConfig("ascend950"' in op_def
     assert "MSA_TILING_KEY_FP8_E4M3FN" in kernel
     assert "at::kFloat8_e4m3fn" in adapter
-    assert '"msa_index_score"' in a5_build_branch
+    assert '"msa_index_score_vllm"' in a5_build_branch
 
 
 def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
     repo_root = Path(msa_m3_module.__file__).parents[3]
-    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score_vllm"
     epilogue = (op_root / "op_kernel" / "arch35" / "msa_seg_row_max_epilogue.h").read_text(encoding="utf-8")
-    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
+    example = (op_root / "examples" / "test_aclnn_msa_index_score_vllm.cpp").read_text(encoding="utf-8")
 
     assert "AdvanceStageWindow" in epilogue
     assert "FlushStageToStrideEnd" in epilogue

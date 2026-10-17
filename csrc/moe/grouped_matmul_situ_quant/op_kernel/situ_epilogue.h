@@ -1,11 +1,11 @@
 /*
  * SiTU + MXQuant epilogue numerics — VERBATIM adaptation of the production
- * situ_mx_quant arch35 regbase implementation (vllm-ascend csrc/moe/situ_mx_quant,
+ * situ_mx_quant_vllm arch35 regbase implementation (vllm-ascend csrc/moe/situ_mx_quant_vllm,
  * CANN Open Software License). Bit-exactness with the production kernel requires
  * the identical MicroAPI instruction sequence; do not "optimize" op order here.
  *
  * Adaptations vs the original:
- *  - namespace renamed (SituMxQuant -> GmsqEpilogue)
+ *  - namespace renamed (SituMxQuantVllm -> GmsqEpilogue)
  *  - platform::GetVRegSize()/GetUbBlockSize() inlined as constants (256/32)
  *  - ops::CeilDivision -> local CeilDivU32
  */

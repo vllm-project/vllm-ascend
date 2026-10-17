@@ -37,9 +37,15 @@ FILL_THRESHOLD = -1.0e30
 def _load_golden_module():
     repo_root = Path(__file__).resolve().parents[4]
     golden_path = (
-        repo_root / "csrc" / "attention" / "msa_index_score" / "tests" / "golden" / "msa_index_score_golden.py"
+        repo_root
+        / "csrc"
+        / "attention"
+        / "msa_index_score_vllm"
+        / "tests"
+        / "golden"
+        / "msa_index_score_vllm_golden.py"
     )
-    spec = spec_from_file_location("msa_index_score_golden", golden_path)
+    spec = spec_from_file_location("msa_index_score_vllm_golden", golden_path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -77,7 +83,7 @@ def _run_case(
     page_axis_gap: int,
 ) -> None:
     if dtype == torch.float8_e4m3fn and not _is_ascend_950():
-        pytest.skip("FLOAT8_E4M3FN MsaIndexScore requires Ascend 950")
+        pytest.skip("FLOAT8_E4M3FN MsaIndexScoreVllm requires Ascend 950")
 
     generator = torch.Generator().manual_seed(2026)
     total_q = sum(q_lens)
@@ -123,8 +129,8 @@ def _run_case(
     )
     atten_mask = torch.zeros((2048, 2048), dtype=torch.int8, device="npu")
 
-    expected = golden.msa_index_score_golden(
-        golden.MsaIndexScoreGoldenInputs(
+    expected = golden.msa_index_score_vllm_golden(
+        golden.MsaIndexScoreVllmGoldenInputs(
             query=query.float().cpu().numpy(),
             key=key.float().cpu().numpy(),
             block_table=block_table.numpy(),

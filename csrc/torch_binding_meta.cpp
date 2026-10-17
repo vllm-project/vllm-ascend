@@ -299,7 +299,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
-at::Tensor npu_sparse_flash_mla_metadata_meta(
+at::Tensor npu_sparse_flash_mla_metadata_vllm_meta(
     int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
     const c10::optional<at::Tensor> &cu_seqlens_q,
     const c10::optional<at::Tensor> &cu_seqlens_ori_kv,
@@ -322,7 +322,7 @@ at::Tensor npu_sparse_flash_mla_metadata_meta(
                             at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_meta(
+std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_vllm_meta(
     const at::Tensor &q,
     const c10::optional<at::Tensor> &ori_kv,
     const c10::optional<at::Tensor> &cmp_kv,
@@ -397,7 +397,7 @@ at::Tensor npu_sparse_attention_score_meta(
                             query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
-at::Tensor npu_msa_index_score_meta(
+at::Tensor npu_msa_index_score_vllm_meta(
     const at::Tensor &query, const at::Tensor &,
     const at::Tensor &block_table, const at::Tensor &,
     const c10::optional<at::Tensor> &,
@@ -1584,7 +1584,7 @@ at::Tensor kda_layout_swap12_meta(
     return at::empty_symint(y_sizes, x.options());
 }
 
-std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
+std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
     const c10::optional<at::Tensor>& activation_scale,
@@ -1626,7 +1626,7 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     return {y, scale};
 }
 
-std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
+std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm_meta(
     const at::Tensor& x,
     double beta,
     double linear_beta,
@@ -1800,8 +1800,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
-    ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
-    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_vllm_meta);
+    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_vllm_meta);
     ops.impl("gmm_dequant_situ_quant", &vllm_ascend::meta::gmm_dequant_situ_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
@@ -1836,13 +1836,13 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
-    ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
-    ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
+    ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_vllm_meta);
+    ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_vllm_meta);
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
-    ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
+    ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_vllm_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap
