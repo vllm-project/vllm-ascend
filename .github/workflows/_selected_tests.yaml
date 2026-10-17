@@ -57,6 +57,16 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      coverage-file-suffix:
+        type: string
+        required: false
+        default: ''
+        description: 'Filename suffix for release coverage, such as v0.30.0rc2. Empty keeps coverage.tar.'
+      coverage-upload:
+        type: string
+        required: false
+        default: obs
+        description: 'Publish assembled coverage to obs, or to a workflow artifact for verification.'
       timeout-minutes:
         type: number
         required: false
@@ -435,6 +445,7 @@ jobs:
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
         OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+        COVERAGE_FILE_SUFFIX: ${{ inputs.coverage-file-suffix }}
       steps:
         - name: Checkout vllm-ascend source code
           uses: actions/checkout@v7
@@ -457,6 +468,39 @@ jobs:
               --test-groups-json "${SELECTED_TEST_GROUPS}" \
               --current-root all-coverage
 
+        - name: Prepare coverage object names
+          run: |
+            python3 - <<'PY'
+            import os
+            import re
+            import sys
+
+            prefix = "ci/precision-test"
+            suffix = os.environ.get("COVERAGE_FILE_SUFFIX", "")
+            if suffix and re.fullmatch(r"v[0-9][0-9A-Za-z._-]*", suffix) is None:
+                print(f"::error::refusing coverage file suffix {suffix}", file=sys.stderr)
+                sys.exit(1)
+
+            def object_name(filename: str) -> str:
+                if not suffix:
+                    return f"{prefix}/{filename}"
+                stem, extension = filename.rsplit(".", 1)
+                return f"{prefix}/{stem}-{suffix}.{extension}"
+
+            names = {
+                "COVERAGE_OBJECT_TAR": object_name("coverage.tar"),
+                "COVERAGE_OBJECT_VERSION": object_name("coverage_version.txt"),
+                "COVERAGE_OBJECT_MAP": object_name("test_case_map.json"),
+                "COVERAGE_OBJECT_EXTRA": object_name("extra_recommended_tests.yaml"),
+            }
+            with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+                for key, value in names.items():
+                    print(f"{key}={value}", file=handle)
+            print("Coverage OBS objects:")
+            for value in names.values():
+                print(f"  {value}")
+            PY
+
         - name: Download previous coverage data from OBS
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           run: |
@@ -466,8 +510,9 @@ jobs:
             # curl (no SDK or credentials needed). On the very first run there
             # is no history yet (HTTP 404); tolerate that so the downstream
             # backfill/assemble steps still proceed with the current data.
+            # Release-branch runs read their suffixed object, not main's package.
             if curl -fSL --retry 3 -o previous-coverage.tar \
-              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
+              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_TAR}"; then
               tar xf previous-coverage.tar -C previous-coverage
             else
               echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
@@ -554,7 +599,27 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
+        - name: Stage coverage artifact
+          if: ${{ inputs.coverage-upload == 'artifact' }}
+          run: |
+            set -euo pipefail
+            mkdir -p coverage-artifact
+            cp coverage.tar "coverage-artifact/$(basename "${COVERAGE_OBJECT_TAR}")"
+            cp coverage_version.txt "coverage-artifact/$(basename "${COVERAGE_OBJECT_VERSION}")"
+            cp test_case_map.json "coverage-artifact/$(basename "${COVERAGE_OBJECT_MAP}")"
+            ls -lh coverage-artifact
+
+        - name: Upload coverage artifact
+          if: ${{ inputs.coverage-upload == 'artifact' }}
+          uses: actions/upload-artifact@v7
+          with:
+            name: precision-test-coverage${{ inputs.coverage-file-suffix && format('-{0}', inputs.coverage-file-suffix) || '' }}
+            path: coverage-artifact
+            if-no-files-found: error
+            retention-days: 14
+
         - name: Upload coverage to OBS
+          if: ${{ inputs.coverage-upload != 'artifact' }}
           run: |
             pip install esdk-obs-python --quiet
             python3 - <<'EOF'
@@ -562,7 +627,6 @@ jobs:
             from obs import ObsClient
 
             OBS_BUCKET = 'vllm-ascend'
-            OBS_PREFIX = 'ci/precision-test'
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
@@ -570,9 +634,9 @@ jobs:
             )
 
             uploads = [
-                ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
-                ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
-                ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
+                ('coverage.tar', os.environ['COVERAGE_OBJECT_TAR']),
+                ('coverage_version.txt', os.environ['COVERAGE_OBJECT_VERSION']),
+                ('test_case_map.json', os.environ['COVERAGE_OBJECT_MAP']),
             ]
             for local_path, obs_path in uploads:
                 resp = client.putFile(OBS_BUCKET, obs_path, local_path)
@@ -584,18 +648,19 @@ jobs:
 
         - name: Prune extra tests already present in coverage
           id: prune-extra
+          if: ${{ inputs.coverage-upload != 'artifact' }}
           continue-on-error: true
           run: |
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
-            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
             if ! pip install pyyaml --quiet; then
               echo "::warning::Failed to install pyyaml; skip prune"
               exit 0
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
-              echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
+              echo "Unable to download ${COVERAGE_OBJECT_EXTRA} from OBS (HTTP ${http_code}); skip prune"
               exit 0
             fi
             python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
@@ -618,7 +683,7 @@ jobs:
             exit 0
 
         - name: Upload pruned extra_recommended_tests.yaml to OBS
-          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
+          if: ${{ success() && inputs.coverage-upload != 'artifact' && steps.prune-extra.outputs.pruned == 'true' }}
           continue-on-error: true
           run: |
             set -euo pipefail
@@ -635,7 +700,7 @@ jobs:
             import os
             from obs import ObsClient
 
-            obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+            obs_path = os.environ['COVERAGE_OBJECT_EXTRA']
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
