@@ -402,6 +402,25 @@ class NPUPlatform(Platform):
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
+    def _align_heterogeneous_kv_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        architectures = getattr(getattr(model_config, "hf_config", None), "architectures", None) or ()
+        if (
+            _MINIMAX_M3_ARCHITECTURES.intersection(architectures)
+            and cache_config is not None
+            and cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+            and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+        ):
+            # M3 keeps separate per-layer pages for BF16 GQA, FP8 sparse
+            # attention and its indexer. They need not share one page size.
+            # The upstream dense-attention alignment doubles the logical
+            # block size, which the M3 indexer backend does not support.
+            return
+
+        super()._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         super().update_block_size_for_backend(vllm_config)
 
