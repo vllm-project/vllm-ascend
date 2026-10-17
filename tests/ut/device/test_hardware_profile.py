@@ -76,6 +76,7 @@ _EXPECTED_CAPABILITIES = {
     ),
     AscendDeviceType.A5: frozenset(
         {
+            HardwareCapability.POOL_KEY_INDEXER_FP8,
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,

@@ -83,6 +83,7 @@ class SparseAttnIndexerKpool(nn.Module):
         output_buffer: torch.Tensor | None = None,
         allow_cache_packing: bool = True,
         query_metadata: AscendIndexerKPoolQueryMetadata | None = None,
+        indexer_scale_cache: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
         if index_kpool <= 0 or self.topk_tokens % index_kpool:
@@ -95,8 +96,20 @@ class SparseAttnIndexerKpool(nn.Module):
             )
         if indexer_metadata.cum_query_lens is None or indexer_metadata.raw_seq_lens is None:
             raise ValueError("GLM KPool metadata requires cum_query_lens and raw_seq_lens.")
-        if indexer_cache.dtype != torch.bfloat16:
-            raise TypeError("GLM KPool compressed cache must be bfloat16.")
+        if indexer_cache.dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
+            raise TypeError("GLM KPool Triton compressed cache must be bfloat16, int8 or FP8 E4M3FN.")
+        if indexer_cache.dtype == torch.float8_e4m3fn and (
+            indexer_cache.shape[-1] != self.head_dim
+            or indexer_scale_cache is None
+            or indexer_scale_cache.dtype != torch.float32
+            or indexer_scale_cache.shape != (*indexer_cache.shape[:-1], 1)
+            or indexer_scale_cache.device != indexer_cache.device
+        ):
+            raise ValueError("GLM KPool FP8 keys require a matching FP32 scale plane.")
+        if indexer_cache.dtype != torch.float8_e4m3fn and indexer_scale_cache is not None:
+            raise ValueError("Separate KPool scale planes are only used with FP8 keys.")
+        if indexer_cache.dtype == torch.int8 and indexer_cache.shape[-1] != self.head_dim + 4:
+            raise ValueError("GLM KPool LI C8 rows require head_dim INT8 bytes plus one FP32 scale.")
         if tail_cache.dtype != torch.float32 or k.dtype != torch.float32 or gate_score.dtype != torch.float32:
             raise TypeError("GLM KPool keys, gates and compressor tail must be float32.")
         if (
@@ -125,6 +138,7 @@ class SparseAttnIndexerKpool(nn.Module):
             tail_metadata.block_table,
             indexer_metadata.slot_mapping[:num_tokens],
             index_kpool,
+            indexer_scale_cache=indexer_scale_cache,
         )
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
@@ -147,6 +161,7 @@ class SparseAttnIndexerKpool(nn.Module):
             output_buffer=output_buffer,
             pack_tail=True,
             allow_cache_packing=allow_cache_packing,
+            indexer_scale_cache=indexer_scale_cache,
         )
         # Expansion also packs the causal tail and clears every padded row.
         if query_metadata is not None:

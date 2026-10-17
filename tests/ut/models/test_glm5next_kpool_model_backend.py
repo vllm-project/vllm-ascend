@@ -48,6 +48,47 @@ def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
     assert module.AscendIndexerKPoolTailBackend.get_builder_cls() is module.AscendIndexerKPoolTailMetadataBuilder
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("dsa_cp", [False, True])
+def test_quantized_routing_preserves_upstream_bf16_cann(monkeypatch, dtype, dsa_cp):
+    import sys
+
+    from vllm_ascend.models.glm5next import sparse_attn_indexer_kpool_cann as fp8_module
+
+    monkeypatch.setitem(sys.modules, "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool", kpool_module)
+    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
+    monkeypatch.setattr(backend_module, "get_current_hardware_profile", MagicMock())
+    initialize_cann = MagicMock()
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", initialize_cann)
+    triton_op, fp8_op = MagicMock(), MagicMock()
+    monkeypatch.setattr(kpool_module, "SparseAttnIndexerKpool", triton_op)
+    monkeypatch.setattr(fp8_module, "SparseAttnIndexerKpool", fp8_op)
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=2,
+        head_dim=2,
+        topk_tokens=4,
+        q_lora_rank=2,
+        index_kpool=4,
+        wq_b=nn.Linear(2, 4),
+        wk_weights_proj=nn.Linear(3, 4),
+        k_norm=nn.LayerNorm(2),
+        softmax_scale=0.5,
+        index_kpool_compress_ape=nn.Parameter(torch.zeros(4, 2)),
+        index_kpool_compress_gate=nn.Parameter(torch.zeros(2, 3)),
+        k_cache=SimpleNamespace(dtype=dtype),
+        tail_cache=SimpleNamespace(),
+        topk_indices_buffer=None,
+    )
+    backend = Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    assert initialize_cann.call_count == int(dtype == torch.bfloat16)
+    assert triton_op.call_count == int(dtype == torch.int8)
+    assert fp8_op.call_count == int(dtype == torch.float8_e4m3fn)
+    assert backend.num_cache_tensors == (2 if dtype == torch.float8_e4m3fn else 1)
+
+
 @pytest.mark.parametrize("pool_size", [1, 4])
 def test_causal_tail_follows_valid_history_without_holes(pool_size: int) -> None:
     topk = 8
@@ -106,7 +147,23 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
     indexer_cache = torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16)
     tail_cache = torch.zeros(2, 2, 4, 2)
 
-    def compress(state, cache, k, gate, ape, positions, query_ends, seq_lens, state_slots, table, indexer_slots, pool):
+    def compress(
+        state,
+        cache,
+        k,
+        gate,
+        ape,
+        positions,
+        query_ends,
+        seq_lens,
+        state_slots,
+        table,
+        indexer_slots,
+        pool,
+        *,
+        indexer_scale_cache=None,
+    ):
+        assert indexer_scale_cache is None
         assert k.dtype == gate.dtype == state.dtype == torch.float32
         assert pool == 4
         torch.testing.assert_close(query_ends, metadata.cum_query_lens)
@@ -238,6 +295,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     backend.index_kpool_compress_gate = nn.Parameter(torch.zeros(2, 3))
     backend.k_cache = SimpleNamespace(
         prefix="indexer.k_cache",
+        dtype=torch.bfloat16,
         kv_cache=torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
     )
     backend.tail_cache = SimpleNamespace(

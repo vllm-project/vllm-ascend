@@ -24,7 +24,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
+from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
@@ -264,6 +264,98 @@ def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
     assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size
     assert k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr() == kv_c_cache[0].numel() * kv_c_cache.element_size()
+
+
+@pytest.mark.parametrize("kernel_size", [4, 8])
+def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size):
+    config = _make_config()
+    specs = _make_specs()
+    specs[INDEXER] = replace(
+        specs[INDEXER],
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        page_size_padded=640,
+    )
+    register_all_kvcache_specs(None)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    runner = _make_runner(config)
+    raw = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw, [kernel_size, 2, 0])
+    key, scale = caches[INDEXER]
+    page_bytes = next(
+        d.size // plan.num_blocks for d in plan.kv_cache_tensors if INDEXER in get_kv_cache_tensor_layers(d)
+    )
+    rows = kernel_size // 2
+    assert key.shape == (3 * 8 // kernel_size, rows, 1, 128)
+    assert scale.shape == (3 * 8 // kernel_size, rows, 1, 1)
+    assert key.dtype == torch.float8_e4m3fn and scale.dtype == torch.float32
+    assert key.stride(0) == scale.stride(0) * scale.element_size() == page_bytes // (8 // kernel_size)
+    assert scale.data_ptr() - key.data_ptr() == rows * 128
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    group = SimpleNamespace(
+        kv_cache_group_id=0, kv_cache_spec=specs[INDEXER], layer_names=[INDEXER], backend=_AttentionBackend
+    )
+    v2_key, v2_scale = attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [kernel_size], {}, plan)[INDEXER]
+    assert v2_key.shape == key.shape and v2_scale.shape == scale.shape
+    assert v2_key.stride() == key.stride() and v2_scale.stride() == scale.stride()
+    assert v2_key.data_ptr() == key.data_ptr() and v2_scale.data_ptr() == scale.data_ptr()
+    key[1].view(torch.uint8).fill_(23)
+    scale[2].fill_(7)
+    assert torch.count_nonzero(key[2].view(torch.uint8)) == 0
+    assert torch.count_nonzero(scale[:2]) == 0
+    assert torch.all(key[1].view(torch.uint8) == 23)
+
+
+@pytest.mark.parametrize("page_bytes", [38016, 46080])
+def test_int8_indexer_packs_rows_inside_each_kernel_page(page_bytes):
+    spec = AscendMLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+        tokens_per_state=4,
+        page_size_padded=page_bytes,
+    )
+    raw = torch.zeros(3 * page_bytes, dtype=torch.uint8)
+    (view,) = view_compressed_indexer_cache(INDEXER, spec, raw, _AttentionBackend, 128)
+    assert view.shape == (27, 32, 1, 132)
+    assert view.stride() == (page_bytes // 9, 132, 132, 1)
+    assert view.data_ptr() == raw.data_ptr()
+    assert view.view(torch.int16).shape[-1] == 66
+    # Scheduler page 1, kernel block 2, pooled row 5, payload byte 7.
+    offset = page_bytes + 2 * (page_bytes // 9) + 5 * 132 + 7
+    raw[offset] = 83
+    assert view[11, 5, 0, 7] == 83
+    view[26, 31, 0, 131] = -5
+    assert raw.view(torch.int8)[2 * page_bytes + 8 * (page_bytes // 9) + 31 * 132 + 131] == -5
+    if page_bytes > 38016:
+        view.fill_(7)
+        assert torch.count_nonzero(raw[4224 : page_bytes // 9]) == 0
+
+
+def test_int8_indexer_rejects_nonuniform_kernel_pages():
+    spec = AscendMLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        tokens_per_state=4,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+        page_size_padded=8449,
+    )
+    with pytest.raises(ValueError, match="aligned kernel pages"):
+        view_compressed_indexer_cache(INDEXER, spec, torch.zeros(8449, dtype=torch.uint8), _AttentionBackend, 128)
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator():

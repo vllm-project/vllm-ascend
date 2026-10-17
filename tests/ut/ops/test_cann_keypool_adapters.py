@@ -123,7 +123,8 @@ def test_business_shape_index_packing_reuses_output_without_running_kernel(monke
     assert args[4:11] == (2051, output.stride(0), 2048, 4, 2, output.shape[1], 4096)
 
 
-def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel(monkeypatch):
+@pytest.mark.parametrize("quantized", [False, True])
+def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel(monkeypatch, quantized):
     launch = MagicMock()
     monkeypatch.setattr(adapters, "_write_keypool_caches_kernel", launch)
     dim = 128
@@ -138,11 +139,15 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
         cann_inputs=SimpleNamespace(write_indices=writes, state_indices=state_rows, page_rows=80)
     )
     state = torch.empty(5, 4, 2 * dim)
-    adapters.write_keypool_caches(tail, cache, None, None, pooled, metadata, tail_metadata, state)
+    scales = torch.empty(3, 64, 1, dtype=torch.float32)[:, :32] if quantized else None
+    adapters.write_keypool_caches(tail, cache, None, None, pooled, metadata, tail_metadata, state, scale_cache=scales)
     args = launch.__getitem__.return_value.call_args.args
     assert launch.__getitem__.call_args.args == ((7,),)
     assert args[0] is tail
     assert args[1] is cache
+    assert args[2] is scales
+    assert args[18] == (64 if quantized else 0)
+    assert args[-2] is quantized
     tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
     assert any(arg is slots for arg in tensors)
     assert any(arg is writes for arg in tensors)
