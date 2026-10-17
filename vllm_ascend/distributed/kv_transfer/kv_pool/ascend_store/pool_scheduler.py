@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     validate_layerwise_runtime,
     validate_layerwise_topology,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -440,17 +441,23 @@ class KVPoolScheduler:
             batch = all_keys[start : start + batch_size]
             try:
                 batch_readable = self.store_scheduler.batch_is_readable(batch)
-                if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
-                    raise RuntimeError("Layerwise readability probe returned invalid results")
-            except Exception as exc:
-                # Ordinary pooling can recompute a miss. Layer-reuse offload
-                # must preserve its strict failure contract.
+            except BatchResultShapeError as exc:
+                # Ordinary pooling can recompute malformed batch results.
+                # Other backend errors and layer-reuse offload remain strict.
                 if self.layerwise_offload:
                     raise
                 logger.warning(
                     "Layerwise readability probe failed for %d keys; treating as cache misses: %s",
                     len(batch),
                     exc,
+                )
+                batch_readable = [False] * len(batch)
+            if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
+                if self.layerwise_offload:
+                    raise RuntimeError("Layerwise readability probe returned invalid results")
+                logger.warning(
+                    "Layerwise readability probe returned malformed results for %d keys; treating as cache misses",
+                    len(batch),
                 )
                 batch_readable = [False] * len(batch)
             readable.extend(batch_readable)

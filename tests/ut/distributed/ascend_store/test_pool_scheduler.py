@@ -250,13 +250,15 @@ class TestKVPoolSchedulerLayerwiseProbe:
         return scheduler
 
     @pytest.mark.parametrize("offload", [False, True])
-    @pytest.mark.parametrize("error_type", [BatchResultShapeError, RuntimeError, TimeoutError])
+    @pytest.mark.parametrize(
+        "error_type", [BatchResultShapeError, RuntimeError, TimeoutError, AttributeError, TypeError]
+    )
     def test_probe_exception_respects_offload_contract(self, offload, error_type):
         scheduler = self._make_scheduler(offload)
         error = error_type("pool metadata query failed")
         scheduler.store_scheduler.batch_is_readable.side_effect = error
 
-        if offload:
+        if offload or error_type is not BatchResultShapeError:
             with pytest.raises(error_type) as exc_info:
                 scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
             assert exc_info.value is error
@@ -264,19 +266,26 @@ class TestKVPoolSchedulerLayerwiseProbe:
             assert scheduler._query_layerwise_block_hits([["rank0", "rank1"]]) == [False]
 
     @pytest.mark.parametrize("offload", [False, True])
-    @pytest.mark.parametrize("result", [[], [True], [True, True, True], [True, 1], None])
+    @pytest.mark.parametrize("result", [[], [True], [True, True, True], [True, 1]])
     def test_malformed_probe_respects_offload_contract(self, offload, result):
         scheduler = self._make_scheduler(offload)
         scheduler.store_scheduler.batch_is_readable.return_value = result
 
         if offload:
-            error_type = TypeError if result is None else RuntimeError
-            with pytest.raises(error_type):
+            with pytest.raises(RuntimeError, match="Layerwise readability probe returned invalid results"):
                 scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
         else:
             assert scheduler._query_layerwise_block_hits([["rank0", "rank1"]]) == [False]
 
-    @pytest.mark.parametrize("failed_result", [BatchResultShapeError("query failed"), [True], [True, 1], None])
+    @pytest.mark.parametrize("offload", [False, True])
+    def test_non_sequence_probe_result_propagates_type_error(self, offload):
+        scheduler = self._make_scheduler(offload)
+        scheduler.store_scheduler.batch_is_readable.return_value = None
+
+        with pytest.raises(TypeError):
+            scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
+
+    @pytest.mark.parametrize("failed_result", [BatchResultShapeError("query failed"), [True], [True, 1]])
     def test_failed_batch_does_not_change_other_block_hits(self, failed_result):
         scheduler = self._make_scheduler(batch_size=1)
         keys_by_block = [[f"block{block}-rank{rank}" for rank in range(2)] for block in range(3)]
