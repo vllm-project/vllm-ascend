@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""State gather for CANN KeyPool."""
+"""State gathering and nonempty input adaptation for CANN KeyPool."""
 
 import torch
 
-from vllm_ascend.ops.triton.glm5_next_cann_keypool import prepare_nonempty_keypool_inputs
+from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 
 
 def _cache_rows(cache):

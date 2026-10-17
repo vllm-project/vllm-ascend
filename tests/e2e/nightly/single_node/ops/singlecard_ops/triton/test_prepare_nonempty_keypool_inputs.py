@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NPU regression for zero-pool DSA-CP shards and changing graph replay metadata.
+"""Accuracy tests for nonempty KPool inputs and their CANN integration.
 
 Run under mssanitizer memcheck as well to detect writes past CANN's TND output.
 """
@@ -12,13 +12,14 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
-from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices, prepare_nonempty_keypool_inputs
+from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices
+from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 
 @pytest.mark.parametrize("tokens,requests,columns", [(1, 1, 1), (5, 2, 128), (65, 64, 1025), (257, 4, 65)])
 @pytest.mark.parametrize("strided", [False, True])
-def test_fused_sentinel_inputs_match_reference(tokens, requests, columns, strided):
+def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, columns, strided):
     torch.manual_seed(1024)
     device = "npu:0"
     step = 2 if strided else 1
