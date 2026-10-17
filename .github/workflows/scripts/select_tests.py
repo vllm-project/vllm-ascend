@@ -54,7 +54,6 @@ See ``test_config.yaml`` for details.
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import sys
@@ -184,29 +183,6 @@ def _as_posix_path(path: str) -> str:
 def _pytest_node_file_path(path: str) -> str:
     """Return the real file path for a pytest nodeid target."""
     return path.split("::", 1)[0]
-
-
-def _normalize_recommended_target(target: str) -> str:
-    file_path, separator, node_id = target.partition("::")
-    path = Path(file_path)
-    if not separator or not path.is_file():
-        return target
-
-    scope: ast.AST = ast.parse(path.read_text(encoding="utf-8"), filename=file_path)
-    for name in node_id.split("[", 1)[0].split("::"):
-        definition = next(
-            (
-                node
-                for node in ast.walk(scope)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name
-            ),
-            None,
-        )
-        if definition is None:
-            print(f"Warning: Recommended node not found in source: {target}; falling back to file.", file=sys.stderr)
-            return file_path
-        scope = definition
-    return target
 
 
 def _load_runners() -> dict[str, RunnerInfo]:
@@ -828,7 +804,7 @@ def main():
                 file=sys.stderr,
             )
         for target in explicit_targets:
-            _route_explicit_test_target(_normalize_recommended_target(target), all_groups)
+            _route_explicit_test_target(target, all_groups)
     elif args.all_tests:
         matched_modules = ["all"]
         for root in _ALL_TESTS_ROOTS:
