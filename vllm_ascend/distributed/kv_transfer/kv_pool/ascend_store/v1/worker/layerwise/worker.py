@@ -264,7 +264,8 @@ class LayerwiseWorker(KVPoolWorker):
         batch = self._materialize_store_candidates(state.commands, candidates, selected_objects)
         state.batch = batch
         # Admission has already chosen one source owner per key, including duplicates across requests.
-        keys, object_sizes = [], []
+        keys: list[str] = []
+        object_sizes: list[int] = []
         for group in batch.groups:
             group_keys = group.selected_keys()
             keys.extend(group_keys)

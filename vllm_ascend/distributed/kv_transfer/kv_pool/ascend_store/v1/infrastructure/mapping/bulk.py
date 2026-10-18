@@ -41,12 +41,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from . import contiguous, head_slicing, layer_partitioning
-from .types import BulkTransferArguments, KeysByPrefix, UInt64Array
+from .types import BulkTransferArguments, KeysByPrefix, LocalMemorySegments, UInt64Array
 
 if TYPE_CHECKING:
     import torch
 
-    from ..configuration.topology import KVPoolTopology
+    from ..configuration.topology import KVPoolGroupTopology, KVPoolTopology
 
 
 class BulkMapping:
@@ -91,6 +91,7 @@ class BulkMapping:
         # ====================================================
 
         groups = topology.transfer_groups
+        group: KVPoolGroupTopology | None
         if group_id is None:
             if len(groups) != 1:
                 raise ValueError("Select an original group_id when binding multiple transferable cache groups")
@@ -99,8 +100,8 @@ class BulkMapping:
             group = next((group for group in groups if group.group_id == group_id), None)
             if group is None:
                 raise KeyError(f"Unknown transferable KV cache group {group_id}")
-        target_pp_layer_counts = topology.consumer_pipeline_partitions
-        split_pipeline = target_pp_layer_counts is not None and len(target_pp_layer_counts) > 1
+        target_pp_layer_counts = topology.consumer_pipeline_partitions or ()
+        split_pipeline = len(target_pp_layer_counts) > 1
 
         self.group_id = group.group_id
         self.group_block_size = group.block_size
@@ -146,6 +147,7 @@ class BulkMapping:
         # can share NumPy slices without recompiling head geometry per PP span.
 
         head_slices_per_rank = 1
+        segments_by_head_slice: tuple[LocalMemorySegments, ...]
         if topology.tp_partition.tp_mismatch:
             head_slices_per_rank = topology.tp_partition.key_slices_per_rank
             head_major = kv_cache_layout in ("HND", "LBHNC")
@@ -184,8 +186,7 @@ class BulkMapping:
         local_prefix_index_in_pp = metadata.dcp_rank * key_head_count + first_head_rank
         if not pp_layer_partitions:
             prefix_start = metadata.pp_rank * prefixes_per_pp + local_prefix_index_in_pp
-            prefixes = self.lookup_key_prefixes[prefix_start : prefix_start + head_slices_per_rank]
-            self.key_prefixes = prefixes
+            self.key_prefixes = self.lookup_key_prefixes[prefix_start : prefix_start + head_slices_per_rank]
             self.physical_layer_ids_by_key_prefix = (self.physical_layer_ids,) * head_slices_per_rank
             self.object_sizes_bytes_by_key_prefix = (
                 self.local_group_block_bytes // head_slices_per_rank,
@@ -198,13 +199,11 @@ class BulkMapping:
         # Select target PP layers for each key prefix
         # ====================================================
 
-        prefixes, layers_by_prefix, object_sizes_bytes, segments_by_prefix, layer_boundaries_by_prefix = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
+        prefixes: list[str] = []
+        layers_by_prefix: list[tuple[int, ...]] = []
+        object_sizes_bytes: list[int] = []
+        segments_by_prefix: list[LocalMemorySegments] = []
+        layer_boundaries_by_prefix: list[tuple[int, ...]] = []
         for pp_partition in pp_layer_partitions:
             pp_segments_by_head_slice = (
                 segments_by_head_slice

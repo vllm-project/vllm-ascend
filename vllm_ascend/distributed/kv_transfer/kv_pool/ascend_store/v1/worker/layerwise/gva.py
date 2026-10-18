@@ -124,9 +124,10 @@ def materialize_layer_gva(
     """Evaluate only layer-dependent GVA arrays from prepared objects."""
 
     object_bases_by_group = plan.object_bases_by_group
-    remote_addresses = []
-    local_addresses = []
-    sizes = []
+    assert object_bases_by_group is not None
+    remote_addresses: list[int] = []
+    local_addresses: list[int] = []
+    sizes: list[int] = []
     for group in plan.groups_by_layer[layer_id]:
         _, local_rows, size_rows, offset_rows = mappings[group.group_id].arguments(
             cast(LayerwiseSelection, group.selection), layer_id=layer_id

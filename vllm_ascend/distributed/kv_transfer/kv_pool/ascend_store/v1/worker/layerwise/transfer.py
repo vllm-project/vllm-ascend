@@ -85,7 +85,7 @@ def _prepare_layer_plan(
     resolve_requests: bool,
 ) -> LayerTransferPlan:
     groups = []
-    object_bases_by_group = {} if resolve_object_bases is not None else None
+    object_bases_by_group: dict[int, ByteArray] | None = {} if resolve_object_bases is not None else None
     for batch_group in batch.groups:
         selection = mappings[batch_group.group_id].prepare(
             batch_group.key_axes, batch_group.block_ids, selected_keys=batch_group.selected_objects
@@ -93,6 +93,7 @@ def _prepare_layer_plan(
         group = make_layer_transfer_group(batch_group, selection=selection, resolve_requests=resolve_requests)
         groups.append(group)
         if resolve_object_bases is not None and group.keys:
+            assert object_bases_by_group is not None
             object_bases_by_group[group.group_id] = resolve_object_bases(batch_group, group.keys)
     return make_layer_transfer_plan(batch, tuple(groups), object_bases_by_group)
 

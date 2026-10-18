@@ -196,6 +196,7 @@ class MooncakeBackend:
 
     def finish_key_range_load(self, keys: list[str]) -> None:
         self._ensure_initialized()
+        assert self._store is not None
         native_result = integer_result("Mooncake batch_get_session_end", self._store.batch_get_session_end(keys))
         if native_result != 0:
             raise RuntimeError(f"Mooncake batch_get_session_end failed with result {native_result}")
