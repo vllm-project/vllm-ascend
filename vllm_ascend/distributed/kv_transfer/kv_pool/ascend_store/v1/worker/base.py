@@ -16,6 +16,7 @@ from vllm.logger import logger
 from ..infrastructure.configuration.topology import KVPoolTopology
 from ..infrastructure.execution.executor import Executor
 from ..infrastructure.mapping import BulkMapping
+from ..infrastructure.mapping.types import ObjectKeyBuilder
 from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from ..infrastructure.reachability import HybridReachability, UnitaryReachability
 from ..infrastructure.resources import KVPoolResources
@@ -139,6 +140,9 @@ class KVPoolWorker(ABC):
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return self._backend.exists(keys) if keys else ()
 
+    def _key_builder(self, group_id: int) -> ObjectKeyBuilder:
+        return self._mappings[group_id]
+
     def lookup(self, request: LookupRequest) -> LookupResult:
         if not self._execution_started:
             raise RuntimeError("KV caches must be bound before Lookup")
@@ -159,7 +163,7 @@ class KVPoolWorker(ABC):
                 start_token=request.start_token,
                 mask=mask,
             )
-            keys = mapping.lookup_keys(hashes)
+            keys = self._key_builder(group_id).lookup_keys(hashes)
             try:
                 observed = self._exists([key for axis in keys for key in axis])
             except Exception as error:
@@ -204,20 +208,22 @@ class KVPoolWorker(ABC):
             )
         groups = []
         for group_id, mapping in self._mappings.items():
+            build_keys = self._key_builder(group_id).keys
             rows = [request_rows[group_id] for request_rows in rows_by_request]
             splits = [0]
             for counts, hashes, block_ids in rows:
                 splits.append(splits[-1] + len(block_ids))
+            object_size, physical_layer_ids_by_axis = self._group_object_layout(group_id)
             groups.append(
                 KVGroupBatch(
                     group_id,
                     concat_uint64([row[2] for row in rows]),
                     concat_uint64([row[0] for row in rows]),
-                    merge_key_axes(group_id, [mapping.keys(row[1]) for row in rows]),
+                    merge_key_axes(group_id, [build_keys(row[1]) for row in rows]),
                     readonly_indices(splits),
                     mapping.physical_layer_ids,
-                    mapping.local_group_block_bytes,
-                    physical_layer_ids_by_axis=mapping.physical_layer_ids_by_key_prefix,
+                    object_size,
+                    physical_layer_ids_by_axis=physical_layer_ids_by_axis,
                 )
             )
         return KVTransferBatch(tuple(command.request_id for command in commands), tuple(groups))
@@ -582,7 +588,7 @@ class KVPoolWorker(ABC):
                 row_offset += request_row_count
 
         topology = self._groups[candidates.group_id]
-        object_size, physical_layer_ids_by_axis = self._store_group_layout(candidates.group_id)
+        object_size, physical_layer_ids_by_axis = self._group_object_layout(candidates.group_id)
         return KVGroupBatch(
             candidates.group_id,
             readonly_uint64(block_ids),
@@ -638,7 +644,7 @@ class KVPoolWorker(ABC):
             f"cache group/block failures {failed_locations}"
         )
 
-    def _store_group_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
+    def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
         mapping = self._mappings[group_id]
         return mapping.local_group_block_bytes, mapping.physical_layer_ids_by_key_prefix
 

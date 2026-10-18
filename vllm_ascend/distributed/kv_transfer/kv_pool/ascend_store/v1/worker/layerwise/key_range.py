@@ -9,6 +9,7 @@ from typing import Any, cast
 from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
+from ....backend.layerwise_keys import LayerwiseKeyBuilder
 from ...backend import KeyRangeBackend
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
@@ -41,6 +42,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
+        key_builder: LayerwiseKeyBuilder | None = None,
     ) -> None:
         backend = cast(KeyRangeBackend, resources.backend)
         sessions = backend.create_sessions()
@@ -55,6 +57,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
             layerwise_prefetch_layers=layerwise_prefetch_layers,
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
+            key_builder=key_builder,
         )
 
         self._attention_store_layers = _attention_store_layer_ids(topology) if store_enabled else frozenset()

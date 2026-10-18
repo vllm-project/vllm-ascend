@@ -1,4 +1,4 @@
-"""Generate one layer's transfers into the same complete objects as Bulk.
+"""Generate one layer's transfers from bound local segments and object geometry.
 
     Binding: once                         Batch: each prepare() call
     BulkMapping                           keys + block_ids + mask
@@ -17,9 +17,10 @@
                              v
               keys, local addresses, lengths, object offsets
 
-Object offsets are relative to the complete Bulk object, never rebased per layer
-or call order. Local layouts share Bulk's read-only arrays; readiness, allocation
-and transfer execution remain caller-owned.
+Default object offsets match Bulk. An optional GVA layout reserves global-layer
+and context-shard regions instead. Neither layout rebases offsets per layer or
+call order. Local layouts share Bulk's read-only arrays; readiness, allocation
+and transfer execution remain caller-owned. Key naming is injected separately.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from types import MappingProxyType
 import numpy as np
 
 from .bulk import BulkMapping
+from .gva_layout import GVAObjectLayout
 from .types import LayerTransferArguments, LocalMemorySegments, UInt64Array
 
 
@@ -91,10 +93,11 @@ class LayerwiseSelection:
 
 
 class LayerwiseMapping:
-    """Reuse Bulk layouts and cache the local-to-object byte positions for each layer."""
+    """Reuse local segments and cache each layer's byte positions in the selected object layout."""
 
-    def __init__(self, bulk: BulkMapping) -> None:
+    def __init__(self, bulk: BulkMapping, object_layout: GVAObjectLayout | None = None) -> None:
         self.bulk = bulk
+        self.object_size_bytes = bulk.local_group_block_bytes
         layers: dict[int, list[LayerTransferLayout]] = defaultdict(list)
         segment_offsets_bytes_by_layout: dict[tuple[int, int], UInt64Array] = {}
         for key_prefix_index, (layer_ids, boundaries, segments, object_size) in enumerate(
@@ -120,6 +123,14 @@ class LayerwiseMapping:
                 segment_offsets_bytes_by_layout[layout_key] = offsets
             if int(offsets[-1]) != object_size:
                 raise ValueError("Bulk segments must cover the complete object size")
+            if object_layout is not None:
+                layer_lengths = [int(offsets[end] - offsets[start]) for start, end in zip(boundaries, boundaries[1:])]
+                if len(set(layer_lengths)) != 1:
+                    raise ValueError("Production GVA layout requires uniform per-layer payloads")
+                object_size, base_offset = object_layout.bind(object_size, len(layer_ids))
+                offsets = offsets + np.uint64(base_offset)
+                offsets.flags.writeable = False
+                self.object_size_bytes = object_size
             for layer_index, layer_id in enumerate(layer_ids):
                 start, end = boundaries[layer_index], boundaries[layer_index + 1]
                 if start == end:

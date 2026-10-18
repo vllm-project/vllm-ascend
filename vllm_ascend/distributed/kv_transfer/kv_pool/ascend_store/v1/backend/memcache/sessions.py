@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .backend import MemcacheBackend
 
 GVA_SESSION_FAILURE = -1
+GVA_SSD_HIT = (1 << 64) - 1
 
 
 class MemcacheSessions:
@@ -93,8 +94,11 @@ class MemcacheSessions:
         addresses = self._backend.allocate_gva(keys, object_sizes)
         codes = []
         for key, address, size in zip(keys, addresses, object_sizes, strict=True):
-            codes.append(0 if address > 0 else GVA_SESSION_FAILURE)
-            if address > 0:
+            # Native allocation can return UINT64_MAX for an already-readable
+            # SSD object. It is not a writable GVA and grants no write ownership.
+            writable = 0 < address < GVA_SSD_HIT
+            codes.append(0 if writable else GVA_SESSION_FAILURE)
+            if writable:
                 self._store_regions[key] = GVARegion(address, size)
             else:
                 del self._store_regions[key]

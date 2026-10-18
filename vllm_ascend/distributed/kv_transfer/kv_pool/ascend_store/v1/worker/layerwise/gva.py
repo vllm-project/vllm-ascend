@@ -9,13 +9,16 @@ import numpy as np
 from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
+from ....backend.layerwise_keys import LayerwiseKeyBuilder
 from ...backend import GVABackend, GVAObjectSessions, GVARegion
 from ...infrastructure.configuration.topology import KVPoolTopology
-from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
+from ...infrastructure.mapping import BulkMapping, LayerwiseMapping, LayerwiseSelection
+from ...infrastructure.mapping.gva_layout import GVAObjectLayout
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..transfer.batch import KVGroupBatch, KVTransferBatch
 from ..transfer.completion import LoadCompletion
+from .shared_store import GVAWriteOutcome, SharedGVAWrites
 from .transfer import (
     LayerStoreResult,
     LayerTransferPlan,
@@ -23,7 +26,7 @@ from .transfer import (
     prepare_layer_load,
     prepare_layer_store,
 )
-from .worker import LayerwiseWorker
+from .worker import LayerwiseWorker, _StoreState
 
 
 class GVALayerwiseWorker(LayerwiseWorker):
@@ -40,7 +43,12 @@ class GVALayerwiseWorker(LayerwiseWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
+        key_builder: LayerwiseKeyBuilder | None = None,
+        object_layout: GVAObjectLayout | None = None,
+        shared_writes: SharedGVAWrites | None = None,
     ) -> None:
+        self._shared_writes = shared_writes
+        self._object_layout = object_layout
         backend = cast(GVABackend, resources.backend)
         sessions = backend.create_sessions()
         self._gva_backend = backend
@@ -54,7 +62,11 @@ class GVALayerwiseWorker(LayerwiseWorker):
             layerwise_prefetch_layers=layerwise_prefetch_layers,
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
+            key_builder=key_builder,
         )
+
+    def _create_layer_mapping(self, mapping: BulkMapping) -> LayerwiseMapping:
+        return LayerwiseMapping(mapping, self._object_layout)
 
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
@@ -105,6 +117,35 @@ class GVALayerwiseWorker(LayerwiseWorker):
 
     def _resolve_load_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
         return self._region_bases(cast(GVAObjectSessions, self._backend_sessions).load_regions(keys, group.object_size))
+
+    def _complete_shared_store(self, state: _StoreState, commit_keys: list[str]) -> list[str]:
+        if self._shared_writes is None:
+            return commit_keys
+        regions: dict[str, tuple[int, int]] = {}
+        sessions = cast(GVAObjectSessions, self._backend_sessions)
+        selected = set(commit_keys)
+        try:
+            if state.batch is not None:
+                for group in state.batch.groups:
+                    keys = tuple(key for key in group.selected_keys() if key in selected)
+                    regions.update(
+                        (key, (region.address, region.size))
+                        for key, region in zip(keys, sessions.store_regions(keys, group.object_size), strict=True)
+                    )
+        except Exception as error:
+            # Still participate: peers must learn that this writer cannot prove completion.
+            selected.clear()
+            state.errors_by_key.update((key, error) for key in commit_keys)
+        try:
+            completed = self._shared_writes.complete_keys(GVAWriteOutcome(frozenset(selected), regions))
+        except Exception as error:
+            completed = set()
+            state.errors_by_key.update((key, error) for key in commit_keys)
+        for key in commit_keys:
+            if key not in completed:
+                state.failure_codes[key] = None
+                state.errors_by_key.setdefault(key, RuntimeError("Shared GVA object has an incomplete context shard"))
+        return [key for key in commit_keys if key in completed]
 
     @staticmethod
     def _region_bases(regions: tuple[GVARegion, ...]) -> np.ndarray:

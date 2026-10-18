@@ -6,8 +6,9 @@ LayerTransferArguments additionally contains byte offsets in complete objects.
 Every argument list is key-aligned; each nested list follows payload segment order.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +17,14 @@ UInt64Array: TypeAlias = NDArray[np.uint64]
 KeysByPrefix: TypeAlias = tuple[tuple[str, ...], ...]
 BulkTransferArguments: TypeAlias = tuple[list[str], list[list[int]], list[list[int]]]
 LayerTransferArguments: TypeAlias = tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]
+
+
+class ObjectKeyBuilder(Protocol):
+    """Bound identity formulas; runtime inputs contain only content hashes."""
+
+    def keys(self, hashes: Sequence[bytes | str]) -> KeysByPrefix: ...
+
+    def lookup_keys(self, hashes: Sequence[bytes | str]) -> KeysByPrefix: ...
 
 
 @dataclass(frozen=True, slots=True)

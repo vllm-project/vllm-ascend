@@ -14,11 +14,13 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
+from ....backend.layerwise_keys import LayerwiseKeyBuilder
 from ...backend import ObjectSessions
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.execution.session import Session
-from ...infrastructure.mapping import LayerwiseMapping
+from ...infrastructure.mapping import BulkMapping, LayerwiseMapping
+from ...infrastructure.mapping.types import ObjectKeyBuilder
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
@@ -81,7 +83,21 @@ class LayerwiseWorker(KVPoolWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
+        key_builder: LayerwiseKeyBuilder | None = None,
     ) -> None:
+        self._key_builders = (
+            {
+                group.group_id: key_builder.bind_group(
+                    group.group_id,
+                    group.key_metadata.head_or_tp_rank,
+                    group.key_metadata.pp_rank,
+                    topology.tp_partition.key_rank_count,
+                )
+                for group in topology.transfer_groups
+            }
+            if key_builder is not None
+            else {}
+        )
         self._layer_mappings: dict[int, LayerwiseMapping] = {}
         self._load_plan: LayerTransferPlan | None = None
         self._store_plan: LayerTransferPlan | None = None
@@ -117,7 +133,17 @@ class LayerwiseWorker(KVPoolWorker):
         for group_id in self._groups:
             mapping = self._create_mapping(group_id, registration)
             self._mappings[group_id] = mapping
-            self._layer_mappings[group_id] = LayerwiseMapping(mapping)
+            self._layer_mappings[group_id] = self._create_layer_mapping(mapping)
+
+    def _create_layer_mapping(self, mapping: BulkMapping) -> LayerwiseMapping:
+        return LayerwiseMapping(mapping)
+
+    def _key_builder(self, group_id: int) -> ObjectKeyBuilder:
+        return self._key_builders.get(group_id, self._mappings[group_id])
+
+    def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
+        mapping = self._layer_mappings[group_id]
+        return mapping.object_size_bytes, mapping.bulk.physical_layer_ids_by_key_prefix
 
     @abstractmethod
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
@@ -210,7 +236,7 @@ class LayerwiseWorker(KVPoolWorker):
                 zip(self._topology.transfer_group_ids, self._store_candidate_rows(command), strict=True)
             ):
                 rows_by_group[group_index].append(rows)
-                keys_by_group[group_index].append(self._mappings[group_id].keys(rows[1]))
+                keys_by_group[group_index].append(self._key_builder(group_id).keys(rows[1]))
         return StoreCandidates(
             tuple(
                 StoreGroupCandidates(group_id, tuple(rows), merge_key_axes(group_id, keys_by_group[group_index]))
@@ -314,6 +340,7 @@ class LayerwiseWorker(KVPoolWorker):
         except Exception as error:
             # Layer jobs depend on opening, so no source was handed off after its failure.
             self._store_plan = None
+            self._complete_shared_store(state, [])
             if state.opened_keys:
                 try:
                     self._backend_sessions.revoke_store(list(state.opened_keys))
@@ -329,6 +356,7 @@ class LayerwiseWorker(KVPoolWorker):
                 self._record_store_result(state, state.keys_by_layer[layer_id], LayerStoreResult(None, False, error))
         self._store_plan = None
         if state.batch is None:
+            self._complete_shared_store(state, [])
             return _store_command_completions(state.commands)
 
         # Preparation succeeded and every submitted Future was observed; no second layer ledger is needed.
@@ -339,6 +367,7 @@ class LayerwiseWorker(KVPoolWorker):
                 state.failure_codes.setdefault(key, None)
                 state.errors_by_key.setdefault(key, incomplete)
         commit_keys = [key for key in state.opened_keys if key not in state.failure_codes]
+        commit_keys = self._complete_shared_store(state, commit_keys)
         final_codes: dict[str, int | None] = {}
         if commit_keys:
             try:
@@ -355,6 +384,10 @@ class LayerwiseWorker(KVPoolWorker):
         self._revoke_store_keys(state, revoke_keys, final_codes)
         observed_layers = state.keys_by_layer.keys() & layers.keys()
         return self._build_store_completions(state, observed_layers, final_codes)
+
+    def _complete_shared_store(self, state: _StoreState, commit_keys: list[str]) -> list[str]:
+        """Concrete shared-object routes require peer evidence before publication."""
+        return commit_keys
 
     @staticmethod
     def _record_store_result(state: _StoreState, keys: list[str], result: LayerStoreResult) -> None:

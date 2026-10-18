@@ -11,6 +11,7 @@ from typing import Any
 
 from vllm.config import ParallelConfig
 
+from ...backend.layerwise_keys import LayerwiseKeyBuilder
 from .interfaces import GVABackend, GVAObjectSessions, GVARegion, KeyRangeBackend, KVStoreBackend, ObjectSessions
 from .registration import (
     BufferRegion,
@@ -36,6 +37,11 @@ class LayerwiseAccessKind(Enum):
     GVA = "gva"
 
 
+class LayerwiseObjectLayoutKind(Enum):
+    STAGE_LOCAL = "stage_local"
+    GLOBAL_GVA = "global_gva"
+
+
 LAYERWISE_ACCESS = MappingProxyType(
     {
         "mooncake": LayerwiseAccessKind.KEY_RANGE,
@@ -52,6 +58,8 @@ class BackendSpec:
     backend_factory: BackendFactory
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
+    layerwise_key_factory: Callable[..., LayerwiseKeyBuilder] | None = None
+    layerwise_object_layout: LayerwiseObjectLayoutKind = LayerwiseObjectLayoutKind.STAGE_LOCAL
 
     def create(
         self,
@@ -67,12 +75,15 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
     if backend_import is None:
         raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
     module_path, class_name = backend_import
-    backend_factory = getattr(importlib.import_module(module_path), class_name)
+    module = importlib.import_module(module_path)
+    backend_factory = getattr(module, class_name)
     return BackendSpec(
         backend_name,
         backend_factory,
         LAYERWISE_ACCESS.get(backend_name),
         bool(getattr(backend_factory, "requires_exists_before_put", True)),
+        getattr(module, "bind_layerwise_keys", None),
+        getattr(module, "LAYERWISE_OBJECT_LAYOUT", LayerwiseObjectLayoutKind.STAGE_LOCAL),
     )
 
 
