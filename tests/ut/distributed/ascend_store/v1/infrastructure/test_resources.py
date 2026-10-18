@@ -1,12 +1,185 @@
-"""Resource ownership enforces drain-before-release independently of Worker policy."""
+"""Registration rollback and Worker teardown preserve native memory lifetime."""
 
-from unittest.mock import Mock, create_autospec
+from __future__ import annotations
+
+from unittest.mock import MagicMock, Mock, create_autospec
 
 import pytest
+import torch
 
-from tests.ut.distributed.ascend_store.v1.helpers import make_worker
-from tests.ut.distributed.ascend_store.v1.worker.resource_fixtures import RecordingBackend, make_caches, make_resources
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    make_backend_spec,
+    make_topology,
+    make_worker,
+)
+from tests.ut.distributed.ascend_store.v1.infrastructure.resources_fixtures import (
+    RecordingBackend,
+    make_caches,
+    make_resources,
+    register_caches,
+)
+from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
+    make_gva_spec,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
+    LayerwiseAccessKind,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution.executor import Executor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    KVPoolResources,
+)
+
+
+def test_resources_own_exact_shared_storage_region_and_close_in_order() -> None:
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology, shared_storage=True)
+    storage = next(iter(caches.values())).untyped_storage()
+
+    register_caches(resources, caches)
+
+    assert backend.calls == [("register_region", storage.data_ptr(), storage.nbytes())]
+    resources.close()
+    resources.close()
+
+    assert backend.calls == [
+        ("register_region", storage.data_ptr(), storage.nbytes()),
+        ("unregister_region", storage.data_ptr(), storage.nbytes()),
+        ("backend_close",),
+    ]
+    assert resources.kv_caches is None
+    assert backend.closed
+    with pytest.raises(RuntimeError, match="closed"):
+        register_caches(resources, caches)
+
+
+def test_gva_registration_alignment_does_not_change_mapping_payload() -> None:
+    alignment = 2 * 1024 * 1024
+    topology = make_topology(physical_layers=(0,))
+    backend = RecordingBackend()
+    resources = KVPoolResources(backend, make_gva_spec(), 8, topology.transfer_groups, align_shared_storage=True)
+    storage = torch.empty(2 * alignment, dtype=torch.uint8)
+    aligned_offset = -storage.data_ptr() % alignment
+    view_offset = aligned_offset + 64
+    cache = storage[view_offset : view_offset + 32].view(8, 4)
+    registration = resources.prepare_kv_caches({topology.groups[0].layer_names[0]: cache})
+    assert backend.calls == []
+    assert registration["base_addresses"] == {0: [cache.data_ptr()]}
+    assert registration["block_lengths"] == {0: [4]}
+    resources.register_kv_buffers()
+    assert backend.calls == [("register_region", storage.data_ptr() + aligned_offset, 96)]
+    resources.close()
+
+
+@pytest.mark.parametrize("empty_first", (False, True))
+@pytest.mark.parametrize("use_gva", (False, True))
+def test_resources_skip_empty_rope_views_in_registration(empty_first, use_gva) -> None:
+    backend = RecordingBackend()
+    topology = make_topology(physical_layers=(0,))
+    resources = KVPoolResources(
+        backend,
+        make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA if use_gva else None),
+        8,
+        topology.transfer_groups,
+    )
+    nope_cache = torch.empty((8, 4), dtype=torch.float32)
+    rope_cache = torch.empty((8, 4, 0), dtype=torch.float32)
+    caches = (rope_cache, nope_cache) if empty_first else (nope_cache, rope_cache)
+
+    registration = register_caches(resources, {topology.groups[0].layer_names[0]: caches})
+
+    address = nope_cache.data_ptr()
+    region_size = nope_cache.numel() * nope_cache.element_size()
+    block_size_bytes = nope_cache[0].numel() * nope_cache.element_size()
+    assert backend.calls == [("register_region", address, region_size)]
+    assert registration["base_addresses"] == {0: [address]}
+    assert registration["block_lengths"] == {0: [block_size_bytes]}
+    assert registration["block_strides"] == {0: [block_size_bytes]}
+    assert registration["layer_entry_offsets"] == {0: [0, 1]}
+    assert "object_sizes" not in registration and "object_offsets" not in registration
+    resources.close()
+    assert backend.calls[-2:] == [("unregister_region", address, region_size), ("backend_close",)]
+
+
+def test_registration_failure_rolls_back_successful_prefix_before_backend_close() -> None:
+    backend = RecordingBackend(fail_registration_index=1)
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology)
+
+    with pytest.raises(RuntimeError, match="registration failed at region 1"):
+        register_caches(resources, caches)
+
+    assert resources.kv_caches is caches
+    assert [call[0] for call in backend.calls] == ["register_region", "register_region", "unregister_region"]
+    resources.close()
+    assert [call[0] for call in backend.calls][-1] == "backend_close"
+    assert resources.kv_caches is None
+
+
+def test_incomplete_registration_rollback_retains_owner_and_retries_release() -> None:
+    backend = RecordingBackend(fail_registration_index=1, fail_unregister_count=1)
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology)
+
+    with pytest.raises(RuntimeError, match="rollback is incomplete"):
+        register_caches(resources, caches)
+
+    assert resources.kv_caches is caches
+    assert "backend_close" not in [call[0] for call in backend.calls]
+    resources.close()
+    assert [call[0] for call in backend.calls][-2:] == ["unregister_region", "backend_close"]
+    assert resources.kv_caches is None
+
+
+def test_backend_close_failure_retains_cache_owner_until_retry() -> None:
+    backend = RecordingBackend(fail_close_count=1)
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    register_caches(resources, caches)
+
+    with pytest.raises(RuntimeError, match="backend close failed"):
+        resources.close()
+
+    assert resources.kv_caches is caches
+    assert [call[0] for call in backend.calls].count("unregister_region") == 1
+    resources.close()
+    assert [call[0] for call in backend.calls].count("unregister_region") == 1
+    assert resources.kv_caches is None
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_remote_cleanup_failure_keeps_registration_and_client_owned_until_retry(use_gva, monkeypatch) -> None:
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    if use_gva:
+        monkeypatch.setattr(backend, "allocate_gva", lambda keys, sizes: (1000,), raising=False)
+        revoke = MagicMock(side_effect=[(-1,), (0,)])
+        monkeypatch.setattr(backend, "revoke_gva", revoke, raising=False)
+        sessions = MemcacheSessions(backend)
+    else:
+        revoke = MagicMock(side_effect=[(-8,), (0,)])
+        monkeypatch.setattr(backend, "revoke_key_range_store", revoke)
+        sessions = backend.create_sessions()
+    resources.bind_backend_sessions(sessions)
+    register_caches(resources, caches)
+    sessions.start_store(["pending"], [64])
+
+    with pytest.raises(RuntimeError, match="cleanup is unconfirmed"):
+        resources.close()
+
+    assert sessions.pending_store_keys == ("pending",)
+    assert resources.kv_caches is caches
+    assert not backend.closed
+    assert not any(item[0] in ("unregister_region", "backend_close") for item in backend.calls)
+    resources.close()
+    resources.close()
+    assert not sessions.pending_store_keys
+    assert [item[0] for item in backend.calls][-2:] == ["unregister_region", "backend_close"]
+    assert resources.kv_caches is None
+    assert backend.closed
+    assert revoke.call_count == 2
 
 
 def test_executors_must_stop_before_registration_and_backend_release():

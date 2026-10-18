@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 
-from ...store_selection import store_block_range
+from ...infrastructure.reachability import store_block_range
 
 if TYPE_CHECKING:
     from .batch import KeyAxes

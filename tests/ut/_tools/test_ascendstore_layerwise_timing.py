@@ -60,7 +60,7 @@ def _make_timing(*, execute_error=None):
         session._load_submit(lambda: backend.finish_key_range_load(["key"])).result(timeout=5)
 
     def execute_model(scheduler_output):
-        if scheduler_output.kv_connector_metadata.load.commands:
+        if scheduler_output.kv_connector_metadata.load_commands:
             worker.start_load()
             worker.wait_for_layer_load("layer.0")
         if execute_error is not None:
@@ -79,7 +79,7 @@ def _make_timing(*, execute_error=None):
 def _schedule(*request_ids):
     commands = tuple(SimpleNamespace(request_id=request) for request in request_ids)
     return SimpleNamespace(
-        kv_connector_metadata=SimpleNamespace(load=SimpleNamespace(commands=commands)),
+        kv_connector_metadata=SimpleNamespace(load_commands=commands),
         num_scheduled_tokens={request: 1 for request in request_ids},
         total_num_scheduled_tokens=len(request_ids),
     )

@@ -10,9 +10,8 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from ..infrastructure.reachability import store_group_mask
-from ..protocol.transfer import CheckpointStoreCommand, StoreCommand
-from ..store_selection import checkpoint_companion_indices, store_block_range
+from ..infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
+from ..infrastructure.reachability import checkpoint_companion_indices, store_block_range, store_group_mask
 from .state import SchedulerConfig
 
 if TYPE_CHECKING:
@@ -138,8 +137,8 @@ class StoreSourceLeases:
                 block_ids = command.block_ids_by_group[group_id]
                 hash_count = len(command.block_hashes) // (spec.block_size // self._config.hash_block_size)
                 indices = store_block_range(
-                    command.store_range.start_token,
-                    command.store_range.end_token,
+                    command.start_token,
+                    command.end_token,
                     spec.block_size,
                     hash_count,
                     len(block_ids),
@@ -151,7 +150,7 @@ class StoreSourceLeases:
                     store_group_mask(
                         spec,
                         manager_cls,
-                        command.store_range.end_token,
+                        command.end_token,
                         command.num_prompt_tokens,
                         alignment_tokens=self._config.cache_transfer_granularity,
                         use_eagle=use_eagle,

@@ -10,10 +10,10 @@ from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
+from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
-from ...topology import KVPoolTopology
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion
 from .transfer import (

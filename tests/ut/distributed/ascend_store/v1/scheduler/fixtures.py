@@ -7,22 +7,26 @@ from types import SimpleNamespace
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MambaSpec, SlidingWindowSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupResult, TailKeyBoundary
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+    LookupResult,
+    TailKeyBoundary,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     SchedulerConfig,
 )
 
 
-class FakeRemoteLookup:
+class FakeLookupClient:
     def __init__(self, available_end_token: int = 0, *, tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()) -> None:
         self.available_end_token = available_end_token
         self.tail_key_boundaries = tail_key_boundaries
-        self.queries: list[tuple[TokenRange, tuple[int, ...], tuple[bytes, ...]]] = []
+        self.queries: list[tuple[tuple[int, int], tuple[int, ...], tuple[bytes, ...]]] = []
         self.closed = False
 
-    def query(self, query_range, transfer_group_ids, block_hashes) -> LookupResult:
-        self.queries.append((query_range, transfer_group_ids, block_hashes))
+    def lookup(self, request) -> LookupResult:
+        self.queries.append(
+            ((request.start_token, request.end_token), request.transfer_group_ids, request.block_hashes)
+        )
         return LookupResult(self.available_end_token, self.tail_key_boundaries)
 
     def close(self) -> None:
@@ -83,7 +87,6 @@ def make_config(
         load_enabled=load,
         store_enabled=store,
         save_decode_cache=save_decode,
-        discard_partial_chunks=True,
         use_eagle_block_drop=eagle,
         has_private_state=private,
         expected_worker_count=workers,
@@ -137,8 +140,4 @@ def make_output(
 
 
 def new_request_data(request_id: str, block_ids, num_computed_tokens: int):
-    return SimpleNamespace(
-        req_id=request_id,
-        block_ids=block_ids,
-        num_computed_tokens=num_computed_tokens,
-    )
+    return SimpleNamespace(req_id=request_id, block_ids=block_ids, num_computed_tokens=num_computed_tokens)

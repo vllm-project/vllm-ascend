@@ -46,7 +46,7 @@ from .types import BulkTransferArguments, KeysByPrefix, UInt64Array
 if TYPE_CHECKING:
     import torch
 
-    from ...topology import KVPoolTopology
+    from ..configuration.topology import KVPoolTopology
 
 
 class BulkMapping:

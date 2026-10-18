@@ -33,9 +33,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from ..coordinates import TokenRange
-from ..protocol.lookup import TailKeyBoundary
-from ..topology import KVPoolGroupTopology
+from .configuration.topology import KVPoolGroupTopology
+from .protocol.messages import TailKeyBoundary
 
 BlockHashes = Sequence[BlockHash | str]
 ChunkRows: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
@@ -101,19 +100,19 @@ class UnitaryReachability:
         self._max_model_len = max_model_len
         self._cache_transfer_granularity = cache_transfer_granularity
 
-    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> ChunkMasks:
-        del block_hashes, query_range
+    def select_for_lookup(self, block_hashes: BlockHashes, end_token: int) -> ChunkMasks:
+        del block_hashes, end_token
         return (None,)
 
     def resolve_available_end(
-        self, query_range: TokenRange, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
+        self, start_token: int, end_token: int, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
     ) -> ReachablePrefix:
         del block_hashes
         if len(observations) != 1:
             raise ValueError(f"Expected one Lookup observation for group {self.group_ids[0]}")
 
-        max_hit_length = min(query_range.end_token, self._max_model_len)
-        hit_end = min(query_range.start_token, max_hit_length)
+        max_hit_length = min(end_token, self._max_model_len)
+        hit_end = min(start_token, max_hit_length)
         hit_end -= hit_end % self._cache_transfer_granularity
         (starts, counts, _), available = observations[0]
         if len(starts) != len(available):
@@ -126,14 +125,12 @@ class UnitaryReachability:
                 hit_end = end_token
         return ReachablePrefix(hit_end)
 
-    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> ChunkMasks:
-        del block_hashes, load_range
+    def select_for_load(self, block_hashes: BlockHashes, end_token: int) -> ChunkMasks:
+        del block_hashes, end_token
         return (None,)
 
-    def select_for_store(
-        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
-    ) -> ChunkMasks:
-        del block_hashes, store_range, num_prompt_tokens
+    def select_for_store(self, block_hashes: BlockHashes, end_token: int, num_prompt_tokens: int) -> ChunkMasks:
+        del block_hashes, end_token, num_prompt_tokens
         return (None,)
 
 
@@ -151,7 +148,7 @@ class HybridReachability:
     This mirrors vLLM's external KV reachability constraints but uses AscendStore's external
     key granularity. Compressed specs already expose raw-token block sizes,
     while transfer addresses remain in cache-domain blocks.
-    The Adapter validates static block geometry; construction binds registered
+    Configuration admission validates static block geometry; construction binds registered
     cache-manager algorithms once, while each call validates its runtime observations.
     """
 
@@ -223,19 +220,19 @@ class HybridReachability:
             for group_index in self.spec_groups[spec_group_index][1]
         }
 
-    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> ChunkMasks:
+    def select_for_lookup(self, block_hashes: BlockHashes, end_token: int) -> ChunkMasks:
         del block_hashes
-        aligned_token_len = cdiv(min(query_range.end_token, self.max_model_len), self.lcm_block_size)
+        aligned_token_len = cdiv(min(end_token, self.max_model_len), self.lcm_block_size)
         aligned_token_len *= self.lcm_block_size
         return self._freeze_masks(self.lookup_mask(aligned_token_len))
 
     def resolve_available_end(
-        self, query_range: TokenRange, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
+        self, start_token: int, end_token: int, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
     ) -> ReachablePrefix:
         if len(observations) != len(self.group_ids):
             raise ValueError(f"Lookup observations do not match configured groups {self.group_ids}")
 
-        max_hit_length = min(query_range.end_token, self.max_model_len)
+        max_hit_length = min(end_token, self.max_model_len)
         block_hashes_to_check = block_hashes[: max_hit_length // self.hash_block_size]
         cached_hashes: set[tuple[int, bytes]] = set()
         for group_index, (group_block_size, observation) in enumerate(
@@ -246,9 +243,7 @@ class HybridReachability:
                 if self.partial_hash_hits
                 else get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
             )
-            local_hit_count = query_range.start_token // (
-                self.hash_block_size if self.partial_hash_hits else group_block_size
-            )
+            local_hit_count = start_token // (self.hash_block_size if self.partial_hash_hits else group_block_size)
             cached_hashes.update(
                 (group_index, block_hash_to_bytes(block_hash)) for block_hash in group_block_hashes[:local_hit_count]
             )
@@ -299,12 +294,10 @@ class HybridReachability:
             boundaries.append(TailKeyBoundary(group_id, boundary_token))
         return tuple(boundaries)
 
-    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> ChunkMasks:
-        return self._freeze_masks(self.load_mask(block_hashes, load_range.end_token))
+    def select_for_load(self, block_hashes: BlockHashes, end_token: int) -> ChunkMasks:
+        return self._freeze_masks(self.load_mask(block_hashes, end_token))
 
-    def select_for_store(
-        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
-    ) -> ChunkMasks:
+    def select_for_store(self, block_hashes: BlockHashes, end_token: int, num_prompt_tokens: int) -> ChunkMasks:
         del block_hashes
         return tuple(
             ()
@@ -312,7 +305,7 @@ class HybridReachability:
             else store_group_mask(
                 spec,
                 self.manager_classes[group_index],
-                store_range.end_token,
+                end_token,
                 num_prompt_tokens,
                 alignment_tokens=self.lcm_block_size,
                 use_eagle=group_index in self.eagle_reachable_group_indices,
@@ -496,6 +489,34 @@ class HybridReachability:
                 hit_lengths_by_group_index[group_index] = hit_length
 
         return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group_index), hit_length
+
+
+# =============================================================================
+# Store Source Selection
+# =============================================================================
+#
+# Scheduler leases must cover the pages that Worker selection may read. Share
+# interval, checkpoint-companion, and retention rules before either side applies
+# its ownership or address-materialization steps.
+
+
+def store_block_range(start_token: int, end_token: int, block_size: int, hash_count: int, block_count: int) -> range:
+    """Intersect the Store interval, confirmed hashes, and retained block-table suffix."""
+
+    logical_count = min(hash_count, -(-end_token // block_size))
+    block_offset = max(logical_count - block_count, 0)
+    return range(max(start_token // block_size, block_offset), logical_count)
+
+
+def checkpoint_companion_indices(
+    boundary_token: int, published_store_end_token: int, block_size: int, block_count: int
+) -> range:
+    """Locate the unpublished attention pages and the checkpoint's boundary page."""
+
+    logical_count = -(-boundary_token // block_size)
+    block_offset = max(logical_count - block_count, 0)
+    first_block = max(min(published_store_end_token // block_size, logical_count - 1), block_offset)
+    return range(first_block - block_offset, logical_count - block_offset)
 
 
 def store_group_mask(

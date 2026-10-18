@@ -131,7 +131,7 @@ class LayerwiseLoadTiming:
         def execute(*args: Any, **kwargs: Any) -> Any:
             scheduler_output = args[0] if args else kwargs["scheduler_output"]
             metadata = scheduler_output.kv_connector_metadata
-            commands = metadata.load.commands if metadata is not None else ()
+            commands = metadata.load_commands if metadata is not None else ()
             self._sample_step = None
             if not commands:
                 return original(*args, **kwargs)

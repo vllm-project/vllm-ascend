@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -18,23 +19,25 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncak
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import (
     integer_results,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
-    HybridReachability,
-    UnitaryReachability,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
+    KVPoolConfig,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
-    KVTransferStep,
-    LoadCommandBatch,
-    StoreCommand,
-    StoreCommandBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
     TPPartitionSpec,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+    KVTransferStep,
+    StoreCommand,
+    StoreCommandBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
+    HybridReachability,
+    UnitaryReachability,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
@@ -42,6 +45,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
 )
+
+
+def make_pool_config(topology, backend_name="mooncake", **changes):
+    config = KVPoolConfig(
+        backend_name=backend_name,
+        use_layerwise=False,
+        load_async=False,
+        load_enabled=True,
+        store_enabled=True,
+        save_decode_cache=False,
+        use_eagle=False,
+        layerwise_prefetch_layers=2,
+        lookup_rpc_timeout_ms=-1,
+        transfer_group_ids=topology.transfer_group_ids,
+        group_specs=tuple(group.kv_cache_spec for group in topology.groups),
+        align_state_group_ids=frozenset(group.group_id for group in topology.groups if group.uses_align_state),
+        cache_transfer_granularity=topology.cache_transfer_granularity,
+        hash_block_size=topology.hash_block_size,
+        tp_partition=topology.tp_partition,
+        consumer_pipeline_partitions=topology.consumer_pipeline_partitions,
+        put_step=topology.put_step,
+        retention_interval=None,
+    )
+    return replace(config, **changes)
 
 
 class FakeBackend:
@@ -191,12 +218,7 @@ def make_backend_spec(
     layerwise_access: LayerwiseAccessKind | None = LayerwiseAccessKind.KEY_RANGE,
     requires_exists_before_put: bool = False,
 ) -> BackendSpec:
-    return BackendSpec(
-        name,
-        FakeBackend,
-        layerwise_access,
-        requires_exists_before_put,
-    )
+    return BackendSpec(name, FakeBackend, layerwise_access, requires_exists_before_put)
 
 
 def make_reachability(
@@ -237,12 +259,7 @@ def make_topology(
     groups = tuple(
         KVPoolGroupTopology(
             group_id,
-            FullAttentionSpec(
-                block_size=4,
-                num_kv_heads=1,
-                head_size=1,
-                dtype=torch.float32,
-            ),
+            FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
             tuple(
                 KVPoolLayerTopology(layer_id, (f"layers.{layer_id}.group.{group_id}",)) for layer_id in physical_layers
             ),
@@ -312,8 +329,6 @@ class FakeResources(KVPoolResources):
         block_lengths = {}
         block_strides = {}
         layer_entry_offsets = {}
-        object_sizes = {}
-        object_offsets = {}
         for group in self._topology.transfer_groups:
             group_id = group.group_id
             base_addresses[group_id] = [
@@ -322,8 +337,6 @@ class FakeResources(KVPoolResources):
             block_lengths[group_id] = [32] * len(group.layers)
             block_strides[group_id] = [64] * len(group.layers)
             layer_entry_offsets[group_id] = list(range(len(group.layers) + 1))
-            object_sizes[group_id] = 32 * len(group.layers)
-            object_offsets[group_id] = 0
         registration: dict[str, Any] = {
             "base_addresses": base_addresses,
             "block_lengths": block_lengths,
@@ -388,12 +401,7 @@ def make_worker(
 
 
 def begin_step(worker, *, load=(), store=()) -> None:
-    worker.begin_step(
-        KVTransferStep(
-            LoadCommandBatch(tuple(load)),
-            StoreCommandBatch(tuple(store)),
-        )
-    )
+    worker.begin_step(KVTransferStep(tuple(load), StoreCommandBatch(tuple(store))))
 
 
 def store_one(worker, command: StoreCommand):

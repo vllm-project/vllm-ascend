@@ -13,13 +13,12 @@ from typing import Any, Concatenate, ParamSpec, TypeVar
 import torch
 from vllm.logger import logger
 
+from ..infrastructure.configuration.topology import KVPoolTopology
 from ..infrastructure.execution.executor import Executor
 from ..infrastructure.mapping import BulkMapping
+from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from ..infrastructure.reachability import HybridReachability, UnitaryReachability
 from ..infrastructure.resources import KVPoolResources
-from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
-from ..topology import KVPoolTopology
 from .transfer.batch import (
     KeyAxes,
     KVGroupBatch,
@@ -148,16 +147,16 @@ class KVPoolWorker(ABC):
                 f"Lookup groups {request.transfer_group_ids} do not match configured groups "
                 f"{self._topology.transfer_group_ids}"
             )
-        masks = self._reachability.select_for_lookup(request.block_hashes, request.query_range)
+        masks = self._reachability.select_for_lookup(request.block_hashes, request.end_token)
         observations = []
         chunk_rows = fine_lookup_chunk_rows if self._fine_grained_lookup else lookup_chunk_rows
         for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
             starts, counts, hashes = chunk_rows(
-                request.query_range.end_token,
+                request.end_token,
                 request.block_hashes,
                 block_size=mapping.group_block_size,
                 hash_block_size=mapping.hash_block_size,
-                start_token=request.query_range.start_token,
+                start_token=request.start_token,
                 mask=mask,
             )
             keys = mapping.lookup_keys(hashes)
@@ -172,13 +171,15 @@ class KVPoolWorker(ABC):
                 for row_index in range(row_count)
             )
             observations.append(((starts, counts, hashes), available))
-        reachable = self._reachability.resolve_available_end(request.query_range, request.block_hashes, observations)
+        reachable = self._reachability.resolve_available_end(
+            request.start_token, request.end_token, request.block_hashes, observations
+        )
         return LookupResult(reachable.end_token, reachable.tail_key_boundaries)
 
     def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
         rows_by_request = []
         for command in commands:
-            masks = self._reachability.select_for_load(command.block_hashes, command.load_range)
+            masks = self._reachability.select_for_load(command.block_hashes, command.end_token)
             boundaries = {item.group_id: item.boundary_token for item in command.tail_key_boundaries}
             if len(boundaries) != len(command.tail_key_boundaries):
                 raise ValueError("Load contains duplicate tail-key boundaries for one cache group")
@@ -188,12 +189,12 @@ class KVPoolWorker(ABC):
             rows_by_request.append(
                 {
                     group_id: load_block_rows(
-                        command.load_range.end_token,
+                        command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         block_size=mapping.group_block_size,
                         hash_block_size=mapping.hash_block_size,
-                        start_token=command.load_range.start_token,
+                        start_token=command.start_token,
                         tail_boundary_token=boundaries.get(group_id),
                         mask=mask,
                         minimum_block_id=1 if group_id in self._state_group_ids else 0,
@@ -257,9 +258,9 @@ class KVPoolWorker(ABC):
 
     @_with_active_step
     def start_load(self, context: KVPoolStepContext) -> None:
-        if not context.step.load.commands:
+        if not context.step.load_commands:
             return
-        batch = self._build_load_batch(context.step.load.commands)
+        batch = self._build_load_batch(context.step.load_commands)
         completions = self._submit_load(batch)
         for completion in completions:
             self._record_load_completion(context, completion)

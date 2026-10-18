@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...topology import KVPoolTopology
+from ...infrastructure.configuration.topology import KVPoolTopology
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
 from ..transfer.rows import StoreCandidateRows

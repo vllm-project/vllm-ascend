@@ -15,13 +15,13 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import ObjectSessions
+from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.execution.session import Session
 from ...infrastructure.mapping import LayerwiseMapping
+from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
-from ...protocol.transfer import CheckpointStoreCommand, StoreCommand
-from ...topology import KVPoolTopology
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeyAxes,
@@ -226,19 +226,15 @@ class LayerwiseWorker(KVPoolWorker):
 
         if not self._layerwise_store_leader:
             return tuple(empty_candidate_rows() for _group_id in self._topology.transfer_group_ids)
-        masks = self._reachability.select_for_store(
-            command.block_hashes,
-            command.store_range,
-            command.num_prompt_tokens,
-        )
+        masks = self._reachability.select_for_store(command.block_hashes, command.end_token, command.num_prompt_tokens)
         return tuple(
             store_candidate_rows(
-                command.store_range.end_token,
+                command.end_token,
                 command.block_hashes,
                 command.block_ids_by_group[group_id],
                 block_size=self._mappings[group_id].group_block_size,
                 hash_block_size=self._mappings[group_id].hash_block_size,
-                start_token=command.store_range.start_token,
+                start_token=command.start_token,
                 mask=mask,
             )
             for group_id, mask in zip(self._topology.transfer_group_ids, masks, strict=True)

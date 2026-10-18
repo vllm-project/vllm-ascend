@@ -5,8 +5,8 @@ from __future__ import annotations
 import ctypes
 from types import SimpleNamespace
 
-from tests.ut.distributed.ascend_store.v1.backend.test_memcache import _make_memcache_registration_backend
-from tests.ut.distributed.ascend_store.v1.backend.test_mooncake import _make_mooncake_registration_backend
+from tests.ut.distributed.ascend_store.v1.backend.memcache.fixtures import _make_memcache_registration_backend
+from tests.ut.distributed.ascend_store.v1.backend.mooncake.fixtures import _make_mooncake_registration_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import MmcDirect
 
 

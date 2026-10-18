@@ -4,25 +4,23 @@ from types import SimpleNamespace
 
 from tests.e2e.pull_request.one_card.ascendstore_v1_layerwise_timing import LayerwiseLoadTiming
 from tests.ut.distributed.ascend_store.v1.helpers import FakeLoadStartGate, make_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupRequest
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     KVTransferStep,
     LoadCommand,
-    LoadCommandBatch,
+    LookupRequest,
     StoreCommandBatch,
 )
 
 
 def test_host_timing_preserves_real_layerwise_load_calls_and_captures_background_work():
     worker, resources, backend = make_worker(layerwise=True, start_gate_factory=lambda: FakeLoadStartGate(opened=True))
-    command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
-    metadata = KVTransferStep(LoadCommandBatch((command,)), StoreCommandBatch(()))
+    command = LoadCommand("request", 0, 4, ((1,),), (b"a",))
+    metadata = KVTransferStep((command,), StoreCommandBatch(()))
     schedule = SimpleNamespace(
         kv_connector_metadata=metadata, num_scheduled_tokens={"request": 1}, total_num_scheduled_tokens=1
     )
     lookup = SimpleNamespace(_lookup=worker.lookup)
-    lookup_request = LookupRequest(TokenRange(0, 4), (0,), (b"a",))
+    lookup_request = LookupRequest(0, 4, (0,), (b"a",))
 
     def execute_model(scheduler_output):
         worker.begin_step(scheduler_output.kv_connector_metadata)

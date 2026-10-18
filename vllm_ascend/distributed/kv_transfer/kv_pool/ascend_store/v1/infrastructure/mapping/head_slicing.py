@@ -40,7 +40,7 @@ from .types import LocalMemorySegments, UInt64Array
 if TYPE_CHECKING:
     import torch
 
-    from ...topology import KVPoolGroupTopology
+    from ..configuration.topology import KVPoolGroupTopology
 
 
 @dataclass(frozen=True, slots=True)

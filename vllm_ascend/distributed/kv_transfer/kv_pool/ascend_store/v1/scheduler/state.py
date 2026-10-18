@@ -8,8 +8,7 @@ from dataclasses import dataclass, replace
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from ..coordinates import TokenRange
-from ..protocol.lookup import TailKeyBoundary
+from ..infrastructure.protocol.messages import TailKeyBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +22,6 @@ class SchedulerConfig:
     load_enabled: bool
     store_enabled: bool
     save_decode_cache: bool
-    discard_partial_chunks: bool
     use_eagle_block_drop: bool
     has_private_state: bool
     expected_worker_count: int
@@ -34,13 +32,13 @@ class SchedulerConfig:
 
 @dataclass(frozen=True, slots=True)
 class LoadCandidate:
-    """Three remote prefix frontiers waiting for allocation confirmation."""
+    """Load boundaries and Store-skip progress waiting for allocation confirmation."""
 
     local_cached_tokens: int
-    readable_end_token: int
     store_skip_end_token: int
     safe_load_end_token: int
-    load_range: TokenRange
+    load_start_token: int
+    load_end_token: int
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
     @property
