@@ -1,50 +1,29 @@
-"""Scheduler-owned remote Lookup and prefix-frontier derivation."""
+"""Derive Scheduler prefix frontiers from remote Lookup results."""
 
 from __future__ import annotations
 
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..coordinates import TokenRange
-from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.rpc import LookupClient
+from ..infrastructure.protocol.messages import LookupResult
 from .state import LoadCandidate, SchedulerConfig
-
-
-class RemoteLookup:
-    """Own the lazy Scheduler-side Lookup RPC client."""
-
-    def __init__(self, address: str, *, timeout_ms: int = -1) -> None:
-        self.address = address
-        self._client = LookupClient(address, timeout_ms=timeout_ms)
-
-    def query(
-        self,
-        query_range: TokenRange,
-        transfer_group_ids: tuple[int, ...],
-        block_hashes: tuple[BlockHash, ...],
-    ) -> LookupResult:
-        return self._client.lookup(LookupRequest(query_range, transfer_group_ids, block_hashes))
-
-    def close(self) -> None:
-        self._client.close()
 
 
 def resolve_load_candidate(
     config: SchedulerConfig,
     lookup_result: LookupResult,
     *,
-    query_range: TokenRange,
+    query_start_token: int,
+    query_end_token: int,
     local_cached_tokens: int,
     request_token_count: int,
 ) -> LoadCandidate | None:
     """Derive readable, Store-skip, and Scheduler-safe prefix frontiers."""
 
     readable_end = lookup_result.available_end_token
-    if readable_end == 0 or readable_end <= query_range.start_token:
+    if readable_end == 0 or readable_end <= query_start_token:
         return None
-    if readable_end > query_range.end_token:
-        raise ValueError(f"Lookup returned token {readable_end} beyond query end {query_range.end_token}")
+    if readable_end > query_end_token:
+        raise ValueError(f"Lookup returned token {readable_end} beyond query end {query_end_token}")
 
     store_skip_end = readable_end
     safe_load_end = readable_end
@@ -60,7 +39,7 @@ def resolve_load_candidate(
     safe_load_end = max(local_cached_tokens, safe_load_end)
 
     physical_load_end = min(readable_end, cdiv(safe_load_end, granularity) * granularity)
-    load_start = 0 if query_range.start_token == 0 else local_cached_tokens
+    load_start = 0 if query_start_token == 0 else local_cached_tokens
     if physical_load_end < load_start:
         physical_load_end = load_start
     # Lookup may select a longer Attention object in the same physical tail page.
@@ -72,9 +51,9 @@ def resolve_load_candidate(
         )
     return LoadCandidate(
         local_cached_tokens,
-        readable_end,
         store_skip_end,
         safe_load_end,
-        TokenRange(load_start, physical_load_end),
+        load_start,
+        physical_load_end,
         tail_boundaries,
     )

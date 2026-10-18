@@ -14,11 +14,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 
-from .protocol.rpc import LookupServer
-from .protocol.transfer import KVTransferStep, StoreSourceReleaseMetadata
+from .factory import create_kv_pool_scheduler, create_kv_pool_worker
+from .infrastructure.protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
+from .infrastructure.protocol.rpc import LookupServer
 from .scheduler import KVPoolScheduler
-from .vllm_adapter import create_kv_pool_scheduler, create_kv_pool_worker
 from .worker.base import KVPoolWorker
+from .worker.layerwise import LayerwiseWorker
 from .worker.transfer.result import LoadResult
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
 
-        self._use_layerwise = bool(vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False))
+        self._use_layerwise = False
         self.scheduler: KVPoolScheduler | None = None
         self.worker: KVPoolWorker | None = None
         self.lookup_server: LookupServer | None = None
@@ -49,6 +50,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler = create_kv_pool_scheduler(vllm_config, kv_cache_config, lookup_address)
         else:
             self.worker = create_kv_pool_worker(vllm_config, kv_cache_config)
+            self._use_layerwise = isinstance(self.worker, LayerwiseWorker)
             if vllm_config.parallel_config.rank == 0:
                 try:
                     lookup_address = self._resolve_lookup_address(vllm_config)

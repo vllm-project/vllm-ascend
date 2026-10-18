@@ -9,12 +9,11 @@ from typing import Any
 
 from vllm.logger import logger
 
+from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
-from ...infrastructure.reachability import HybridReachability, UnitaryReachability
+from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
+from ...infrastructure.reachability import HybridReachability, UnitaryReachability, checkpoint_companion_indices
 from ...infrastructure.resources import KVPoolResources
-from ...protocol.transfer import CheckpointStoreCommand, StoreCommand
-from ...store_selection import checkpoint_companion_indices
-from ...topology import KVPoolTopology
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeyAxes,
@@ -163,19 +162,19 @@ class BulkWorker(KVPoolWorker):
                 continue
 
             masks = self._reachability.select_for_store(
-                command.block_hashes, command.store_range, command.num_prompt_tokens
+                command.block_hashes, command.end_token, command.num_prompt_tokens
             )
             for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
                 if group_id in self._state_group_ids:
                     rows = empty_candidate_rows()
                 else:
                     rows = store_candidate_rows(
-                        command.store_range.end_token,
+                        command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         block_size=mapping.group_block_size,
                         hash_block_size=mapping.hash_block_size,
-                        start_token=command.store_range.start_token,
+                        start_token=command.start_token,
                         mask=mask,
                     )
                     rows = select_store_writer_rows(

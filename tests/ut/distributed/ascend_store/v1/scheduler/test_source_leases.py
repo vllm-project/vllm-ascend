@@ -14,8 +14,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import FakeBlockPool, make_config
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     CheckpointStoreCommand,
     RangeStoreCommand,
     StateCheckpointSource,
@@ -28,7 +27,7 @@ def test_stable_sources_need_neither_references_nor_release_jobs(source_groups) 
     leases = StoreSourceLeases(make_config(groups=source_groups, store=True))
     pool = FakeBlockPool()
     leases.bind_block_pool(pool)
-    command = RangeStoreCommand("request", TokenRange(4, 8), ((1, 2, 3),) * 4, (b"a", b"b"), 8)
+    command = RangeStoreCommand("request", 4, 8, ((1, 2, 3),) * 4, (b"a", b"b"), 8)
 
     assert leases.acquire(command) is command
     assert not leases.has_pending()
@@ -52,7 +51,8 @@ def test_recycling_sources_respect_range_retention_and_original_group_ids(retent
     leases.bind_block_pool(pool)
     command = RangeStoreCommand(
         "request",
-        TokenRange(32, 96),
+        32,
+        96,
         ((40,), (1, 2, 3, 4, 5, 6), (41,), (20, 21, 22, 23, 24, 25, 26)),
         tuple(bytes([index]) for index in range(6)),
         97,
@@ -97,7 +97,7 @@ def test_unselected_recycling_rows_create_no_lease() -> None:
     pool = FakeBlockPool()
     leases.bind_block_pool(pool)
     # The selected source is null; neither the old prefix nor speculative suffix is read.
-    command = RangeStoreCommand("request", TokenRange(4, 8), ((1, 0, 3),), (b"a", b"b"), 8)
+    command = RangeStoreCommand("request", 4, 8, ((1, 0, 3),), (b"a", b"b"), 8)
 
     assert leases.acquire(command) is command
     assert not leases.has_pending()
@@ -114,7 +114,7 @@ def test_recycling_manager_keeps_sources_even_when_spec_inherits_full_attention(
     leases = StoreSourceLeases(config)
     pool = FakeBlockPool()
     leases.bind_block_pool(pool)
-    command = RangeStoreCommand("request", TokenRange(4, 8), ((1, 2, 3),), (b"a", b"b"), 8)
+    command = RangeStoreCommand("request", 4, 8, ((1, 2, 3),), (b"a", b"b"), 8)
 
     leased = leases.acquire(command)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
@@ -17,11 +18,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connecto
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
     AscendStoreV1Connector,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     KVTransferStep,
     LoadCommand,
-    LoadCommandBatch,
     StoreSourceReleaseMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.result import (
@@ -155,8 +154,8 @@ def test_store_fence_preserves_released_request_ids_in_both_load_and_decode_step
         take_released_store_job_ids=lambda: set(),
     )
     connector._released_store_job_ids = set()
-    load = LoadCommand("load", TokenRange(0, 4), ((7,),), (b"a",))
-    metadata = KVTransferStep(load=LoadCommandBatch((load,) if has_load else ()), released_request_ids=released_ids)
+    load = LoadCommand("load", 0, 4, ((7,),), (b"a",))
+    metadata = KVTransferStep(load_commands=(load,) if has_load else (), released_request_ids=released_ids)
 
     connector.handle_preemptions(metadata)
 
@@ -225,6 +224,19 @@ def test_connector_retains_worker_on_lookup_close_failure_and_can_retry_shutdown
     query_running = False
     connector.shutdown()
     assert calls == ["lookup", "lookup", "worker"]
+
+
+@pytest.mark.parametrize("layerwise", (False, True))
+def test_connector_uses_the_constructed_route_without_reparsing_options(monkeypatch, layerwise) -> None:
+    worker_type = connector_module.LayerwiseWorker if layerwise else connector_module.KVPoolWorker
+    worker = Mock(spec=worker_type)
+    monkeypatch.setattr(KVConnectorBase_V1, "__init__", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connector_module, "create_kv_pool_worker", lambda *_args: worker)
+    config = SimpleNamespace(parallel_config=SimpleNamespace(rank=1))
+    connector = AscendStoreV1Connector(config, None, None)
+    assert connector._use_layerwise is layerwise
+    connector.shutdown()
+    worker.close.assert_called_once()
 
 
 def test_connector_closes_created_worker_if_lookup_server_cannot_start(monkeypatch) -> None:
