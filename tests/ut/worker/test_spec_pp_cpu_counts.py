@@ -23,14 +23,18 @@ def runner_cls(mamba_state_cls):
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner")
     init = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
-    assignment = next(
+    assignments = [
         node
         for node in init.body
         if isinstance(node, ast.Assign)
-        and any(getattr(target, "attr", None) == "sync_spec_pp_cpu_counts" for target in node.targets)
-    )
+        and any(
+            getattr(target, "attr", None) in {"sync_spec_pp_cpu_counts", "_skip_spec_cpu_length_sync"}
+            for target in node.targets
+        )
+    ]
+    assert len(assignments) == 2
     # Execute the real production methods with a CPU parent instead of importing NPU workers.
-    init.body = [assignment]
+    init.body = assignments
     cls.body = [
         node
         for node in cls.body

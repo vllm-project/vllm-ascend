@@ -577,6 +577,8 @@ def test_host_positions_after_rejection_or_chunk(
         methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
     )
     runner = namespace["NPUModelRunner"]()
+    # This harness bypasses __init__; retain the original host-length path.
+    runner._skip_spec_cpu_length_sync = False
     runner.speculator = object() if owns_speculator else None
     runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
