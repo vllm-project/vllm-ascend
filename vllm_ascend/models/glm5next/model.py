@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal
 import torch
 import torch_npu
 from torch import nn
+from transformers import Glm5NextConfig
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -75,7 +76,6 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -877,7 +877,9 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod

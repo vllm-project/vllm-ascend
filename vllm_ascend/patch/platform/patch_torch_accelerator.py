@@ -1,8 +1,18 @@
+import contextlib
+
 import torch
 
 
 def patch_empty_cache() -> None:
-    torch.npu.empty_cache()
+    # torch_npu's emptyCache asserts that no memory pool/capture is in flight.
+    # Upstream main now calls torch.accelerator.empty_cache() while loading
+    # weights, and with --enable-sleep-mode that load runs inside the pluggable
+    # CaMem pool, where empty_cache is known to error (pytorch/pytorch#145168,
+    # see CaMemAllocator.use_memory_pool). Emptying the cache is only a hint,
+    # so never fail engine startup over it; the pool memory is released by its
+    # own lifecycle.
+    with contextlib.suppress(RuntimeError):
+        torch.npu.empty_cache()
 
 
 torch.accelerator.empty_cache = patch_empty_cache

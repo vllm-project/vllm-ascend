@@ -37,6 +37,7 @@ import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -45,6 +46,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _EXPECTED_PARAMETERS = (
     "self",
@@ -120,9 +122,22 @@ def _mamba_block_aligned_split(
             request.num_tokens - 1,
         ):
             block_size = self.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
-                last_cache_position = max(last_cache_position - block_size, 0)
+            if vllm_version_is("0.31.0"):
+                last_cache_position = request.num_tokens - request.num_tokens % block_size
+                if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
+                    last_cache_position = max(last_cache_position - block_size, 0)
+            else:
+                # vLLM main routes this through
+                # get_mamba_prefill_checkpoint_position (which leaves one token
+                # to recompute, or backs off one block under EAGLE).
+                drop_eagle_block = not _skips_eagle_block_drop(kv_transfer_config) and getattr(
+                    self, "use_eagle_block_drop", getattr(self, "use_eagle", False)
+                )
+                last_cache_position = get_mamba_prefill_checkpoint_position(
+                    request.num_tokens,
+                    block_size,
+                    drop_eagle_block,
+                )
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:
                 chunked_tokens = num_new_tokens // block_size * block_size

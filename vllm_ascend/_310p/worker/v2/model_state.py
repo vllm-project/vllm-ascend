@@ -181,8 +181,10 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         self._num_accepted_tokens_cpu[req_index] = 1
         if not self._align_mode:
             return
-        # b2f685834a uses cache_config.block_size as the align page size.
-        block_size = self.cache_config.block_size
+        # Align pages are mamba blocks; cache_config.block_size is the min over
+        # prefix-cacheable groups, which a drafter group can shrink below it.
+        block_size = self.cache_config.mamba_block_size
+        assert block_size is not None
         self._mamba_state_idx_cpu[req_index] = (new_req_data.num_computed_tokens - 1) // block_size
 
     def _ensure_mamba_copy_funcs_cpu(self, kv_cache_config: KVCacheConfig) -> None:

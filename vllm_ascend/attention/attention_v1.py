@@ -81,6 +81,12 @@ class AscendAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Ascend batch-invariant mode registers deterministic matmul/sampler
+        # kernels for the whole worker; attention itself is unchanged.
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
         if enable_dcp():
@@ -349,7 +355,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
-        # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
+        # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c
+        # /vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
 
@@ -1221,7 +1228,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key_to_cache = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
             value_to_cache = value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value
             # quick fix to make sure slots is int32 for cross attention case.
-            # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
+            # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c
+            # /vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
             DeviceOperator.reshape_and_cache(
                 key=key_to_cache,

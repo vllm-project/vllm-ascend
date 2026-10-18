@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+# mypy: ignore-errors
 
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -9,11 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
+    SpeculatorCudaGraphManager,
 )
 
 

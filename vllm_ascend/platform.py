@@ -58,6 +58,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -352,10 +353,13 @@ class NPUPlatform(Platform):
 
         # Upstream derives this threshold only for CUDA/XPU. Without an Ascend
         # default, an explicit SP/MMRS request is disabled during VllmConfig
-        # validation before the graph fusion pass can observe it.
-        pass_config = vllm_config.compilation_config.pass_config
-        if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
-            pass_config.sp_min_token_num = 1
+        # validation before the graph fusion pass can observe it. vLLM main
+        # removed the sequence-parallel pass (and these pass_config switches);
+        # Ascend's own SP is driven by parallel_config.use_sequence_parallel_moe.
+        if vllm_version_is("0.31.0"):
+            pass_config = vllm_config.compilation_config.pass_config
+            if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
+                pass_config.sp_min_token_num = 1
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
@@ -1276,6 +1280,24 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         compilation_config.cudagraph_mode = cudagraph_mode
 
 
+def _tp_aligned_capture_sizes(possible_sizes: list[int], tp_size: int) -> list[int]:
+    """Drop CUDA-graph sizes that are not a multiple of the TP width.
+
+    vLLM main removed ``VllmConfig.update_sizes_for_sequence_parallelism``
+    together with the sequence-parallel compile pass. Ascend's SP, shared
+    expert DP and DSA CP still require TP-aligned capture sizes.
+    """
+    removed_sizes = [size for size in possible_sizes if size % tp_size != 0]
+    if removed_sizes:
+        logger.warning(
+            "Batch sizes %s are removed because they are not multiple of tp_size %d "
+            "when sequence parallelism is enabled",
+            removed_sizes,
+            tp_size,
+        )
+    return [size for size in possible_sizes if size % tp_size == 0]
+
+
 def _setup_compile_backend(
     vllm_config: VllmConfig,
     compile_backend: str,
@@ -1322,7 +1344,7 @@ def _setup_compile_backend(
         and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
-        sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
+        sp_aclgraph_sizes = _tp_aligned_capture_sizes(original_sizes, vllm_config.parallel_config.tensor_parallel_size)
         if not sp_aclgraph_sizes:
             raise AssertionError(
                 f"cudagraph_capture_sizes {original_sizes} does not contain"
@@ -1541,9 +1563,11 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
     # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
-    # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+    # Find more details at
+    # https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
     # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
-    # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
+    # Find more details about how to configure this environment variable at
+    # https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
     if vllm_config.model_config and not vllm_config.model_config.enable_sleep_mode:
         npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
         # This environment variable may have more than one key-value pairs.

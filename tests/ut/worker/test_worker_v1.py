@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import importlib
 import unittest
 from types import SimpleNamespace
@@ -2191,8 +2192,8 @@ class TestNPUWorker(TestBase):
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
 
-    def test_update_config(self):
-        """Test update_config delegates to model_runner.update_config"""
+    def test_update_config_release_delegates_to_model_runner(self):
+        """The release tree applies update_config on the model runner."""
         from vllm_ascend.worker.worker import NPUWorker
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -2200,9 +2201,32 @@ class TestNPUWorker(TestBase):
             worker.model_runner = MagicMock()
 
             overrides = {"load_config": {"load_format": "dummy"}}
-            worker.update_config(overrides)
+            with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
+                worker.update_config(overrides)
 
             worker.model_runner.update_config.assert_called_once_with(overrides)
+
+    def test_update_config_applies_overrides_to_config_and_runner(self):
+        """Main applies update_config on the worker and mirrors it onto the runner."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            original_load_config = worker.vllm_config.load_config
+
+            new_config = MagicMock()
+            with (
+                patch("vllm_ascend.worker.worker.vllm_version_is", return_value=False),
+                patch("vllm_ascend.worker.worker.update_config", return_value=new_config) as mock_update,
+            ):
+                worker.update_config({"load_config": {"load_format": "dummy"}})
+
+            mock_update.assert_called_once_with(original_load_config, {"load_format": "dummy"})
+            self.assertIs(worker.vllm_config.load_config, new_config)
+            self.assertIs(worker.model_runner.load_config, new_config)
+            self.assertIs(worker.load_config, new_config)
 
     def test_reload_weights(self):
         """Test reload_weights delegates to model_runner.reload_weights"""

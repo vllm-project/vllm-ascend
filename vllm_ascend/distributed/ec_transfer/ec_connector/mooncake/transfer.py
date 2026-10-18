@@ -23,7 +23,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 
 if TYPE_CHECKING:
-    from mooncake.engine import TransferEngine  # type: ignore[import-not-found]
+    from mooncake.engine import TransferEngine  # type: ignore[import-not-found,import-untyped]
 
 
 @dataclass(frozen=True)

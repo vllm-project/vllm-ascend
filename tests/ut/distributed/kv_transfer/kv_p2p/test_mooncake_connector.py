@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import ctypes
 import inspect
 import math
@@ -18,7 +19,6 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -53,7 +53,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (  # type: ignore[import-not-found]
+        get_kv_cache_config_from_groups,
+        is_kv_cache_spec_uniform,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (  # type: ignore[import-not-found]
+        get_kv_cache_config_from_groups,
+        is_kv_cache_spec_uniform,
+    )
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"

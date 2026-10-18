@@ -46,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config, vllm_version_is
+from vllm_ascend.utils import get_ascend_config, normalize_encoder_schedule_result, vllm_version_is
 
 
 @dataclass
@@ -303,12 +303,14 @@ class RecomputeScheduler(Scheduler):
                     num_new_tokens,
                     new_encoder_compute_budget,
                     external_load_encoder_input,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_compute_budget,
-                    shift_computed_tokens=self.num_prefill_lookahead,
+                ) = normalize_encoder_schedule_result(
+                    self._try_schedule_encoder_inputs(
+                        request,
+                        request.num_computed_tokens,
+                        num_new_tokens,
+                        encoder_compute_budget,
+                        shift_computed_tokens=self.num_prefill_lookahead,
+                    )
                 )
 
             # Multi-module MTP: avoid ending a prefill chunk within
@@ -462,7 +464,7 @@ class RecomputeScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and not self._recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and not self._recomputed_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -474,7 +476,7 @@ class RecomputeScheduler(Scheduler):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
-            while (self.waiting or self.kv_holding_waiting) and token_budget > 0:
+            while token_budget > 0:
                 if input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -483,8 +485,13 @@ class RecomputeScheduler(Scheduler):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                request_queue = self.kv_holding_waiting or self.waiting
-                assert request_queue is not None
+                # Requests holding KV blocks drain first, and are the only
+                # ones admitted under PAUSED_NEW (e.g. async KV loads).
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
+                if not request_queue:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
@@ -701,12 +708,14 @@ class RecomputeScheduler(Scheduler):
                             num_new_tokens,
                             new_encoder_compute_budget,
                             external_load_encoder_input,
-                        ) = self._try_schedule_encoder_inputs(
-                            request,
-                            num_computed_tokens,
-                            num_new_tokens,
-                            encoder_compute_budget,
-                            shift_computed_tokens=self.num_prefill_lookahead,
+                        ) = normalize_encoder_schedule_result(
+                            self._try_schedule_encoder_inputs(
+                                request,
+                                num_computed_tokens,
+                                num_new_tokens,
+                                encoder_compute_budget,
+                                shift_computed_tokens=self.num_prefill_lookahead,
+                            )
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
@@ -736,6 +745,16 @@ class RecomputeScheduler(Scheduler):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                # vLLM main skips zeroing for the groups an async load writes
+                # through `skip_zeroing_group_ids`; the release uses a
+                # scheduler-side block-id set (handled below).
+                allocate_kwargs = {}
+                if not vllm_version_is("0.31.0"):
+                    allocate_kwargs["skip_zeroing_group_ids"] = (
+                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        if load_kv_async and self.connector is not None
+                        else ()
+                    )
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -748,6 +767,7 @@ class RecomputeScheduler(Scheduler):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    **allocate_kwargs,
                 )
 
                 if new_blocks is None:
@@ -799,9 +819,9 @@ class RecomputeScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
+                    if vllm_version_is("0.31.0") and self.needs_kv_cache_zeroing:
+                        # The release skips zeroing via a block-id set; main
+                        # forwards `skip_zeroing_group_ids` to allocate_slots.
                         self._skip_zero_block_ids.update(
                             self.kv_cache_manager.get_zeroing_block_ids_in_range(
                                 request.request_id,
@@ -884,10 +904,13 @@ class RecomputeScheduler(Scheduler):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+        if vllm_version_is("0.31.0"):
+            with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+                if self.running:
+                    any_request_id = self.running[0].request_id
+                    num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(  # type: ignore[attr-defined]
+                        any_request_id
+                    )
 
         # Construct the scheduler output.
         new_request_kwargs = {

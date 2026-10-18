@@ -1326,6 +1326,7 @@
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#      (renamed to `...spec_decode.target_dependent_ar.speculator` on vLLM main)
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.

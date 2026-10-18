@@ -995,6 +995,10 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""

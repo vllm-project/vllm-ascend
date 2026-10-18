@@ -117,6 +117,10 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_MINIMAX_M3_SPARSE_INDEXER"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3IndexerImpl]:
         return AscendMiniMaxM3IndexerImpl
@@ -582,6 +586,10 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MINIMAX_M3_SPARSE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3SparseImpl]:

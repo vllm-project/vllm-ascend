@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
+# mypy: ignore-errors
 
 from types import SimpleNamespace
 from typing import Any
@@ -57,7 +58,13 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
+
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core import kv_cache_utils as kv_cache_planner  # type: ignore[import-not-found]
+else:
+    from vllm.v1.core import kv_cache_planning as kv_cache_planner  # type: ignore[import-not-found]
 
 
 @pytest.fixture(autouse=True)
@@ -187,12 +194,12 @@ def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, ru
     groups = (
         make_cache_groups(group_cache_specs(specs))
         if packed_groups
-        else kv_cache_utils.get_kv_cache_groups(runtime, specs)
+        else kv_cache_planner.get_kv_cache_groups(runtime, specs)
     )
     assert is_deepseek_v41_cache(groups)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
-    assert kv_cache_utils._pool_bytes_per_block(groups) == page_bytes
-    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    assert kv_cache_planner._pool_bytes_per_block(groups) == page_bytes
+    cache_config = kv_cache_planner.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
@@ -414,7 +421,7 @@ def test_request_accounting_counts_merged_full_context_once(runtime):
         for g in groups[1:]
     )
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    required = kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups)
+    required = kv_cache_planner._max_memory_usage_bytes_from_groups(runtime, groups)
     assert required // page == 1024 // 64 + bounded
 
 
@@ -431,12 +438,12 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     runtime.max_in_flight_tokens = 128
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    config = kv_cache_utils.get_kv_cache_config_from_groups(runtime, groups, 100 * page)
+    config = kv_cache_planner.get_kv_cache_config_from_groups(runtime, groups, 100 * page)
     assert config.num_blocks == 100 and len(config.kv_cache_tensors) == 4
     assert sum(t.size for t in config.kv_cache_tensors) == 100 * page
-    demand = kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) // page
-    assert kv_cache_utils._pool_bytes_per_block(groups) == page
-    assert kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) == demand * page
+    demand = kv_cache_planner._max_memory_usage_bytes_from_groups(runtime, groups) // page
+    assert kv_cache_planner._pool_bytes_per_block(groups) == page
+    assert kv_cache_planner._max_memory_usage_bytes_from_groups(runtime, groups) == demand * page
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, config) == 100 / demand
     scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config([config])
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, scheduler_config) == 100 / demand
@@ -472,8 +479,8 @@ def test_dspark_is_one_additional_group_in_existing_slots(runtime):
     assert [t.size for t in draft.kv_cache_tensors] == [t.size for t in target.kv_cache_tensors]
     assert get_deepseek_v41_pool_bytes_per_block(groups) == 540928
     added = (
-        kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups)
-        - kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, target.kv_cache_groups)
+        kv_cache_planner._max_memory_usage_bytes_from_groups(runtime, groups)
+        - kv_cache_planner._max_memory_usage_bytes_from_groups(runtime, target.kv_cache_groups)
     ) // get_deepseek_v41_pool_bytes_per_block(groups)
     spec = next(iter(groups[12].kv_cache_spec.kv_cache_specs.values()))
     assert added == (spec.max_memory_usage_bytes(runtime) + spec.page_size_bytes - 1) // spec.page_size_bytes

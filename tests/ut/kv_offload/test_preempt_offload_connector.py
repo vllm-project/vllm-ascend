@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 
 import sys
 import types
@@ -38,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (  # noqa: E402, E501
     PreemptOffloadConnectorV1,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker import (  # noqa: E402
@@ -974,6 +975,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.kv_cache_manager = MagicMock()
     # vLLM main tracks prefix-replay bookkeeping on the scheduler.
     scheduler.prefix_replay_tokens = 0
+    scheduler.prefix_replay_group_ids = ()
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -1004,6 +1006,7 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     # vLLM main tracks prefix-replay bookkeeping on the scheduler and
     # reads request.num_tokens to decide the full-prompt-hit rewind.
     scheduler.prefix_replay_tokens = 0
+    scheduler.prefix_replay_group_ids = ()
     request.num_tokens = 8
 
     scheduler._update_waiting_for_remote_kv(request)

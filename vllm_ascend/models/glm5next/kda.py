@@ -4,6 +4,7 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
@@ -25,7 +26,6 @@ from vllm.model_executor.utils import set_weight_attrs
 # FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
 # through the OOT registration in `vllm_ascend.utils` rather than by import.
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -115,7 +115,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(
         self,

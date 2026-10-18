@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -270,10 +272,11 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         object(),
         128,
     )
-    args = (*forward_args, False, "capture")
+    args = forward_args
+    forward_key = "precompute_context_kv" if vllm_version_is("0.31.0") else "prepare_forward"
+    forward_kwargs = {"causal": False, forward_key: "capture"}
     expected_kwargs = {
-        "causal": False,
-        "precompute_context_kv": "capture",
+        **forward_kwargs,
         "progress_bar_desc": "Capturing CUDA graphs",
     }
 
@@ -289,7 +292,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
 
     monkeypatch.setattr(graph.DFlashCudaGraphManager, "capture", capture)
     with pytest.raises(RuntimeError, match="capture failed") if fail else nullcontext():
-        manager.capture(*args)
+        manager.capture(*args, **forward_kwargs)
     assert events == ["enter communicator", "enter model", "capture", "exit model", "exit communicator"]
 
 

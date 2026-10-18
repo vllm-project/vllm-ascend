@@ -23,6 +23,8 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class ShardedStateLoader310(ShardedStateLoader):
     def __init__(self, load_config: LoadConfig):
@@ -36,13 +38,17 @@ class ShardedStateLoader310(ShardedStateLoader):
         max_size: int | None = None,
     ) -> None:
         from safetensors.torch import save_file
-        from vllm.distributed import get_tensor_model_parallel_rank
 
-        rank = get_tensor_model_parallel_rank()
         part_idx = 0
         state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
 
-        filename = ShardedStateLoader.DEFAULT_PATTERN.format(rank=rank, part=part_idx)
+        if vllm_version_is("0.31.0"):
+            from vllm.distributed import get_tensor_model_parallel_rank  # type: ignore[import-not-found]
+
+            rank = get_tensor_model_parallel_rank()
+            filename = ShardedStateLoader.DEFAULT_PATTERN.format(rank=rank, part=part_idx)
+        else:
+            filename = ShardedStateLoader._render_default_pattern(pattern, part=part_idx)
         save_file(
             state_dict,
             os.path.join(path, filename),

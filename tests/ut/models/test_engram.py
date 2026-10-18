@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 # ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
+import importlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -20,13 +22,19 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
-
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM main moved the Engram implementation from the nvidia module to the common
+# module (and deleted the nvidia one).
+_upstream_engram_module = (
+    "vllm.models.deepseek_v41.nvidia.engram" if vllm_version_is("0.31.0") else "vllm.models.deepseek_v41.common.engram"
+)
+upstream_engram = importlib.import_module(_upstream_engram_module)
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):

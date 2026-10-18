@@ -929,11 +929,21 @@ class AscendConfig:
             self._sparse_li_c4_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
-        self.enable_sp_by_pass = (
-            vc.model_config is not None
-            and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
-        )
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.31.0"):
+            self.enable_sp_by_pass = (
+                vc.model_config is not None
+                and not vc.model_config.enforce_eager
+                and vc.compilation_config.pass_config.enable_sp
+            )
+        else:
+            # vLLM main removed the SP pass switch; mirror Ascend's own SP flag.
+            self.enable_sp_by_pass = (
+                vc.model_config is not None
+                and not vc.model_config.enforce_eager
+                and vc.parallel_config.use_sequence_parallel_moe
+            )
 
         self._validate_mc2_comm_alg(vc)
 

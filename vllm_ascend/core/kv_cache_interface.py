@@ -3,7 +3,7 @@
 
 import inspect
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -42,7 +42,7 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
     if isinstance(kv_cache_spec, MLAAttentionSpec):
-        storage_block_size = kv_cache_spec.storage_block_size
+        storage_block_size = getattr(kv_cache_spec, "storage_block_size", None)
         return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
@@ -225,6 +225,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+    # vLLM main removed the storage-view override from MLAAttentionSpec; keep
+    # accepting it so the release lane's page geometry can still be spelled
+    # out by callers. Ascend derives the value from tokens_per_state.
+    storage_block_size: int | None = field(default=None, kw_only=True)
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

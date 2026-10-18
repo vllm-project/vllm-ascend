@@ -6,6 +6,8 @@ Reuse mainline EDP ownership and row exchange. The A5 scheduler can skip DP
 metadata synchronization, so hash gathering must retain its fixed-slot path.
 """
 
+import importlib
+
 import torch
 import torch.distributed as dist
 from vllm.config import get_current_vllm_config
@@ -14,11 +16,16 @@ from vllm.forward_context import get_forward_context
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import DEAD_ID
-from vllm.models.deepseek_v41.nvidia.engram import (
-    engram_head_shard_rank as engram_head_shard_rank,
-)
 
-from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_scheduler_enabled
+from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_scheduler_enabled, vllm_version_is
+
+# vLLM main moved `engram_head_shard_rank` from the nvidia module to the common
+# module (and deleted the nvidia one). Resolve it by version at runtime so both
+# trees import cleanly; a static import of the nvidia module would break main.
+_engram_impl = importlib.import_module(
+    "vllm.models.deepseek_v41.nvidia.engram" if vllm_version_is("0.31.0") else "vllm.models.deepseek_v41.common.engram"
+)
+engram_head_shard_rank = _engram_impl.engram_head_shard_rank
 
 
 def resolve_dp_shared_memory(requested: bool) -> bool:

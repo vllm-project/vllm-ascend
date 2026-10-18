@@ -632,8 +632,8 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
-        # Randomized profiling was added on the release branch after the verified main pin.
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        # Randomized profiling now exists on both the release and main trees.
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
             try:
@@ -738,7 +738,7 @@ class NPUModelRunner(GPUModelRunner):
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         # The initial dummy profile bypasses PCP batch partitioning. Profile
         # rank-local tokens; the existing MoE preparation still handles TP.
@@ -1022,8 +1022,8 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        # The PP sampling length field exists only in v0.31.0.
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np} if vllm_version_is("0.31.0") else {}
+        # The PP sampling length field exists on the release and main trees.
+        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1127,7 +1127,9 @@ class NPUModelRunner(GPUModelRunner):
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
-        if grammar_output is not None:
+        invalid_drafts: torch.Tensor | None = None
+        # A diffusion prefill has no logit rows even when a bitmask row arrived.
+        if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
@@ -1136,10 +1138,31 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
+            if not vllm_version_is("0.31.0"):
+                # vLLM main masks drafts whose bitmask row was permissive.
+                from vllm.v1.worker.gpu.structured_outputs import (  # type: ignore[import-not-found]
+                    grammar_invalid_drafts,
+                )
+
+                invalid_drafts = grammar_invalid_drafts(
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.num_acceptable_drafts,
+                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
             sampler_output = self.sampler(logits, input_batch)
+        elif vllm_version_is("0.31.0"):
+            # Rejection sampling for spec decoding.
+            assert self.rejection_sampler is not None
+            assert self.speculator is not None
+            sampler_output = self.rejection_sampler(
+                logits,
+                input_batch,
+                # Draft logits are needed for probabilistic rejection sampling.
+                self.speculator.draft_logits,
+            )
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -1149,6 +1172,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_drafts,
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected

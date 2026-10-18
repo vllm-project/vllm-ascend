@@ -1211,6 +1211,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
+        # vLLM main's `KVConnectorBase_V1.get_loaded_kv_cache_group_ids` default
+        # reads `_kv_cache_config`; this connector does not call `super().__init__`.
+        self._kv_cache_config = kv_cache_config
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
@@ -1220,6 +1223,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # This P/D connector restores the request's own blocks across all
+        # transfer groups; used by the scheduler to skip zeroing those blocks.
+        kv_cache_config = self._kv_cache_config
+        return () if kv_cache_config is None else tuple(kv_cache_config.transfer_group_ids)
 
     ############################################################
     # Scheduler Side Methods
@@ -1394,6 +1403,16 @@ class MooncakeConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0 for n_tokens, block_size in sw_sizes_tokens
         ]
 
+        # DSV41 SWA bounded replay is not replayed after a P/D load, so the
+        # prefiller must leave the recomputed last token on the decoder side.
+        if not self.need_truncate:
+            self.need_truncate = any(
+                isinstance(getattr(spec, "prefix_replay_tokens", 0), int)
+                and getattr(spec, "prefix_replay_tokens", 0) > 0
+                for specs in self.kv_cache_specs
+                for spec in specs
+            )
+
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
         Clip the number of blocks to the sliding window size for each kv cache group
@@ -1429,11 +1448,14 @@ class MooncakeConnectorScheduler:
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
+        # A request that skips the prefix cache loads nothing on the decoder.
+        skip_prefix_cache = getattr(request, "get_skip_reading_prefix_cache", None)
         if (
             params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
+            and not (skip_prefix_cache is not None and skip_prefix_cache())
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -2164,7 +2186,12 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
     ctx: zmq.Context | None = None  # type: ignore
     try:
         ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
+        yield make_zmq_socket(  # type: ignore
+            ctx=ctx,
+            path=addr,
+            socket_type=socket_type,
+            bind=socket_type == zmq.ROUTER,  # type: ignore[attr-defined]
+        )
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
