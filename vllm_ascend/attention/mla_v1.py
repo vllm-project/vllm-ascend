@@ -1234,8 +1234,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
-        """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
-        if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
+        """Defer MXFP8 projection NZ conversion to fused preprocessing."""
+        # Strided-cache PROLOG_V3 also runs for draft models with MLAPO disabled.
+        # Keep source weights in ND so they can be split before NZ conversion.
+        if not self.support_fp8_attention or not (
+            self.enable_mlapo or self.fa_quant_layer or self.supports_prolog_v3_writer()
+        ):
             return None
         if self.fused_qkv_a_proj is None or self.q_proj is None:
             return None

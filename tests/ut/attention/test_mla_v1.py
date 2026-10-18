@@ -291,6 +291,8 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
     impl.fa_quant_layer = fa_quant_layer
+    # This matrix isolates the existing MLAPO/FA-quant policy.
+    impl.use_mla_rope = False
     impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=MagicMock(spec=scheme_type)))
     impl.q_proj = SimpleNamespace()
     mark_fused_preprocess_weights(impl)
