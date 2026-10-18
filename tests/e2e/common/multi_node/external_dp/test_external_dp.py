@@ -19,6 +19,7 @@ from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     RankResolver,
     resolve_current_node_index,
 )
+from tests.e2e.common.multi_node.external_dp.log_archive import periodic_rank_log_archive
 from tests.e2e.common.multi_node.external_dp.runtime import (
     ExternalDPProxyLauncher,
     ExternalDPServerManager,
@@ -239,6 +240,7 @@ def test_external_dp() -> None:
 
     try:
         with (
+            periodic_rank_log_archive(log_root, current_node_index),
             kv_pool_manager,
             ExternalDPServerManager(
                 config=config,

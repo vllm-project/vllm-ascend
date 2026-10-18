@@ -4,7 +4,6 @@ import os
 import shlex
 import signal
 import subprocess
-import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +22,7 @@ from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     ExternalDPConfig,
     RankInfo,
 )
+from tests.e2e.common.multi_node.external_dp.log_archive import collect_logs as collect_logs
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 
 logger = logging.getLogger(__name__)
@@ -122,14 +122,6 @@ def wait_http_unready(url: str, timeout: int, interval: float = 5.0) -> None:
             return
         time.sleep(interval)
     raise TimeoutError(f"Timed out waiting for HTTP unready: {url}")
-
-
-def collect_logs(src_dir: Path, output_tar: Path) -> None:
-    if not src_dir.exists():
-        return
-    output_tar.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(output_tar, "w:gz") as tar:
-        tar.add(src_dir, arcname=src_dir.name)
 
 
 def _common_command_envs(commands: list["ServerCommand"]) -> dict[str, str]:
