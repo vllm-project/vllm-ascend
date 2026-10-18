@@ -131,6 +131,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         worker._layer_mappings = {0: mapping.LayerwiseMapping(bulk)}
     if route == "gva":
         # Lease synthetic addresses once; no tensor or native memory is read.
+        assert isinstance(backend, ConstantGVABackend) and backend.native_store is not None
         backend.native_store.objects.update(
             {key: (0x10000000000 + index * object_size, object_size, True) for index, key in enumerate(keys)}
         )
@@ -164,7 +165,7 @@ def check_success(result, request_ids, route):
 
 
 def constructor_counts(operation):
-    counts = Counter()
+    counts: Counter[str] = Counter()
 
     def record(frame, event, _arg):
         if event == "call" and frame.f_code.co_name == "__init__":
@@ -185,7 +186,7 @@ def constructor_counts(operation):
 
 def compare(request_count, route, repeats, baseline):
     cases = {}
-    timings = {"before": [], "after": []}
+    timings: dict[str, list[float]] = {"before": [], "after": []}
     rng = random.Random(71)
     gc_was_enabled = gc.isenabled()
     try:

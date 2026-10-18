@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import (
     expected_group_bytes,
@@ -132,7 +133,7 @@ class MappingTests(unittest.TestCase):
             ]
             payloads = []
             for cases in (producer_cases, consumer_cases):
-                objects = {}
+                objects: dict[str, bytes] = {}
                 for case in cases:
                     group = case.topology.transfer_groups[0]
                     for layer in group.layers:
@@ -167,7 +168,7 @@ class MappingTests(unittest.TestCase):
                 layout=layout, head_slices=head_slices, padding=padding, kernels=kernels, pp_layer_counts=(1, 3)
             )
             bound = case.bind()
-            ids = np.arange(9, dtype=np.uint64) % 3
+            ids: NDArray[np.uint64] = np.arange(9, dtype=np.uint64) % 3
             hashes = [f"h{index}" for index in range(9)]
             for transfer in (bound, bound):
                 keys = transfer.keys(hashes)
@@ -251,7 +252,7 @@ class MappingTests(unittest.TestCase):
                             expected[tensor.data_ptr()] = tensor.clone()
                 bound = {id(case): case.bind() for case in producer + consumer}
                 for sources, targets in ((producer, consumer), (consumer, producer)):
-                    objects = {}
+                    objects: dict[str, bytes] = {}
                     for case in sources:
                         transfer = bound[id(case)]
                         keys, addresses, lengths = transfer.arguments(transfer.keys(["a", "b", "c"]), [0, 1, 2])
@@ -457,9 +458,9 @@ class MappingTests(unittest.TestCase):
             self.assertEqual(lengths[0][0], original_length)
 
     def test_invalid_inputs_and_empty_runtime_rows(self):
-        for pp_layer_counts in ((-1, 5), (1, 1)):
+        for invalid_pp_layer_counts in ((-1, 5), (1, 1)):
             with self.assertRaises(ValueError):
-                make_case(pp_layer_counts=pp_layer_counts).bind()
+                make_case(pp_layer_counts=invalid_pp_layer_counts).bind()
         case = make_case(head_slices=3)
         with self.assertRaisesRegex(ValueError, "divide"):
             case.bind()
@@ -618,7 +619,7 @@ class MappingTests(unittest.TestCase):
             if tensor.numel()
         }
         for sources, targets in ((producers, consumers), (consumers, producers)):
-            objects = {}
+            objects: dict[str, bytes] = {}
             for case in sources:
                 for group_id in (3, 9):
                     transfer = bound[id(case), group_id]

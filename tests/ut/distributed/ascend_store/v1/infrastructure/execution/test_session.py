@@ -310,7 +310,7 @@ def test_end_step_detaches_callbacks_before_abort_and_leaves_store_running(sessi
     store_started = threading.Event()
     release_store = threading.Event()
     entry = Mock()
-    copied = []
+    copied: list[int] = []
     wait, cancel = gate.wait, gate.cancel
 
     def wait_at_gate(timeout):
@@ -481,7 +481,7 @@ def test_store_finish_receives_failed_futures_without_session_interpreting_them(
 
 
 def test_store_finish_with_no_layers_still_runs_after_preparation(session):
-    trace = []
+    trace: list[str] = []
     opening = session._store_submit(trace.append, "prepared")
 
     def finish(prepared, layers):
