@@ -196,12 +196,7 @@ class MooncakeBackend:
 
     def finish_key_range_load(self, keys: list[str]) -> None:
         self._ensure_initialized()
-        if self._store is None:
-            raise RuntimeError("Mooncake store is unavailable for batch_get_session_end")
-        method = getattr(self._store, "batch_get_session_end", None)
-        if not callable(method):
-            raise RuntimeError("Mooncake client does not support batch_get_session_end")
-        native_result = integer_result("Mooncake batch_get_session_end", method(keys))
+        native_result = integer_result("Mooncake batch_get_session_end", self._store.batch_get_session_end(keys))
         if native_result != 0:
             raise RuntimeError(f"Mooncake batch_get_session_end failed with result {native_result}")
 
@@ -321,11 +316,7 @@ class MooncakeBackend:
 
     def _call_key_range(self, operation: str, keys: list[str], *arguments: object) -> tuple[int, ...]:
         self._ensure_initialized()
-        if self._store is None:
-            raise RuntimeError(f"Mooncake store is unavailable for {operation}")
-        method = getattr(self._store, operation, None)
-        if not callable(method):
-            raise RuntimeError(f"Mooncake client does not support {operation}")
+        method = getattr(self._store, operation)
         return integer_results(f"Mooncake {operation}", keys, method(*arguments))
 
     def _unregister_store_buffer(self, address: int, _size: int) -> None:

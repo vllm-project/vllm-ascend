@@ -15,24 +15,20 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.sessions import MooncakeSessions
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import (
+    integer_results,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
     HybridReachability,
     UnitaryReachability,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    BulkProjectionBinder,
-    GVALayerwiseProjectionBinder,
-    KeyRangeLayerwiseProjectionBinder,
-    LayerwiseProjectionBinder,
-    compile_bulk_projection_binder,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
     LoadCommandBatch,
     StoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -86,10 +82,10 @@ class FakeBackend:
         return self.put_result if self.put_result is not None else [0] * len(keys)
 
     def load(self, keys, addresses, sizes):
-        return self.get(keys, addresses, sizes)
+        return integer_results("fake load", keys, self.get(keys, addresses, sizes))
 
     def store(self, keys, addresses, sizes):
-        return self.put(keys, addresses, sizes)
+        return integer_results("fake store", keys, self.put(keys, addresses, sizes))
 
     def set_device(self) -> None:
         self.calls.append(("set_device",))
@@ -118,7 +114,7 @@ class FakeBackend:
         return self.session_start_result if self.session_start_result is not None else [0] * len(keys)
 
     def start_key_range_load(self, keys):
-        return tuple(self.batch_get_start(keys))
+        return integer_results("batch_get_start", keys, self.batch_get_start(keys))
 
     def batch_copy_get(self, keys, addresses, sizes, offsets):
         self.calls.append(
@@ -135,7 +131,7 @@ class FakeBackend:
         return self.session_copy_result if self.session_copy_result is not None else [0] * len(keys)
 
     def copy_key_range_load(self, keys, addresses, sizes, offsets):
-        return tuple(self.batch_copy_get(keys, addresses, sizes, offsets))
+        return integer_results("batch_copy_get", keys, self.batch_copy_get(keys, addresses, sizes, offsets))
 
     def batch_get_end(self, keys):
         self.calls.append(("batch_get_end", tuple(keys)))
@@ -151,7 +147,7 @@ class FakeBackend:
         return self.store_session_start_result if self.store_session_start_result is not None else [0] * len(keys)
 
     def start_key_range_store(self, keys, object_sizes):
-        return tuple(self.batch_put_start(keys, object_sizes))
+        return integer_results("batch_put_start", keys, self.batch_put_start(keys, object_sizes))
 
     def batch_copy_put(self, keys, addresses, sizes, offsets):
         self.calls.append(
@@ -168,21 +164,21 @@ class FakeBackend:
         return self.store_session_copy_result if self.store_session_copy_result is not None else [0] * len(keys)
 
     def copy_key_range_store(self, keys, addresses, sizes, offsets):
-        return tuple(self.batch_copy_put(keys, addresses, sizes, offsets))
+        return integer_results("batch_copy_put", keys, self.batch_copy_put(keys, addresses, sizes, offsets))
 
     def batch_commit(self, keys):
         self.calls.append(("batch_commit", tuple(keys)))
         return self.store_session_commit_result if self.store_session_commit_result is not None else [0] * len(keys)
 
     def commit_key_range_store(self, keys):
-        return tuple(self.batch_commit(keys))
+        return integer_results("batch_commit", keys, self.batch_commit(keys))
 
     def batch_revoke(self, keys):
         self.calls.append(("batch_revoke", tuple(keys)))
         return self.store_session_revoke_result if self.store_session_revoke_result is not None else [0] * len(keys)
 
     def revoke_key_range_store(self, keys):
-        return tuple(self.batch_revoke(keys))
+        return integer_results("batch_revoke", keys, self.batch_revoke(keys))
 
     def close(self) -> None:
         self.calls.append(("backend_close",))
@@ -232,11 +228,12 @@ def make_topology(
     dcp_rank: int = 0,
     dcp_size: int = 1,
     put_step: int = 1,
-    head_or_tp_rank: int = 0,
+    head_or_tp_rank: int | None = None,
     key_rank_count: int | None = None,
     key_slices_per_rank: int | None = None,
     consumer_pipeline_partitions: tuple[int, ...] | None = None,
 ) -> KVPoolTopology:
+    head_or_tp_rank = (tp_rank if tp_mismatch else 0) if head_or_tp_rank is None else head_or_tp_rank
     groups = tuple(
         KVPoolGroupTopology(
             group_id,
@@ -286,24 +283,31 @@ class FakeEvent:
         self.synchronized = True
 
 
-class FakeResources:
+class FakeResources(KVPoolResources):
+    def register_kv_buffers(self):
+        pass
+
     def __init__(
         self,
         backend: FakeBackend,
         backend_spec: BackendSpec,
         topology: KVPoolTopology,
     ) -> None:
-        self.backend = backend
-        self.backend_spec = backend_spec
+        super().__init__(backend, backend_spec, 8, topology.transfer_groups)
         self._topology = topology
-        self.backend_sessions = None
-        self.num_blocks = 8
-        self.kv_caches = None
         self.closed = False
 
-    def bind_kv_caches(self, kv_caches):
+    def prepare_kv_caches(self, kv_caches):
         # This fixture publishes synthetic addresses without backing tensor storage.
-        self.kv_caches = None
+        self.kv_caches = (
+            {
+                name: torch.empty_strided((8, 4, 2, 1), (16, 2, 1, 1), dtype=torch.float32)
+                for group in self._topology.transfer_groups
+                for name in group.layer_names
+            }
+            if self._topology.tp_partition.tp_mismatch
+            else None
+        )
         base_addresses = {}
         block_lengths = {}
         block_strides = {}
@@ -326,14 +330,11 @@ class FakeResources:
             "block_strides": block_strides,
             "layer_entry_offsets": layer_entry_offsets,
         }
-        if self.backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
-            registration["object_sizes"] = object_sizes
-            registration["object_offsets"] = object_offsets
         return registration
 
     def close(self) -> None:
-        if self.backend_sessions is not None:
-            self.backend_sessions.close()
+        if self._backend_sessions is not None:
+            self._backend_sessions.close()
         self.closed = True
         self.kv_caches = None
 
@@ -360,33 +361,14 @@ def make_worker(
         requires_exists_before_put=requires_exists_before_put,
     )
     resources = FakeResources(backend, backend_spec, topology)
-    route_spec = KVPoolRouteSpec(topology, "fake", 64, use_layerwise=layerwise)
-    full_key = lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}"
-    projection_binder: LayerwiseProjectionBinder | BulkProjectionBinder
-    if not layerwise:
-        projection_binder = compile_bulk_projection_binder(topology, route_spec.max_model_len)
-    else:
-        assert backend_spec.layerwise_access is not None
-        binder_type = (
-            GVALayerwiseProjectionBinder
-            if backend_spec.layerwise_access is LayerwiseAccessKind.GVA
-            else KeyRangeLayerwiseProjectionBinder
+    if layerwise:
+        worker_type = (
+            GVALayerwiseWorker if backend_spec.layerwise_access is LayerwiseAccessKind.GVA else KeyRangeLayerwiseWorker
         )
-        projection_binder = binder_type(topology, full_key, make_reachability(topology, route_spec.max_model_len))
-    if isinstance(projection_binder, GVALayerwiseProjectionBinder):
-        worker = GVALayerwiseWorker(
+        worker = worker_type(
             topology,
-            projection_binder,
-            resources,  # type: ignore[arg-type]
-            store_enabled=store,
-            **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
-            source_ready_event_factory=source_ready_event_factory or FakeEvent,
-        )
-    elif isinstance(projection_binder, KeyRangeLayerwiseProjectionBinder):
-        worker = KeyRangeLayerwiseWorker(
-            topology,
-            projection_binder,
-            resources,  # type: ignore[arg-type]
+            resources,
+            reachability=make_reachability(topology),
             store_enabled=store,
             **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
             source_ready_event_factory=source_ready_event_factory or FakeEvent,
@@ -394,8 +376,8 @@ def make_worker(
     else:
         worker = BulkWorker(
             topology,
-            projection_binder,
-            resources,  # type: ignore[arg-type]
+            resources,
+            reachability=make_reachability(topology),
             store_enabled=store,
             load_async=async_load,
             source_ready_event_factory=source_ready_event_factory or FakeEvent,

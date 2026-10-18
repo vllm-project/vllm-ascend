@@ -11,8 +11,8 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from ..infrastructure.reachability import store_group_mask
-from ..projection.store import checkpoint_companion_indices, store_block_range
 from ..protocol.transfer import CheckpointStoreCommand, StoreCommand
+from ..store_selection import checkpoint_companion_indices, store_block_range
 from .state import SchedulerConfig
 
 if TYPE_CHECKING:

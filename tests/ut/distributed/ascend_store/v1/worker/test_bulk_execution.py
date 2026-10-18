@@ -11,7 +11,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import LoadCommand, RangeStoreCommand
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import BulkWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.evidence import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.completion import (
     LoadCompletion,
     StoreCompletion,
     StoreEvidence,

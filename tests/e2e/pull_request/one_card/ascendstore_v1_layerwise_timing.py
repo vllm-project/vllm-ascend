@@ -48,14 +48,13 @@ class LayerwiseLoadTiming:
 
     def install(self) -> None:
         try:
-            io = self._worker._layerwise_backend_io
             self._patch(self._lookup_server, "_lookup", "lookup_service", independent=True)
             self._patch(self._backend, "exists", "lookup_backend_exists", independent=True)
             self._patch(self._worker, "_build_load_batch", "load_batch_prepare")
             self._patch(self._worker, "start_load", "load_start_host")
             self._patch(self._worker, "wait_for_layer_load", "layer_wait_host", layer_argument="layer_name")
-            self._patch(io, "prepare_load_layers", "layer_plan_prepare")
-            self._patch(io, "load_layer", "layer_io_host", layer_argument="layer_id")
+            self._patch(self._worker, "_prepare_load_layers", "layer_plan_prepare")
+            self._patch(self._worker, "_copy_load_layer", "layer_io_host", layer_argument="layer_id")
             self._patch(self._backend, "start_key_range_load", "session_start")
             self._patch(self._backend, "copy_key_range_load", "range_copy")
             self._patch(self._backend, "finish_key_range_load", "session_end")

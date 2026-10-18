@@ -1,7 +1,5 @@
 """GVA object allocation, leases, publication, and Worker binding fixtures."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import numpy as np
@@ -20,13 +18,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import GVA_REVOKE_UNCONFIRMED
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    GVALayerwiseProjection,
-    GVALayerwiseProjectionBinder,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.layerwise.gva import gva_local_keys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
-    GVABackendIO,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import integer_result, integer_results
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
+    BulkMapping,
+    LayerwiseMapping,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -150,7 +145,7 @@ class FakeGVABackend(FakeBackend):
 
     def add_gva_leases(self, keys):
         assert self.native_store is not None
-        return tuple(self.native_store.batch_add_lease(keys))
+        return integer_results("batch_add_lease", keys, self.native_store.batch_add_lease(keys))
 
     def remove_gva_leases(self, keys):
         assert self.native_store is not None
@@ -160,19 +155,19 @@ class FakeGVABackend(FakeBackend):
 
     def allocate_gva(self, keys, sizes):
         assert self.native_store is not None
-        return tuple(self.native_store.batch_alloc(keys, sizes))
+        return integer_results("batch_alloc", keys, self.native_store.batch_alloc(keys, sizes))
 
     def copy_from_gva(self, remote_addresses, local_addresses, sizes):
         assert self.native_store is not None
-        return self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 1)
+        return integer_result("batch_copy", self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 1))
 
     def copy_to_gva(self, remote_addresses, local_addresses, sizes):
         assert self.native_store is not None
-        return self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 0)
+        return integer_result("batch_copy", self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 0))
 
     def publish_gva(self, keys):
         assert self.native_store is not None
-        return tuple(self.native_store.batch_write_finish(keys, [0] * len(keys)))
+        return integer_results("batch_write_finish", keys, self.native_store.batch_write_finish(keys, [0] * len(keys)))
 
     def revoke_gva(self, keys):
         return (GVA_REVOKE_UNCONFIRMED,) * len(keys)
@@ -192,15 +187,10 @@ def make_gva_worker(*, topology=None, source_ready_event_factory=FakeEvent):
     topology = topology or make_topology()
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
-    projection_binder = GVALayerwiseProjectionBinder(
-        topology,
-        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
-        make_reachability(topology),
-    )
     worker = GVALayerwiseWorker(
         topology,
-        projection_binder,
         resources,  # type: ignore[arg-type]
+        reachability=make_reachability(topology),
         source_ready_event_factory=source_ready_event_factory,
     )
     worker.bind_kv_caches({"cache": object()})
@@ -213,16 +203,15 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     topology = make_topology()
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
-    binder = GVALayerwiseProjectionBinder(
+    registration = resources.prepare_kv_caches({"cache": object()})
+    mapping = BulkMapping(
         topology,
-        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
-        make_reachability(topology),
+        *(registration[name] for name in ("base_addresses", "block_lengths", "block_strides", "layer_entry_offsets")),
     )
-    projection = binder.bind(**resources.bind_kv_caches({"cache": object()}))
-    assert isinstance(projection, GVALayerwiseProjection)
-    sessions = backend.create_sessions()
-    backend_io = GVABackendIO(backend, backend_spec, sessions)
-    backend_io.bind_projection(projection)
+    # Exercise Worker copy methods without starting background executors.
+    worker = GVALayerwiseWorker(topology, resources, reachability=make_reachability(topology))
+    worker._layer_mappings = {0: LayerwiseMapping(mapping)}
+    sessions = worker._backend_sessions
 
     hashes = tuple(f"h{index}" for index in range(len(block_ids)))
     ids = np.asarray(block_ids, dtype=np.uint64)
@@ -234,10 +223,10 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
         0,
         ids,
         counts,
-        gva_local_keys(projection.groups[0], hashes),
+        mapping.keys(hashes),
         request_splits,
         (0, 1),
-        projection.groups[0].object_size,
+        mapping.local_group_block_bytes,
     )
     assert backend.native_store is not None
-    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.native_store, sessions
+    return worker, KVTransferBatch(("request",), (group,), (17,)), backend.native_store, sessions

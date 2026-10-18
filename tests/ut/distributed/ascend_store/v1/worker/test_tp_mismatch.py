@@ -12,21 +12,19 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeEvent,
     begin_step,
     make_backend_spec,
+    make_reachability,
     make_topology,
     make_worker,
     store_one,
 )
 from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import TensorBytesBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    compile_bulk_projection_binder,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     LoadCommand,
     RangeStoreCommand,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import BulkWorker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import KVPoolResources
 
 
 @pytest.mark.parametrize(
@@ -42,8 +40,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resource
                 key_slices_per_rank=2,
             ),
             (2, 3),
-            ((1128, 1136, 1144), (1132, 1140, 1148)),
-            ((4, 4, 4), (4, 4, 4)),
+            ((1128, 1136, 1144, 1152), (1132, 1140, 1148, 1156)),
+            ((4, 4, 4, 4), (4, 4, 4, 4)),
         ),
         (
             make_topology(
@@ -56,7 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resource
             ),
             (2,),
             ((1128,),),
-            ((24,),),
+            ((32,),),
         ),
     ),
 )
@@ -103,12 +101,9 @@ def test_tp_mismatch_bulk_preserves_axis_result_provenance() -> None:
     batch = worker._build_load_batch((command,))
     (completion,) = worker._execute_bulk_load(batch)
 
-    assert [item.result_code for item in completion.transfer_evidence] == [0, -1]
-    assert [item.source.block_id for item in completion.transfer_evidence] == [2, 2]
-    assert [
-        "@head_or_tp_rank:2@" in completion.transfer_evidence[0].source.key,
-        "@head_or_tp_rank:3@" in completion.transfer_evidence[1].source.key,
-    ] == [True, True]
+    assert [item.result_code for item in completion.failures] == [-1]
+    assert [item.source.block_id for item in completion.failures] == [2]
+    assert "@head_or_tp_rank:3@" in completion.failures[0].source.key
 
     worker.close()
     assert resources.closed
@@ -167,8 +162,13 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
     resources = KVPoolResources(
         backend, make_backend_spec(layerwise_access=None), num_cache_blocks, topology.transfer_groups
     )
-    binder = compile_bulk_projection_binder(topology, 64, kv_cache_layout=layout)
-    worker = BulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = BulkWorker(
+        topology,
+        resources,
+        reachability=make_reachability(topology, 64),
+        kv_cache_layout=layout,
+        source_ready_event_factory=FakeEvent,
+    )
     worker.bind_kv_caches(caches)
     return worker, caches, expected
 

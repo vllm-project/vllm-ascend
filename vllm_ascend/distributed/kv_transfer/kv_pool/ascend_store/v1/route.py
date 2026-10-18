@@ -1,4 +1,4 @@
-"""Static inputs used to select one concrete AscendStore projection binder."""
+"""Static inputs used to assemble one concrete AscendStore Worker route."""
 
 from __future__ import annotations
 
