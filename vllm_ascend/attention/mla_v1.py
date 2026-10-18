@@ -1463,6 +1463,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             lse_list.append(chunk_lse.reshape(num_tokens * H))
             has_context = True
             if len(out_list) == ATTENTION_UPDATE_MAX_INPUTS:
+                # CANN npu_attention_update accepts at most 16 output/LSE pairs
+                # per call. Merge at this limit and retain the aggregate as one
+                # pair so subsequent chunks cannot exceed the operator limit.
                 merged_out, merged_lse, lse_anchor = merge_prefill_chunks(
                     out_list, lse_list, lse_anchor, return_lse=True
                 )
