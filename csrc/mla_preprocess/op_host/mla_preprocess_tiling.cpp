@@ -15,6 +15,7 @@
  */
 
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -39,6 +40,8 @@ constexpr size_t ATTR_ENABLE_INNER_OUT = 2;
 constexpr size_t ATTR_ENABLE_ROPE = 3;
 constexpr size_t ATTR_KV_CACHE_STRIDE0 = 4;
 constexpr size_t ATTR_KV_CACHE_ROPE_STRIDE0 = 5;
+constexpr size_t ATTR_Q_EPSILON = 6;
+constexpr size_t ATTR_KV_EPSILON = 7;
 
 constexpr int64_t CACHE_MODE_MIN = 0;
 constexpr int64_t CACHE_MODE_MAX = 3;
@@ -101,12 +104,20 @@ ge::graphStatus ParseShapesAndAttrs(gert::TilingContext *context, mlapo::OpParam
     const bool *enableRopePtr = attrs->GetBool(ATTR_ENABLE_ROPE);
     const int64_t *kvCacheStride0Ptr = attrs->GetInt(ATTR_KV_CACHE_STRIDE0);
     const int64_t *kvCacheRopeStride0Ptr = attrs->GetInt(ATTR_KV_CACHE_ROPE_STRIDE0);
+    const float *qEpsilonPtr = attrs->GetFloat(ATTR_Q_EPSILON);
+    const float *kvEpsilonPtr = attrs->GetFloat(ATTR_KV_EPSILON);
     OP_CHECK_NULL_WITH_CONTEXT(context, cacheModePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, quantModePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, enableInnerOutPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, enableRopePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, kvCacheStride0Ptr);
     OP_CHECK_NULL_WITH_CONTEXT(context, kvCacheRopeStride0Ptr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, qEpsilonPtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, kvEpsilonPtr);
+    OP_CHECK_IF(!std::isfinite(*qEpsilonPtr) || *qEpsilonPtr <= 0.0f ||
+                    !std::isfinite(*kvEpsilonPtr) || *kvEpsilonPtr <= 0.0f,
+                OP_LOGE(context, "qEpsilon and kvEpsilon must be positive and finite."),
+                return ge::GRAPH_FAILED);
 
     const int64_t cacheMode = *cacheModePtr;
     const int64_t quantMode = *quantModePtr;
@@ -173,6 +184,8 @@ ge::graphStatus ParseShapesAndAttrs(gert::TilingContext *context, mlapo::OpParam
     opParam.kvCacheBlockSize = static_cast<uint64_t>(kvCacheBlockSize);
     opParam.kvCacheStride0 = static_cast<uint64_t>(*kvCacheStride0Ptr);
     opParam.kvCacheRopeStride0 = static_cast<uint64_t>(*kvCacheRopeStride0Ptr);
+    opParam.qEpsilon = *qEpsilonPtr;
+    opParam.kvEpsilon = *kvEpsilonPtr;
     const ge::DataType weightDtype = wdqkvDesc->GetDataType();
     opParam.isWeightQuantized = weightDtype == ge::DT_FLOAT16 || weightDtype == ge::DT_BF16 ? 0U : 1U;
     return ge::GRAPH_SUCCESS;
