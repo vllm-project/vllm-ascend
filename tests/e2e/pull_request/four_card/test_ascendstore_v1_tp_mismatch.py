@@ -6,8 +6,8 @@ import json
 import os
 import shlex
 import shutil
-import time
 from contextlib import ExitStack
+from functools import partial
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -22,17 +22,17 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.ascendstore_v1_benchmark import (
     BLOCK_SIZE,
     CONCURRENCY,
-    CROSSOVER_RUNS,
     MODEL,
     ROUNDS_PER_RUN,
     WORKER_EXTENSION,
     assert_prompt_sources,
     call_worker_rpc,
-    compare_runs,
     make_report,
     make_requests,
     reset_local_prefix_cache,
     run_benchmark,
+    run_byte_accuracy,
+    run_comparison,
     write_report,
 )
 
@@ -63,18 +63,10 @@ def test_production_and_v1_tp1_to_tp2_serve_performance(tmp_path: Path) -> None:
         "external_load_role": "TP=2 consumer; producer remains alive but idle",
     }
     try:
-        for run_index, connector in enumerate(CROSSOVER_RUNS, start=1):
-            run_path = tmp_path / f"run-{run_index}-{connector[0]}"
-            run_path.mkdir()
-            run: dict[str, Any] = {"run": run_index, "implementation": connector[0], "measurements": []}
-            report["runs"].append(run)
-            start = time.monotonic()
-            try:
-                _exercise_pair(run_path, model_path, tokenizer, inputs, warmup, devices, connector, run["measurements"])
-            finally:
-                run["duration_seconds"] = time.monotonic() - start
-        report["comparisons"] = compare_runs(report["runs"])
-        report["status"] = "measured"
+        exercise = partial(
+            _exercise_pair, model_path=model_path, tokenizer=tokenizer, inputs=inputs, warmup=warmup, devices=devices
+        )
+        run_comparison(tmp_path, report, exercise)
     except BaseException as error:
         report.update(status="incomplete", error=f"{type(error).__name__}: {error}")
         raise
@@ -82,7 +74,9 @@ def test_production_and_v1_tp1_to_tp2_serve_performance(tmp_path: Path) -> None:
         write_report(tmp_path / "ascendstore-tp-mismatch-performance.json", "ASCENDSTORE_TP_PERFORMANCE", report)
 
 
-def _exercise_pair(run_path, model_path, tokenizer, inputs, warmup, devices, connector, observations) -> None:
+def _exercise_pair(
+    run_path, model_path, tokenizer, inputs, warmup, devices, connector, observations, *, accuracy_directory=None
+) -> None:
     master_port, metrics_port, producer_port, consumer_port, producer_lookup, consumer_lookup = get_open_ports_list(6)
     pool_config = MooncakeKVPoolConfig(
         config={
@@ -105,6 +99,9 @@ def _exercise_pair(run_path, model_path, tokenizer, inputs, warmup, devices, con
         consumer = stack.enter_context(
             _start_server(model_path, connector, devices[1:3], consumer_port, consumer_lookup, pool.server_envs, False)
         )
+        if accuracy_directory is not None:
+            run_byte_accuracy(producer, consumer, tokenizer, accuracy_directory, observations, CONSUMER_TP)
+            return
         run_benchmark(producer, tokenizer, warmup)
         call_worker_rpc(producer, "drain_ascendstore_benchmark_stores")
         run_benchmark(consumer, tokenizer, warmup)

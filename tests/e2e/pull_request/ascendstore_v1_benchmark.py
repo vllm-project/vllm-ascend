@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from statistics import median
@@ -18,6 +19,8 @@ from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.serve import TaskType, benchmark
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.metrics.stats import PromptTokenStats
+
+from tests.e2e.common.kv_pool.ascendstore_byte_accuracy import compare_saved_bytes
 
 if TYPE_CHECKING:
     from tests.e2e.conftest import RemoteOpenAIServer
@@ -41,9 +44,15 @@ CONNECTORS = (
 )
 # Separate server lifetimes balance early/late execution without colocating competing implementations.
 CROSSOVER_RUNS = CONNECTORS + CONNECTORS[::-1]
-SUMMARY_METRICS = tuple(
-    f"{statistic}_{metric}_ms" for metric in ("ttft", "e2el", "tpot", "itl") for statistic in ("mean", "p50", "p95")
-) + ("request_throughput", "output_throughput", "total_token_throughput")
+SUMMARY_METRICS = (
+    "mean_ttft_ms",
+    "p50_ttft_ms",
+    "p95_ttft_ms",
+    "request_throughput",
+    "output_throughput",
+    "total_token_throughput",
+)
+ACCURACY_PROMPT_TOKENS = 2 * BLOCK_SIZE + 1
 HTTP_TIMEOUT_SECONDS = 30
 CONTROL_TIMEOUT_SECONDS = 60
 BENCHMARK_TIMEOUT_SECONDS = 600
@@ -57,7 +66,14 @@ def write_report(path: Path, label: str, report: dict[str, Any]) -> None:
     print(f"\n{label}\n{serialized}")
 
 
-def make_requests(tokenizer: TokenizerLike, scenario: str, count: int = REQUEST_COUNT) -> list[SampleRequest]:
+def make_requests(
+    tokenizer: TokenizerLike,
+    scenario: str,
+    count: int = REQUEST_COUNT,
+    *,
+    prompt_tokens: int = PROMPT_TOKEN_COUNT,
+    output_tokens: int = OUTPUT_TOKEN_COUNT,
+) -> list[SampleRequest]:
     document = tokenizer.encode(
         "External KV caches retain attention keys and values for previously computed token prefixes. "
         "A request can restore those values instead of recomputing the same document. ",
@@ -69,14 +85,14 @@ def make_requests(tokenizer: TokenizerLike, scenario: str, count: int = REQUEST_
     samples = []
     for index in range(count):
         header = tokenizer.encode(f"Document {scenario}-{index}.\n", add_special_tokens=False)
-        remaining = PROMPT_TOKEN_COUNT - len(header) - len(question)
+        remaining = prompt_tokens - len(header) - len(question)
         assert document and remaining > 0
         body = (document * ((remaining + len(document) - 1) // len(document)))[:remaining]
         samples.append(
             SampleRequest(
                 prompt=header + body + question,
-                prompt_len=PROMPT_TOKEN_COUNT,
-                expected_output_len=OUTPUT_TOKEN_COUNT,
+                prompt_len=prompt_tokens,
+                expected_output_len=output_tokens,
             )
         )
     return samples
@@ -100,7 +116,7 @@ def run_benchmark(server: RemoteOpenAIServer, tokenizer: TokenizerLike, samples:
         disable_tqdm=True,
         num_warmups=0,
         profile=False,
-        selected_percentile_metrics=["ttft", "tpot", "itl", "e2el"],
+        selected_percentile_metrics=["ttft"],
         selected_percentiles=[50.0, 95.0],
         ignore_eos=True,
         goodput_config_dict={},
@@ -114,18 +130,18 @@ def run_benchmark(server: RemoteOpenAIServer, tokenizer: TokenizerLike, samples:
     result = asyncio.run(asyncio.wait_for(operation, timeout=BENCHMARK_TIMEOUT_SECONDS))
     # Keep scalars, per-request latency and outputs; omit bulky per-token timing arrays from the CI report.
     measurements = {
-        **{key: value for key, value in result.items() if isinstance(value, (int, float))},
+        **{key: result[key] for key in (*SUMMARY_METRICS, "completed", "failed", "duration")},
         **{
             key: result[key] for key in ("ttfts", "latencies", "generated_texts", "input_lens", "output_lens", "errors")
         },
     }
     try:
         assert result["completed"] == len(samples) and result["failed"] == 0, result["errors"]
-        assert result["input_lens"] == [PROMPT_TOKEN_COUNT] * len(samples)
-        assert result["output_lens"] == [OUTPUT_TOKEN_COUNT] * len(samples)
+        assert result["input_lens"] == [sample.prompt_len for sample in samples]
+        assert result["output_lens"] == [sample.expected_output_len for sample in samples]
         assert result["median_ttft_ms"] > 0 and result["request_throughput"] > 0
         measurements["prompt_tokens_by_source"], preemptions_after = _wait_for_prompt_tokens(
-            server, baseline, len(samples) * PROMPT_TOKEN_COUNT
+            server, baseline, sum(sample.prompt_len for sample in samples)
         )
         measurements["preemptions"] = preemptions_after - preemptions_before
         assert measurements["preemptions"] == 0, "KV capacity caused preemption; this is not the intended workload"
@@ -183,11 +199,17 @@ def _wait_for_prompt_tokens(
     raise AssertionError(f"Prompt-token metrics did not account for all {expected_tokens} measured input tokens")
 
 
-def assert_prompt_sources(measurement: dict[str, Any], *, external: bool, request_count: int = REQUEST_COUNT) -> None:
+def assert_prompt_sources(
+    measurement: dict[str, Any],
+    *,
+    external: bool,
+    request_count: int = REQUEST_COUNT,
+    prompt_tokens: int = PROMPT_TOKEN_COUNT,
+) -> None:
     assert measurement["prompt_tokens_by_source"] == {
-        "local_compute": request_count if external else request_count * PROMPT_TOKEN_COUNT,
+        "local_compute": request_count if external else request_count * prompt_tokens,
         "local_cache_hit": 0,
-        "external_kv_transfer": request_count * REUSABLE_TOKEN_COUNT if external else 0,
+        "external_kv_transfer": request_count * (prompt_tokens - 1) if external else 0,
     }, "Cold requests must compute locally; warm requests must load every reusable block from External"
 
 
@@ -223,10 +245,72 @@ def make_report(inputs: list[SampleRequest], warmup: list[SampleRequest]) -> dic
         "load_scope": "fully External-cached prompt; one final prompt token and all output tokens still compute",
         "concurrency_scope": "closed-loop client limit; not a guarantee of eight requests in every model step",
         "total_token_throughput_note": "includes cached input tokens; not NPU compute throughput",
+        "throughput_scope": "complete 256-output-token requests; includes Decode, not isolated Backend throughput",
+        "accuracy_policy": "two full blocks, one request, one output token; exact KV bytes gate all performance runs",
         "text_parity_policy": "report only; request failures, wrong token counts or hit sources fail the test",
         "summary_policy": "median and range of separate rounds; percentiles are per-round, not pooled",
         "runs": [],
+        "accuracy": [],
     }
+
+
+def run_comparison(tmp_path: Path, report: dict[str, Any], exercise: Callable[..., None]) -> None:
+    """Fail the entire test before any performance server starts if accuracy fails."""
+    reference_directory = None
+    reference_objects = None
+    for connector in CONNECTORS:
+        path = tmp_path / f"accuracy-{connector[0]}"
+        path.mkdir()
+        directory = path / "saved-kv"
+        observations: list[dict[str, Any]] = []
+        report["accuracy"].append({"implementation": connector[0], "observations": observations})
+        exercise(path, connector=connector, observations=observations, accuracy_directory=directory)
+        objects = observations[0]["stored_objects"]
+        if reference_directory is None:
+            reference_directory, reference_objects = directory, objects
+        else:
+            compare_saved_bytes(reference_directory, directory, reference_objects, objects)
+    report["accuracy_status"] = "passed"
+    for run_index, connector in enumerate(CROSSOVER_RUNS, start=1):
+        path = tmp_path / f"performance-{run_index}-{connector[0]}"
+        path.mkdir()
+        run: dict[str, Any] = {"run": run_index, "implementation": connector[0], "measurements": []}
+        report["runs"].append(run)
+        start = time.monotonic()
+        try:
+            exercise(path, connector=connector, observations=run["measurements"])
+        finally:
+            run["duration_seconds"] = time.monotonic() - start
+    report["comparisons"] = compare_runs(report["runs"])
+    report["status"] = "measured"
+
+
+def run_byte_accuracy(producer, consumer, tokenizer, directory: Path, observations: list, consumer_tp: int = 1) -> None:
+    samples = make_requests(tokenizer, "byte-accuracy", count=1, prompt_tokens=ACCURACY_PROMPT_TOKENS, output_tokens=1)
+    row: dict[str, Any] = {}
+    observations.append(row)
+    call_worker_rpc(producer, "start_ascendstore_byte_accuracy", args=[str(directory)])
+    if consumer is not producer:
+        call_worker_rpc(consumer, "start_ascendstore_byte_accuracy", consumer_tp, args=[str(directory)])
+    # No warmup request: these dedicated servers have no cached accuracy prefix.
+    cold = run_benchmark(producer, tokenizer, samples)
+    assert_prompt_sources(cold, external=False, request_count=1, prompt_tokens=ACCURACY_PROMPT_TOKENS)
+    stored = call_worker_rpc(producer, "finish_ascendstore_byte_accuracy", args=["store"])
+    row["stored_objects"] = stored["workers"][0]["objects"]
+    reset_local_prefix_cache(consumer)
+    call_worker_rpc(consumer, "clear_ascendstore_accuracy_kv", consumer_tp)
+    loaded = run_benchmark(consumer, tokenizer, samples)
+    assert_prompt_sources(loaded, external=True, request_count=1, prompt_tokens=ACCURACY_PROMPT_TOKENS)
+    evidence = call_worker_rpc(consumer, "finish_ascendstore_byte_accuracy", consumer_tp, args=["load"])
+    row["loaded_objects"] = {}
+    for worker in evidence["workers"]:
+        assert not row["loaded_objects"].keys() & worker["objects"].keys(), "Duplicate Load object ownership"
+        row["loaded_objects"].update(worker["objects"])
+    assert row["stored_objects"] == row["loaded_objects"], "Load did not cover every saved byte"
+    row["status"] = "passed"
+    call_worker_rpc(producer, "stop_ascendstore_byte_accuracy")
+    if consumer is not producer:
+        call_worker_rpc(consumer, "stop_ascendstore_byte_accuracy", consumer_tp)
 
 
 def compare_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
