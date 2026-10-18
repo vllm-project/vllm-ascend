@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -414,6 +415,7 @@ def store_one(worker, command: StoreCommand):
 
 class FakeLoadStartGate:
     def __init__(self, opened: bool = False) -> None:
+        self.on_start: Callable[[], None] | None = None
         self._opened = threading.Event()
         if opened:
             self._opened.set()

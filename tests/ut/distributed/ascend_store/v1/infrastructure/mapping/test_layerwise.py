@@ -215,6 +215,8 @@ class LayerwiseMappingTests(unittest.TestCase):
 
     def test_layer_evaluation_visits_only_its_key_prefixes(self):
         class CountedPrefixSelections(tuple):
+            visits: list[int]
+
             def __new__(cls, values):
                 result = super().__new__(cls, values)
                 result.visits = []
@@ -386,7 +388,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                         originals[tensor.data_ptr()] = tensor.clone()
             for sources, targets in ((producers, consumers), (consumers, producers)):
                 for source_layerwise in (False, True):
-                    objects = {}
+                    objects: dict[str, bytes] = {}
                     for case in sources:
                         bulk, mapping = bindings[id(case)]
                         keys = bulk.keys(["a", "b"])

@@ -517,7 +517,9 @@ def test_bulk_async_load_business_failure_covers_every_request_in_its_batch(monk
 @pytest.mark.parametrize("cancelled", (False, True), ids=("broken_executor", "cancelled_future"))
 def test_bulk_async_load_execution_error_leaves_later_batches_queued(monkeypatch, cancelled):
     worker, resources, _ = make_worker(async_load=True, store=False)
-    first, failed, last = Future(), Future(), Future()
+    first: Future[tuple[LoadCompletion, ...]] = Future()
+    failed: Future[tuple[LoadCompletion, ...]] = Future()
+    last: Future[tuple[LoadCompletion, ...]] = Future()
     error = BrokenExecutor("executor unavailable")
     first.set_result((LoadCompletion("first", ()),))
     if cancelled:

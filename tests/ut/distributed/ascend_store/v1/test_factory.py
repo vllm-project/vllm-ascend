@@ -408,7 +408,7 @@ def test_factory_routes_share_complete_objects(monkeypatch, backend_name, layerw
         tp_size=dcp_size,
         put_step=dcp_size,
     )
-    objects = {}
+    objects: dict[str, ctypes.Array[ctypes.c_char]] = {}
     writer, source, write_sdk = factory_worker(monkeypatch, backend_name, layerwise_store, topology, objects)
     block_ids = tuple((1,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
     command = RangeStoreCommand("request", 0, 4, block_ids, (b"a",), 4, 17)

@@ -936,7 +936,7 @@ def test_layer_copy_failure_preserves_unknown_code_and_releases_load_sessions(ro
         backend.copy_result = native_result
     else:
         backend.session_copy_result = native_result if isinstance(native_result, Exception) else (native_result,)
-    observed_codes = []
+    observed_codes: list[int | None] = []
     record = worker._record_load_completion
 
     def record_failures(context, completion):

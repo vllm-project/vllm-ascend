@@ -54,7 +54,7 @@ def measure(before, after, samples, target_sample_ms):
             del result
         estimates.append((time.perf_counter_ns() - start) / _WARMUP_CALLS)
     repetitions = max(1, min(_MAX_REPETITIONS, int(target_sample_ms * 1_000_000 / max(estimates))))
-    timings = ([], [])
+    timings: tuple[list[float], list[float]] = ([], [])
     gc.collect()
     was_enabled = gc.isenabled()
     gc.disable()
@@ -142,10 +142,12 @@ def main():
     if args.samples < 5 or args.target_sample_ms <= 0:
         parser.error("Use at least five paired samples and a positive sample duration")
     spec = importlib.util.spec_from_file_location("mapping_baseline", args.baseline)
+    if spec is None or spec.loader is None:
+        parser.error(f"Not an importable mapping snapshot: {args.baseline}")
     baseline = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = baseline
     spec.loader.exec_module(baseline)
-    profiles = (
+    profiles: tuple[tuple[str, dict[str, object]], ...] = (
         ("default", {}),
         ("Consumer PP", {"pp_layer_counts": (8, 8, 8, 8)}),
         ("TP packed", {"head_slices": 1}),
