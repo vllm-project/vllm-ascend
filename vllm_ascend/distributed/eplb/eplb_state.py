@@ -4,6 +4,7 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -227,11 +228,9 @@ class AscendEplbState(_eplb_state.EplbState):
             self._close_error = self._hixl_session._error
         if self._close_error is not None:
             logger.error("EPLB cleanup failed; terminating the worker: %s", self._close_error)
-            # Ordinary RPC exceptions are caught by the upstream worker loop.
-            # SystemExit reaches its process-death monitor and engine shutdown.
-            raise SystemExit(
-                "EPLB cleanup failed; worker must terminate before releasing registered memory"
-            ) from self._close_error
+            # Bypass RPC exception handling and Python/CANN global destructors:
+            # registered storage must remain alive until the OS reclaims it.
+            os._exit(1)
 
     def start_async_loop(self, *args, **kwargs) -> None:
         if not self._suspended:

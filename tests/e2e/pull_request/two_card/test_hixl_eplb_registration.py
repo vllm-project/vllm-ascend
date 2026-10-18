@@ -139,15 +139,7 @@ def _failed_close_worker(rank: int, port: int) -> None:
     state._hixl_session = session
     state.async_worker = None
     state.model_states = {"model": SimpleNamespace(communicator=communicator)}
-    try:
-        state.close()
-    except SystemExit:
-        # The owner remains intact until the actual subprocess exits. This
-        # failure must bypass the upstream RPC loop's `except Exception`.
-        assert session._engine is not None
-        assert session._storage_refs
-        assert state._close_error is not None
-        raise
+    state.close()
     raise AssertionError("failed deregistration must terminate the worker")
 
 
@@ -185,17 +177,7 @@ def _failed_initialization_worker(rank: int, port: int) -> None:
         raise AssertionError("failed rollback must bypass ordinary RPC error handling")
 
     rpc = SimpleNamespace(worker=SimpleNamespace(rebuild=rebuild), rank=rank, handle_output=unexpected_response)
-    try:
-        WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
-    except SystemExit as error:
-        cause = error.__cause__
-        assert cause is not None and hasattr(cause, "hixl_session")
-        owner = cause.hixl_session
-        assert owner._engine is not None
-        assert owner._storage_refs
-        if rank == 0:
-            assert owner._registered_handles
-        raise
+    WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
     raise AssertionError("failed initialization rollback must terminate the worker")
 
 

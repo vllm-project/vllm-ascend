@@ -328,7 +328,7 @@ def test_close_wakes_idle_worker_without_fake_device_event():
     event_wait.assert_not_called()
 
 
-def test_close_failure_keeps_communicator_owner():
+def test_close_failure_keeps_communicator_owner(monkeypatch):
     state = _shutdown_state()
     communicator = MagicMock(spec=AscendHixlEplbCommunicator)
     session = MagicMock(spec=_HixlSession)
@@ -336,21 +336,35 @@ def test_close_failure_keeps_communicator_owner():
     session.close.side_effect = RuntimeError("still bound")
     state._hixl_session = session
     state.model_states = {"model": SimpleNamespace(communicator=communicator)}
-    with pytest.raises(SystemExit, match="worker must terminate"):
+
+    def exit_with_live_owner(code):
+        assert state.model_states["model"].communicator is communicator
+        assert state._hixl_session is session
+        raise SystemExit(code)
+
+    exit_worker = MagicMock(side_effect=exit_with_live_owner)
+    monkeypatch.setattr(eplb_state.os, "_exit", exit_worker)
+    with pytest.raises(SystemExit) as fatal:
         state.close()
+    assert fatal.value.code == 1
+    exit_worker.assert_called_once_with(1)
     assert state.model_states["model"].communicator is communicator
     assert state._suspended
 
 
-def test_failed_close_is_fatal_without_retrying_cleanup():
+def test_failed_close_is_fatal_without_retrying_cleanup(monkeypatch):
     state = _shutdown_state()
     error = RuntimeError("still bound")
     state._close_error = error
     communicator = MagicMock(spec=AscendHixlEplbCommunicator)
     state.model_states = {"model": SimpleNamespace(communicator=communicator)}
-    with pytest.raises(SystemExit, match="worker must terminate") as exc:
+    exit_worker = MagicMock(side_effect=SystemExit(1))
+    monkeypatch.setattr(eplb_state.os, "_exit", exit_worker)
+    with pytest.raises(SystemExit) as exc:
         state.close()
-    assert exc.value.__cause__ is error
+    assert exc.value.code == 1
+    exit_worker.assert_called_once_with(1)
+    assert state._close_error is error
     assert state._hixl_session is None
 
 
@@ -403,7 +417,7 @@ def test_hixl_initialization_failure_never_starts_the_async_worker(monkeypatch):
 
 
 @pytest.mark.parametrize("entry", ["step", "ready", "close"])
-def test_hixl_worker_setup_failure_exits_before_releasing_storage(entry):
+def test_hixl_worker_setup_failure_exits_before_releasing_storage(monkeypatch, entry):
     state = _shutdown_state()
     session = MagicMock(spec=_HixlSession)
     session._error = None
@@ -411,33 +425,41 @@ def test_hixl_worker_setup_failure_exits_before_releasing_storage(entry):
     state._hixl_session = session
     state.async_worker = SimpleNamespace(is_alive=lambda: False)
     state.model_states = {"main": SimpleNamespace(rebalanced=False, pending_result=None)}
-    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+    exit_worker = MagicMock(side_effect=SystemExit(1))
+    monkeypatch.setattr(eplb_state.os, "_exit", exit_worker)
+    with pytest.raises(SystemExit) as fatal:
         if entry == "step":
             state.step()
         elif entry == "ready":
             state._all_ranks_result_ready(object())
         else:
             state.close()
-    assert "background worker terminated" in str(fatal.value.__cause__)
-    assert session._error is fatal.value.__cause__
+    assert fatal.value.code == 1
+    exit_worker.assert_called_once_with(1)
+    assert "background worker terminated" in str(state._close_error)
+    assert session._error is state._close_error
     assert not session._usable
     session.close.assert_not_called()
 
 
 @pytest.mark.parametrize("entry", ["step", "ready", "close"])
-def test_failed_shared_session_exits_from_foreground_before_reusing_resources(entry):
+def test_failed_shared_session_exits_from_foreground_before_reusing_resources(monkeypatch, entry):
     state = _shutdown_state()
     error = RuntimeError("HIXL transfer failed")
     session = MagicMock(spec=_HixlSession)
     session._error = error
     state._hixl_session = session
-    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+    exit_worker = MagicMock(side_effect=SystemExit(1))
+    monkeypatch.setattr(eplb_state.os, "_exit", exit_worker)
+    with pytest.raises(SystemExit) as fatal:
         if entry == "step":
             state.step()
         elif entry == "ready":
             state._all_ranks_result_ready(object())
         else:
             state.close()
-    assert fatal.value.__cause__ is error
+    assert fatal.value.code == 1
+    exit_worker.assert_called_once_with(1)
+    assert state._close_error is error
     assert state._hixl_session is session
     session.close.assert_not_called()

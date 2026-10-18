@@ -4,6 +4,7 @@
 """Ascend communicators for asynchronous EPLB."""
 
 import contextlib
+import os
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -233,10 +234,10 @@ class _HixlSession:
             try:
                 self.close()
             except Exception as cleanup_error:
-                # Keep the owner on the fatal exception chain until process exit.
-                # An ordinary RPC exception is serialized and then discarded.
-                cleanup_error.hixl_session = self  # type: ignore[attr-defined]
-                raise SystemExit("HIXL initialization rollback failed; worker must terminate") from cleanup_error
+                logger.error("HIXL initialization rollback failed; terminating the worker: %s", cleanup_error)
+                # Failed registrations must survive until the OS reclaims them.
+                # SystemExit still runs Python/CANN global destructors.
+                os._exit(1)
             raise
 
     def check_usable(self) -> None:

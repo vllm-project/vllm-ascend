@@ -476,18 +476,21 @@ def test_initialization_rollback_failure_bypasses_rpc_and_retains_storage(monkey
         handle_output=MagicMock(),
     )
     if rollback_fails:
-        with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+
+        def exit_with_live_storage(code):
+            assert code == 1
+            assert communicator._engine is not None
+            assert communicator._registered_handles == [1]
+            assert storage_ref is not None and storage_ref() is not None
+            raise SystemExit(code)
+
+        exit_worker = MagicMock(side_effect=exit_with_live_storage)
+        monkeypatch.setattr(eplb_communicator.os, "_exit", exit_worker)
+        with pytest.raises(SystemExit) as fatal:
             WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
+        assert fatal.value.code == 1
+        exit_worker.assert_called_once_with(1)
         rpc.handle_output.assert_not_called()
-        cause = fatal.value.__cause__
-        assert cause is not None and hasattr(cause, "hixl_session")
-        owner = cause.hixl_session
-        assert owner._engine is not None
-        assert owner._registered_handles == [1]
-        del rpc, communicator, owner
-        gc.collect()
-        assert storage_ref is not None
-        assert storage_ref() is not None
     else:
         WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
         assert isinstance(rpc.handle_output.call_args.args[0], RuntimeError)

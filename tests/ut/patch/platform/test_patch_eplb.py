@@ -592,9 +592,13 @@ def test_hixl_async_failure_outside_execute_exits_rpc_and_retains_shared_storage
         with pytest.raises(RuntimeError, match="HIXL EPLB session is closed or failed"):
             communicator.set_stream(stream)
     rpc = SimpleNamespace(rank=0, worker=SimpleNamespace(step=state.step), handle_output=MagicMock())
-    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+    exit_worker = MagicMock(side_effect=SystemExit(1))
+    monkeypatch.setattr("vllm_ascend.distributed.eplb.eplb_state.os._exit", exit_worker)
+    with pytest.raises(SystemExit) as fatal:
         WorkerProc._execute_worker_rpc(rpc, ("step", (), {}, None))
-    assert fatal.value.__cause__ is failure.value
+    assert fatal.value.code == 1
+    exit_worker.assert_called_once_with(1)
+    assert state._close_error is failure.value
     rpc.handle_output.assert_not_called()
     assert session._storage_refs == storage_refs
     assert session._registered_handles == handles
