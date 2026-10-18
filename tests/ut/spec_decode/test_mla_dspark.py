@@ -15,7 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl, all_mla_use_flashmla
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
@@ -32,6 +32,7 @@ def make_speculator():
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
+    spec._draft_mla_uses_device_lengths = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(),
@@ -114,7 +115,7 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
     assert spec.attn_backends == {"draft": draft_backend}
 
 
-def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
+def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend, *, flashmla_layers=()):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
     monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
@@ -128,6 +129,13 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec = init_speculator(config, torch.device("cpu"))
     assert type(spec) is AscendDSparkSpeculator
     assert spec.attn_architecture is None
+    spec.model = torch.nn.Module()
+    for index, use_flashmla in enumerate(flashmla_layers):
+        layer = torch.nn.Module()
+        layer.impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        if use_flashmla is not None:
+            layer.impl.use_flashmla = use_flashmla
+        spec.model.add_module(f"layer_{index}", layer)
     spec.vllm_config = config
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
@@ -150,6 +158,15 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.set_attn(None, cache_config, None, None, target_groups)
     assert spec._context_slot_mappings.dtype == torch.int32
     return spec
+
+
+@pytest.mark.parametrize("backend", [AscendMLABackend, DerivedMLABackend, AscendAttentionBackend])
+@pytest.mark.parametrize("flashmla_layers", [(), (True,), (True, True), (True, False), (None,)])
+def test_draft_device_lengths_require_all_mla_layers_to_use_flashmla(monkeypatch, backend, flashmla_layers):
+    spec = initialize_attention(monkeypatch, backend, flashmla_layers=flashmla_layers)
+    all_flashmla = bool(flashmla_layers) and all(value is True for value in flashmla_layers)
+    assert all_mla_use_flashmla(spec.model) is all_flashmla
+    assert spec._draft_mla_uses_device_lengths is (issubclass(backend, AscendMLABackend) and all_flashmla)
 
 
 @pytest.mark.parametrize(

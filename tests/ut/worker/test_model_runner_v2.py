@@ -58,6 +58,7 @@ def _make_runner(need_timing: bool = True):
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
+    runner._skip_spec_cpu_length_sync = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -1263,6 +1264,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         patch("vllm_ascend.worker.v2.model_runner.TargetDeviceMetadata", return_value="metadata") as metadata_cls,
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch.object(NPUModelRunner, "_can_skip_spec_cpu_length_sync", return_value=False) as can_skip_sync,
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
         patch(
             "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
@@ -1273,6 +1275,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
+    can_skip_sync.assert_called_once_with()
     assert runner.model_state.device_metadata == (
         "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
     )
@@ -1330,6 +1333,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     with (
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch.object(NPUModelRunner, "_can_skip_spec_cpu_length_sync", return_value=False) as can_skip_sync,
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(
             "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
@@ -1339,6 +1343,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
+    can_skip_sync.assert_called_once_with()
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
@@ -1950,6 +1955,66 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
     runner.model_config.hf_config.model_type = "deepseek_v41"
     before = runner.req_states.num_computed_tokens_cpu.clone()
     runner._update_seq_lens_cpu(output, batch.req_ids)
+    runner.num_computed_tokens_event.synchronize.assert_not_called()
+    torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, before)
+    for i, req_id in enumerate(batch.req_ids):
+        index = runner.req_states.req_id_to_index[req_id]
+        assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+@pytest.mark.parametrize(
+    "architecture", ["KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"]
+)
+@pytest.mark.parametrize(
+    "blocker",
+    [None, "other_model", "draft_fia", "pp", "pcp", "dcp", "adaptive", "offload", "kvpp", "target_fia"],
+)
+def test_spec_cpu_length_sync_bypass_requires_all_audited_conditions(architecture, blocker):
+    runner = _make_runner()
+    runner.model_config.architecture = "OtherModel" if blocker == "other_model" else architecture
+    runner.model = torch.nn.Module()
+    runner.speculator = SimpleNamespace(_draft_mla_uses_device_lengths=blocker != "draft_fia")
+    runner.vllm_config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=2 if blocker == "pp" else 1,
+        prefill_context_parallel_size=2 if blocker == "pcp" else 1,
+        decode_context_parallel_size=2 if blocker == "dcp" else 1,
+    )
+    runner.adaptive_verification = object() if blocker == "adaptive" else None
+    runner.ascend_config.sparse_kv_offload_config.enabled = blocker == "offload"
+    runner.ascend_config.kvpp_config = SimpleNamespace(size=2 if blocker == "kvpp" else 1)
+
+    with patch(
+        "vllm_ascend.worker.v2.model_runner.all_mla_use_flashmla", return_value=blocker != "target_fia"
+    ) as target_uses_flashmla:
+        assert runner._can_skip_spec_cpu_length_sync() is (blocker is None)
+
+    if blocker in {None, "target_fia"}:
+        target_uses_flashmla.assert_called_once_with(runner.model)
+    else:
+        target_uses_flashmla.assert_not_called()
+
+
+def test_flashmla_cpu_length_sync_bypass_does_not_copy_or_record_event():
+    runner = _make_runner()
+    runner._skip_spec_cpu_length_sync = True
+    runner.num_computed_tokens_cpu = MagicMock()
+    runner.num_computed_tokens_event = MagicMock()
+
+    with patch("vllm_ascend.worker.v2.model_runner.torch.cuda.current_stream") as current_stream:
+        runner._copy_num_computed_tokens_to_cpu()
+
+    current_stream.assert_not_called()
+    runner.num_computed_tokens_cpu.copy_.assert_not_called()
+    runner.num_computed_tokens_event.record.assert_not_called()
+
+
+def test_flashmla_cpu_lengths_keep_upper_bounds_without_event_wait():
+    runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
+    runner._skip_spec_cpu_length_sync = True
+    before = runner.req_states.num_computed_tokens_cpu.clone()
+
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, before)
     for i, req_id in enumerate(batch.req_ids):

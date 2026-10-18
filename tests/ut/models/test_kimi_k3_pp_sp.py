@@ -580,6 +580,7 @@ def test_host_positions_after_rejection_or_chunk(
         methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
     )
     runner = namespace["NPUModelRunner"]()
+    runner._skip_spec_cpu_length_sync = False
     runner.speculator = object() if owns_speculator else None
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp
