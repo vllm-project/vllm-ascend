@@ -5,7 +5,7 @@ from concurrent.futures import BrokenExecutor, Future
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.executor import Executor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution.executor import Executor
 
 
 def test_executor_initializes_once_on_its_worker_and_returns_typed_results():

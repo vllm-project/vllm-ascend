@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
+    make_reachability,
     make_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
@@ -48,24 +49,16 @@ def _registration(topology, *, block_length: int = 32):
     return bases, lengths, strides, layer_offsets
 
 
-def test_layerwise_binders_reject_unsupported_static_compositions() -> None:
-    for topology, message in (
-        (make_topology(tp_mismatch=True), "TP mismatch"),
-        (make_topology(consumer_pipeline_partitions=(1, 1)), "consumer pipeline"),
-    ):
-        for binder_type in (KeyRangeLayerwiseProjectionBinder, GVALayerwiseProjectionBinder):
-            with pytest.raises(ValueError, match=message):
-                binder_type(topology, 64, lambda *_args: "key")
-
-
 def test_key_range_projection_bind_terminal_layer_formulas() -> None:
     topology = make_topology()
+    reachability = make_reachability(topology)
     projection = KeyRangeLayerwiseProjectionBinder(
         topology,
-        64,
         lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        reachability,
     ).bind(*_registration(topology))
     assert isinstance(projection, KeyRangeLayerwiseProjection)
+    assert projection.reachability is reachability
 
     group = projection.groups[0]
     block_ids = np.asarray([1, 3], dtype=np.uint64)
@@ -88,12 +81,12 @@ def test_gva_projection_bind_global_layout_and_terminal_copy_formula() -> None:
     def full_key(group: int, value: str, head: int, stage: int) -> str:
         return f"g{group}:p{stage}:h{head}:{value}"
 
-    binder = GVALayerwiseProjectionBinder(topology, 64, full_key)
+    binder = GVALayerwiseProjectionBinder(topology, full_key, make_reachability(topology))
     with pytest.raises(ValueError, match="global object sizes"):
         binder.bind(*_registration(topology))
 
     parallel = replace(make_topology(group_ids=(0, 1)), pp_size=2)
-    parallel_binder = GVALayerwiseProjectionBinder(parallel, 64, full_key)
+    parallel_binder = GVALayerwiseProjectionBinder(parallel, full_key, make_reachability(parallel))
     with pytest.raises(ValueError, match="group 1.*global object offset"):
         parallel_binder.bind(
             *_registration(parallel),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TypeAlias
 
@@ -13,8 +13,8 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import block_hash_to_str
 
+from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...topology import KVPoolTopology
-from ..reachability import HybridReachability, UnitaryReachability, bind_layerwise_reachability
 
 ByteArray: TypeAlias = NDArray[np.uint64]
 KeyAxes: TypeAlias = tuple[tuple[str, ...], ...]
@@ -62,23 +62,8 @@ class GVALayerwiseProjectionBinder:
     """Bind GVA layout arrays when the Worker registers its KV cache."""
 
     topology: KVPoolTopology
-    max_model_len: int
     full_key: LayerwiseFullKey
-    use_eagle: bool = False
-    retention_interval: int | None = None
-    reachability: Reachability = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "reachability",
-            bind_layerwise_reachability(
-                self.topology,
-                self.max_model_len,
-                use_eagle=self.use_eagle,
-                retention_interval=self.retention_interval,
-            ),
-        )
+    reachability: Reachability
 
     def bind(
         self,

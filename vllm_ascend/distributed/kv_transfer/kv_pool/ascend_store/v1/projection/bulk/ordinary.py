@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from ...infrastructure.reachability import UnitaryReachability
 from ...topology import KVPoolTopology
-from ..reachability import UnitaryReachability
 from .common import (
     BulkRangeBatch,
     ByteArray,

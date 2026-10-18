@@ -20,6 +20,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
+    HybridReachability,
+    UnitaryReachability,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     BulkProjectionBinder,
 )
@@ -63,11 +67,14 @@ def _make_factory_config(
 
 
 @pytest.mark.parametrize("use_layerwise", (False, True), ids=("bulk", "layerwise"))
+@pytest.mark.parametrize("group_count", (1, 2), ids=("unitary", "hybrid"))
 @pytest.mark.parametrize(
     "method,use_eagle",
     (("mtp", True), ("dspark", True), ("eagle", True), ("eagle3", True), ("dflash", True), ("draft_model", False)),
 )
-def test_speculative_factories_follow_upstream_eagle_policy(monkeypatch, use_layerwise, method, use_eagle) -> None:
+def test_speculative_factories_follow_upstream_eagle_policy(
+    monkeypatch, use_layerwise, method, use_eagle, group_count
+) -> None:
     backend = FakeBackend()
     backend_spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
@@ -77,15 +84,16 @@ def test_speculative_factories_follow_upstream_eagle_policy(monkeypatch, use_lay
     monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, **_kwargs: FakeRemoteLookup(8))
     cache_config = SimpleNamespace(
         num_blocks=8,
-        transfer_group_ids=(0,),
+        transfer_group_ids=tuple(range(group_count)),
         kv_cache_groups=[
             SimpleNamespace(
                 layer_names=["model.layers.0.attention", "mtp.layers.0.attention"],
                 kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
                 is_eagle_group=False,
             )
+            for _ in range(group_count)
         ],
-        prefix_cache_retention_interval=None,
+        prefix_cache_retention_interval=32,
     )
     config = _make_factory_config(
         speculative_config=SimpleNamespace(
@@ -102,7 +110,16 @@ def test_speculative_factories_follow_upstream_eagle_policy(monkeypatch, use_lay
     try:
         assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4 if use_eagle else 7, False)
         binder = vllm_adapter.compile_kv_pool_projection_binder(config, cache_config)
-        assert binder.use_eagle is use_eagle
+        if use_layerwise:
+            assert binder.reachability.group_ids == tuple(range(group_count))
+            if group_count == 1:
+                assert isinstance(binder.reachability, UnitaryReachability)
+            else:
+                assert isinstance(binder.reachability, HybridReachability)
+                assert binder.reachability.use_eagle is use_eagle
+                assert binder.reachability.retention_interval == 32
+        else:
+            assert binder.use_eagle is use_eagle
     finally:
         scheduler.close()
         worker.close()
@@ -147,6 +164,74 @@ def test_layerwise_factories_reject_align_state_before_route_construction(monkey
                 vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
             else:
                 vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
+
+
+@pytest.mark.parametrize("factory", ("scheduler", "worker"))
+@pytest.mark.parametrize(
+    "extra, message",
+    (
+        ({"consumer_is_to_put": True, "prefill_pp_size": 2}, "Consumer pipeline Store"),
+        ({"prefill_tp_size": 2}, "does not support TP mismatch"),
+    ),
+)
+def test_layerwise_adapter_rejects_static_compositions_before_resource_creation(
+    monkeypatch, factory, extra, message
+) -> None:
+    backend_spec = BackendSpec(
+        "mooncake",
+        lambda *_args, **_kwargs: pytest.fail("Backend must not be created"),
+        LayerwiseAccessKind.KEY_RANGE,
+        True,
+    )
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda *_args, **_kwargs: pytest.fail("RPC must not be created"))
+    config = _make_factory_config(use_layerwise=True)
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    config.kv_transfer_config.kv_connector_extra_config.update(extra)
+    config.model_config.get_total_num_kv_heads = lambda: 2
+    cache_config = SimpleNamespace(
+        transfer_group_ids=(0,),
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match=message):
+        if factory == "scheduler":
+            vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+        else:
+            vllm_adapter.create_kv_pool_worker(config, cache_config)
+
+
+@pytest.mark.parametrize("factory", ("scheduler", "worker"))
+@pytest.mark.parametrize(
+    "scheduler_size, hash_size, group_size",
+    ((6, 4, 4), (12, 4, 6), (12, 4, 8), (0, 4, 4), (4, 0, 4)),
+)
+def test_adapter_rejects_invalid_reachability_geometry(
+    monkeypatch, factory, scheduler_size, hash_size, group_size
+) -> None:
+    monkeypatch.setattr(
+        vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (scheduler_size, hash_size)
+    )
+    monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda *_args, **_kwargs: pytest.fail("RPC must not be created"))
+    config = _make_factory_config()
+    cache_config = SimpleNamespace(
+        transfer_group_ids=(0,),
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(block_size=group_size, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="block size"):
+        if factory == "scheduler":
+            vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+        else:
+            vllm_adapter.create_kv_pool_worker(config, cache_config)
 
 
 def test_bulk_factories_reject_non_align_mamba_state(monkeypatch) -> None:
@@ -412,6 +497,36 @@ def test_factories_reject_unproven_bulk_compositions(
 
     for factory in ("scheduler", "worker"):
         with pytest.raises(ValueError, match=message):
+            if factory == "scheduler":
+                vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+            else:
+                vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
+
+
+@pytest.mark.parametrize("attention_companion", (False, True), ids=("state-only", "attention-and-state"))
+@pytest.mark.parametrize("role", ("kv_producer", "kv_consumer"))
+def test_factories_reject_align_state_tp_mismatch(monkeypatch, attention_companion, role) -> None:
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
+    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
+    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (8, 4))
+    config = _make_factory_config()
+    config.kv_transfer_config.kv_role = role
+    peer_option = "decode_tp_size" if role == "kv_producer" else "prefill_tp_size"
+    config.kv_transfer_config.kv_connector_extra_config[peer_option] = 4
+    config.parallel_config.tensor_parallel_size = 2
+    config.model_config.get_total_num_kv_heads = lambda: 8
+    state = MambaSpec(block_size=4, shapes=((2, 3),), dtypes=(torch.float32,), mamba_cache_mode="align")
+    specs = [state]
+    if attention_companion:
+        specs.insert(0, FullAttentionSpec(block_size=8, num_kv_heads=4, head_size=1, dtype=torch.float32))
+    cache_config = SimpleNamespace(
+        transfer_group_ids=tuple(range(len(specs))),
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec) for spec in specs],
+        prefix_cache_retention_interval=None,
+    )
+    for factory in ("scheduler", "worker"):
+        with pytest.raises(ValueError, match="requires one dense transferable KV cache group"):
             if factory == "scheduler":
                 vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
             else:

@@ -7,7 +7,7 @@ import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, FakeEvent, begin_step, make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.executor import Executor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution.executor import Executor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import LoadCommand, RangeStoreCommand
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import BulkWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_worker_module

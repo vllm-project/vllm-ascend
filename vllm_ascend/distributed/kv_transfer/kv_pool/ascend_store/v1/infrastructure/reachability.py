@@ -35,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 from ..coordinates import TokenRange
 from ..protocol.lookup import TailKeyBoundary
-from ..topology import KVPoolGroupTopology, KVPoolTopology
+from ..topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]
 ChunkRows: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
@@ -151,6 +151,8 @@ class HybridReachability:
     This mirrors vLLM's external KV reachability constraints but uses AscendStore's external
     key granularity. Compressed specs already expose raw-token block sizes,
     while transfer addresses remain in cache-domain blocks.
+    The Adapter validates static block geometry; construction binds registered
+    cache-manager algorithms once, while each call validates its runtime observations.
     """
 
     def __init__(
@@ -162,10 +164,6 @@ class HybridReachability:
         use_eagle: bool = False,
         retention_interval: int | None = None,
     ) -> None:
-        assert scheduler_block_size % hash_block_size == 0, (
-            f"scheduler_block_size ({scheduler_block_size}) must be a multiple of hash_block_size ({hash_block_size})"
-        )
-
         self.groups = groups
         self.group_ids = tuple(group.group_id for group in groups)
         self.hash_block_size = hash_block_size
@@ -174,11 +172,6 @@ class HybridReachability:
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
         self.effective_block_sizes = [group.kv_cache_spec.block_size for group in groups]
-        for effective_block_size in self.effective_block_sizes:
-            assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-            assert scheduler_block_size % effective_block_size == 0, (
-                "scheduler_block_size must be a multiple of each group's effective block_size"
-            )
 
         self.eagle_group_indices = {index for index, group in enumerate(groups) if group.is_eagle_group}
         if use_eagle and not self.eagle_group_indices:
@@ -196,18 +189,17 @@ class HybridReachability:
     def _verify_and_split_kv_cache_groups(self) -> None:
         spec_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.effective_specs: list[KVCacheSpec] = []
-        self.manager_classes: list[type[SingleTypeKVCacheManager] | None] = []
+        self.manager_classes: dict[int, type[SingleTypeKVCacheManager]] = {}
 
         for group_index, group in enumerate(self.groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             self.effective_specs.append(spec)
             if not group.kv_cache_spec.prefix_cacheable:
-                self.manager_classes.append(None)
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             if manager_cls is None:
                 raise ValueError(f"No vLLM KV cache manager is registered for {type(spec).__name__}")
-            self.manager_classes.append(manager_cls)
+            self.manager_classes[group_index] = manager_cls
 
             for existing_spec, group_indices, existing_cls in spec_groups:
                 if existing_spec == spec:
@@ -315,18 +307,18 @@ class HybridReachability:
     ) -> ChunkMasks:
         del block_hashes
         return tuple(
-            store_group_mask(
+            ()
+            if not spec.prefix_cacheable or isinstance(spec, MambaSpec)
+            else store_group_mask(
                 spec,
-                manager_cls,
+                self.manager_classes[group_index],
                 store_range.end_token,
                 num_prompt_tokens,
                 alignment_tokens=self.lcm_block_size,
                 use_eagle=group_index in self.eagle_reachable_group_indices,
                 retention_interval=self.retention_interval,
             )
-            for group_index, (spec, manager_cls) in enumerate(
-                zip(self.effective_specs, self.manager_classes, strict=True)
-            )
+            for group_index, spec in enumerate(self.effective_specs)
         )
 
     @staticmethod
@@ -367,7 +359,7 @@ class HybridReachability:
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
         masks: list[tuple[int, list[bool] | None]] = []
-        for group_index, (spec, manager_cls) in enumerate(zip(self.effective_specs, self.manager_classes, strict=True)):
+        for group_index, spec in enumerate(self.effective_specs):
             num_chunks = aligned_token_len // self.effective_block_sizes[group_index]
             group = self.groups[group_index]
             if not group.kv_cache_spec.prefix_cacheable:
@@ -376,7 +368,7 @@ class HybridReachability:
             if isinstance(spec, MambaSpec) and num_prompt_tokens is not None:
                 masks.append((num_chunks, [False] * num_chunks))
                 continue
-            assert manager_cls is not None
+            manager_cls = self.manager_classes[group_index]
             mask = manager_cls.reachable_block_mask(
                 start_block=0,
                 end_block=num_chunks,
@@ -506,44 +498,9 @@ class HybridReachability:
         return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group_index), hit_length
 
 
-def bind_layerwise_reachability(
-    topology: KVPoolTopology,
-    max_model_len: int,
-    *,
-    use_eagle: bool = False,
-    retention_interval: int | None = None,
-) -> UnitaryReachability | HybridReachability:
-    """Validate one Layerwise topology and bind its reusable reachability state."""
-
-    groups = topology.transfer_groups
-    if not groups:
-        raise ValueError("Layerwise projection requires at least one transferable cache group")
-    if topology.tp_partition.tp_mismatch:
-        raise ValueError("Layerwise transfer cannot be composed with TP mismatch")
-    partitions = topology.consumer_pipeline_partitions
-    if partitions is not None and len(partitions) > 1:
-        raise ValueError("Layerwise transfer cannot be composed with consumer pipeline projection")
-    if any(group.uses_align_state for group in groups):
-        raise ValueError("Layerwise transfer does not support Mamba align-state groups")
-    if len(groups) == 1:
-        return UnitaryReachability(
-            topology.transfer_group_ids[0],
-            max_model_len,
-            topology.cache_transfer_granularity,
-        )
-    return HybridReachability(
-        groups,
-        scheduler_block_size=topology.cache_transfer_granularity,
-        hash_block_size=topology.hash_block_size,
-        max_model_len=max_model_len,
-        use_eagle=use_eagle,
-        retention_interval=retention_interval,
-    )
-
-
 def store_group_mask(
     spec: KVCacheSpec,
-    manager_cls: type[SingleTypeKVCacheManager] | None,
+    manager_cls: type[SingleTypeKVCacheManager],
     end_token: int,
     num_prompt_tokens: int,
     *,
@@ -558,8 +515,6 @@ def store_group_mask(
         return ()
     if end_token % alignment_tokens:
         return None
-    if manager_cls is None:
-        raise ValueError(f"No vLLM KV cache manager is registered for {type(spec).__name__}")
     mask = manager_cls.reachable_block_mask(
         start_block=start_block,
         end_block=end_token // spec.block_size,

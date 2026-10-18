@@ -10,8 +10,8 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import FakeLoadStartGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.executor import Executor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.session import Session
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution.executor import Executor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution.session import Session
 
 
 @pytest.fixture

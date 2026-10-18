@@ -15,8 +15,8 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import ObjectSessions
-from ...execution.executor import Executor
-from ...execution.session import Session
+from ...infrastructure.execution.executor import Executor
+from ...infrastructure.execution.session import Session
 from ...projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
 from ...projection.layerwise.gva import gva_local_keys, gva_lookup_keys
 from ...projection.layerwise.key_range import key_range_local_keys, key_range_lookup_keys

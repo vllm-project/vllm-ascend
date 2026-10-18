@@ -7,8 +7,8 @@ from dataclasses import dataclass, replace
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 
+from ...infrastructure.reachability import HybridReachability
 from ...topology import KVPoolGroupTopology, KVPoolTopology
-from ..reachability import HybridReachability
 from .common import (
     BulkRangeBatch,
     ByteArray,

@@ -10,6 +10,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeEvent,
     FakeResources,
+    make_reachability,
     make_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -193,8 +194,8 @@ def make_gva_worker(*, topology=None, source_ready_event_factory=FakeEvent):
     resources = FakeResources(backend, backend_spec, topology)
     projection_binder = GVALayerwiseProjectionBinder(
         topology,
-        64,
         lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        make_reachability(topology),
     )
     worker = GVALayerwiseWorker(
         topology,
@@ -214,8 +215,8 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     resources = FakeResources(backend, backend_spec, topology)
     binder = GVALayerwiseProjectionBinder(
         topology,
-        64,
         lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        make_reachability(topology),
     )
     projection = binder.bind(**resources.bind_kv_caches({"cache": object()}))
     assert isinstance(projection, GVALayerwiseProjection)

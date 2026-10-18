@@ -15,6 +15,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.sessions import MooncakeSessions
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
+    HybridReachability,
+    UnitaryReachability,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     BulkProjectionBinder,
     GVALayerwiseProjectionBinder,
@@ -199,6 +203,21 @@ def make_backend_spec(
     )
 
 
+def make_reachability(
+    topology: KVPoolTopology, max_model_len: int = 64, *, retention_interval: int | None = None
+) -> UnitaryReachability | HybridReachability:
+    groups = topology.transfer_groups
+    if len(groups) == 1 and not groups[0].uses_align_state:
+        return UnitaryReachability(groups[0].group_id, max_model_len, topology.cache_transfer_granularity)
+    return HybridReachability(
+        groups,
+        topology.cache_transfer_granularity,
+        topology.hash_block_size,
+        max_model_len,
+        retention_interval=retention_interval,
+    )
+
+
 def make_topology(
     *,
     group_ids: tuple[int, ...] = (0,),
@@ -353,7 +372,7 @@ def make_worker(
             if backend_spec.layerwise_access is LayerwiseAccessKind.GVA
             else KeyRangeLayerwiseProjectionBinder
         )
-        projection_binder = binder_type(topology, route_spec.max_model_len, full_key)
+        projection_binder = binder_type(topology, full_key, make_reachability(topology, route_spec.max_model_len))
     if isinstance(projection_binder, GVALayerwiseProjectionBinder):
         worker = GVALayerwiseWorker(
             topology,
