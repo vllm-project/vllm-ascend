@@ -211,6 +211,7 @@ class MemcacheBackend(Backend):
 
         self.store: Any | None = None
         self._store_initialized = False
+        self._closed = False
         self._store_init_lock = threading.Lock()
         self._pending_buffers: tuple[list[int], list[int]] | None = None
 
@@ -219,10 +220,14 @@ class MemcacheBackend(Backend):
             self._store_initialized = True
 
     def ensure_initialized(self):
+        if getattr(self, "_closed", False):
+            raise RuntimeError("Memcache backend is closed")
         if self._store_initialized:
             return
 
         with self._store_init_lock:
+            if getattr(self, "_closed", False):
+                raise RuntimeError("Memcache backend is closed")
             if self._store_initialized:
                 return
 
@@ -275,12 +280,25 @@ class MemcacheBackend(Backend):
         )
 
     def init_store(self, init_bm: bool = True):
-        if self.store is not None:
-            return
-        self._init_bm = init_bm
-        self.store = self._setup_store()
-        self._store_initialized = True
-        self._register_buffers_if_needed()
+        with self._store_init_lock:
+            if self._closed:
+                raise RuntimeError("Memcache backend is closed")
+            if self.store is not None:
+                return
+            self._init_bm = init_bm
+            self.store = self._setup_store()
+            self._store_initialized = True
+            self._register_buffers_if_needed()
+
+    def close(self) -> None:
+        with self._store_init_lock:
+            self._closed = True
+            if self.store is not None:
+                result = self.store.close()
+                if result != 0:
+                    raise RuntimeError(f"Memcache close failed: result={result}")
+                self.store = None
+            self._store_initialized = False
 
     def set_device(self):
         torch.npu.set_device(self.device_id)
