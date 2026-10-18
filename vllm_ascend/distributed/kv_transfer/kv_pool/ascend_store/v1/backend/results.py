@@ -1,4 +1,4 @@
-"""Validate native Backend results before they enter Worker execution."""
+"""Validate integer result shapes; each adapter interprets its native values."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ class BackendResultError(RuntimeError):
     """A native operation did not return the v1 evidence shape it promises."""
 
 
-def result_codes(operation: str, keys: list[str], results: Iterable[int] | None) -> tuple[int, ...]:
+def integer_results(operation: str, keys: list[str], results: Iterable[int] | None) -> tuple[int, ...]:
     try:
         raw_values = tuple(results) if results is not None else ()
     except (TypeError, ValueError) as error:
@@ -23,14 +23,14 @@ def result_codes(operation: str, keys: list[str], results: Iterable[int] | None)
     return tuple(int(value) for value in raw_values)
 
 
-def result_code(operation: str, value: Any) -> int:
+def integer_result(operation: str, value: Any) -> int:
     if not is_integer_result(value):
         raise BackendResultError(f"{operation} returned a non-integer result")
     return int(value)
 
 
 def presence_results(operation: str, keys: list[str], results: Iterable[int] | None) -> tuple[bool, ...]:
-    codes = result_codes(operation, keys, results)
+    codes = integer_results(operation, keys, results)
     if any(code not in (0, 1) for code in codes):
         raise BackendResultError(f"{operation} returned object states other than 0 or 1")
     return tuple(code == 1 for code in codes)

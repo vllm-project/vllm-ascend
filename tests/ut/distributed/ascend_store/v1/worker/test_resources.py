@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BackendSpec,
     LayerwiseAccessKind,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
@@ -217,6 +218,40 @@ def test_backend_close_failure_retains_cache_owner_until_retry() -> None:
     resources.close()
     assert [call[0] for call in backend.calls].count("unregister_region") == 1
     assert resources.kv_caches is None
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_remote_cleanup_failure_keeps_registration_and_client_owned_until_retry(use_gva, monkeypatch) -> None:
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    resources.bind_kv_caches(caches)
+    if use_gva:
+        monkeypatch.setattr(backend, "allocate_gva", lambda keys, sizes: (1000,), raising=False)
+        revoke = MagicMock(side_effect=[(-1,), (0,)])
+        monkeypatch.setattr(backend, "revoke_gva", revoke, raising=False)
+        sessions = MemcacheSessions(backend)
+    else:
+        revoke = MagicMock(side_effect=[(-8,), (0,)])
+        monkeypatch.setattr(backend, "revoke_key_range_store", revoke)
+        sessions = backend.create_sessions()
+    resources.backend_sessions = sessions
+    sessions.start_store(["pending"], [64])
+
+    with pytest.raises(RuntimeError, match="cleanup is unconfirmed"):
+        resources.close()
+
+    assert sessions.pending_store_keys == ("pending",)
+    assert resources.kv_caches is caches
+    assert not backend.closed
+    assert not any(item[0] in ("unregister_region", "backend_close") for item in backend.calls)
+    resources.close()
+    resources.close()
+    assert not sessions.pending_store_keys
+    assert [item[0] for item in backend.calls][-2:] == ["unregister_region", "backend_close"]
+    assert resources.kv_caches is None
+    assert backend.closed
+    assert revoke.call_count == 2
 
 
 def test_worker_bind_failure_releases_registration_before_backend_close() -> None:

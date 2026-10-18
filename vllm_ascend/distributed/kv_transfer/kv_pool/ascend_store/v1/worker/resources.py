@@ -12,6 +12,7 @@ from ..backend import (
     BackendSpec,
     BufferRegistrationError,
     KVStoreBackend,
+    ObjectSessions,
     Registration,
 )
 
@@ -47,6 +48,7 @@ class KVPoolResources:
     ) -> None:
         self.backend = backend
         self.backend_spec = backend_spec
+        self.backend_sessions: ObjectSessions | None = None
         self.num_blocks = num_blocks
         self._groups = groups
         self._gva_layout = gva_layout
@@ -74,6 +76,8 @@ class KVPoolResources:
     def close(self) -> None:
         if self._closed:
             return
+        if self.backend_sessions is not None:
+            self.backend_sessions.close()
         if self._buffer_registration is not None:
             self._buffer_registration.close()
         self.backend.close()

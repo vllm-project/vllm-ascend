@@ -14,6 +14,7 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
+from ...backend import ObjectSessions
 from ...execution.executor import Executor
 from ...execution.session import Session
 from ...projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
@@ -69,7 +70,7 @@ class _StoreState:
 
 
 class LayerwiseWorker(KVPoolWorker):
-    """Own the shared Layerwise request, session, and per-layer lifecycle."""
+    """Own request and layer scheduling; Backend owns the remote object lifecycle."""
 
     def __init__(
         self,
@@ -77,6 +78,7 @@ class LayerwiseWorker(KVPoolWorker):
         projection_binder: LayerwiseProjectionBinder,
         resources: KVPoolResources,
         backend_io: _LayerwiseBackendIO,
+        backend_sessions: ObjectSessions,
         *,
         store_enabled: bool = True,
         layerwise_prefetch_layers: int = 2,
@@ -86,6 +88,8 @@ class LayerwiseWorker(KVPoolWorker):
         self._layerwise_projection_binder = projection_binder
         self._layerwise_projection: LayerwiseProjection | None = None
         self._layerwise_backend_io = backend_io
+        self._backend_sessions = backend_sessions
+        resources.backend_sessions = backend_sessions
         self._layerwise_store_leader = _is_store_leader(topology)
         self._start_gate_factory = start_gate_factory
         self._prefetch_layers = layerwise_prefetch_layers
@@ -94,7 +98,6 @@ class LayerwiseWorker(KVPoolWorker):
         self._store_state: _StoreState | None = None
         self._store_opening: Future[None] | None = None
         self._load_batch: KVTransferBatch | None = None
-        self._load_session_keys: tuple[str, ...] = ()
         self._load_initial_completions: tuple[LoadCompletion, ...] = ()
         self._attention_store_layers = (
             _attention_store_layer_ids(topology)
@@ -124,7 +127,6 @@ class LayerwiseWorker(KVPoolWorker):
         if not object_sizes:
             return ()
         self._load_batch = batch
-        self._load_session_keys = tuple(object_sizes)
         self._load_initial_completions = ()
         try:
             order = self._load_executor.submit(self._open_load, batch, object_sizes).result()
@@ -139,20 +141,20 @@ class LayerwiseWorker(KVPoolWorker):
         return self._load_initial_completions
 
     def _open_load(self, batch: KVTransferBatch, object_sizes: dict[str, int]) -> tuple[int, ...]:
-        result_codes = self._layerwise_backend_io.start_load_sessions(list(object_sizes), list(object_sizes.values()))
+        self._layerwise_backend_io.clear_load_plan()
+        result_codes = self._backend_sessions.start_load(list(object_sizes), list(object_sizes.values()))
         codes_by_key = dict(zip(object_sizes, result_codes, strict=True))
-        self._load_session_keys = tuple(key for key, code in codes_by_key.items() if code == 0)
+        opened_keys = {key for key, code in codes_by_key.items() if code == 0}
         self._load_initial_completions = _load_session_failures(batch, codes_by_key)
-        if not self._load_session_keys:
+        if not opened_keys:
             return ()
-        selected = batch.select_keys(set(self._load_session_keys))
+        selected = batch.select_keys(opened_keys)
         keys_by_layer = self._layerwise_backend_io.prepare_load_layers(selected)
         return tuple(sorted(layer_id for layer_id, keys in keys_by_layer.items() if keys))
 
     def _finish_load(self) -> None:
-        if self._load_session_keys:
-            self._layerwise_backend_io.finish_load_sessions(list(self._load_session_keys))
-            self._load_session_keys = ()
+        self._layerwise_backend_io.clear_load_plan()
+        self._backend_sessions.finish_load()
 
     def _collect_load_completions(self) -> tuple[LoadCompletion, ...]:
         if self._session is not None and (pending := self._session.pending_load_layers):
@@ -161,8 +163,8 @@ class LayerwiseWorker(KVPoolWorker):
         return ()
 
     def _abort_load(self, *, wait: bool = True) -> None:
-        if self._session is not None or self._load_session_keys:
-            finish = self._finish_load if self._load_session_keys else None
+        if self._session is not None or self._backend_sessions.has_load_sessions:
+            finish = self._finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().abort_load(finish, wait=wait)
 
     def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
@@ -380,8 +382,9 @@ class LayerwiseWorker(KVPoolWorker):
         keys = list(batch.selected_keys())
         object_sizes = [group.object_size for group in batch.groups for _ in group.selected_keys()]
         io = self._layerwise_backend_io
+        io.clear_store_plan()
         try:
-            result_codes = io.start_store_sessions(keys, object_sizes)
+            result_codes = self._backend_sessions.start_store(keys, object_sizes)
         except Exception as error:
             state.failure_codes.update((key, None) for key in keys)
             state.errors_by_key.update((key, error) for key in keys)
@@ -416,16 +419,16 @@ class LayerwiseWorker(KVPoolWorker):
         self, opening: Future[None], layers: dict[int, Future[None]], state: _StoreState
     ) -> tuple[StoreCompletion, ...]:
         # Session supplies terminal Futures; this method interprets their business outcomes.
-        io = self._layerwise_backend_io
         try:
             opening.result()
         except (BrokenExecutor, CancelledError):
             raise
         except Exception as error:
             # Layer jobs depend on opening, so no source was handed off after its failure.
+            self._layerwise_backend_io.clear_store_plan()
             if state.opened_keys:
                 try:
-                    io.revoke_store_sessions(list(state.opened_keys))
+                    self._backend_sessions.revoke_store(list(state.opened_keys))
                 except BaseException:
                     logger.exception("Failed to revoke Layerwise Store sessions after preparation failed")
             return _store_command_completions(state.commands, error)
@@ -436,6 +439,7 @@ class LayerwiseWorker(KVPoolWorker):
                 raise
             except Exception as error:
                 self._record_store_result(state, state.keys_by_layer[layer_id], LayerStoreResult(None, False, error))
+        self._layerwise_backend_io.clear_store_plan()
         if state.batch is None:
             return _store_command_completions(state.commands)
 
@@ -450,7 +454,7 @@ class LayerwiseWorker(KVPoolWorker):
         final_codes: dict[str, int | None] = {}
         if commit_keys:
             try:
-                result_codes = io.commit_store_sessions(commit_keys)
+                result_codes = self._backend_sessions.commit_store(commit_keys)
             except Exception as error:
                 state.failure_codes.update((key, None) for key in commit_keys)
                 state.errors_by_key.update((key, error) for key in commit_keys)
@@ -487,7 +491,7 @@ class LayerwiseWorker(KVPoolWorker):
         if not keys:
             return
         try:
-            result_codes = self._layerwise_backend_io.revoke_store_sessions(keys)
+            result_codes = self._backend_sessions.revoke_store(keys)
         except Exception as error:
             for key in keys:
                 state.errors_by_key.setdefault(key, error)
@@ -627,8 +631,8 @@ class LayerwiseWorker(KVPoolWorker):
             return _failed_load_completions(self._load_batch, layer_id)
 
     def end_step(self) -> None:
-        if self._session is not None or self._load_session_keys:
-            finish_load = self._finish_load if self._load_session_keys else None
+        if self._session is not None or self._backend_sessions.has_load_sessions:
+            finish_load = self._finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().end_step(finish_load)
         closing_batch = self._prepare_store_close()
         if closing_batch is not None:
@@ -639,8 +643,8 @@ class LayerwiseWorker(KVPoolWorker):
         super().end_step()
 
     def close(self) -> None:
-        if self._session is not None or self._load_session_keys:
-            finish_load = self._finish_load if self._load_session_keys else None
+        if self._session is not None or self._backend_sessions.has_load_sessions:
+            finish_load = self._finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().end_step(finish_load, wait=False)
         super().close()
 

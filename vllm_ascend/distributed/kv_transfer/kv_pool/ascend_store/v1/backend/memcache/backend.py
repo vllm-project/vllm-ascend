@@ -20,11 +20,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     _validate_device_ub_qos,
 )
 
-from .port import GVARegion
-from .registration import BufferRegistration, rollback_buffer_registration
-from .results import presence_results, result_code, result_codes
+from ..interfaces import GVARegion
+from ..registration import BufferRegistration, rollback_buffer_registration
+from ..results import integer_result, integer_results, presence_results
+from .sessions import MemcacheSessions
 
 READABLE_GVA_QUERY = 1
+# No native abort currently proves that this writer's remote allocation was released.
+GVA_REVOKE_UNCONFIRMED = -1
 
 
 class MemcacheBackend:
@@ -65,7 +68,12 @@ class MemcacheBackend:
             self._initialized = True
 
     def set_device(self) -> None:
+        self._require_open()
         torch.npu.set_device(self.device_id)
+
+    def create_sessions(self) -> MemcacheSessions:
+        """Create this Worker's session owner after validating native support."""
+        return MemcacheSessions(self)
 
     def register_buffer(self, addresses: list[int], sizes: list[int]) -> BufferRegistration:
         self._require_open()
@@ -97,6 +105,7 @@ class MemcacheBackend:
         self._closed = True
 
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
+        self._require_open()
         if self._lazy_init and not self._initialized:
             return (False,) * len(keys)
         assert self._store is not None
@@ -108,10 +117,11 @@ class MemcacheBackend:
         addresses: list[list[int]],
         sizes: list[list[int]],
     ) -> tuple[int, ...]:
+        self._require_open()
         if self._lazy_init and not self._initialized:
             raise RuntimeError("Memcache store is not initialized; Store must initialize it before Load")
         assert self._store is not None
-        return result_codes(
+        return integer_results(
             "Memcache batch_get_into_layers",
             keys,
             self._store.batch_get_into_layers(keys, addresses, sizes, MmcDirect.COPY_G2L.value),
@@ -125,7 +135,7 @@ class MemcacheBackend:
     ) -> tuple[int, ...]:
         self._ensure_initialized()
         assert self._store is not None
-        return result_codes(
+        return integer_results(
             "Memcache batch_put_from_layers",
             keys,
             self._store.batch_put_from_layers(keys, addresses, sizes, MmcDirect.COPY_L2G.value),
@@ -147,6 +157,7 @@ class MemcacheBackend:
                 raise RuntimeError(f"Memcache GVA requires native {method_name}; upgrade the Backend library")
 
     def query_gva_regions(self, keys: list[str]) -> tuple[GVARegion | None, ...]:
+        self._require_open()
         if not keys:
             return ()
         self._ensure_initialized()
@@ -175,19 +186,20 @@ class MemcacheBackend:
     def add_gva_leases(self, keys: list[str]) -> tuple[int, ...]:
         self._ensure_initialized()
         assert self._store is not None
-        return result_codes("Memcache batch_add_lease", keys, self._store.batch_add_lease(keys))
+        return integer_results("Memcache batch_add_lease", keys, self._store.batch_add_lease(keys))
 
     def remove_gva_leases(self, keys: list[str]) -> None:
         self._ensure_initialized()
         assert self._store is not None
-        native_result = result_code("Memcache batch_remove_lease", self._store.batch_remove_lease(keys))
+        native_result = integer_result("Memcache batch_remove_lease", self._store.batch_remove_lease(keys))
         if native_result != 0:
             raise RuntimeError(f"Memcache batch_remove_lease failed with result {native_result}")
 
     def allocate_gva(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
+        """Return addresses, not status codes; an address is not an exclusive ownership token."""
         self._ensure_initialized()
         assert self._store is not None
-        return result_codes("Memcache batch_alloc", keys, self._store.batch_alloc(keys, object_sizes))
+        return integer_results("Memcache batch_alloc", keys, self._store.batch_alloc(keys, object_sizes))
 
     def copy_from_gva(
         self,
@@ -208,11 +220,23 @@ class MemcacheBackend:
     def publish_gva(self, keys: list[str]) -> tuple[int, ...]:
         self._ensure_initialized()
         assert self._store is not None
-        return result_codes(
+        return integer_results(
             "Memcache batch_write_finish",
             keys,
             self._store.batch_write_finish(keys, [0] * len(keys)),
         )
+
+    def revoke_gva(self, keys: list[str]) -> tuple[int, ...]:
+        """Leave remote cleanup unconfirmed when no ownership-safe abort is available.
+
+        Native failed-write notification can delete by key, including an object
+        returned by duplicate allocation or replaced by another writer. Neither
+        presence queries nor removing read leases can prove write cleanup. Do not
+        call those APIs here; the caller must retain its unresolved write records.
+        Server expiry may reclaim resources, but this adapter cannot confirm it.
+        """
+        self._require_open()
+        return (GVA_REVOKE_UNCONFIRMED,) * len(keys)
 
     def _ensure_initialized(self) -> None:
         self._require_open()
@@ -241,7 +265,7 @@ class MemcacheBackend:
         store = DistributedObjectStore()
         try:
             native_result = store.init(self.device_id, init_bm=self._init_bm)
-            if result_code("Memcache init", native_result) != 0:
+            if integer_result("Memcache init", native_result) != 0:
                 raise RuntimeError(f"Memcache store initialization failed with result {native_result!r}")
             if self._init_bm and self._dp_init_barrier:
                 logger.info("Waiting for all DP Memcache v1 initializations")
@@ -302,7 +326,7 @@ class MemcacheBackend:
     ) -> int:
         self._ensure_initialized()
         assert self._store is not None
-        return result_code(
+        return integer_result(
             "Memcache batch_copy",
             self._store.batch_copy(remote_addresses, local_addresses, sizes, direction),
         )

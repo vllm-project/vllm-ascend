@@ -74,13 +74,13 @@ def test_store_admission_keeps_failed_requests_separate_from_copy_sources(start_
     error = RuntimeError(f"failed at {failure_stage}")
     io = worker._layerwise_backend_io
     if failure_stage == "start":
-        start = io.start_store_sessions
+        start = worker._backend_sessions.start_store
 
         def start_then_raise(*args):
             start(*args)
             raise error
 
-        monkeypatch.setattr(io, "start_store_sessions", start_then_raise)
+        monkeypatch.setattr(worker._backend_sessions, "start_store", start_then_raise)
     elif failure_stage == "prepare_layers":
 
         def fail_preparation(batch):
@@ -178,6 +178,12 @@ def test_store_result_precedence_does_not_hide_copy_source_release(
         assert worker.take_released_store_job_ids() == {17}
         worker.end_step()
     finally:
+        if revoke_code != 0:
+            with pytest.raises(RuntimeError, match="cleanup is unconfirmed"):
+                worker.close()
+            assert not resources.closed
+            assert worker._backend_sessions.pending_store_keys
+            backend.store_session_revoke_result = [0]
         worker.close()
     assert resources.closed
 

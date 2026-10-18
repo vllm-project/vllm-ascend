@@ -27,16 +27,14 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
-from .registration import (
+from ..registration import (
     BufferRegistration,
     BufferRegistrationError,
     Registration,
     rollback_buffer_registration,
 )
-from .results import presence_results, result_code, result_codes
-
-# Adapter-local failure: a completed native copy did not cover the requested ranges.
-_RANGE_COPY_SIZE_MISMATCH = -1
+from ..results import integer_result, integer_results, presence_results
+from .sessions import MooncakeSessions
 
 
 class MooncakeBackend:
@@ -74,7 +72,12 @@ class MooncakeBackend:
             self._initialized = True
 
     def set_device(self) -> None:
+        self._require_open()
         torch.npu.set_device(self.device_id)
+
+    def create_sessions(self) -> MooncakeSessions:
+        """Create this Worker's session owner after validating native support."""
+        return MooncakeSessions(self)
 
     def register_buffer(self, addresses: list[int], sizes: list[int]) -> Registration:
         self._require_open()
@@ -86,7 +89,9 @@ class MooncakeBackend:
             assert self._store is not None
             try:
                 for address, size in zip(addresses, sizes, strict=True):
-                    native_result = result_code("Mooncake register_buffer", self._store.register_buffer(address, size))
+                    native_result = integer_result(
+                        "Mooncake register_buffer", self._store.register_buffer(address, size)
+                    )
                     if native_result != 0:
                         raise RuntimeError(
                             f"Mooncake store buffer registration failed: address={address}, size={size}, "
@@ -118,13 +123,14 @@ class MooncakeBackend:
             if not callable(close_store):
                 raise RuntimeError("Installed Mooncake client does not expose close()")
             native_result = close_store()
-            if native_result is not None and result_code("Mooncake close", native_result) != 0:
+            if native_result is not None and integer_result("Mooncake close", native_result) != 0:
                 raise RuntimeError(f"Mooncake store close failed: result={native_result}")
         self._store = None
         self._initialized = False
         self._closed = True
 
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
+        self._require_open()
         if self._lazy_init and not self._initialized:
             return (False,) * len(keys)
         assert self._store is not None
@@ -136,11 +142,12 @@ class MooncakeBackend:
         addresses: list[list[int]],
         sizes: list[list[int]],
     ) -> tuple[int, ...]:
+        self._require_open()
         if self._lazy_init and not self._initialized:
             raise RuntimeError("Mooncake store is not initialized; Store must initialize it before Load")
         assert self._store is not None
         _emit_whole_key_debug_event("get", len(keys))
-        codes = result_codes(
+        codes = integer_results(
             "Mooncake batch_get_into_multi_buffers",
             keys,
             self._store.batch_get_into_multi_buffers(keys, addresses, sizes),
@@ -156,7 +163,7 @@ class MooncakeBackend:
         self._ensure_initialized()
         assert self._store is not None
         _emit_whole_key_debug_event("put", len(keys))
-        return result_codes(
+        return integer_results(
             "Mooncake batch_put_from_multi_buffers",
             keys,
             self._store.batch_put_from_multi_buffers(keys, addresses, sizes, self._replicate_config()),
@@ -194,7 +201,7 @@ class MooncakeBackend:
         method = getattr(self._store, "batch_get_session_end", None)
         if not callable(method):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
-        native_result = result_code("Mooncake batch_get_session_end", method(keys))
+        native_result = integer_result("Mooncake batch_get_session_end", method(keys))
         if native_result != 0:
             raise RuntimeError(f"Mooncake batch_get_session_end failed with result {native_result}")
 
@@ -230,27 +237,10 @@ class MooncakeBackend:
         sizes: list[list[int]],
         offsets: list[list[int]],
     ) -> tuple[int, ...]:
-        """Convert native byte counts to v1 status codes without accepting partial copies."""
+        """Match production range copies: negative results fail; nonnegative results succeed."""
 
         native_results = self._call_key_range(operation, keys, keys, addresses, sizes, offsets)
-        codes = []
-        for key, copied_bytes, range_sizes in zip(keys, native_results, sizes, strict=True):
-            if copied_bytes < 0:
-                codes.append(copied_bytes)
-                continue
-            expected_bytes = sum(range_sizes)
-            if copied_bytes == expected_bytes:
-                codes.append(0)
-            else:
-                logger.error(
-                    "Mooncake %s returned an unexpected range copy size for key %s: copied_bytes=%d, expected_bytes=%d",
-                    operation,
-                    key,
-                    copied_bytes,
-                    expected_bytes,
-                )
-                codes.append(_RANGE_COPY_SIZE_MISMATCH)
-        return tuple(codes)
+        return tuple(code if code < 0 else 0 for code in native_results)
 
     def _ensure_initialized(self) -> None:
         self._require_open()
@@ -291,7 +281,7 @@ class MooncakeBackend:
             if self.config.tenant_id != DEFAULT_TENANT_ID:
                 setup_kwargs["tenant_id"] = self.config.tenant_id
             native_result = self._setup_native_store(store, local_hostname, setup_kwargs)
-            if result_code("Mooncake setup", native_result) != 0:
+            if integer_result("Mooncake setup", native_result) != 0:
                 raise RuntimeError(
                     f"Mooncake store initialization failed: result={native_result}, "
                     f"metadata_server={self.config.metadata_server}"
@@ -336,12 +326,12 @@ class MooncakeBackend:
         method = getattr(self._store, operation, None)
         if not callable(method):
             raise RuntimeError(f"Mooncake client does not support {operation}")
-        return result_codes(f"Mooncake {operation}", keys, method(*arguments))
+        return integer_results(f"Mooncake {operation}", keys, method(*arguments))
 
     def _unregister_store_buffer(self, address: int, _size: int) -> None:
         if self._store is None:
             raise RuntimeError("Mooncake store is unavailable during buffer deregistration")
-        native_result = result_code("Mooncake unregister_buffer", self._store.unregister_buffer(address))
+        native_result = integer_result("Mooncake unregister_buffer", self._store.unregister_buffer(address))
         if native_result != 0:
             raise RuntimeError(
                 f"Mooncake store buffer deregistration failed: address={address}, result={native_result}"

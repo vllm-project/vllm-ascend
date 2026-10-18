@@ -11,7 +11,7 @@ from typing import Any
 
 from vllm.config import ParallelConfig
 
-from .port import GVABackend, GVARegion, KeyRangeBackend, KVStoreBackend
+from .interfaces import GVABackend, GVAObjectSessions, GVARegion, KeyRangeBackend, KVStoreBackend, ObjectSessions
 from .registration import (
     BufferRegion,
     BufferRegistration,
@@ -85,10 +85,12 @@ __all__ = [
     "BufferRegistrationError",
     "BufferReleaseError",
     "GVABackend",
+    "GVAObjectSessions",
     "GVARegion",
     "KVStoreBackend",
     "KeyRangeBackend",
     "LayerwiseAccessKind",
+    "ObjectSessions",
     "Registration",
     "resolve_backend_spec",
     "rollback_buffer_registration",

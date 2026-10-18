@@ -15,7 +15,7 @@ from .worker import LayerwiseWorker
 
 
 class KeyRangeLayerwiseWorker(LayerwiseWorker):
-    """Own native key-range sessions through one concrete adapter."""
+    """Select layer ranges while Backend owns the underlying object sessions."""
 
     def __init__(
         self,
@@ -30,14 +30,16 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
     ) -> None:
         if resources.backend_spec.layerwise_access is not LayerwiseAccessKind.KEY_RANGE:
             raise TypeError("KeyRangeLayerwiseWorker requires a KeyRange Backend")
-        backend_io = KeyRangeBackendIO(cast(KeyRangeBackend, resources.backend), resources.backend_spec)
-        backend_io.validate_support()
+        backend = cast(KeyRangeBackend, resources.backend)
+        sessions = backend.create_sessions()
+        backend_io = KeyRangeBackendIO(backend, resources.backend_spec)
         self._key_range_backend_io = backend_io
         super().__init__(
             topology,
             projection_binder,
             resources,
             backend_io,
+            sessions,
             store_enabled=store_enabled,
             layerwise_prefetch_layers=layerwise_prefetch_layers,
             start_gate_factory=start_gate_factory,

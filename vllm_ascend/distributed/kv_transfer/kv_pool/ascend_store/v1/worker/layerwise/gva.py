@@ -15,7 +15,7 @@ from .worker import LayerwiseWorker
 
 
 class GVALayerwiseWorker(LayerwiseWorker):
-    """Own GVA leases, addresses, and publication through one concrete adapter."""
+    """Select GVA transfers while Backend owns leases, addresses, and publication mechanics."""
 
     def __init__(
         self,
@@ -30,13 +30,16 @@ class GVALayerwiseWorker(LayerwiseWorker):
     ) -> None:
         if resources.backend_spec.layerwise_access is not LayerwiseAccessKind.GVA:
             raise TypeError("GVALayerwiseWorker requires a GVA Backend")
-        backend_io = GVABackendIO(cast(GVABackend, resources.backend), resources.backend_spec)
+        backend = cast(GVABackend, resources.backend)
+        sessions = backend.create_sessions()
+        backend_io = GVABackendIO(backend, resources.backend_spec, sessions)
         self._gva_backend_io = backend_io
         super().__init__(
             topology,
             projection_binder,
             resources,
             backend_io,
+            sessions,
             store_enabled=store_enabled,
             layerwise_prefetch_layers=layerwise_prefetch_layers,
             start_gate_factory=start_gate_factory,

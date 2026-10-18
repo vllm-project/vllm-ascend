@@ -20,11 +20,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BackendSpec,
     BufferRegistrationError,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
-    mooncake as mooncake_adapter,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake import (
     MooncakeBackend,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake import (
+    backend as mooncake_adapter,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import BackendResultError
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 
 def _load_global_te_type():
-    source = Path(mooncake_adapter.__file__).resolve().parents[4] / "utils" / "mooncake_transfer_engine.py"
+    source = Path(mooncake_adapter.__file__).resolve().parents[5] / "utils" / "mooncake_transfer_engine.py"
     spec = importlib.util.spec_from_file_location("_ascend_store_test_global_te", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -89,6 +89,53 @@ def test_v1_mooncake_adapter_preserves_native_bulk_store_contract() -> None:
     assert not replicate_config.prefer_alloc_in_same_node
 
 
+def test_mooncake_creates_sessions_with_native_commit_and_release():
+    store = MagicMock()
+    backend = _make_mooncake_registration_backend(store)
+    backend.config = SimpleNamespace(preferred_segment=False, prefer_alloc_in_same_node=False)
+    store.batch_get_session_start.return_value = [0]
+    store.batch_get_session_end.return_value = 0
+    store.batch_put_session_start.return_value = [0]
+    store.batch_put_session_end.return_value = [0]
+
+    sessions = backend.create_sessions()
+    assert sessions.start_load(["read"], [64]) == (0,)
+    assert sessions.start_store(["write"], [64]) == (0,)
+    assert sessions.commit_store(["write"]) == (0,)
+    assert not sessions.pending_store_keys
+    sessions.close()
+    store.batch_get_session_end.assert_called_once_with(["read"])
+    store.batch_put_session_end.assert_called_once_with(["write"])
+    store.batch_put_session_revoke.assert_not_called()
+
+
+def test_mooncake_session_factory_rejects_missing_native_support():
+    store = MagicMock()
+    backend = _make_mooncake_registration_backend(store)
+    store.batch_get_session_start = None
+    with pytest.raises(RuntimeError, match="Missing methods: batch_get_session_start"):
+        backend.create_sessions()
+    store.batch_put_session_start.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    (("set_device", ()), ("create_sessions", ()), ("exists", (["key"],)), ("load", (["key"], [[100]], [[10]]))),
+)
+def test_closed_mooncake_rejects_reads_and_device_setup(operation, args) -> None:
+    store = MagicMock()
+    store.close.return_value = 0
+    backend = _make_mooncake_registration_backend(store)
+    backend._lazy_init = True
+    backend.close()
+    store.reset_mock()
+
+    with pytest.raises(RuntimeError, match="Backend is closed"):
+        getattr(backend, operation)(*args)
+
+    assert store.mock_calls == []
+
+
 @pytest.mark.parametrize("direction", ("store", "load"))
 @pytest.mark.parametrize(
     "native_results, expected_codes", (([524288, 24, 0], (0, 0, 0)), ([524288, -707, -7], (0, -707, -7)))
@@ -111,8 +158,8 @@ def test_mooncake_range_copy_normalizes_native_byte_counts(direction, native_res
 
 
 @pytest.mark.parametrize("direction", ("store", "load"))
-@pytest.mark.parametrize("copied_bytes", (0, 8, 23, 25))
-def test_mooncake_range_copy_rejects_inexact_byte_counts(direction, copied_bytes, caplog) -> None:
+@pytest.mark.parametrize("copied_bytes", (0, 8, 23, 24, 25))
+def test_mooncake_range_copy_accepts_nonnegative_results_like_production(direction, copied_bytes) -> None:
     store = MagicMock()
     method = (
         store.batch_put_from_multi_buffer_ranges if direction == "store" else store.batch_get_into_multi_buffer_ranges
@@ -121,13 +168,9 @@ def test_mooncake_range_copy_rejects_inexact_byte_counts(direction, copied_bytes
     backend = _make_mooncake_registration_backend(store)
     copy = backend.copy_key_range_store if direction == "store" else backend.copy_key_range_load
 
-    codes = copy(["complete", "incomplete"], [[100], [200, 300]], [[524288], [8, 16]], [[0], [8, 32]])
+    codes = copy(["complete", "split"], [[100], [200, 300]], [[524288], [8, 16]], [[0], [8, 32]])
 
-    assert codes[0] == 0
-    assert codes[1] < 0
-    assert "incomplete" in caplog.text
-    assert f"copied_bytes={copied_bytes}" in caplog.text
-    assert "expected_bytes=24" in caplog.text
+    assert codes == (0, 0)
 
 
 @pytest.mark.parametrize("direction", ("store", "load"))
@@ -171,7 +214,8 @@ def test_mooncake_range_sessions_preserve_native_status_codes(code) -> None:
 
 
 @pytest.mark.parametrize("failed_copy", (None, "store", "load"))
-def test_mooncake_native_byte_counts_reach_layerwise_store_and_load(failed_copy) -> None:
+@pytest.mark.parametrize("successful_bytes", (None, 0, 1))
+def test_mooncake_native_byte_counts_reach_layerwise_store_and_load(failed_copy, successful_bytes) -> None:
     store = MagicMock()
     backend = _make_mooncake_registration_backend(store)
     backend.device_id = 0
@@ -182,10 +226,11 @@ def test_mooncake_native_byte_counts_reach_layerwise_store_and_load(failed_copy)
     store.batch_get_session_start.side_effect = lambda keys: [0] * len(keys)
     store.batch_get_session_end.return_value = 0
     store.batch_put_from_multi_buffer_ranges.side_effect = lambda keys, addresses, sizes, offsets: [
-        sum(row) - (failed_copy == "store") for row in sizes
+        -707 if failed_copy == "store" else (sum(row) if successful_bytes is None else successful_bytes)
+        for row in sizes
     ]
     store.batch_get_into_multi_buffer_ranges.side_effect = lambda keys, addresses, sizes, offsets: [
-        sum(row) - (failed_copy == "load") for row in sizes
+        -707 if failed_copy == "load" else (sum(row) if successful_bytes is None else successful_bytes) for row in sizes
     ]
     worker, resources, _ = make_worker(
         cast(FakeBackend, backend), layerwise=True, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
@@ -315,7 +360,7 @@ def test_mooncake_setup_failure_closes_constructed_client() -> None:
         patch("mooncake.store.MooncakeDistributedStore", return_value=store, create=True),
         patch.object(MooncakeBackend, "set_device"),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.get_ip",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.backend.get_ip",
             return_value="127.0.0.1",
         ),
         pytest.raises(RuntimeError, match="initialization failed"),

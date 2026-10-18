@@ -14,9 +14,7 @@ from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
     make_gva_binding,
     make_gva_spec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
-    GVABackendIO,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import GVARegion
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
     GVAObjectLayout,
     KVPoolResources,
@@ -29,12 +27,12 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
     monkeypatch.setattr(backend.native_store, "batch_write_finish", None)
     monkeypatch.setattr(backend, "batch_write_finish", lambda *args: [0], raising=False)
     with pytest.raises(RuntimeError, match="native batch_write_finish"):
-        GVABackendIO(backend, make_gva_spec())
+        backend.create_sessions()
 
     unavailable = FakeGVABackend()
     unavailable.native_store = None
     with pytest.raises(RuntimeError, match="store is unavailable"):
-        GVABackendIO(unavailable, make_gva_spec())
+        unavailable.create_sessions()
 
     topology = make_topology(physical_layers=(4, 5))
     registration_backend = FakeBackend()
@@ -64,21 +62,21 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
 
 
 def test_gva_readability_changes_only_after_publication() -> None:
-    backend_io, batch, store = make_gva_binding((1,))
+    backend_io, batch, store, sessions = make_gva_binding((1,))
     key = batch.selected_keys()[0]
 
-    assert backend_io.start_store_sessions([key], [64]) == (0,)
+    assert sessions.start_store([key], [64]) == (0,)
     assert not backend_io.exists([key])[0]
     assert backend_io.store_batch(batch, 0)[0].evidence.succeeded
     assert not backend_io.exists([key])[0]
-    assert backend_io.commit_store_sessions([key]) == (0,)
+    assert sessions.commit_store([key]) == (0,)
     assert backend_io.exists([key])[0]
-    assert not backend_io._store_sessions
+    assert not sessions.pending_store_keys
     assert store.objects[key][2]
 
 
 def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(monkeypatch) -> None:
-    backend_io, batch, store = make_gva_binding()
+    backend_io, batch, store, sessions = make_gva_binding()
     first, second = batch.selected_keys()
     store.objects.update(
         {
@@ -95,20 +93,20 @@ def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(mo
         return original_add_lease(keys)
 
     monkeypatch.setattr(store, "batch_add_lease", acquire)
-    assert backend_io.start_load_sessions([first, second, "wrong-size"], [64, 64, 64]) == (0, -7, -1)
+    assert sessions.start_load([first, second, "wrong-size"], [64, 64, 64]) == (0, -7, -1)
     completion = backend_io.load_batch(batch.select_keys({first}), 0)[0]
     assert completion.transfer_evidence[0].result_code == 0
     assert next(call for call in store.calls if call[0] == "copy")[1] == (4000,)
-    backend_io.finish_load_sessions([first, second, "wrong-size"])
+    sessions.finish_load([first, second, "wrong-size"])
     assert store.calls[-1] == ("release", (first,))
     assert not store.leases
 
 
 def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
-    backend_io, batch, store = make_gva_binding()
+    backend_io, batch, store, sessions = make_gva_binding()
     first, second = batch.selected_keys()
     store.objects.update({first: (1000, 64, True), second: (2000, 64, True)})
-    assert backend_io.start_load_sessions([first, second], [64, 64]) == (0, 0)
+    assert sessions.start_load([first, second], [64, 64]) == (0, 0)
     backend_io.prepare_load_layers(batch)
 
     for layer_id in (0, 1):
@@ -117,17 +115,17 @@ def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
     assert [call[1] for call in copies] == [(1000, 2000), (1032, 2032)]
     assert [call[2] for call in copies] == [(1064, 1192), (2064, 2192)]
     assert [call[3] for call in copies] == [(32, 32), (32, 32)]
-    backend_io.finish_load_sessions([first, second])
+    sessions.finish_load([first, second])
     assert store.calls[-1] == ("release", (first, second))
     assert not store.leases
 
 
 def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
-    backend_io, batch, store = make_gva_binding(block_ids=(1,))
+    backend_io, batch, store, sessions = make_gva_binding(block_ids=(1,))
     key = batch.selected_keys()[0]
     store.objects[key] = (1000, 64, True)
 
-    assert backend_io.start_load_sessions([key], [64]) == (0,)
+    assert sessions.start_load([key], [64]) == (0,)
     store.copy_result = RuntimeError("GVA copy failed")
     completion = backend_io.load_batch(batch, 0)[0]
 
@@ -139,20 +137,22 @@ def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
         evidence.source.block_id,
         evidence.source.physical_layer_ids,
     ) == (0, 1, (0,))
-    backend_io.finish_load_sessions([key])
+    sessions.finish_load([key])
     assert not store.leases
 
 
 def test_gva_store_admission_owns_only_successful_allocations() -> None:
-    backend_io, batch, store = make_gva_binding()
+    backend_io, batch, store, sessions = make_gva_binding()
     first, second = batch.selected_keys()
     store.allocation_result = [1000, 0]
 
-    assert backend_io.start_store_sessions([first, second], [64, 64]) == (0, -1)
-    assert backend_io._store_sessions == {first: (1000, 64)}
+    assert sessions.start_store([first, second], [64, 64]) == (0, -1)
+    assert sessions.store_regions((first,), 64) == (GVARegion(1000, 64),)
     assert store.calls == [("alloc", (first, second), (64, 64))]
-    assert backend_io.revoke_store_sessions([first, second]) == (-1, 0)
-    assert not backend_io._store_sessions
+    assert sessions.revoke_store([first, second]) == (-1, 0)
+    assert sessions.pending_store_keys == (first,)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        sessions.store_regions((first,), 64)
 
 
 def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
@@ -164,10 +164,10 @@ def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
         ([0], [None, None], False, False),
         (RuntimeError("copy failed"), [None, None], False, False),
     ):
-        backend_io, batch, store = make_gva_binding()
+        backend_io, batch, store, sessions = make_gva_binding()
         keys = list(batch.selected_keys())
         store.copy_result = native_result
-        assert backend_io.start_store_sessions(keys, [64, 64]) == (0, 0)
+        assert sessions.start_store(keys, [64, 64]) == (0, 0)
         evidence = backend_io.store_batch(batch, 0)[0].evidence
         assert [item.result_code for item in evidence.transfer_evidence] == expected_codes
         assert all(item.source_release_confirmed is released for item in evidence.transfer_evidence)
@@ -176,12 +176,13 @@ def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
 
 
 def test_gva_publication_failure_does_not_hide_copy_source_release() -> None:
-    backend_io, batch, store = make_gva_binding((1,))
+    backend_io, batch, store, sessions = make_gva_binding((1,))
     store.commit_result = [-8]
     key = batch.selected_keys()[0]
 
-    assert backend_io.start_store_sessions([key], [64]) == (0,)
+    assert sessions.start_store([key], [64]) == (0,)
     assert backend_io.store_batch(batch, 0)[0].evidence.source_release_confirmed
-    assert backend_io.commit_store_sessions([key]) == (-8,)
+    assert sessions.commit_store([key]) == (-8,)
     assert not store.objects[key][2]
-    assert backend_io.revoke_store_sessions([key]) == (-1,)
+    assert sessions.revoke_store([key]) == (-1,)
+    assert sessions.pending_store_keys == (key,)

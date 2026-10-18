@@ -1,14 +1,13 @@
-"""Execute Layerwise transfer work through GVA Backend sessions."""
+"""Prepare GVA copy arguments and request results, without owning remote leases."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 from vllm.logger import logger
 
-from ...backend import BackendSpec, GVABackend
+from ...backend import BackendSpec, GVABackend, GVAObjectSessions, GVARegion
 from ...projection import GVALayerwiseProjection
 from ..transfer.batch import KVGroupBatch, KVTransferBatch, LayerTransferPlan
 from ..transfer.evidence import LayerStoreResult, TransferEvidence
@@ -27,79 +26,25 @@ from .io import (
     _store_completions,
 )
 
-GVA_SESSION_FAILURE = -1
-
 
 class GVABackendIO(BackendIO):
-    """Keep leased GVA addresses inside the Backend boundary."""
+    """Use Backend-owned regions to prepare Worker layer plans and request evidence."""
 
-    def __init__(self, backend: GVABackend, backend_spec: BackendSpec) -> None:
+    def __init__(self, backend: GVABackend, backend_spec: BackendSpec, sessions: GVAObjectSessions) -> None:
         super().__init__(backend, backend_spec)
         self._gva_backend = backend
-        self._load_sessions: dict[str, tuple[int, int] | None] = {}
-        self._store_sessions: dict[str, tuple[int, int]] = {}
+        self._sessions = sessions
         self._projection: GVALayerwiseProjection | None = None
         self._load_plan: LayerTransferPlan | None = None
         self._store_plan: LayerTransferPlan | None = None
-        self.validate_support()
 
     def bind_projection(self, projection: GVALayerwiseProjection) -> None:
         if self._projection is not None:
             raise RuntimeError("GVA projection is already bound")
         self._projection = projection
 
-    def validate_support(self) -> None:
-        self._gva_backend.validate_gva_support()
-
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
-
-    def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._load_plan = None
-        if not keys:
-            return ()
-        if any(key in self._load_sessions for key in keys):
-            raise RuntimeError("Previous GVA Load sessions have not ended")
-        result_codes = list(self._gva_backend.add_gva_leases(keys))
-        leased_keys = [key for key, code in zip(keys, result_codes, strict=True) if code == 0]
-        self._load_sessions.update((key, None) for key in leased_keys)
-        # Resolve after acquiring the lease: an earlier Lookup address may already have been evicted.
-        regions = dict(zip(leased_keys, self._gva_backend.query_gva_regions(leased_keys), strict=True))
-        rejected_keys = []
-        for index, (key, object_size) in enumerate(zip(keys, object_sizes, strict=True)):
-            if result_codes[index] != 0:
-                continue
-            region = regions[key]
-            if region is None or region.size != object_size:
-                result_codes[index] = GVA_SESSION_FAILURE
-                rejected_keys.append(key)
-            else:
-                self._load_sessions[key] = (region.address, region.size)
-        self.finish_load_sessions(rejected_keys)
-        return tuple(result_codes)
-
-    def finish_load_sessions(self, keys: list[str]) -> None:
-        leased_keys = [key for key in keys if key in self._load_sessions]
-        if not leased_keys:
-            return
-        self._gva_backend.remove_gva_leases(leased_keys)
-        for key in leased_keys:
-            del self._load_sessions[key]
-        self._load_plan = None
-
-    def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._store_plan = None
-        if not keys:
-            return ()
-        if any(key in self._store_sessions for key in keys):
-            raise RuntimeError("Previous GVA Store sessions have not ended")
-        gvas = self._gva_backend.allocate_gva(keys, object_sizes)
-        result_codes = []
-        for key, gva, object_size in zip(keys, gvas, object_sizes, strict=True):
-            result_codes.append(0 if gva > 0 else GVA_SESSION_FAILURE)
-            if gva > 0:
-                self._store_sessions[key] = (gva, object_size)
-        return tuple(result_codes)
 
     def prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._store_plan = prepare_layer_store(batch, self._resolve_store_bases)
@@ -190,47 +135,21 @@ class GVABackendIO(BackendIO):
             return LayerStoreResult(None, not source_handed_off, error)
         return LayerStoreResult(int(result_code), True)
 
-    def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        if not keys:
-            return ()
-        if any(key not in self._store_sessions for key in keys):
-            raise RuntimeError("GVA commit has no owning Store session")
-        result_codes = self._gva_backend.publish_gva(keys)
-        for key, code in zip(keys, result_codes, strict=True):
-            if code == 0:
-                del self._store_sessions[key]
-        self._store_plan = None
-        return result_codes
+    def clear_load_plan(self) -> None:
+        self._load_plan = None
 
-    def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        # Native failed-write notification deletes by key, even after a duplicate allocation.
-        # Do not delete another writer's object; leave uncertain write leases to Backend expiry.
-        result = tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
+    def clear_store_plan(self) -> None:
         self._store_plan = None
-        return result
 
     def _resolve_store_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
-        return self._resolve_bases(group, keys, self._store_sessions)
+        return self._region_bases(self._sessions.store_regions(keys, group.object_size))
 
     def _resolve_load_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
-        return self._resolve_bases(group, keys, self._load_sessions)
+        return self._region_bases(self._sessions.load_regions(keys, group.object_size))
 
     @staticmethod
-    def _resolve_bases(
-        group: KVGroupBatch,
-        keys: tuple[str, ...],
-        sessions: Mapping[str, tuple[int, int] | None],
-    ) -> np.ndarray:
-        bases = []
-        for key in keys:
-            session = sessions.get(key)
-            if session is None:
-                raise RuntimeError(f"GVA session for {key!r} is unavailable")
-            base, object_size = session
-            if object_size != group.object_size:
-                raise RuntimeError(f"GVA session for {key!r} has an unexpected object size")
-            bases.append(base)
-        object_bases = np.asarray(bases, dtype=np.uint64)
+    def _region_bases(regions: tuple[GVARegion, ...]) -> np.ndarray:
+        object_bases = np.asarray([region.address for region in regions], dtype=np.uint64)
         object_bases.flags.writeable = False
         return object_bases
 

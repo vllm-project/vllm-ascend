@@ -17,6 +17,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     GVARegion,
     LayerwiseAccessKind,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import GVA_REVOKE_UNCONFIRMED
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     GVALayerwiseProjection,
     GVALayerwiseProjectionBinder,
@@ -120,6 +122,9 @@ class FakeGVABackend(FakeBackend):
         super().__init__()
         self.native_store: FakeGVAStore | None = FakeGVAStore()
 
+    def create_sessions(self) -> MemcacheSessions:
+        return MemcacheSessions(self)
+
     def validate_gva_support(self) -> None:
         if self.native_store is None:
             raise RuntimeError("Memcache store is unavailable for GVA")
@@ -168,6 +173,9 @@ class FakeGVABackend(FakeBackend):
         assert self.native_store is not None
         return tuple(self.native_store.batch_write_finish(keys, [0] * len(keys)))
 
+    def revoke_gva(self, keys):
+        return (GVA_REVOKE_UNCONFIRMED,) * len(keys)
+
 
 def make_gva_spec() -> BackendSpec:
     return BackendSpec(
@@ -211,7 +219,8 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     )
     projection = binder.bind(**resources.bind_kv_caches({"cache": object()}))
     assert isinstance(projection, GVALayerwiseProjection)
-    backend_io = GVABackendIO(backend, backend_spec)
+    sessions = backend.create_sessions()
+    backend_io = GVABackendIO(backend, backend_spec, sessions)
     backend_io.bind_projection(projection)
 
     hashes = tuple(f"h{index}" for index in range(len(block_ids)))
@@ -230,4 +239,4 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
         projection.groups[0].object_size,
     )
     assert backend.native_store is not None
-    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.native_store
+    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.native_store, sessions
