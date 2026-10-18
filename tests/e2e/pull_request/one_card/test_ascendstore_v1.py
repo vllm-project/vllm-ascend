@@ -6,8 +6,7 @@ import json
 import os
 import shlex
 import shutil
-import time
-from collections.abc import Callable
+from functools import partial
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -23,17 +22,17 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.ascendstore_v1_benchmark import (
     BLOCK_SIZE,
     CONCURRENCY,
-    CROSSOVER_RUNS,
     MODEL,
     ROUNDS_PER_RUN,
     WORKER_EXTENSION,
     assert_prompt_sources,
     call_worker_rpc,
-    compare_runs,
     make_report,
     make_requests,
     reset_local_prefix_cache,
     run_benchmark,
+    run_byte_accuracy,
+    run_comparison,
     write_report,
 )
 
@@ -52,18 +51,10 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
     warmup = make_requests(tokenizer, "warmup", count=CONCURRENCY)
     report = {**make_report(inputs, warmup), "scenario": "bulk", "tensor_parallel_size": 1}
     try:
-        for run_index, connector in enumerate(CROSSOVER_RUNS, start=1):
-            run_path = tmp_path / f"run-{run_index}-{connector[0]}"
-            run_path.mkdir()
-            run: dict[str, Any] = {"run": run_index, "implementation": connector[0], "measurements": []}
-            report["runs"].append(run)
-            start = time.monotonic()
-            try:
-                _exercise_connector(run_path, model_path, tokenizer, inputs, warmup, connector, run["measurements"])
-            finally:
-                run["duration_seconds"] = time.monotonic() - start
-        report["comparisons"] = compare_runs(report["runs"])
-        report["status"] = "measured"
+        exercise = partial(
+            _exercise_connector, model_path=model_path, tokenizer=tokenizer, inputs=inputs, warmup=warmup
+        )
+        run_comparison(tmp_path, report, exercise)
     except BaseException as error:
         report.update(status="incomplete", error=f"{type(error).__name__}: {error}")
         raise
@@ -83,7 +74,7 @@ def _exercise_connector(
     *,
     use_layerwise: bool = False,
     worker_extension: str = WORKER_EXTENSION,
-    after_measurements: Callable[[RemoteOpenAIServer], None] | None = None,
+    accuracy_directory: Path | None = None,
 ) -> None:
     _, connector_name, connector_module = connector
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
@@ -142,6 +133,9 @@ def _exercise_connector(
             auto_port=False,
             env_dict=server_envs,
         ) as server:
+            if accuracy_directory is not None:
+                run_byte_accuracy(server, server, tokenizer, accuracy_directory, observations)
+                return
             run_benchmark(server, tokenizer, warmup)
             for round_index in range(1, ROUNDS_PER_RUN + 1):
                 row: dict[str, Any] = {"round": round_index}
@@ -160,5 +154,3 @@ def _exercise_connector(
                 row["external_reset"] = reset_local_prefix_cache(server)
                 row["external_load"] = run_benchmark(server, tokenizer, inputs)
                 assert_prompt_sources(row["external_load"], external=True)
-            if after_measurements is not None:
-                after_measurements(server)
