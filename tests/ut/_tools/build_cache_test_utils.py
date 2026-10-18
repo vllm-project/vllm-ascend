@@ -84,6 +84,8 @@ def build_cache_command(
 def run_command(
     command: Sequence[str],
     env: Mapping[str, str] | None = None,
+    *,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     if env:
@@ -94,4 +96,5 @@ def run_command(
         text=True,
         env=environment,
         check=False,
+        timeout=timeout,
     )
