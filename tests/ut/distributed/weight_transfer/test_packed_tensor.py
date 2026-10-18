@@ -1110,13 +1110,13 @@ def test_packed_consumer_orders_retained_clones_and_layer_processing(num_buffers
             runtime.zero_()
             payloads = iter(expected.split(1))
 
-            def broadcast(packed, *, src, stream):
+            def broadcast(packed, *, src, stream, payloads=payloads):
                 assert preparation == ["ready"]
                 assert active is stream
                 value = next(payloads)
                 stream.pending.append(lambda: packed.copy_(value.view(torch.uint8)))
 
-            def load(weights):
+            def load(weights, retained=retained):
                 retained.extend(tensor for _, tensor in weights)
                 # A layer completed by this chunk replays all retained inputs.
                 count = len(retained)

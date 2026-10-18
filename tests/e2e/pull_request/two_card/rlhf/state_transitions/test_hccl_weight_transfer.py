@@ -37,6 +37,7 @@ from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+    MODEL_CASES,
     FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
@@ -58,6 +59,7 @@ INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 INIT_TIMEOUT = 120
 UPDATE_TIMEOUT = 300
+PACKED_STRESS_UPDATE_TIMEOUT = 900
 CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.75
 
@@ -107,7 +109,14 @@ def _collect_weight_metadata(source: FixedRandomWeightSource):
 
 
 def _send_update(
-    server, source, model_update_group, *, packed: bool, num_buffers: int = 2, buffer_size_bytes: int | None = None
+    server,
+    source,
+    model_update_group,
+    *,
+    packed: bool,
+    num_buffers: int = 2,
+    buffer_size_bytes: int | None = None,
+    timeout: int = UPDATE_TIMEOUT,
 ) -> None:
     """Run one START -> broadcast -> FINISH transaction over the server's RPCs."""
     from vllm_ascend.distributed.weight_transfer.hccl_engine import (
@@ -136,7 +145,7 @@ def _send_update(
                 "packed_num_buffers": num_buffers,
             }
         },
-        timeout=UPDATE_TIMEOUT,
+        timeout=timeout,
     )
     update_thread.start()
     HCCLWeightTransferEngine.trainer_send_weights(
@@ -165,7 +174,14 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
 
 
 @pytest.mark.skipif(torch.npu.device_count() < 2, reason="HCCL weight transfer e2e test requires at least 2 NPUs.")
-@pytest.mark.parametrize("case", pytest_model_cases())
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model))
+        for case in MODEL_CASES
+        if case.id == "qwen3.5-35b-a3b-moe-layout"
+    ],
+)
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.filterwarnings("ignore:Tensor .*exceeds buffer_size_bytes.*:UserWarning")
 def test_hccl_packed_cross_chunk_reload(case: WeightUpdateModelCase, num_buffers: int):
@@ -175,9 +191,14 @@ def test_hccl_packed_cross_chunk_reload(case: WeightUpdateModelCase, num_buffers
     one-byte threshold splits layer weights across streams irrespective of
     model size, exercising retained inputs and slot rotation on actual NPU.
     """
-    if case.id != "qwen3.5-35b-a3b-moe-layout":
-        pytest.skip("Targeted regression for the packed Qwen3.5 reload divergence")
-    _run_weight_transfer_transaction(case, packed=True, num_buffers=num_buffers, buffer_size_bytes=1, update_rounds=4)
+    _run_weight_transfer_transaction(
+        case,
+        packed=True,
+        num_buffers=num_buffers,
+        buffer_size_bytes=1,
+        update_rounds=4,
+        update_timeout=PACKED_STRESS_UPDATE_TIMEOUT,
+    )
 
 
 def _run_weight_transfer_transaction(
@@ -187,7 +208,8 @@ def _run_weight_transfer_transaction(
     num_buffers: int = 2,
     buffer_size_bytes: int | None = None,
     update_rounds: int = 2,
-):
+    update_timeout: int = UPDATE_TIMEOUT,
+) -> None:
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
 
@@ -285,6 +307,7 @@ def _run_weight_transfer_transaction(
                 packed=packed,
                 num_buffers=num_buffers,
                 buffer_size_bytes=buffer_size_bytes,
+                timeout=update_timeout,
             )
             signatures.append(generation_signature(client, case.model))
 

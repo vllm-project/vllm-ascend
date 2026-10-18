@@ -249,8 +249,8 @@ def packed_hccl_broadcast_consumer(
                 # Keep the receive buffer alive through broadcast and loading.
                 in_flight[buffer_idx] = packed
                 group.broadcast(packed, src=src, stream=stream)
-            stream.synchronize()
-            with torch.npu.device(resolved), torch.npu.stream(stream):
+                # This stream orders unpacking after the broadcast; only the
+                # cross-chunk dependency below needs a host-side barrier.
                 post_unpack_func(
                     unpack_tensor(
                         packed,
