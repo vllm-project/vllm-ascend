@@ -205,7 +205,10 @@ class LayerwiseMapping:
         layer = self.layer_layouts.get(layer_id)
         if not selection.selected_row_count or layer is None:
             return [], [], [], []
-        keys, addresses, lengths, offsets = [], [], [], []
+        keys: list[str] = []
+        addresses: list[list[int]] = []
+        lengths: list[list[int]] = []
+        offsets: list[list[int]] = []
         for layout in layer:
             selected = selection.by_key_prefix[layout.key_prefix_index]
             if selected is None:

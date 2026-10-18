@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
@@ -100,7 +100,7 @@ def inspect_entries(
     for layer in group.layers:
         for name in layer.layer_names:
             cache = kv_caches[name]
-            tensors = (cache,) if hasattr(cache, "shape") else cache
+            tensors = cast("Sequence[torch.Tensor]", (cache,) if hasattr(cache, "shape") else cache)
             for tensor in tensors:
                 if not tensor.numel():
                     continue
@@ -136,11 +136,11 @@ def compile_geometries(
     entry_segment_boundaries is caller-owned and must start with zero; appended
     values are segment-array indices used by layer/PP selection, not byte offsets.
     """
-    geometry_by_layout = {}
+    geometry_by_layout: dict[HeadSliceLayout, UInt64Array] = {}
     segment_count = 0
     first_segment_length_bytes = entry_layouts[0].heads_per_segment * entry_layouts[0].head_vector_bytes
     uniform_segment_length = True
-    slice_indices = np.arange(head_slices_per_rank, dtype=np.uint64)[:, None]
+    slice_indices: UInt64Array = np.arange(head_slices_per_rank, dtype=np.uint64)[:, None]
     for layout in entry_layouts:
         geometry = geometry_by_layout.get(layout)
         if geometry is None:
@@ -163,12 +163,12 @@ def materialize_segments(
 ) -> tuple[LocalMemorySegments, ...]:
     """Return read-only segments whose head slices share stride and length arrays."""
     segment_count = geometry.segment_count
-    slice_addresses = np.empty((head_slices_per_rank, segment_count), dtype=np.uint64)
+    slice_addresses: UInt64Array = np.empty((head_slices_per_rank, segment_count), dtype=np.uint64)
     uniform_block_stride = np.all(group_block_strides_bytes == group_block_strides_bytes[0])
     segment_strides = (
         group_block_strides_bytes[:1] if uniform_block_stride else np.empty(segment_count, dtype=np.uint64)
     )
-    segment_lengths = (
+    segment_lengths: UInt64Array = (
         np.full(1, geometry.first_segment_length_bytes, dtype=np.uint64)
         if geometry.uniform_segment_length
         else np.empty(segment_count, dtype=np.uint64)
@@ -240,9 +240,9 @@ def _compile_head_slice_geometry(layout: HeadSliceLayout, slice_indices: UInt64A
 
     Flattening must preserve the layout's wire order, not sort by local address.
     """
-    kernel_indices = np.arange(layout.kernel_blocks_per_group_block, dtype=np.uint64)[:, None, None]
-    token_indices = np.arange(layout.stored_tokens_per_kernel_block, dtype=np.uint64)
-    head_starts = np.arange(0, layout.heads_per_slice, layout.heads_per_segment, dtype=np.uint64)
+    kernel_indices: UInt64Array = np.arange(layout.kernel_blocks_per_group_block, dtype=np.uint64)[:, None, None]
+    token_indices: UInt64Array = np.arange(layout.stored_tokens_per_kernel_block, dtype=np.uint64)
+    head_starts: UInt64Array = np.arange(0, layout.heads_per_slice, layout.heads_per_segment, dtype=np.uint64)
     token_indices = token_indices[None, None, :] if head_major else token_indices[None, :, None]
     head_starts = head_starts[None, :, None] if head_major else head_starts[None, None, :]
     offsets = (

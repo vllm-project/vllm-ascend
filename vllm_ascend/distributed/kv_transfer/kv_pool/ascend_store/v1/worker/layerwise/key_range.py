@@ -166,7 +166,10 @@ def materialize_load_layer_ranges(
 
     # Keep the common path in bulk list operations; only duplicate keys need per-object merging.
     key_indices: dict[str, int] = {}
-    merged_keys, merged_addresses, merged_sizes, merged_offsets = [], [], [], []
+    merged_keys: list[str] = []
+    merged_addresses: list[list[int]] = []
+    merged_sizes: list[list[int]] = []
+    merged_offsets: list[list[int]] = []
     for key, row_addresses, row_sizes, row_offsets in zip(keys, addresses, sizes, offsets, strict=True):
         index = key_indices.get(key)
         if index is None:
