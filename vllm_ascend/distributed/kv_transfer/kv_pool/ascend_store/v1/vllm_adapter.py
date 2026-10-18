@@ -26,6 +26,7 @@ from ..layerwise_cache_layout import (
     get_layerwise_reuse_config,
 )
 from .backend import LayerwiseAccessKind, resolve_backend_spec
+from .infrastructure.reachability import HybridReachability, UnitaryReachability
 from .projection import (
     BulkProjectionBinder,
     GVALayerwiseProjectionBinder,
@@ -72,9 +73,6 @@ def create_kv_pool_scheduler(
     use_layerwise = bool(extra_config.get("use_layerwise", False))
     backend_name = extra_config.get("backend", "mooncake").strip().lower()
     _validate_kv_pool_preflight(vllm_config, backend_name, use_layerwise=use_layerwise)
-    cache_transfer_granularity, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    )
     transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
     align_state_group_ids = frozenset(
         group_id
@@ -91,12 +89,13 @@ def create_kv_pool_scheduler(
     )
     if use_layerwise and has_private_state:
         raise ValueError("AscendStore private KV state requires non-layerwise transfer")
-    _validate_bulk_topology_support(
+    _validate_kv_pool_topology_support(
         vllm_config,
         kv_cache_config,
         use_layerwise=use_layerwise,
         has_private_state=has_private_state,
     )
+    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(vllm_config, kv_cache_config)
 
     store_enabled = _store_enabled(vllm_config, extra_config)
     dcp_size = int(getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1))
@@ -266,13 +265,20 @@ def _compile_kv_pool_projection_binder(
         binder_type = GVALayerwiseProjectionBinder
     else:
         binder_type = KeyRangeLayerwiseProjectionBinder
-    return binder_type(
-        topology,
-        spec.max_model_len,
-        key_builder.make_full_key,
-        spec.use_eagle,
-        spec.retention_interval,
-    )
+    groups = topology.transfer_groups
+    reachability: UnitaryReachability | HybridReachability
+    if len(groups) == 1:
+        reachability = UnitaryReachability(groups[0].group_id, spec.max_model_len, topology.cache_transfer_granularity)
+    else:
+        reachability = HybridReachability(
+            groups,
+            topology.cache_transfer_granularity,
+            topology.hash_block_size,
+            spec.max_model_len,
+            use_eagle=spec.use_eagle,
+            retention_interval=spec.retention_interval,
+        )
+    return binder_type(topology, key_builder.make_full_key, reachability)
 
 
 def resolve_kv_pool_route_spec(
@@ -291,7 +297,7 @@ def resolve_kv_pool_route_spec(
         use_layerwise=use_layerwise,
         discard_partial_chunks=bool(extra_config.get("discard_partial_chunks", True)),
     )
-    _validate_bulk_topology_support(
+    _validate_kv_pool_topology_support(
         vllm_config,
         kv_cache_config,
         use_layerwise=use_layerwise,
@@ -362,14 +368,14 @@ def _validate_kv_pool_preflight(
     validate_layerwise_topology(protocol, parallel_config, use_layerwise)
 
 
-def _validate_bulk_topology_support(
+def _validate_kv_pool_topology_support(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     *,
     use_layerwise: bool,
     has_private_state: bool | None = None,
 ) -> None:
-    """Reject Bulk compositions whose identity or writer ownership is unproven."""
+    """Reject transfer compositions whose identity or writer ownership is unproven."""
 
     cache_groups = kv_cache_config.kv_cache_groups
     transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
@@ -379,6 +385,9 @@ def _validate_bulk_topology_support(
     if use_layerwise:
         if any(kv_cache_spec_uses_align_state(cache_groups[group_id].kv_cache_spec) for group_id in transfer_group_ids):
             raise ValueError("AscendStore v1 Layerwise transfer does not support Mamba align-state groups")
+        partitions = resolve_consumer_pipeline_partitions(vllm_config)
+        if partitions is not None and len(partitions) > 1:
+            raise ValueError("AscendStore v1 Layerwise transfer cannot be composed with Consumer pipeline Store")
     else:
         for group_id in transfer_group_ids:
             spec = cache_groups[group_id].kv_cache_spec
@@ -412,11 +421,35 @@ def _validate_bulk_topology_support(
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "index_topk"):
         raise ValueError("AscendStore v1 TP mismatch does not support sparse KV layouts")
-    if has_private_state or len(cache_groups) != 1 or transfer_group_ids != (0,):
+    if (
+        has_private_state
+        or len(cache_groups) != 1
+        or transfer_group_ids != (0,)
+        or kv_cache_spec_uses_align_state(cache_groups[0].kv_cache_spec)
+    ):
         raise ValueError("AscendStore v1 TP mismatch requires one dense transferable KV cache group")
     partitions = resolve_consumer_pipeline_partitions(vllm_config)
     if partitions is not None and len(partitions) > 1:
         raise ValueError("AscendStore v1 TP mismatch cannot be composed with Consumer pipeline Store")
+
+
+def _resolve_kv_pool_block_sizes(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> tuple[int, int]:
+    """Resolve and validate the geometry consumed by transfer and reachability algorithms."""
+
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    if scheduler_block_size <= 0 or hash_block_size <= 0 or scheduler_block_size % hash_block_size:
+        raise ValueError("AscendStore scheduler block size must be a positive multiple of the hash block size")
+    transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
+    dcp_size = int(getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1))
+    for group_id in transfer_group_ids:
+        spec = resolve_dcp_kv_cache_spec(kv_cache_config.kv_cache_groups[group_id].kv_cache_spec, dcp_size)
+        block_size = spec.block_size
+        if block_size <= 0 or block_size % hash_block_size or scheduler_block_size % block_size:
+            raise ValueError(
+                f"AscendStore transfer group {group_id} block size ({block_size}) must be a positive multiple "
+                f"of hash block size ({hash_block_size}) and divide scheduler block size ({scheduler_block_size})"
+            )
+    return scheduler_block_size, hash_block_size
 
 
 def _resolve_transfer_group_ids(kv_cache_config: KVCacheConfig) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -499,9 +532,7 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
     num_kv_heads = 1 if getattr(model_config, "use_mla", False) else model_config.get_total_num_kv_heads()
     put_step = tp_size // num_kv_heads if num_kv_heads < tp_size else 1
     head_or_tp_rank = tp_rank // put_step
-    cache_transfer_granularity, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    )
+    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(vllm_config, kv_cache_config)
     model_name = model_config.model.rstrip("/").split("/")[-1]
     base_layer_count = model_config.get_total_num_hidden_layers()
     hf_text_config = getattr(model_config, "hf_text_config", None)

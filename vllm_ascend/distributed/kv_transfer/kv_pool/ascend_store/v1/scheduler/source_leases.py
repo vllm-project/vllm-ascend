@@ -10,7 +10,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from ..projection.reachability import store_group_mask
+from ..infrastructure.reachability import store_group_mask
 from ..projection.store import checkpoint_companion_indices, store_block_range
 from ..protocol.transfer import CheckpointStoreCommand, StoreCommand
 from .state import SchedulerConfig

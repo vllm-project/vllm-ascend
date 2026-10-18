@@ -14,6 +14,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeEvent,
     begin_step,
     make_backend_spec,
+    make_reachability,
     make_topology,
     store_one,
 )
@@ -503,8 +504,8 @@ def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> Non
     )
     projection_binder = GVALayerwiseProjectionBinder(
         topology,
-        64,
         lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        make_reachability(topology),
     )
     worker = GVALayerwiseWorker(
         topology,

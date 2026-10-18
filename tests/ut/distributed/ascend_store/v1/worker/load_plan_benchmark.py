@@ -18,7 +18,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, make_backend_spec, make_topology
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeBackend,
+    make_backend_spec,
+    make_reachability,
+    make_topology,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import KeyRangeLayerwiseProjectionBinder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import arguments, key_range
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
@@ -58,7 +63,9 @@ def make_case(request_count):
             for group in topology.groups
         ),
     )
-    binder = KeyRangeLayerwiseProjectionBinder(topology, 8192, lambda group, value, head, stage: str(value))
+    binder = KeyRangeLayerwiseProjectionBinder(
+        topology, lambda group, value, head, stage: str(value), make_reachability(topology, 8192)
+    )
     projection = binder.bind(
         {0: [0x100000000 * (index + 1) for index in range(2 * _LAYERS)]},
         {0: [_SEGMENT_BYTES] * (2 * _LAYERS)},

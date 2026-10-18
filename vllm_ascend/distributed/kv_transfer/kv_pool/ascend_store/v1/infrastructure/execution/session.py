@@ -49,6 +49,13 @@ class Session(Generic[LoadResult]):
         self._store_futures: dict[int, Future[None]] = {}
         self._store_finished: Future[Any] | None = None
 
+    # ================================================
+    # Load prefetch and result claiming
+    # ================================================
+    #
+    # Prefetch may submit work before a model hook claims its result.
+    # Completion alone must not advance the claim cursor or deliver a result twice.
+
     def wait_for_layer(
         self, layer_id: int, load: Callable[[int], LoadResult], finish: Callable[[], None]
     ) -> LoadResult | None:
@@ -119,6 +126,14 @@ class Session(Generic[LoadResult]):
         if self._load_finished is not None:
             self._load_finished.result()
 
+    # ================================================
+    # Store submission and finalization
+    # ================================================
+    #
+    # Source-ready markers are recorded on the model-hook thread; waits stay in
+    # queued operations. Sealing submission places the finalizer after all layers,
+    # leaving result interpretation to the caller-supplied finish operation.
+
     def store_layer(
         self,
         layer_id: int,
@@ -160,6 +175,14 @@ class Session(Generic[LoadResult]):
             assert self._store_submit is not None
             self._store_finished = self._store_submit(finish, opening, self._store_futures, *args)
         return self._store_finished
+
+    # ================================================
+    # Shared step state and teardown
+    # ================================================
+    #
+    # Load dependencies and Store callbacks share per-layer compute-start gates.
+    # Progress distinguishes submission from claiming; teardown detaches callbacks
+    # and drains Load when requested, without draining Store or claiming Load results.
 
     def _get_or_create_compute_start_gate(self, layer_id: int) -> Any:
         gate = self._start_gates.get(layer_id)

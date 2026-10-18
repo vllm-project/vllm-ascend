@@ -9,7 +9,7 @@ from typing import Any
 
 from vllm.logger import logger
 
-from ...execution.executor import Executor
+from ...infrastructure.execution.executor import Executor
 from ...projection import (
     BulkProjection,
     BulkProjectionBinder,

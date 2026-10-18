@@ -19,6 +19,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeLoadStartGate,
     begin_step,
     make_backend_spec,
+    make_reachability,
     make_topology,
     make_worker,
 )
@@ -320,7 +321,9 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
     )
     binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
     binder = binder_type(
-        topology, 256, lambda group, value, head, stage: f"g{group}:{value}", retention_interval=retention_interval
+        topology,
+        lambda group, value, head, stage: f"g{group}:{value}",
+        make_reachability(topology, 256, retention_interval=retention_interval),
     )
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
@@ -379,7 +382,7 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
         gva_layout=GVAObjectLayout(0, 4, 0, 1, 1) if use_gva else None,
     )
     binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
-    binder = binder_type(topology, 64, lambda group, value, head, stage: f"g{group}:{value}")
+    binder = binder_type(topology, lambda group, value, head, stage: f"g{group}:{value}", make_reachability(topology))
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
     source_blocks = {0: 1, 2: 3}

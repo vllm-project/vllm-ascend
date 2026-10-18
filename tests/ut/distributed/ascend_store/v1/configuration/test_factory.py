@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, Slid
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeResources,
+    make_reachability,
     make_topology,
 )
 from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
@@ -68,9 +69,9 @@ def test_worker_factory_selects_one_concrete_route(monkeypatch) -> None:
         )
         route_spec = KVPoolRouteSpec(topology, "fake", 64, use_layerwise=use_layerwise)
         if layerwise_access is LayerwiseAccessKind.GVA:
-            projection_binder = GVALayerwiseProjectionBinder(topology, 64, full_key)
+            projection_binder = GVALayerwiseProjectionBinder(topology, full_key, make_reachability(topology))
         elif layerwise_access is LayerwiseAccessKind.KEY_RANGE:
-            projection_binder = KeyRangeLayerwiseProjectionBinder(topology, 64, full_key)
+            projection_binder = KeyRangeLayerwiseProjectionBinder(topology, full_key, make_reachability(topology))
         else:
             projection_binder = compile_bulk_projection_binder(topology, 64)
 

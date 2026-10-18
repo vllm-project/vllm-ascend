@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
@@ -13,8 +14,9 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 )
 from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import make_sparse_group_topology
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.reachability import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
     HybridReachability,
+    KVCacheSpecRegistry,
     ReachablePrefix,
     UnitaryReachability,
 )
@@ -26,6 +28,44 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
     KVPoolLayerTopology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.rows import lookup_chunk_rows
+
+
+@pytest.mark.parametrize("hybrid", (False, True), ids=("unitary", "hybrid"))
+def test_reachability_rejects_runtime_observation_shape_mismatches(hybrid) -> None:
+    topology = make_topology(group_ids=(0, 1))
+    reachability = HybridReachability(topology.transfer_groups, 4, 4, 64) if hybrid else UnitaryReachability(0, 64, 4)
+    with pytest.raises(ValueError, match="observation"):
+        reachability.resolve_available_end(TokenRange(0, 4), (b"a",), ())
+
+    rows = (np.asarray((0,)), np.asarray((4,)), (b"a",))
+    observations = tuple((rows, ()) for _ in reachability.group_ids)
+    with pytest.raises(ValueError, match="different lengths"):
+        reachability.resolve_available_end(TokenRange(0, 4), (b"a",), observations)
+
+
+def test_reachability_binds_registered_managers_once(monkeypatch) -> None:
+    topology = make_topology(group_ids=(0, 1))
+    reachability = HybridReachability(topology.transfer_groups, 4, 4, 64)
+    monkeypatch.setattr(
+        KVCacheSpecRegistry, "get_manager_class", lambda _spec: pytest.fail("Manager must already be bound")
+    )
+    assert reachability.select_for_lookup((b"a",), TokenRange(0, 4)) == (None, None)
+    assert reachability.select_for_store((b"a",), TokenRange(0, 4), 4) == (None, None)
+    assert reachability.select_for_store((b"a",), TokenRange(0, 3), 4) == (None, None)
+
+
+def test_reachability_preserves_runtime_mask_length_check(monkeypatch) -> None:
+    reachability = HybridReachability(make_topology(group_ids=(0, 1)).transfer_groups, 4, 4, 64)
+    manager_cls = reachability.manager_classes[0]
+    monkeypatch.setattr(manager_cls, "reachable_block_mask", lambda **_kwargs: [True])
+    with pytest.raises(AssertionError):
+        reachability.select_for_lookup((b"a", b"b"), TokenRange(0, 8))
+
+
+def test_reachability_rejects_unregistered_manager_during_binding(monkeypatch) -> None:
+    monkeypatch.setattr(KVCacheSpecRegistry, "get_manager_class", lambda _spec: None)
+    with pytest.raises(ValueError, match="No vLLM KV cache manager is registered"):
+        HybridReachability(make_topology(group_ids=(0, 1)).transfer_groups, 4, 4, 64)
 
 
 def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -> None:

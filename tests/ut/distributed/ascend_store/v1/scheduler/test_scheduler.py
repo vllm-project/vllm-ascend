@@ -22,7 +22,7 @@ from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
     new_request_data,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.reachability import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
     HybridReachability,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import TailKeyBoundary
