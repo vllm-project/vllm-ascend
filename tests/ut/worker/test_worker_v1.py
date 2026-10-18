@@ -1683,7 +1683,9 @@ class TestNPUWorker(TestBase):
             # Verify calls
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.get_current_usage.assert_called_once()
-            mock_allocator.use_memory_pool.assert_called_once_with(tag="weights")
+            # The weights pool must stay mapped across sleep so the addresses
+            # a captured ACL graph baked in remain valid.
+            mock_allocator.use_memory_pool.assert_called_once_with(tag=mock_allocator_class.sleep_persistent_tag)
             worker.model_runner.load_model.assert_called_once()
 
     def test_load_model_without_sleep_mode(self):

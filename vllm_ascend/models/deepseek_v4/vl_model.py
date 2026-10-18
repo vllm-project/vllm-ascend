@@ -258,6 +258,17 @@ class AscendDeepseekV4ForConditionalGeneration(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
 
+    def reinitialize_runtime_params(self) -> None:
+        """Re-create served-side runtime tensors (hash tables, VL bias,
+        attention sinks) after a weight update / sleep discarded them."""
+        # Drop the lazily built sentinel table first: it holds references to the
+        # ``image_*`` parameter storage from *before* the reload, and the
+        # layerwise reload re-materialises those parameters into new buffers.
+        # Keeping the stale cache would feed pre-update sentinel vectors into
+        # every image placeholder position after the first live update.
+        self._sentinel_table = None
+        self.language_model.reinitialize_runtime_params()
+
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         return self.language_model.get_mtp_target_hidden_states()
 

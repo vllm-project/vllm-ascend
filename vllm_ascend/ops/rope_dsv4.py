@@ -274,6 +274,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 beta_fast,
                 beta_slow,
                 apply_yarn_scaling=apply_yarn_scaling,
+                device=current_platform.device_type,
             )
             t = torch.arange(
                 max_position_embeddings * scaling_factor,
@@ -330,9 +331,35 @@ class ComplexExpRotaryEmbedding(nn.Module):
                     ]
                     _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
 
+        # Remember constructor args so the engine's per-module reinit loop can
+        # force-rebuild the module-global caches after a level-2 sleep.
+        self._reinit_max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        self._reinit_num_spec_tokens = num_speculative_tokens
+        self._reinit_rope_args = {
+            "rotary_dim": rotary_dim,
+            "max_position_embeddings": max_position_embeddings,
+            "original_seq_len": original_seq_len,
+            "base": base,
+            "scaling_factor": scaling_factor,
+            "beta_fast": beta_fast,
+            "beta_slow": beta_slow,
+            "apply_yarn_scaling": apply_yarn_scaling,
+        }
+        self._reinit_rope_groups = list(rope_groups)
+        self._reinit_config_key = config_key
+
     @staticmethod
     def precompute_freqs_cis(
-        dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, *, apply_yarn_scaling=True
+        dim,
+        seqlen,
+        original_seq_len,
+        base,
+        factor,
+        beta_fast,
+        beta_slow,
+        *,
+        apply_yarn_scaling=True,
+        device="cpu",
     ):
         def yarn_find_correction_dim(
             num_rotations: int,
@@ -362,11 +389,11 @@ class ComplexExpRotaryEmbedding(nn.Module):
             if low == high:
                 high += 0.001  # Prevent singularity
 
-            linear_func = (torch.arange(dim, dtype=dtype) - low) / (high - low)
+            linear_func = (torch.arange(dim, device=device, dtype=dtype) - low) / (high - low)
             ramp_func = torch.clamp(linear_func, 0, 1)
             return ramp_func
 
-        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         if not apply_yarn_scaling:
             return inv_freq_extrapolation
@@ -382,6 +409,100 @@ class ComplexExpRotaryEmbedding(nn.Module):
         inv_freq_mask = (1 - yarn_linear_ramp_mask(low, high, dim // 2, dtype=torch.float32)) * 1
         inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
+
+    def reinitialize_runtime_params(self) -> None:
+        """Re-create this layer's module-global RoPE caches in ``_ROPE_STATE``.
+
+        A level-2 sleep discards every device allocation (``offload_tags=()``),
+        and the cos/sin tables are read through the module-GLOBAL
+        ``_ROPE_STATE`` dict.  They are also owned as non-persistent buffers of
+        this module, so the layerwise reload parks them on the meta device and
+        finalize would zero-fill the freshly-woken tables.  Mirror ``__init__``
+        and unconditionally recompute the full cache plus the runtime scratch
+        buffers so the first post-update forward reads valid positions again.
+        The engine calls this hook on every module at finish of a weight
+        update; multiple instances sharing a ``config_key`` recompute the same
+        deterministic values (idempotent).
+
+        The recomputed tables are written **in place**: the FULL-decode ACL
+        graph was captured against the boot-time cache addresses, so replacing
+        the cache objects would orphan those addresses (gc + empty_cache
+        reclaim them) and replay would read garbage.
+        """
+        a = self._reinit_rope_args
+        config_key = self._reinit_config_key
+        target_device = current_platform.device_type
+
+        inv_freq = self.precompute_freqs_cis(
+            a["rotary_dim"],
+            a["max_position_embeddings"],
+            a["original_seq_len"],
+            a["base"],
+            a["scaling_factor"],
+            a["beta_fast"],
+            a["beta_slow"],
+            apply_yarn_scaling=a["apply_yarn_scaling"],
+            device=target_device,
+        )
+        t = torch.arange(
+            a["max_position_embeddings"] * a["scaling_factor"],
+            device=target_device,
+            dtype=torch.float32,
+        )
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos().repeat_interleave(2, dim=-1).to(target_device)
+        sin = freqs.sin().repeat_interleave(2, dim=-1).to(target_device)
+        new_cos = cos.unsqueeze(1).unsqueeze(1)
+        new_sin = sin.unsqueeze(1).unsqueeze(1)
+        cached = _ROPE_STATE.full_rope_cache.get(config_key)
+        if cached is not None and cached[0].shape == new_cos.shape and cached[0].dtype == new_cos.dtype:
+            cached[0].copy_(new_cos)
+            cached[1].copy_(new_sin)
+            full_rope_cos, full_rope_sin = cached
+        else:
+            _ROPE_STATE.full_rope_cache[config_key] = (new_cos, new_sin)
+            full_rope_cos, full_rope_sin = new_cos, new_sin
+        # Keep the non-persistent buffer ownership from ``__init__``: the
+        # layerwise reload replaced this module's buffers with meta tensors, so
+        # re-registering the live tables is what keeps ``named_buffers()`` (and
+        # therefore the next level-2 sleep backup) in sync with the cache.
+        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
+        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
+
+        if config_key not in _ROPE_STATE.runtime_buffer:
+            _ROPE_STATE.runtime_buffer[config_key] = {}
+        if self._reinit_num_spec_tokens is not None:
+            _ROPE_STATE.spec_runtime_buffer.setdefault(config_key, {})
+
+        max_batch_size = self._reinit_max_batch_size
+        rotary_dim = self.rotary_dim
+        for grp in self._reinit_rope_groups:
+            # These are the ``out=`` targets of the per-step gather that the
+            # captured decode graph replays into: keep their objects as well.
+            current = _ROPE_STATE.runtime_buffer[config_key].get(grp)
+            if (
+                current is not None
+                and current[0].shape == (max_batch_size, 1, 1, rotary_dim)
+                and current[0].dtype == torch.float32
+            ):
+                current[0].fill_(1.0)
+                current[1].zero_()
+            else:
+                _ROPE_STATE.runtime_buffer[config_key][grp] = (
+                    torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device),
+                    torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device),
+                )
+            if self._reinit_num_spec_tokens is not None:
+                _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (
+                    [
+                        torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
+                        for _ in range(self._reinit_num_spec_tokens)
+                    ],
+                    [
+                        torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
+                        for _ in range(self._reinit_num_spec_tokens)
+                    ],
+                )
 
     def forward(
         self,
