@@ -128,12 +128,17 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     @patch("vllm_ascend.worker.worker.logger")
     def test_hixl_weights_count_driver_consumption_once(self, mock_logger, mock_get_ascend_config):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        for enabled, backend, expected in [(True, "hixl", 31), (True, "torch_gloo", 47), (False, "hixl", 47)]:
-            with self.subTest(enable_eplb=enabled, communicator=backend):
-                worker = self._make_worker(48 * GiB_bytes, 60 * GiB_bytes, 64 * GiB_bytes, 16 * GiB_bytes)
+        for enabled, backend, weights, expected in [
+            (True, "hixl", 16, 31),
+            (True, "hixl", 32, 31),
+            (True, "torch_gloo", 16, 47),
+            (False, "hixl", 16, 47),
+        ]:
+            with self.subTest(enable_eplb=enabled, communicator=backend, weights=weights):
+                worker = self._make_worker(48 * GiB_bytes, 60 * GiB_bytes, 64 * GiB_bytes, weights * GiB_bytes)
                 worker.vllm_config.parallel_config.enable_eplb = enabled
                 worker.vllm_config.parallel_config.eplb_config.communicator = backend
-                profile = self._make_profile_result(35 * GiB_bytes, 16 * GiB_bytes)
+                profile = self._make_profile_result(35 * GiB_bytes, weights * GiB_bytes)
                 profile.non_torch_increase = 25 * GiB_bytes
                 profile.before_profile.torch_peak = 4 * GiB_bytes
                 profile.after_profile.torch_allocated = 4 * GiB_bytes
@@ -149,6 +154,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
                 # only the 6 GiB transient activation headroom is added.
                 self.assertEqual(profile.non_kv_cache_memory, expected * GiB_bytes)
                 self.assertEqual(available, (48 - expected) * GiB_bytes)
+                if enabled and backend == "hixl":
+                    self.assertEqual(worker.non_torch_memory, (25 - weights) * GiB_bytes)
                 self.assertEqual(
                     worker.model_runner.model_memory_usage + worker.peak_activation_memory + worker.non_torch_memory,
                     profile.non_kv_cache_memory,

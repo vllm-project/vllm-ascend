@@ -629,6 +629,7 @@ class NPUWorker(WorkerBase):
         self.peak_activation_memory = profile_result.torch_peak_increase
         # Keep the later KV-cache suggestion consistent with this budget;
         # compacted weights are already included in the weights category.
+        # This signed residual keeps the sum equal to the measured non-KV budget.
         self.non_torch_memory = (
             profile_result.non_kv_cache_memory - profile_result.weights_memory - self.peak_activation_memory
         )
