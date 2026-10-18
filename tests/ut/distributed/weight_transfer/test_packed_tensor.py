@@ -1059,6 +1059,84 @@ def test_packed_npu_ipc_roundtrip_scalar(dtype, value):
     assert torch.equal(restored.cpu(), original.cpu())
 
 
+@pytest.mark.parametrize("num_buffers", [1, 2, 3])
+def test_packed_consumer_orders_retained_clones_and_layer_processing(num_buffers):
+    """A later chunk may replay earlier tensors before their slot is reused."""
+    active = None
+
+    class QueuedStream(_FakeNpuStream):
+        def __init__(self):
+            self.pending = []
+
+        def synchronize(self):
+            while self.pending:
+                self.pending.pop(0)()
+
+        def __enter__(self):
+            nonlocal active
+            self.previous = active
+            active = self
+            return self
+
+        def __exit__(self, *exc):
+            nonlocal active
+            active = self.previous
+
+    streams = tuple(QueuedStream() for _ in range(num_buffers))
+    num_chunks = 2 * num_buffers + 1
+    expected = torch.arange(1, num_chunks + 1, dtype=torch.float32)
+    runtime = torch.zeros_like(expected)
+    runtime_ptr = runtime.data_ptr()
+
+    def delayed_unpack(packed, names, *metadata):
+        assert active is not None
+        # Model an asynchronous clone with independently owned storage. The
+        # storage exists immediately; its contents become ready on its stream.
+        owned = torch.full((1,), -1.0)
+        active.pending.append(lambda: owned.copy_(packed.view(torch.float32)))
+        return [(names[0], owned)]
+
+    with (
+        patch(f"{_MODULE}._get_streams", return_value=streams),
+        patch(f"{_MODULE}.unpack_tensor", side_effect=delayed_unpack),
+    ):
+        for _ in range(2):
+            retained = []
+            runtime.zero_()
+            payloads = iter(expected.split(1))
+
+            def broadcast(packed, *, src, stream):
+                assert active is stream
+                value = next(payloads)
+                stream.pending.append(lambda: packed.copy_(value.view(torch.uint8)))
+
+            def load(weights):
+                retained.extend(tensor for _, tensor in weights)
+                # A layer completed by this chunk replays all retained inputs.
+                count = len(retained)
+
+                def process():
+                    runtime[:count].copy_(torch.cat(retained[:count]))
+                    torch.testing.assert_close(runtime[:count], expected[:count])
+
+                active.pending.append(process)
+                # Let a later stream overtake an earlier stream. CPU tensor
+                # operations without a queue would hide the missing dependency.
+                if count % 2 == 0:
+                    active.synchronize()
+
+            packed_broadcast_consumer(
+                iterator=iter((str(i), ([1], torch.float32)) for i in range(num_chunks)),
+                group=types.SimpleNamespace(broadcast=broadcast),
+                src=0,
+                post_unpack_func=load,
+                buffer_size_bytes=1,
+                num_buffers=num_buffers,
+            )
+            torch.testing.assert_close(runtime, expected)
+            assert runtime.data_ptr() == runtime_ptr
+
+
 def test_packed_broadcast_consumer_retains_each_slot_until_stream_sync():
     class TrackingStream(_FakeNpuStream):
         def __init__(self):

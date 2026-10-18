@@ -212,6 +212,9 @@ def packed_hccl_broadcast_consumer(
         if resolved.type != "npu" or resolved.index is None:
             raise ValueError(f"packed HCCL transfer requires an indexed NPU device, got {resolved}")
         device_index = resolved.index
+    # Complete caller-side model preparation before custom streams load weights.
+    with torch.npu.device(resolved):
+        torch.npu.current_stream().synchronize()
     streams = _get_streams(device_index, num_buffers)
     in_flight: list[torch.Tensor | None] = [None] * num_buffers
     buffer_idx = 0
@@ -241,11 +244,10 @@ def packed_hccl_broadcast_consumer(
                 break
 
             names, shapes, dtypes, tensor_sizes = zip(*metadata)
-            packed = torch.empty(total_bytes, dtype=torch.uint8, device=resolved)
-            # Keep each receive slot alive until the stream using that slot has
-            # completed its broadcast, unpack clones, and model loading work.
-            in_flight[buffer_idx] = packed
-            with torch.npu.device(resolved):
+            with torch.npu.device(resolved), torch.npu.stream(stream):
+                packed = torch.empty(total_bytes, dtype=torch.uint8, device=resolved)
+                # Keep the receive buffer alive through broadcast and loading.
+                in_flight[buffer_idx] = packed
                 group.broadcast(packed, src=src, stream=stream)
             stream.synchronize()
             with torch.npu.device(resolved), torch.npu.stream(stream):
@@ -258,6 +260,11 @@ def packed_hccl_broadcast_consumer(
                         list(tensor_sizes),
                     )
                 )
+            # Layerwise reload retains tensors and can replay their loaders on
+            # a later chunk's stream. Owned clones prevent buffer overwrites,
+            # but their copies and earlier loader work must also finish before
+            # the next chunk can read them or process shared layer state.
+            stream.synchronize()
             buffer_idx = (buffer_idx + 1) % num_buffers
     except BaseException as exc:
         body_error = exc
