@@ -87,7 +87,7 @@ def test_all_present_store_exits_before_materialization_or_backend_sessions(use_
     materialize = Mock(side_effect=AssertionError("All-present keys must exit before materialization"))
     start = Mock(side_effect=AssertionError("Presence checks must not acquire Backend sessions"))
     monkeypatch.setattr(worker, "_materialize_store_candidates", materialize)
-    monkeypatch.setattr(worker._layerwise_backend_io, "start_store_sessions", start)
+    monkeypatch.setattr(worker._backend_sessions, "start_store", start)
     record = Mock(side_effect=FakeEvent)
     monkeypatch.setattr(worker, "_source_ready_event_factory", record)
     try:

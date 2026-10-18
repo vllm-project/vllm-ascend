@@ -14,7 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BackendSpec,
     BufferRegistrationError,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import (
     MemcacheBackend,
     MmcDirect,
 )
@@ -158,11 +158,11 @@ def test_memcache_post_init_failure_closes_constructed_client() -> None:
         patch("memcache_hybrid.DistributedObjectStore", return_value=store, create=True),
         patch.object(MemcacheBackend, "set_device"),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.get_dp_group",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend.get_dp_group",
             return_value=SimpleNamespace(cpu_group=object()),
         ),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.torch.distributed.barrier",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend.torch.distributed.barrier",
             side_effect=RuntimeError("barrier failed"),
         ),
         pytest.raises(RuntimeError, match="barrier failed"),

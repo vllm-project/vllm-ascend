@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from types import ModuleType
 from unittest.mock import Mock
@@ -140,8 +141,11 @@ def test_layerwise_store_prepares_before_wait_and_reads_only_ready_sources(use_g
         assert any(call[0] in ("publish", "batch_commit") for call in backend.calls) == (failure_stage is None)
         worker.end_step()
     finally:
-        worker.close()
-    assert resources.closed
+        cleanup_unconfirmed = use_gva and failure_stage is not None
+        with pytest.raises(RuntimeError, match="cleanup is unconfirmed") if cleanup_unconfirmed else nullcontext():
+            worker.close()
+    assert resources.closed is not cleanup_unconfirmed
+    assert bool(worker._backend_sessions.pending_store_keys) == cleanup_unconfirmed
 
 
 @pytest.mark.parametrize("with_load", (False, True), ids=("cold", "external_load"))
@@ -578,7 +582,7 @@ def test_layerwise_missing_load_hook_aborts_prefetch_and_next_step_can_load() ->
     assert resources.closed
 
 
-def test_layerwise_failed_load_finish_is_observed_without_repeating_backend_cleanup() -> None:
+def test_layerwise_failed_load_finish_keeps_backend_ownership_for_close_retry() -> None:
     worker, resources, backend = make_worker(layerwise=True, store=False, physical_layers=(0,))
     backend.session_end_result = -1
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
@@ -588,8 +592,16 @@ def test_layerwise_failed_load_finish_is_observed_without_repeating_backend_clea
         worker.wait_for_layer_load("layers.0.group.0")
     with pytest.raises(RuntimeError, match="batch_get_end failed"):
         worker.close()
-    assert sum(call[0] == "batch_get_end" for call in backend.calls) == 1
+    assert sum(call[0] == "batch_get_end" for call in backend.calls) == 2
     assert worker._load_executor.stopped
+    assert not resources.closed
+    assert worker._backend_sessions.has_load_sessions
+    backend.session_end_result = 0
+    # The execution error is still reported, independently of successful resource retry.
+    with pytest.raises(RuntimeError, match="batch_get_end failed"):
+        worker.close()
+    assert sum(call[0] == "batch_get_end" for call in backend.calls) == 3
+    assert not worker._backend_sessions.has_load_sessions
     assert resources.closed
 
 
@@ -766,8 +778,10 @@ def test_layerwise_escaped_preparation_error_skips_copies_releases_sources_and_n
         assert sum(call[0] in ("publish", "batch_commit") for call in backend.calls) == 1
         worker.end_step()
     finally:
-        worker.close()
-    assert resources.closed
+        with pytest.raises(RuntimeError, match="cleanup is unconfirmed") if use_gva else nullcontext():
+            worker.close()
+    assert resources.closed is not use_gva
+    assert bool(worker._backend_sessions.pending_store_keys) == use_gva
 
 
 @pytest.mark.parametrize("start_results", ([0, 0], [0, -1]), ids=("all_started", "partial_start"))
@@ -995,5 +1009,33 @@ def test_gva_store_failure_is_a_cache_miss_and_next_step_can_publish(failure: st
     worker.finish_step()
     assert worker.take_released_store_job_ids() == {18}
     assert worker.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"b",))).available_end_token == 4
-    worker.close()
-    assert resources.closed
+    cleanup_unconfirmed = failure != "allocation"
+    with pytest.raises(RuntimeError, match="cleanup is unconfirmed") if cleanup_unconfirmed else nullcontext():
+        worker.close()
+    assert resources.closed is not cleanup_unconfirmed
+    assert bool(worker._backend_sessions.pending_store_keys) == cleanup_unconfirmed
+
+
+def test_gva_unconfirmed_revoke_survives_steps_without_reopening_or_reusing_the_address() -> None:
+    worker, resources, store = make_gva_worker()
+    store.copy_result = -9
+    try:
+        for job_id in (17, 18):
+            command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, job_id)
+            begin_step(worker, store=(command,))
+            worker.save_layer("layers.0.group.0")
+            worker.save_layer("layers.1.group.0")
+            worker.finish_step()
+            assert worker.take_released_store_job_ids() == {job_id}
+            assert len(worker._backend_sessions.pending_store_keys) == 1
+            assert worker._layerwise_backend_io._store_plan is None
+            worker.end_step()
+        # The second attempt cannot acquire or copy through the abandoned session.
+        assert sum(item[0] == "alloc" for item in store.calls) == 1
+        assert sum(item[0] == "copy" for item in store.calls) == 2
+        assert not any(item[0] == "publish" for item in store.calls)
+    finally:
+        with pytest.raises(RuntimeError, match="cleanup is unconfirmed"):
+            worker.close()
+    assert not resources.closed
+    assert worker._load_executor.stopped and worker._store_executor.stopped

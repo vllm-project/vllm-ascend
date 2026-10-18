@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BufferRegistration,
     LayerwiseAccessKind,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.sessions import MooncakeSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     BulkProjectionBinder,
     GVALayerwiseProjectionBinder,
@@ -60,6 +61,9 @@ class FakeBackend:
         self.store_session_revoke_result: list[int] | None = None
         self.calls: list[tuple[Any, ...]] = []
         self.closed = False
+
+    def create_sessions(self) -> MooncakeSessions:
+        return MooncakeSessions(self)
 
     def exists(self, keys):
         self.calls.append(("exists", tuple(keys)))
@@ -273,6 +277,7 @@ class FakeResources:
         self.backend = backend
         self.backend_spec = backend_spec
         self._topology = topology
+        self.backend_sessions = None
         self.num_blocks = 8
         self.kv_caches = None
         self.closed = False
@@ -308,6 +313,8 @@ class FakeResources:
         return registration
 
     def close(self) -> None:
+        if self.backend_sessions is not None:
+            self.backend_sessions.close()
         self.closed = True
         self.kv_caches = None
 

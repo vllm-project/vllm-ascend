@@ -1,4 +1,4 @@
-"""Execute Layerwise transfer work through Backend key-range sessions."""
+"""Prepare layer ranges and interpret request outcomes; Backend owns remote sessions."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .io import BackendIO, _batch_sources, _failed_load_completions, _load_compl
 
 
 class KeyRangeBackendIO(BackendIO):
-    """Apply Backend range-session APIs to layer-restricted bindings."""
+    """Worker-side range preparation, source readiness, copying, and request evidence."""
 
     def __init__(self, backend: KeyRangeBackend, backend_spec: BackendSpec) -> None:
         super().__init__(backend, backend_spec)
@@ -34,17 +34,6 @@ class KeyRangeBackendIO(BackendIO):
         if self._projection is not None:
             raise RuntimeError("KeyRange projection is already bound")
         self._projection = projection
-
-    def validate_support(self) -> None:
-        self._key_range_backend.validate_key_range_support()
-
-    def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._load_plan = None
-        return self._key_range_backend.start_key_range_load(keys)
-
-    def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._store_plan = None
-        return self._key_range_backend.start_key_range_store(keys, object_sizes)
 
     def prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._load_plan = prepare_layer_load(batch)
@@ -130,21 +119,11 @@ class KeyRangeBackendIO(BackendIO):
             return LayerStoreResult(None, False, result_error)
         return LayerStoreResult(result_codes, (True,) * len(result_codes), result_error)
 
-    def finish_load_sessions(self, keys: list[str]) -> None:
-        self._key_range_backend.finish_key_range_load(keys)
+    def clear_load_plan(self) -> None:
         self._load_plan = None
 
-    def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        try:
-            return self._key_range_backend.commit_key_range_store(keys)
-        finally:
-            self._store_plan = None
-
-    def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        try:
-            return self._key_range_backend.revoke_key_range_store(keys)
-        finally:
-            self._store_plan = None
+    def clear_store_plan(self) -> None:
+        self._store_plan = None
 
     @property
     def _bound_projection(self) -> KeyRangeLayerwiseProjection:
