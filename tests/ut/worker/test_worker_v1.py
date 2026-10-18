@@ -1164,7 +1164,6 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()
@@ -1271,7 +1270,6 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()
@@ -1301,23 +1299,16 @@ class TestNPUWorker(TestBase):
             expected_result = int(10000 * 0.9 - 6000)
             self.assertEqual(result, expected_result)
 
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
     def test_determine_available_memory_memory_profiling_error(
-        self,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
-        mock_torch_mem_get_info,
-        mock_memory_profiling,
-        mock_get_ascend_config,
+        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
         # Mock memory_profiling where free memory after profile > init free memory (error case)
         mock_profile_result = MagicMock()
         mock_profile_result.non_kv_cache_memory = 2000
@@ -1339,6 +1330,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
             worker._kvpp_cache_allocation_plan = None
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
@@ -1387,7 +1379,6 @@ class TestNPUWorker(TestBase):
         mock_context.__exit__ = MagicMock(return_value=False)
         mock_memory_profiling.return_value = mock_context
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        mock_get_ascend_config.return_value.eplb_config.compact_weights = False
 
         # Mock init_snapshot
         mock_init_snapshot = MagicMock()
@@ -1630,6 +1621,8 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.parallel_config.enable_eplb = True
+            worker.vllm_config.parallel_config.eplb_config.communicator = "torch_gloo"
             worker.vllm_config.weight_transfer_config = None
             worker.vllm_config.kv_transfer_config = None
 
@@ -1648,6 +1641,38 @@ class TestNPUWorker(TestBase):
             mock_allocator.get_current_usage.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="weights")
             worker.model_runner.load_model.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    def test_load_model_with_sleep_and_disabled_eplb(self, mock_allocator_class):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.parallel_config.enable_eplb = False
+            worker.vllm_config.parallel_config.eplb_config.communicator = "hixl"
+            worker.vllm_config.weight_transfer_config = None
+            mock_allocator_class.get_instance.return_value.get_current_usage.return_value = 0
+            worker.load_model()
+            worker.model_runner.load_model.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    def test_load_model_rejects_hixl_eplb_sleep_before_allocation(self, mock_allocator_class):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = SimpleNamespace(
+                model_config=SimpleNamespace(enable_sleep_mode=True),
+                parallel_config=SimpleNamespace(enable_eplb=True, eplb_config=SimpleNamespace(communicator="hixl")),
+            )
+            with self.assertRaisesRegex(ValueError, "HIXL EPLB weight compaction is incompatible with sleep mode"):
+                worker.load_model()
+            mock_allocator_class.get_instance.assert_not_called()
+            worker.model_runner.load_model.assert_not_called()
 
     def test_load_model_without_sleep_mode(self):
         """Test load_model method - without sleep mode enabled"""

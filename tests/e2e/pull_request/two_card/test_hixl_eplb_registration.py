@@ -55,6 +55,7 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
         session = eplb_communicator._HixlSession(dist.group.WORLD)
         session.initialize({"model": communicator})
         registered = tuple(session._registered_handles)
+        assert len(registered) == 1
         # Grow the allocator, then let it reclaim unused mapped pages while
         # the original expert registrations and connections remain alive.
         extra = torch.empty(128 * _MIB, dtype=torch.uint8, device=f"npu:{rank}")
@@ -73,24 +74,15 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
         assert not session._storage_refs
         del session, communicator, buffers, weights, allocation
         torch.npu.empty_cache()
-    # Exercise the 4000-region boundary on the real backend, including one
-    # additional region for the receive buffer.
-    region_count = 3999
-    # A small allocator prefix can make a 2 MiB view cover two aligned
-    # pages; leave another page between views so merging keeps them apart.
-    region_spacing = 6 * _MIB
-    allocation = torch.empty(region_count * region_spacing // 4, dtype=torch.float32, device=f"npu:{rank}")
-    weights = [
-        [allocation[offset : offset + 2 * _MIB // 4].view(2, -1)]
-        for offset in range(0, allocation.numel(), region_spacing // 4)
-    ]
+    # More than 4000 distinct storages still require only one registration.
+    weights = [[torch.empty((2, 8), dtype=torch.float32, device=f"npu:{rank}")] for _ in range(4001)]
     buffers = [torch.empty_like(weights[0][0])]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, weights, buffers)
     session = eplb_communicator._HixlSession(dist.group.WORLD)
     session.initialize({"model": communicator})
-    assert len(session._registered_handles) == 4000
+    assert len(session._registered_handles) == 1
     session.close()
-    del session, communicator, buffers, weights, allocation
+    del session, communicator, buffers, weights
     torch.npu.empty_cache()
     if rank == 0:
         print(

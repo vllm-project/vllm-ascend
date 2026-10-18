@@ -152,6 +152,8 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
     session = eplb_communicator._HixlSession(group)
+    session._compact_region = (0, 2_097_152)
+    monkeypatch.setattr(session, "_compact_tensor_storages", lambda _tensors: None)
     session.initialize({"main": communicator})
     assert session._hixl is hixl_compat
     assert engine.options == {}

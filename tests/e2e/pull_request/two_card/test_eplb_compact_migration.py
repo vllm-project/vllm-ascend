@@ -63,7 +63,7 @@ def _migration_worker(rank, port, fp4):
             assert source.untyped_storage().nbytes() == destination.untyped_storage().nbytes()
             assert torch_npu.get_npu_format(source) == torch_npu.get_npu_format(destination)
     parameter_aliases = [torch.nn.Parameter(tensor, requires_grad=False) for view in weights for tensor in view]
-    communicator = AscendHixlEplbCommunicator(dist.group.WORLD, [weights], buffers, compact_weights=True)
+    communicator = AscendHixlEplbCommunicator(dist.group.WORLD, [weights], buffers)
     session = _HixlSession(dist.group.WORLD)
     session.initialize({"model": communicator})
     assert len(session._registered_handles) == 1

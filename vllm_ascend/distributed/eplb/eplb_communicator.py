@@ -27,8 +27,6 @@ from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
-_HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
-_HIXL_MAX_REGISTERED_REGIONS = 4000
 _TRANSFER_TIMEOUT_SECONDS = 300
 _STATUS_POLL_SECONDS = 0.0005
 
@@ -197,9 +195,8 @@ class _HixlSession:
                 for views in (*communicator._all_expert_weights, communicator._expert_buffer)
                 for tensor in communicator._iter_storage_tensors(views)
             )
-            if any(c._compact_weights for c in communicators.values()):
-                torch.npu.set_device(self._device)
-                self._compact_tensor_storages(tensors)
+            torch.npu.set_device(self._device)
+            self._compact_tensor_storages(tensors)
             for key, communicator in communicators.items():
                 local_meta[key] = communicator._local_send_meta()
 
@@ -255,57 +252,15 @@ class _HixlSession:
         self._confirm_all_ranks(local_error, name)
 
     def _register_tensor_segments(self, tensors: Sequence[torch.Tensor]) -> None:
-        """Register only aligned pages protected by live transferable storage.
-
-        Expandable allocator segments can grow or shed free physical pages.
-        Their snapshot size is therefore not a stable registration identity.
-        Holding the underlying storage keeps these pages allocated, including
-        when a tensor is rebound to another storage during model rebuilding.
-        """
-        if self._compact_region is not None:
-            self._storage_refs.extend(tensor.untyped_storage() for tensor in tensors)
-            if self._rank == 0:
-                logger.info(
-                    "Registering 1 compact NPU memory region (%.2f GiB) for HIXL EPLB.",
-                    self._compact_region[1] / 1024**3,
-                )
-            self._register_region(*self._compact_region)
-            return
-        regions: list[tuple[int, int]] = []
-        for tensor in tensors:
-            storage = tensor.untyped_storage()
-            start = tensor.data_ptr()
-            end = start + tensor.nbytes
-            if tensor.nbytes <= 0 or not storage.data_ptr() <= start < end <= storage.data_ptr() + storage.nbytes():
-                raise ValueError("HIXL EPLB tensor byte range must fit its underlying storage")
-            self._storage_refs.append(storage)
-            regions.append(
-                (
-                    start // _HIXL_MEMORY_ALIGNMENT * _HIXL_MEMORY_ALIGNMENT,
-                    (end + _HIXL_MEMORY_ALIGNMENT - 1) // _HIXL_MEMORY_ALIGNMENT * _HIXL_MEMORY_ALIGNMENT,
-                )
-            )
-        merged: list[tuple[int, int]] = []
-        for start, end in sorted(regions):
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        ordered_regions = [(start, end - start) for start, end in merged]
-        if len(ordered_regions) > _HIXL_MAX_REGISTERED_REGIONS:
-            raise ValueError(
-                f"HIXL EPLB requires {len(ordered_regions)} registered memory regions after merging; "
-                f"the maximum is {_HIXL_MAX_REGISTERED_REGIONS}"
-            )
+        """Pin compacted storages until their shared allocation is deregistered."""
+        assert self._compact_region is not None
+        self._storage_refs.extend(tensor.untyped_storage() for tensor in tensors)
         if self._rank == 0:
-            registered_bytes = sum(size for _, size in ordered_regions)
             logger.info(
-                "Registering %d NPU memory regions (%.2f GiB) for HIXL EPLB.",
-                len(ordered_regions),
-                registered_bytes / 1024**3,
+                "Registering 1 compact NPU memory region (%.2f GiB) for HIXL EPLB.",
+                self._compact_region[1] / 1024**3,
             )
-        for start, size in ordered_regions:
-            self._register_region(start, size)
+        self._register_region(*self._compact_region)
 
     def _compact_tensor_storages(self, tensors: Sequence[torch.Tensor]) -> None:
         # Runs before addresses are exchanged or any graph is captured. The
@@ -509,14 +464,12 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         cpu_group: ProcessGroup,
         all_expert_weights: Sequence[Sequence[Any]],
         expert_buffer: Sequence[Any],
-        compact_weights: bool = False,
     ) -> None:
         self._cpu_group = cpu_group
         self._rank = cpu_group.rank()
         self._world_size = cpu_group.size()
         self._all_expert_weights = all_expert_weights
         self._expert_buffer = expert_buffer
-        self._compact_weights = compact_weights
         self._session: _HixlSession | None = None
         self._remote_send_meta: dict[int, _ExpertMetadata] = {}
         self._expert_to_src_row: list[dict[int, int]] | None = None

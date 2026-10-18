@@ -147,24 +147,21 @@ Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
 omit it or set it to `stair` to run STAIR.
 
-#### HIXL Weight Compaction (Experimental)
+#### HIXL Weight Compaction
 
-With Model Runner V2, set `--additional-config '{"eplb_config":{"compact_weights":true}}'` with
-`--enable-eplb --eplb-config.communicator hixl` to pack all participating expert storages and
-receive buffers into one registered allocation per rank. The default is `false`.
-Compaction preserves native NZ storage descriptors and parameter aliases. It
-runs before address exchange, profiling, and graph capture, and keeps
-`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` unchanged. It uses no MemPool.
+With Model Runner V2, HIXL EPLB automatically packs participating expert storages
+and receive buffers into one registered allocation per rank. No additional
+configuration is needed. Compaction preserves native NZ storage descriptors
+and parameter aliases. It runs before address exchange, profiling, and graph
+capture, and keeps `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` unchanged.
+It uses no MemPool. The Gloo path retains its existing allocation behavior.
+
 NZ migration requires a `torch_npu` build with native-NZ `copy_` support.
-Sleep mode is incompatible because its memory pool cannot offload this allocation.
-Selecting or falling back to `torch_gloo` with compaction enabled is rejected.
-
-The allocation remains owned by the live storages, which HIXL pins until
-deregistration. The memory profile counts this allocation as non-Torch memory.
+HIXL EPLB cannot be used with sleep mode because its memory pool cannot offload
+the compact allocation. The allocation remains owned by the live storages,
+which HIXL pins until deregistration; memory profiling counts it once.
 The original weights and compact allocation coexist during the initial copy,
 so initialization peak memory can increase even when steady memory decreases.
-Validate full-model accuracy, graph replay, migration, and memory use on the
-target runtime before using this experimental option in production.
 
 #### MRv2 Load Collection Phase
 

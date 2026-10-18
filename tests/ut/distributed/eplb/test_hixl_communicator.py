@@ -177,6 +177,8 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
     session = eplb_communicator._HixlSession(group)
+    session._compact_region = (0, 2_097_152)
+    monkeypatch.setattr(session, "_compact_tensor_storages", lambda _tensors: None)
     assert engine.initializations == 0
     session.initialize({"main": communicator})
     communicator.set_stream(None)
@@ -272,31 +274,12 @@ def _bare_session(monkeypatch):
     session._engine = _Engine()
     session._hixl = _fake_hixl(session._engine)
     session._device = SimpleNamespace(type="npu", index=0)
+    session._compact_region = (0, 2_097_152)
+    monkeypatch.setattr(session, "_compact_tensor_storages", lambda _tensors: None)
     session._usable = True
     session._confirm_all_ranks = lambda error, _operation: (_ for _ in ()).throw(error) if error else None
     monkeypatch.setattr(torch, "npu", SimpleNamespace(set_device=lambda _device: None), raising=False)
     return session
-
-
-@pytest.mark.parametrize(
-    "ranges, expected",
-    [
-        ([(0, 84), (0, 86)], [(0, 86)]),
-        ([(0, 4), (2, 4)], [(0, 6)]),
-        ([(0, 2), (2, 2)], [(0, 4)]),
-        ([(0, 2), (4, 2)], [(0, 2), (4, 2)]),
-        ([(1, 1), (1, 1)], [(0, 2)]),
-    ],
-)
-def test_registration_merges_live_ranges_without_bridging_holes(monkeypatch, ranges, expected):
-    communicator = _bare_session(monkeypatch)
-    monkeypatch.setattr(eplb_communicator, "_HIXL_MEMORY_ALIGNMENT", 2)
-    tensors = [_Tensor(start, communicator._device, nbytes=size) for start, size in ranges]
-    communicator._register_tensor_segments(tensors)
-    assert [(d.addr, d.len) for d in communicator._engine.registered] == expected
-    assert len(communicator._storage_refs) == len(tensors)
-    communicator.close()
-    assert communicator._storage_refs == []
 
 
 def test_compact_registration_pins_storages_and_registers_whole_parent(monkeypatch):
@@ -312,7 +295,6 @@ def test_compact_registration_pins_storages_and_registers_whole_parent(monkeypat
 
 def test_compaction_precedes_address_exchange(monkeypatch):
     session, models, engine = _shared_models(monkeypatch)
-    models["main"]._compact_weights = True
     compact = MagicMock()
 
     def move(tensors):
@@ -330,44 +312,24 @@ def test_compaction_precedes_address_exchange(monkeypatch):
     session.close()
 
 
-@pytest.mark.parametrize("region_count", [4000, 4001])
-def test_registration_region_limit_is_checked_before_any_backend_call(monkeypatch, region_count):
-    session = _bare_session(monkeypatch)
-    register = MagicMock(side_effect=[(0, handle) for handle in range(1, 4001)])
-    session._engine.register_mem = register
-    alignment = eplb_communicator._HIXL_MEMORY_ALIGNMENT
-    tensors = [_Tensor((2 * index + 1) * alignment, session._device) for index in range(region_count)]
-    if region_count == 4001:
-        with pytest.raises(ValueError, match="4001.*maximum is 4000"):
-            session._register_tensor_segments(tensors)
-        register.assert_not_called()
-        assert session._registered_handles == []
-    else:
-        session._register_tensor_segments(tensors)
-        assert register.call_count == 4000
-        assert len(session._registered_handles) == 4000
-    session.close()
-    assert session._storage_refs == []
+def test_default_compaction_failure_prevents_registration(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    compact = MagicMock(side_effect=RuntimeError("compaction failed"))
+    monkeypatch.setattr(session, "_compact_tensor_storages", compact)
+    with pytest.raises(RuntimeError, match="compaction failed"):
+        session.initialize(models)
+    compact.assert_called_once()
+    assert engine.initializations == 0
+    assert engine.registered == []
+    assert engine.connected == []
 
 
-def test_registration_limit_counts_merged_regions_instead_of_input_tensors(monkeypatch):
+def test_many_tensors_register_one_compact_region(monkeypatch):
     session = _bare_session(monkeypatch)
     session._register_tensor_segments([_Tensor(1000, session._device) for _ in range(4001)])
     assert len(session._registered_handles) == 1
+    assert len(session._storage_refs) == 4001
     session.close()
-
-
-def test_registration_limit_failure_rolls_back_before_registering_either_model(monkeypatch):
-    session, models, engine = _shared_models(monkeypatch)
-    models["main"]._all_expert_weights[1][0]._address = 3 * eplb_communicator._HIXL_MEMORY_ALIGNMENT
-    monkeypatch.setattr(eplb_communicator, "_HIXL_MAX_REGISTERED_REGIONS", 1)
-    with pytest.raises(ValueError, match="2.*maximum is 1"):
-        session.initialize(models)
-    assert engine.registered == []
-    assert engine.connected == []
-    assert engine.finalized
-    assert session._engine is None
-    assert session._storage_refs == []
 
 
 def test_registration_keeps_old_storage_alive_after_tensor_rebinding(monkeypatch):
@@ -678,22 +640,14 @@ def test_models_cannot_share_a_session_across_groups_or_devices(monkeypatch, mis
     assert not session._storage_refs
 
 
-def test_partial_registration_rolls_back_only_successful_handles(monkeypatch):
+def test_registration_failure_rolls_back_without_handles(monkeypatch):
     session, models, engine = _shared_models(monkeypatch)
-    monkeypatch.setattr(eplb_communicator, "_HIXL_MEMORY_ALIGNMENT", 128)
-    register = engine.register_mem
-    calls = 0
-
-    def fail_second(descriptor, mem_type):
-        nonlocal calls
-        calls += 1
-        return (103900, 0) if calls == 2 else register(descriptor, mem_type)
-
-    monkeypatch.setattr(engine, "register_mem", fail_second)
+    register = MagicMock(return_value=(103900, 0))
+    monkeypatch.setattr(engine, "register_mem", register)
     with pytest.raises(RuntimeError, match="register memory"):
         session.initialize(models)
-    assert calls == 2
-    assert engine.deregistered == [1]
+    register.assert_called_once()
+    assert engine.deregistered == []
     assert engine.finalizations == 1
     assert not session._registered_handles
     assert not session._storage_refs

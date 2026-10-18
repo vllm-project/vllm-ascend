@@ -595,16 +595,7 @@ class TestNPUPlatform(TestBase):
             communicator="hixl",
         )
 
-        for compact_weights in (False, True):
-            vllm_config.additional_config = {"eplb_config": {"compact_weights": compact_weights}}
-            with self.subTest(compact_weights=compact_weights), patch.dict("os.environ", {}, clear=True):
-                _validate_eplb_config(vllm_config)
-
-    def test_validate_eplb_config_rejects_v1_compact_weights(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = False
-        vllm_config.additional_config = {"eplb_config": {"compact_weights": True}}
-        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
+        with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(

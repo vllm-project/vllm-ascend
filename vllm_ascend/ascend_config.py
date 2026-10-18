@@ -283,8 +283,6 @@ class EplbConfig:
     """
 
     dynamic_eplb: bool = False
-    # Pack HIXL expert weights and receive buffers before profile/graph capture.
-    compact_weights: bool = False
     expert_map_path: str | None = None
     expert_heat_collection_interval: int = 600
     algorithm_execution_interval: int = 50
@@ -678,13 +676,6 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
-        if self.eplb_config.compact_weights and not vc.parallel_config.enable_eplb:
-            raise ValueError("EPLB compact_weights requires enable_eplb=True.")
-        if self.eplb_config.compact_weights and vc.model_config is not None and vc.model_config.enable_sleep_mode:
-            raise ValueError(
-                "EPLB compact_weights is incompatible with sleep mode: "
-                "the compact allocation is outside the sleep-mode memory pool."
-            )
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

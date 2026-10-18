@@ -612,7 +612,10 @@ class NPUWorker(WorkerBase):
         profile_result.non_kv_cache_memory = (
             profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
         )
-        if get_ascend_config().eplb_config.compact_weights:
+        if (
+            self.vllm_config.parallel_config.enable_eplb
+            and self.vllm_config.parallel_config.eplb_config.communicator == "hixl"
+        ):
             # Compaction moves already-accounted weights outside the caching
             # allocator. Count driver consumption once, plus transient Torch
             # activation headroom, including the pre-graph peak above.
@@ -855,6 +858,11 @@ class NPUWorker(WorkerBase):
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
+            if (
+                self.vllm_config.parallel_config.enable_eplb
+                and self.vllm_config.parallel_config.eplb_config.communicator == "hixl"
+            ):
+                raise ValueError("HIXL EPLB weight compaction is incompatible with sleep mode.")
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
