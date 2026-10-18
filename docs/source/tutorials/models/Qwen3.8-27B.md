@@ -337,6 +337,7 @@ Before starting the service:
     # Load model from ModelScope to speed up download
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
     export VLLM_USE_MODELSCOPE=True
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_BUFFSIZE=512
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
@@ -360,12 +361,13 @@ Before starting the service:
         --gpu-memory-utilization 0.85 \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
     ```
 
     Key Parameter Descriptions:
 
     - `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
+    - `VLLM_USE_V2_MODEL_RUNNER=0` and `"enable_flashcomm1": true` enable the Qwen3.8 dense sequence-parallel path. This initial path requires DP=1, PP=1, TP>1, and PCP/DCP disabled.
     - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
     - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
     - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:

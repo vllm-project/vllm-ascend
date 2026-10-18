@@ -20,21 +20,21 @@
 from functools import wraps
 
 import torch
+from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
-
-try:
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
-    from vllm.sequence import IntermediateTensors
-except ImportError:
-    Qwen3_5MultiTokenPredictor = None
-    IntermediateTensors = None
+from vllm.model_executor.models import qwen3_5 as _qwen3_5
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer as _UpstreamQwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
+from vllm_ascend.utils import enable_dense_sp
+
+logger = init_logger(__name__)
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -100,20 +100,73 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
         return out
 
 
-class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
+def _disable_projection_reduction(projection: torch.nn.Module) -> None:
+    custom_op = getattr(projection, "custom_op", None)
+    if custom_op is not None:
+        raise ValueError(
+            "Qwen3.5 dense sequence parallelism does not support a custom "
+            f"projection communication operator on {projection.prefix}."
+        )
+    projection.reduce_results = False
+
+
+def _configure_dense_sequence_parallel(layer: _UpstreamQwen3_5DecoderLayer) -> None:
+    # Reuse Qwen3NextModel's entry shard/final gather contract. Dense MLPs
+    # need an explicit gather/reduce-scatter pair because upstream only
+    # implements the middle-of-layer contract for MoE blocks.
+    # The upstream model-level contract is currently keyed by this MoE-named
+    # field, so keep that compatibility detail isolated here.
+    layer.use_attn_reduce_scatter_for_moe = True
+    if layer.layer_type == "linear_attention":
+        _disable_projection_reduction(layer.linear_attn.out_proj)
+    else:
+        _disable_projection_reduction(layer.self_attn.o_proj)
+    _disable_projection_reduction(layer.mlp.down_proj)
+
+
+class AscendQwen3_5DecoderLayer(_UpstreamQwen3_5DecoderLayer):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        layer_type: str,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            vllm_config=vllm_config,
+            layer_type=layer_type,
+            prefix=prefix,
+        )
+        self._use_dense_sequence_parallel = enable_dense_sp(vllm_config)
+        if self._use_dense_sequence_parallel:
+            _configure_dense_sequence_parallel(self)
+            logger.info_once(
+                "Enabled Qwen3.5 dense sequence-parallel decoder; "
+                "attention o_proj and MLP down_proj use reduce-scatter."
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor = None,
+        positions: torch.Tensor,
         **kwargs: object,
     ):
+        if not self._use_dense_sequence_parallel:
+            return super().forward(
+                hidden_states=hidden_states,
+                residual=residual,
+                positions=positions,
+                **kwargs,
+            )
+
+        full_num_tokens = positions.shape[-1]
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
@@ -122,28 +175,47 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 positions=positions,
             )
         else:
-            raise ValueError("Invalid layer_type")
+            raise ValueError(f"Invalid layer_type {self.layer_type}")
 
         if self.layer_scale:
-            if len(hidden_states.shape) == 2:
+            if hidden_states.ndim == 2:
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype)[0] + 1)
             else:
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype) + 1)
+        hidden_states = sp_reduce_scatter(hidden_states)
 
-        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.mlp(hidden_states)
+        hidden_states = sp_reduce_scatter(hidden_states)
 
         if self.layer_scale:
-            if len(hidden_states.shape) == 2:
+            if hidden_states.ndim == 2:
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype)[0] + 1)
             else:
-                assert len(hidden_states.shape) == len(self.ffn_layer_scale.shape), (
-                    f"shape must be the same {len(hidden_states.shape)}, {len(self.ffn_layer_scale.shape)}"
+                assert hidden_states.ndim == self.ffn_layer_scale.ndim, (
+                    f"shape must be the same {hidden_states.ndim}, {self.ffn_layer_scale.ndim}"
                 )
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype) + 1)
 
         return hidden_states, residual
+
+
+# Qwen3_5Model resolves this symbol when its layer factory runs. Replacing the
+# factory symbol keeps the upstream class itself untouched and also preserves
+# isinstance checks because the Ascend implementation is a proper subclass.
+_qwen3_5.Qwen3_5DecoderLayer = AscendQwen3_5DecoderLayer
+
+try:
+    from vllm.model_executor.models import qwen3_5_mtp as _qwen3_5_mtp
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
+    from vllm.sequence import IntermediateTensors
+
+    # qwen3_5_mtp may have imported the decoder before this patch module.
+    _qwen3_5_mtp.Qwen3_5DecoderLayer = AscendQwen3_5DecoderLayer
+except ImportError:
+    Qwen3_5MultiTokenPredictor = None
+    IntermediateTensors = None
 
 
 if Qwen3_5MultiTokenPredictor is not None:

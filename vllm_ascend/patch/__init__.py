@@ -1147,6 +1147,24 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer`
+#    Why:
+#       Upstream sequence parallelism only connects Qwen3.5 attention to MoE
+#       blocks. Qwen3.8-27B uses the same decoder with dense MLP blocks, so
+#       enabling FlashComm otherwise leaves the dense model unsharded.
+#    How:
+#       Opt in with `additional_config.enable_flashcomm1`, reuse the upstream
+#       model-level input shard and final gather, and install an Ascend decoder
+#       subclass at the Qwen3.5 layer factories. The subclass replaces the
+#       attention and dense-MLP TP all-reduces with gather/compute/reduce-
+#       scatter boundaries. The initial lane is Model Runner V1 with TP>1,
+#       DP=PP=PCP=DCP=1.
+#    Related PR (if no, explain why):
+#       No, this is an Ascend FlashComm-specific dense-model path.
+#    Future Plan:
+#       Remove the factory override after upstream exposes a dense sequence-
+#       parallel contract that Qwen3.5/Qwen3.8 can use directly.
+#
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
