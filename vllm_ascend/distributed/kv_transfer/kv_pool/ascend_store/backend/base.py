@@ -75,6 +75,10 @@ class Backend(ABC):
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
 
+    def close(self) -> None:
+        """Release backend resources after all callers have stopped."""
+        return None
+
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         pass

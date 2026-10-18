@@ -466,6 +466,7 @@ class KVPoolWorker:
             self.enable_kv_events = True
 
     def _init_state_vars(self) -> None:
+        self._shutdown = False
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._previous_save_batch: KVCacheStoreBatch | None = None
@@ -488,6 +489,20 @@ class KVPoolWorker:
         self._step_keyinfo_cache: dict[str, Any] = {}
         self._step_lease_result: dict[str, int] = {}
         self._step_exist_cache: dict[str, int] = {}
+
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._layer_load_aborted.set()
+        threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
+        # Signal both sides before joining: a receive may be waiting for a save.
+        for thread in threads:
+            thread.request_shutdown()
+        for thread in threads:
+            thread.shutdown()
+        # Do not close the native SDK while a transfer thread can still use it.
+        self.m_store.close()
+        self._shutdown = True
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -740,6 +755,8 @@ class KVPoolWorker:
         return True
 
     def _start_kv_transfer_threads(self) -> None:
+        if self._shutdown:
+            raise RuntimeError("KV pool worker is shut down")
         if self._transfer_threads_started:
             return
 

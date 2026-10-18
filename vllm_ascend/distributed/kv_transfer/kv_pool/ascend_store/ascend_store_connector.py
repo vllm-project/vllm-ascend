@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 
 
+_LOOKUP_SHUTDOWN_POLL_MS = 100
+
+
 class AscendStoreKVEvents(KVConnectorKVEvents):
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
@@ -104,6 +107,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+        self._shutdown = False
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -151,6 +155,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        lookup_server = getattr(self, "lookup_server", None)
+        if lookup_server is not None:
+            lookup_server.close()
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+        self._shutdown = True
 
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
@@ -485,6 +501,10 @@ class LookupKeyServer:
 
         def process_request():
             while self.running:
+                if not self.socket.poll(timeout=_LOOKUP_SHUTDOWN_POLL_MS):
+                    continue
+                if not self.running:
+                    break
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
@@ -510,4 +530,7 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
+        self.thread.join()
         self.socket.close(linger=0)
+        self.ctx.term()

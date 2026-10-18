@@ -6,6 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.logger import logger
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
@@ -97,6 +98,22 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
     def _wait_for_external_slot_release(self, layer_idx: int) -> None:
         for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
+
+    def shutdown(self) -> None:
+        # Pool receive threads may be blocked in a provider's reuse waiter.
+        # Stop those providers before joining the pool's receive threads.
+        providers = getattr(self, "_layerwise_slot_release_providers", [])
+        connectors = [*providers, *(c for c in self._connectors if all(c is not p for p in providers))]
+        exception: Exception | None = None
+        for connector in connectors:
+            try:
+                connector.shutdown()
+            except Exception as exc:
+                logger.exception("Exception during connector %s shutdown.", connector.__class__.__name__)
+                if exception is None:
+                    exception = exc
+        if exception is not None:
+            raise exception
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if getattr(self, "_external_slot_release_sink_configured", False):

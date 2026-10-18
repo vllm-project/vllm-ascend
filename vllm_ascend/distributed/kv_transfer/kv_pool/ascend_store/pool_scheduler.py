@@ -1203,6 +1203,14 @@ class KVPoolScheduler:
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
 
+    def shutdown(self) -> None:
+        try:
+            if self.client is not None:
+                self.client.close()
+                self.client = None
+        finally:
+            self.store_scheduler.close()
+
 
 class LookupKeyClient:
     def __init__(self, vllm_config: "VllmConfig"):
@@ -1240,6 +1248,7 @@ class LookupKeyClient:
 
     def close(self):
         self.socket.close(linger=0)
+        self.ctx.term()
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
