@@ -23,7 +23,7 @@ def runner_cls(mamba_state_cls):
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner")
     init = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
-    assignments = [
+    assignments: list[ast.stmt] = [
         node
         for node in init.body
         if isinstance(node, ast.Assign)
