@@ -395,7 +395,11 @@ def factory_worker(monkeypatch, name, layerwise, topology, objects):
     ),
 )
 @pytest.mark.parametrize("layerwise_store", (False, True), ids=("bulk_to_layerwise", "layerwise_to_bulk"))
-def test_factory_routes_share_complete_objects(monkeypatch, backend_name, layerwise_store, pp_rank, dcp_rank, dcp_size):
+def test_factory_default_keys_share_complete_objects(
+    monkeypatch, backend_name, layerwise_store, pp_rank, dcp_rank, dcp_size
+):
+    # The injected BackendSpec deliberately has no wire/layout overrides.
+    # Native production overrides are covered by test_layerwise_compatibility.
     # Original group IDs are sparse. Nonzero PP uses absolute layers but object-relative offsets.
     topology = make_topology(
         group_ids=(0, 3),

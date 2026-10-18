@@ -13,6 +13,7 @@ from ..backend import (
     ObjectSessions,
     Registration,
 )
+from .execution.collective import StoreCollective
 from .execution.executor import Executor
 
 if TYPE_CHECKING:
@@ -52,6 +53,12 @@ class KVPoolResources:
         self._binding_started = False
         self._closed = False
         self._executors: tuple[Executor, ...] | None = None
+        self._store_collective: StoreCollective | None = None
+
+    def bind_store_collective(self, collective: StoreCollective) -> None:
+        if self._closed or self._binding_started or self._store_collective is not None:
+            raise RuntimeError("Store collective must be bound once before KV caches")
+        self._store_collective = collective
 
     def bind_backend_sessions(self, sessions: ObjectSessions) -> None:
         if self._closed or self._binding_started or self._backend_sessions is not None:
@@ -122,6 +129,8 @@ class KVPoolResources:
             raise RuntimeError("Executors must stop before KV resources are released")
         if self._backend_sessions is not None:
             self._backend_sessions.close()
+        if self._store_collective is not None:
+            self._store_collective.close()
         if self._buffer_registration is not None:
             self._buffer_registration.close()
         self.backend.close()

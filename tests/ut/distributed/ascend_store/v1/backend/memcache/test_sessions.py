@@ -12,6 +12,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 
 
+def test_gva_allocation_never_treats_ssd_hit_sentinel_as_a_writable_address():
+    backend = MagicMock()
+    backend.allocate_gva.return_value = (1000, (1 << 64) - 1)
+    sessions = MemcacheSessions(backend)
+    assert sessions.start_store(["new", "ssd_hit"], [64, 64]) == (0, -1)
+    assert sessions.pending_store_keys == ("new",)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        sessions.store_regions(("ssd_hit",), 64)
+    backend.publish_gva.assert_not_called()
+    backend.revoke_gva.assert_not_called()
+
+
 def test_gva_resolves_only_after_lease_and_retains_lease_when_query_raises():
     backend = MagicMock()
     sessions = MemcacheSessions(backend)

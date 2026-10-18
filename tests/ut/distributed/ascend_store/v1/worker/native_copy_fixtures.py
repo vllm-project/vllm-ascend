@@ -13,9 +13,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcach
 class ByteCopySDK:
     """Model native publication and copies over registered CPU memory, not NPU transport."""
 
-    def __init__(self, objects):
+    def __init__(self, objects, readable=None):
         self.objects = objects
-        self.readable = set(objects)
+        self.readable = set(objects) if readable is None else readable
         self.regions = {}
         self.calls = []
         self.closed = False
@@ -102,7 +102,11 @@ class ByteCopySDK:
         return self.batch_get_session_end(keys)
 
     def batch_alloc(self, keys, sizes):
-        self.batch_put_session_start(keys, sizes, None)
+        # Native GVA allocation is idempotent, unlike Mooncake PUT session start.
+        for key, size in zip(keys, sizes, strict=True):
+            self.objects.setdefault(key, ctypes.create_string_buffer(size))
+            assert ctypes.sizeof(self.objects[key]) == size
+        self.calls.append(("allocate", tuple(keys), tuple(sizes)))
         return [ctypes.addressof(self.objects[key]) for key in keys]
 
     def batch_copy(self, remote, local, sizes, direction):
