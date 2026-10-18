@@ -1083,6 +1083,8 @@ def test_packed_consumer_orders_retained_clones_and_layer_processing(num_buffers
             active = self.previous
 
     streams = tuple(QueuedStream() for _ in range(num_buffers))
+    caller = QueuedStream()
+    preparation = []
     num_chunks = 2 * num_buffers + 1
     expected = torch.arange(1, num_chunks + 1, dtype=torch.float32)
     runtime = torch.zeros_like(expected)
@@ -1099,13 +1101,17 @@ def test_packed_consumer_orders_retained_clones_and_layer_processing(num_buffers
     with (
         patch(f"{_MODULE}._get_streams", return_value=streams),
         patch(f"{_MODULE}.unpack_tensor", side_effect=delayed_unpack),
+        patch.object(torch.npu, "current_stream", return_value=caller),
     ):
         for _ in range(2):
+            preparation.clear()
+            caller.pending.append(lambda: preparation.append("ready"))
             retained = []
             runtime.zero_()
             payloads = iter(expected.split(1))
 
             def broadcast(packed, *, src, stream):
+                assert preparation == ["ready"]
                 assert active is stream
                 value = next(payloads)
                 stream.pending.append(lambda: packed.copy_(value.view(torch.uint8)))
