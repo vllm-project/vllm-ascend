@@ -30,9 +30,7 @@ def test_worker_uses_backend_supplied_session_owner(monkeypatch, use_gva):
     try:
         create.assert_called_once_with()
         assert worker._backend_sessions is sessions
-        assert resources.backend_sessions is sessions
-        if use_gva:
-            assert worker._gva_backend_io._sessions is sessions
+        assert resources._backend_sessions is sessions
         validate.assert_not_called()
     finally:
         worker.close()

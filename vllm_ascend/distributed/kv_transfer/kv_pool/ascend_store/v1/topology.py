@@ -1,4 +1,4 @@
-"""Describe the resolved static topology shared by KV projection and Worker."""
+"""Describe the resolved static topology shared by Mapping, Reachability and Worker."""
 
 from __future__ import annotations
 

@@ -9,11 +9,11 @@ import pytest
 from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, begin_step, make_topology, make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import RangeStoreCommand
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import LayerStoreResult
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.worker import (
     LayerwiseWorker,
     _StoreState,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.evidence import LayerStoreResult
 
 
 def test_layer_results_update_only_current_keys_and_keep_scalar_success_constant_time():
@@ -72,7 +72,6 @@ def test_store_admission_keeps_failed_requests_separate_from_copy_sources(start_
         RangeStoreCommand("duplicate", TokenRange(0, 4), ((5,),), (b"a",), 4, 19),
     )
     error = RuntimeError(f"failed at {failure_stage}")
-    io = worker._layerwise_backend_io
     if failure_stage == "start":
         start = worker._backend_sessions.start_store
 
@@ -86,7 +85,7 @@ def test_store_admission_keeps_failed_requests_separate_from_copy_sources(start_
         def fail_preparation(batch):
             raise error
 
-        monkeypatch.setattr(io, "prepare_store_layers", fail_preparation)
+        monkeypatch.setattr(worker, "_prepare_store_layers", fail_preparation)
     try:
         begin_step(worker, store=commands)
         for layer_id in (2, 2, 5, 5, 9, 9):

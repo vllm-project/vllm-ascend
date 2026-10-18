@@ -18,7 +18,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import make_gva_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import LoadCommand, RangeStoreCommand
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import arguments
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import transfer as layer_transfer
 
 
 @pytest.mark.parametrize("scenario", ("no_commands", "no_candidates", "all_present", "all_starts_failed"))
@@ -36,9 +36,8 @@ def test_known_empty_store_never_creates_a_step_session_or_layer_work(scenario, 
         source_ready_event_factory=record,
         start_gate_factory=gate,
     )
-    io = worker._layerwise_backend_io
-    prepare = Mock(side_effect=io.prepare_store_layers)
-    monkeypatch.setattr(io, "prepare_store_layers", prepare)
+    prepare = Mock(side_effect=worker._prepare_store_layers)
+    monkeypatch.setattr(worker, "_prepare_store_layers", prepare)
     end_token = 0 if scenario == "no_candidates" else 4
     command = RangeStoreCommand("request", TokenRange(0, end_token), ((1,),), (b"a",), 4, 17)
     commands = () if scenario == "no_commands" else (command,)
@@ -77,7 +76,7 @@ def test_all_present_store_exits_before_materialization_or_backend_sessions(use_
         command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
         candidates = worker._build_store_candidates((command,))
         for group in candidates.groups:
-            object_size = worker._bound_layerwise_projection.groups[group.group_id].object_size
+            object_size = worker._mappings[group.group_id].local_group_block_bytes
             for axis in group.key_axes:
                 for key in axis:
                     backend.objects[key] = (10000, object_size, True)
@@ -147,26 +146,25 @@ def test_store_builds_shared_layer_information_only_after_backend_admission(star
         backend = FakeBackend()
         backend.store_session_start_result = list(start_codes)
         worker, resources, _ = make_worker(backend, layerwise=True, topology=topology)
-    io = worker._layerwise_backend_io
-    prepare = Mock(side_effect=io.prepare_store_layers)
-    monkeypatch.setattr(io, "prepare_store_layers", prepare)
-    make_group = arguments.make_layer_transfer_group
+    prepare = Mock(side_effect=worker._prepare_store_layers)
+    monkeypatch.setattr(worker, "_prepare_store_layers", prepare)
+    make_group = layer_transfer.make_layer_transfer_group
 
-    def make_admitted_group(group):
+    def make_admitted_group(group, **kwargs):
         assert any(call[0] == ("alloc" if use_gva else "batch_put_start") for call in backend.calls)
         assert len(group.selected_keys()) == start_codes.count(0)
-        return make_group(group)
+        return make_group(group, **kwargs)
 
     shared_group = Mock(side_effect=make_admitted_group)
-    monkeypatch.setattr(arguments, "make_layer_transfer_group", shared_group)
+    monkeypatch.setattr(layer_transfer, "make_layer_transfer_group", shared_group)
     plans = []
-    copy = io.store_layer
+    copy = worker._copy_store_layer
 
     def copy_with_shared_plan(event, layer):
-        plans.append(io._store_plan)
+        plans.append(worker._store_plan)
         return copy(event, layer)
 
-    monkeypatch.setattr(io, "store_layer", copy_with_shared_plan)
+    monkeypatch.setattr(worker, "_copy_store_layer", copy_with_shared_plan)
     commands = (
         RangeStoreCommand("first", TokenRange(0, 4), ((1,),), (b"a",), 4, 17),
         RangeStoreCommand("second", TokenRange(0, 4), ((2,),), (b"b",), 4, 18),
@@ -230,7 +228,7 @@ def test_blocked_store_does_not_block_load_and_retains_state_after_end_step(monk
     worker, resources, backend = make_worker(layerwise=True, start_gate_factory=FakeLoadStartGate)
     store_started = threading.Event()
     release_store = threading.Event()
-    copy = worker._layerwise_backend_io.store_layer
+    copy = worker._copy_store_layer
 
     def blocked_copy(event, layer):
         if layer == 0:
@@ -238,7 +236,7 @@ def test_blocked_store_does_not_block_load_and_retains_state_after_end_step(monk
             assert release_store.wait(timeout=5)
         return copy(event, layer)
 
-    monkeypatch.setattr(worker._layerwise_backend_io, "store_layer", blocked_copy)
+    monkeypatch.setattr(worker, "_copy_store_layer", blocked_copy)
     try:
         begin_step(
             worker,
@@ -282,7 +280,7 @@ def test_escaped_store_task_error_revokes_objects_without_claiming_source_releas
     def escaped_copy(event, layer):
         raise error
 
-    monkeypatch.setattr(worker._layerwise_backend_io, "store_layer", escaped_copy)
+    monkeypatch.setattr(worker, "_copy_store_layer", escaped_copy)
     begin_step(worker, store=(RangeStoreCommand("store", TokenRange(0, 4), ((1,),), (b"a",), 4, 17),))
     worker.save_layer("layers.0.group.0")
     worker._finalize_layerwise_store(worker._active_step)

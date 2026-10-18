@@ -8,12 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeEvent,
     begin_step,
     make_backend_spec,
+    make_reachability,
     make_topology,
     make_worker,
     store_one,
@@ -33,7 +35,7 @@ from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import compile_bulk_projection_binder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupRequest,
     TailKeyBoundary,
@@ -52,10 +54,59 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import BackendIO
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io.arguments import BulkBackendArguments
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import KVPoolResources
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import KVTransferBatch
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_module
+
+
+def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group_dict(monkeypatch):
+    topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
+    worker, _, _ = make_worker(topology=topology)
+    events = []
+    make_rows, make_keys = bulk_module.store_candidate_rows, worker_module.BulkMapping.keys
+
+    def rows(end_token, hashes, block_ids, **kwargs):
+        events.append(("rows", tuple(block_ids)))
+        return make_rows(end_token, hashes, block_ids, **kwargs)
+
+    def keys(mapping, hashes):
+        events.append(("keys", mapping.group_id))
+        return make_keys(mapping, hashes)
+
+    def reject_unused_empty_rows():
+        raise AssertionError("Present ordinary groups must not allocate fallback empty rows")
+
+    monkeypatch.setattr(bulk_module, "store_candidate_rows", rows)
+    monkeypatch.setattr(worker_module.BulkMapping, "keys", keys)
+    monkeypatch.setattr(bulk_module, "empty_candidate_rows", reject_unused_empty_rows)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,), (), (), (7,)), (b"a",), 4, 17)
+    try:
+        candidates = worker._build_store_candidates((command,))
+        assert events == [("rows", (1,)), ("keys", 0), ("rows", (7,)), ("keys", 3)]
+        assert tuple(group.group_id for group in candidates.groups) == (0, 3)
+    finally:
+        worker.close()
+
+
+def test_bulk_registration_does_not_reassemble_reachability_or_checkpoint_policy(monkeypatch) -> None:
+    worker, _, _ = make_worker(topology=make_align_state_topology(), bind=False)
+    reachability = worker._reachability
+    assert worker._state_group_ids == frozenset((1,))
+    assert worker._companion_group_ids == (0,)
+    assert worker._fine_grained_lookup
+
+    def reject_static_selection(*_args, **_kwargs):
+        raise AssertionError("Registration must not select Reachability algorithms")
+
+    monkeypatch.setattr(KVCacheSpecRegistry, "get_manager_class", reject_static_selection)
+    try:
+        worker.bind_kv_caches({"cache": object()})
+        assert worker._reachability is reachability
+        assert tuple(worker._mappings) == (0, 1)
+        for mapping in worker._mappings.values():
+            assert not hasattr(mapping, "reachability")
+            assert not hasattr(mapping, "checkpoint_policy")
+            assert not hasattr(mapping, "fine_grained_lookup")
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize(
@@ -70,8 +121,12 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
     resources = KVPoolResources(
         backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
     )
-    binder = compile_bulk_projection_binder(topology, 256, retention_interval=retention_interval)
-    worker = BulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = BulkWorker(
+        topology,
+        resources,
+        reachability=make_reachability(topology, 256, retention_interval=retention_interval),
+        source_ready_event_factory=FakeEvent,
+    )
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
     cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 2, 16, 1, 1)
     caches = {group.layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups}
@@ -133,8 +188,8 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     )
     worker = BulkWorker(
         topology,
-        compile_bulk_projection_binder(topology, 256),
         resources,
+        reachability=make_reachability(topology, 256),
         load_async=load_async,
         source_ready_event_factory=FakeEvent,
     )
@@ -244,7 +299,7 @@ def test_ordinary_bulk_worker_owns_lookup_load_store_rows_and_ranges() -> None:
     worker.end_step()
     get_call = next(call for call in backend.calls if call[0] == "get")
     assert get_call[2] == ((1128, 2128), (1192, 2192))
-    assert get_call[3] == ((32, 32), (16, 16))
+    assert get_call[3] == ((32, 32), (32, 32))
 
     completion = store_one(
         worker,
@@ -252,7 +307,7 @@ def test_ordinary_bulk_worker_owns_lookup_load_store_rows_and_ranges() -> None:
     )
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert put_call[1][0].endswith("@62")
-    assert put_call[2:] == (((1192, 2192),), ((16, 16),))
+    assert put_call[2:] == (((1192, 2192),), ((32, 32),))
     (evidence,) = completion.evidence.transfer_evidence
     assert evidence.source.block_id == 3
     assert evidence.source.physical_layer_ids == (0, 1)
@@ -337,7 +392,7 @@ def test_hybrid_bulk_worker_owns_fine_lookup_load_range_and_checkpoint_store(mon
     assert ["@head_or_tp_rank:1@" in key for key in exists_calls[1][1][::2]] == [False, True]
 
     backend.calls.clear()
-    monkeypatch.setattr(worker._bulk_projection.reachability, "select_for_load", lambda *_args: (None, None))
+    monkeypatch.setattr(worker._reachability, "select_for_load", lambda *_args: (None, None))
     load = LoadCommand(
         "load",
         TokenRange(0, 4),
@@ -693,17 +748,17 @@ def test_bulk_store_prepares_before_source_wait_and_fences_before_close(
         backend,
         source_ready_event_factory=lambda: source_ready_event,
     )
-    materialize_arguments = worker._materialize_concrete_bulk_arguments
+    materialize_arguments = worker._materialize_bulk_arguments
 
-    def prepare_arguments(batch, *, store):
-        arguments = materialize_arguments(batch, store=store)
+    def prepare_arguments(batch):
+        arguments = materialize_arguments(batch)
         trace.append("prepare")
         assert not source_ready_event.synchronized
         if failure_stage == "prepare":
             raise RuntimeError("argument preparation failed")
         return arguments
 
-    monkeypatch.setattr(worker, "_materialize_concrete_bulk_arguments", prepare_arguments)
+    monkeypatch.setattr(worker, "_materialize_bulk_arguments", prepare_arguments)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
 
@@ -777,10 +832,12 @@ def test_bulk_store_unknown_evidence_keeps_registered_resources(native_result) -
     assert not resources.closed
 
 
-def test_bulk_store_argument_alignment_error_is_not_suppressed() -> None:
-    backend = FakeBackend()
-    backend_io = BackendIO(backend, make_backend_spec(layerwise_access=None))
-    arguments = BulkBackendArguments(keys=["key"], addresses=[[1000]], sizes=[[32]], sources=())
-    with pytest.raises(RuntimeError, match="Bulk Store arguments do not align"):
-        backend_io.store_materialized(KVTransferBatch((), ()), arguments)
-    assert "put" not in [call[0] for call in backend.calls]
+def test_bulk_mapping_rejects_misaligned_rows_before_backend_handoff() -> None:
+    worker, _, backend = make_worker()
+    try:
+        mapping = worker._mappings[0]
+        with pytest.raises(ValueError, match="Keys must align"):
+            mapping.arguments((("key",),), (1, 2))
+        assert "put" not in [call[0] for call in backend.calls]
+    finally:
+        worker.close()

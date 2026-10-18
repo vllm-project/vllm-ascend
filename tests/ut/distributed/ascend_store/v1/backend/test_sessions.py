@@ -15,6 +15,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import GVA_REVOKE_UNCONFIRMED
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncake.sessions import MooncakeSessions
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import integer_results
+
+
+def inject_backend_failure(method, native_result):
+    # Match the real adapter contract: malformed SDK results become an exception
+    # before Session can update any ownership record.
+    def call(keys, *_args):
+        if isinstance(native_result, Exception):
+            raise native_result
+        return integer_results("injected SDK result", keys, native_result)
+
+    method.side_effect = call
 
 
 @pytest.fixture(params=("key_range", "gva"))
@@ -70,8 +82,7 @@ def test_partial_read_open_releases_only_owned_keys_and_can_retry(owner):
 @pytest.mark.parametrize("failure", (RuntimeError("open outcome unknown"), (0,), (0, True)))
 def test_exceptional_read_open_keeps_attempts_for_cleanup(owner, failure):
     sessions, _, acquire, release, *_ = owner
-    acquire.side_effect = failure if isinstance(failure, Exception) else None
-    acquire.return_value = failure
+    inject_backend_failure(acquire, failure)
 
     with pytest.raises(RuntimeError):
         sessions.start_load(["first", "second"], [64, 64])
@@ -96,8 +107,7 @@ def test_partial_store_open_never_revokes_rejected_keys(owner):
 @pytest.mark.parametrize("failure", (RuntimeError("allocation unknown"), (1000,), (1000, True)))
 def test_exceptional_store_open_keeps_attempts_but_cannot_publish(owner, failure):
     sessions, _, _, _, allocate, publish, revoke = owner
-    allocate.side_effect = failure if isinstance(failure, Exception) else None
-    allocate.return_value = failure
+    inject_backend_failure(allocate, failure)
 
     with pytest.raises(RuntimeError):
         sessions.start_store(["first", "second"], [64, 64])
@@ -151,8 +161,7 @@ def test_failed_or_malformed_finalization_retains_ownership(owner, stage, failur
     sessions.start_store(["key"], [64])
     native = publish if stage == "publish" else revoke
     operation = sessions.commit_store if stage == "publish" else sessions.revoke_store
-    native.side_effect = failure if isinstance(failure, Exception) else None
-    native.return_value = failure
+    inject_backend_failure(native, failure)
 
     with pytest.raises(RuntimeError):
         operation(["key"])

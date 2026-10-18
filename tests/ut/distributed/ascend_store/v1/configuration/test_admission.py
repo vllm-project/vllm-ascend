@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -23,9 +24,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
     HybridReachability,
     UnitaryReachability,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    BulkProjectionBinder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     RangeStoreCommand,
@@ -75,6 +73,11 @@ def _make_factory_config(
 def test_speculative_factories_follow_upstream_eagle_policy(
     monkeypatch, use_layerwise, method, use_eagle, group_count
 ) -> None:
+    static_resolvers = {}
+    for name in ("_resolve_transfer_group_ids", "_resolve_tp_partition", "resolve_consumer_pipeline_partitions"):
+        resolver = Mock(wraps=getattr(vllm_adapter, name))
+        monkeypatch.setattr(vllm_adapter, name, resolver)
+        static_resolvers[name] = resolver
     backend = FakeBackend()
     backend_spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
@@ -106,20 +109,22 @@ def test_speculative_factories_follow_upstream_eagle_policy(
     )
 
     scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+    for resolver in static_resolvers.values():
+        assert resolver.call_count == 1
+        resolver.reset_mock()
     worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    for resolver in static_resolvers.values():
+        assert resolver.call_count == 1
     try:
         assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4 if use_eagle else 7, False)
-        binder = vllm_adapter.compile_kv_pool_projection_binder(config, cache_config)
-        if use_layerwise:
-            assert binder.reachability.group_ids == tuple(range(group_count))
-            if group_count == 1:
-                assert isinstance(binder.reachability, UnitaryReachability)
-            else:
-                assert isinstance(binder.reachability, HybridReachability)
-                assert binder.reachability.use_eagle is use_eagle
-                assert binder.reachability.retention_interval == 32
+        reachability = worker._reachability
+        assert reachability.group_ids == tuple(range(group_count))
+        if group_count == 1:
+            assert isinstance(reachability, UnitaryReachability)
         else:
-            assert binder.use_eagle is use_eagle
+            assert isinstance(reachability, HybridReachability)
+            assert reachability.use_eagle is use_eagle
+            assert reachability.retention_interval == 32
     finally:
         scheduler.close()
         worker.close()
@@ -128,8 +133,6 @@ def test_speculative_factories_follow_upstream_eagle_policy(
 
 def test_layerwise_factories_reject_align_state_before_route_construction(monkeypatch) -> None:
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (8, 8))
     monkeypatch.setattr(vllm_adapter, "_uses_layerwise_buffer_reuse", lambda *_args: False)
     monkeypatch.setattr(vllm_adapter, "infer_cacheable_group_ids", lambda _groups: [0, 1])
@@ -236,8 +239,6 @@ def test_adapter_rejects_invalid_reachability_geometry(
 
 def test_bulk_factories_reject_non_align_mamba_state(monkeypatch) -> None:
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(vllm_adapter, "infer_cacheable_group_ids", lambda _groups: [0])
     cache_config = SimpleNamespace(
@@ -266,8 +267,6 @@ def test_bulk_factories_reject_non_align_mamba_state(monkeypatch) -> None:
 
 def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(monkeypatch) -> None:
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(vllm_adapter, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
     monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
@@ -313,8 +312,6 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(monkey
     route_spec = vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
     assert tuple(group.group_id for group in route_spec.topology.groups) == (0, 1)
     assert route_spec.topology.transfer_group_ids == (0,)
-    binder = vllm_adapter._compile_kv_pool_projection_binder(route_spec, config, cache_config)
-    assert isinstance(binder, BulkProjectionBinder)
 
     backend = FakeBackend()
     worker, resources, _ = make_worker(backend, topology=route_spec.topology)
@@ -355,8 +352,6 @@ def test_kvpp_authoritative_size_selects_noop_or_rejection(kvpp_size, monkeypatc
         SimpleNamespace(KVPPConfig=FakeKVPPConfig),
     )
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(vllm_adapter, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
     monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
@@ -392,8 +387,7 @@ def test_kvpp_authoritative_size_selects_noop_or_rejection(kvpp_size, monkeypatc
             scheduler.close()
         else:
             route_spec = vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
-            binder = vllm_adapter._compile_kv_pool_projection_binder(route_spec, config, cache_config)
-            assert isinstance(binder, BulkProjectionBinder)
+            assert route_spec.topology.transfer_group_ids == (0,)
 
 
 @pytest.mark.parametrize(
@@ -459,8 +453,6 @@ def test_factories_reject_unproven_bulk_compositions(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(vllm_adapter, "infer_cacheable_group_ids", lambda _groups: [0])
 
@@ -507,8 +499,6 @@ def test_factories_reject_unproven_bulk_compositions(
 @pytest.mark.parametrize("role", ("kv_producer", "kv_consumer"))
 def test_factories_reject_align_state_tp_mismatch(monkeypatch, attention_companion, role) -> None:
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (8, 4))
     config = _make_factory_config()
     config.kv_transfer_config.kv_role = role
@@ -548,19 +538,13 @@ def test_v1_rejects_yuanrong_during_configuration(monkeypatch) -> None:
 def test_initialization_runs_layerwise_topology_validation_on_both_sides(monkeypatch) -> None:
     monkeypatch.setattr(vllm_adapter, "_kvpp_size", lambda _config: 1)
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: object())
 
-    def reject_context_parallelism(_protocol, _parallel_config, use_layerwise):
-        assert use_layerwise
-        raise ValueError("Mooncake block-key layerwise does not support context parallelism")
-
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", reject_context_parallelism)
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both",
             kv_connector_extra_config={"use_layerwise": True},
         ),
-        parallel_config=SimpleNamespace(world_size=1),
+        parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=2),
         model_config=SimpleNamespace(max_model_len=64),
         speculative_config=None,
     )
@@ -620,8 +604,9 @@ def test_peer_context_parallel_check_preserves_production_scope(kv_role, extra_c
     vllm_adapter._validate_kv_pool_preflight(config, "memcache", use_layerwise=use_layerwise)
 
 
+@pytest.mark.parametrize("factory", ("scheduler", "worker"))
 @pytest.mark.parametrize("private_only", (False, True))
-def test_factory_rejects_private_state_layerwise_and_private_only(monkeypatch, private_only) -> None:
+def test_factory_rejects_private_state_layerwise_and_private_only(monkeypatch, private_only, factory) -> None:
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
     cache_config = SimpleNamespace(
         transfer_group_ids=() if private_only else (0,),
@@ -653,7 +638,10 @@ def test_factory_rejects_private_state_layerwise_and_private_only(monkeypatch, p
     )
 
     with pytest.raises(ValueError, match=expected_message):
-        vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+        if factory == "scheduler":
+            vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+        else:
+            vllm_adapter.create_kv_pool_worker(config, cache_config)
 
 
 @pytest.mark.parametrize(

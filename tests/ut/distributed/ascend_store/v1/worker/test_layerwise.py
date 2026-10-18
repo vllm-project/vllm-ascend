@@ -35,9 +35,8 @@ from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import attention_fence
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    GVALayerwiseProjectionBinder,
-    KeyRangeLayerwiseProjectionBinder,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    KVPoolResources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupRequest,
@@ -50,16 +49,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import gva as gva_io
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import key_range as key_range_io
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
-    GVAObjectLayout,
-    KVPoolResources,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import gva as gva_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import key_range as key_range_worker
 
 
 @pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
@@ -102,13 +97,13 @@ def test_layerwise_store_prepares_before_wait_and_reads_only_ready_sources(use_g
     module: ModuleType
     if use_gva:
         worker, resources, backend = make_gva_worker(topology=topology, source_ready_event_factory=lambda: event)
-        module, materializer = gva_io, "materialize_store_layer_gva"
+        module, materializer = gva_worker, "materialize_layer_gva"
         copy_method = "batch_copy"
     else:
         worker, resources, backend = make_worker(
             layerwise=True, topology=topology, source_ready_event_factory=lambda: event
         )
-        module, materializer = key_range_io, "materialize_store_layer_ranges"
+        module, materializer = key_range_worker, "materialize_store_layer_ranges"
         copy_method = "batch_copy_put"
     prepare = getattr(module, materializer)
     copy = getattr(backend, copy_method)
@@ -317,16 +312,10 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
         backend_spec,
         8,
         topology.transfer_groups,
-        gva_layout=GVAObjectLayout(0, 2, 0, 1, 1) if use_gva else None,
     )
-    binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
-    binder = binder_type(
-        topology,
-        lambda group, value, head, stage: f"g{group}:{value}",
-        make_reachability(topology, 256, retention_interval=retention_interval),
-    )
+    reachability = make_reachability(topology, 256, retention_interval=retention_interval)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
-    worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
     caches = {group.layer_names[0]: torch.zeros((8, 2, 16, 1, 1)) for group in topology.transfer_groups}
     try:
@@ -345,8 +334,8 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
             readable_keys = {key for key, region in backend.native_store.objects.items() if region[2]}
         else:
             readable_keys = backend.readable_keys
-        swa_keys = tuple(key for key in readable_keys if key.startswith("g3:"))
-        assert sorted(int(key.split(":")[1], 16) * 16 for key in swa_keys) == list(stored_swa_boundaries)
+        swa_keys = tuple(key for key in readable_keys if "@group:3@" in key)
+        assert sorted(int(key.rsplit("@", 1)[1], 16) * 16 for key in swa_keys) == list(stored_swa_boundaries)
         for start, end, expected_end in ((0, 128, 96), (0, 80, middle_end), (64, 128, 96)):
             result = worker.lookup(LookupRequest(TokenRange(start, end), (1, 3), block_hashes))
             assert result.available_end_token == expected_end
@@ -379,12 +368,10 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
         backend_spec,
         cache_config.num_blocks,
         topology.transfer_groups,
-        gva_layout=GVAObjectLayout(0, 4, 0, 1, 1) if use_gva else None,
     )
-    binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
-    binder = binder_type(topology, lambda group, value, head, stage: f"g{group}:{value}", make_reachability(topology))
+    reachability = make_reachability(topology)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
-    worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
     source_blocks = {0: 1, 2: 3}
     try:
         worker.bind_kv_caches(caches)
@@ -401,7 +388,7 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
                 group.group_id: next(
                     region[0]
                     for key, region in backend.native_store.objects.items()
-                    if key.startswith(f"g{group.group_id}:")
+                    if f"@group:{group.group_id}@" in key
                 )
                 for group in topology.transfer_groups
             }
@@ -715,7 +702,7 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
 @pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
 def test_layerwise_escaped_copy_error_preserves_later_jobs_and_retains_unknown_sources(use_gva, monkeypatch) -> None:
     worker, resources, backend = make_gva_worker() if use_gva else make_worker(layerwise=True)
-    original = worker._layerwise_backend_io.store_layer
+    original = worker._copy_store_layer
     reached = []
 
     def copy_then_raise(source_ready, layer_id):
@@ -725,7 +712,7 @@ def test_layerwise_escaped_copy_error_preserves_later_jobs_and_retains_unknown_s
             raise RuntimeError("escaped layer copy error")
         return result
 
-    monkeypatch.setattr(worker._layerwise_backend_io, "store_layer", copy_then_raise)
+    monkeypatch.setattr(worker, "_copy_store_layer", copy_then_raise)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
     worker.save_layer("layers.0.group.0")
@@ -1031,7 +1018,7 @@ def test_gva_unconfirmed_revoke_survives_steps_without_reopening_or_reusing_the_
             worker.finish_step()
             assert worker.take_released_store_job_ids() == {job_id}
             assert len(worker._backend_sessions.pending_store_keys) == 1
-            assert worker._layerwise_backend_io._store_plan is None
+            assert worker._store_plan is None
             worker.end_step()
         # The second attempt cannot acquire or copy through the abandoned session.
         assert sum(item[0] == "alloc" for item in store.calls) == 1

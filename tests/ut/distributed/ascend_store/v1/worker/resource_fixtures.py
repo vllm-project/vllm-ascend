@@ -7,20 +7,18 @@ import torch
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     make_backend_spec,
+    make_reachability,
     make_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BufferRegistration,
     rollback_buffer_registration,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
-    compile_bulk_projection_binder,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    KVPoolResources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
-    KVPoolResources,
 )
 
 
@@ -86,12 +84,17 @@ def make_resources(backend: RecordingBackend, *, physical_layers=(0, 1)):
 def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
     resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
-    projection_binder = compile_bulk_projection_binder(topology, 64)
     worker = BulkWorker(
         topology,
-        projection_binder,
         resources,
+        reachability=make_reachability(topology, 64),
         store_enabled=False,
     )
     worker.bind_kv_caches(make_caches(topology))
     worker.close()
+
+
+def register_caches(resources, caches):
+    registration = resources.prepare_kv_caches(caches)
+    resources.register_kv_buffers()
+    return registration

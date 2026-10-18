@@ -30,8 +30,6 @@ def _make_timing(*, execute_error=None):
         copy_key_range_load=Mock(return_value=(0,)),
         finish_key_range_load=Mock(),
     )
-    io = SimpleNamespace(prepare_load_layers=Mock())
-    io.load_layer = lambda layer_id: backend.copy_key_range_load(["key"], [[100]], [[16]], [[0]])
 
     def submit_task(operation, *args):
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -39,12 +37,16 @@ def _make_timing(*, execute_error=None):
 
     session = SimpleNamespace(_load_submit=submit_task)
     worker = SimpleNamespace(
-        _layerwise_backend_io=io, _session=session, _layer_ids_by_name={"layer.0": 0}, _build_load_batch=Mock()
+        _prepare_load_layers=Mock(),
+        _copy_load_layer=lambda layer_id: backend.copy_key_range_load(["key"], [[100]], [[16]], [[0]]),
+        _session=session,
+        _layer_ids_by_name={"layer.0": 0},
+        _build_load_batch=Mock(),
     )
 
     def submit_load(batch):
         backend.start_key_range_load(["key"])
-        io.prepare_load_layers(batch)
+        worker._prepare_load_layers(batch)
 
     def start_load():
         worker._build_load_batch(())
@@ -52,7 +54,7 @@ def _make_timing(*, execute_error=None):
 
     def wait_for_layer_load(layer_name):
         def load(layer_id, gate):
-            return io.load_layer(layer_id)
+            return worker._copy_load_layer(layer_id)
 
         session._load_submit(load, 0, None).result(timeout=5)
         session._load_submit(lambda: backend.finish_key_range_load(["key"])).result(timeout=5)
@@ -85,7 +87,7 @@ def _schedule(*request_ids):
 
 def test_timing_preserves_results_and_captures_executor_layers_but_not_decode():
     timing, worker, backend, lookup, runner, result = _make_timing()
-    owners = (worker, backend, lookup, runner, worker._layerwise_backend_io, worker._session)
+    owners = (worker, backend, lookup, runner, worker._session)
     originals = [dict(vars(owner)) for owner in owners]
     timing.install()
     try:
@@ -154,7 +156,7 @@ def test_timing_releases_per_step_session_hooks_without_accumulating_wrappers():
 def test_partial_install_rolls_back_every_successful_hook():
     timing, worker, backend, lookup, runner, _ = _make_timing()
     del backend.copy_key_range_load
-    owners = (worker, backend, lookup, runner, worker._layerwise_backend_io, worker._session)
+    owners = (worker, backend, lookup, runner, worker._session)
     originals = [dict(vars(owner)) for owner in owners]
     with pytest.raises(AttributeError):
         timing.install()

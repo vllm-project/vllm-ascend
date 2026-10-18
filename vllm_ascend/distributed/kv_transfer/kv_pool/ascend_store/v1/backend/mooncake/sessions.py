@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..results import integer_results
 from ..validation import validate_session_open
 
 if TYPE_CHECKING:
@@ -43,7 +42,7 @@ class MooncakeSessions:
         if not keys:
             return ()
         self._load_keys.update((key, None) for key in keys)
-        codes = integer_results("KeyRange start Load", keys, self._backend.start_key_range_load(keys))
+        codes = self._backend.start_key_range_load(keys)
         for key, code in zip(keys, codes, strict=True):
             if code != 0:
                 del self._load_keys[key]
@@ -69,7 +68,7 @@ class MooncakeSessions:
         if not keys:
             return ()
         self._store_keys.update((key, False) for key in keys)
-        codes = integer_results("KeyRange start Store", keys, self._backend.start_key_range_store(keys, object_sizes))
+        codes = self._backend.start_key_range_store(keys, object_sizes)
         for key, code in zip(keys, codes, strict=True):
             if code == 0:
                 self._store_keys[key] = True
@@ -84,7 +83,7 @@ class MooncakeSessions:
             raise ValueError("Commit keys must be unique")
         if any(not self._store_keys.get(key) for key in keys):
             raise RuntimeError("KeyRange commit has no confirmed owning Store session")
-        codes = integer_results("KeyRange commit", keys, self._backend.commit_key_range_store(keys))
+        codes = self._backend.commit_key_range_store(keys)
         for key, code in zip(keys, codes, strict=True):
             if code == 0:
                 del self._store_keys[key]
@@ -96,7 +95,7 @@ class MooncakeSessions:
             return (0,) * len(keys)
         # Once abandoned, an unresolved write may be cleaned up but never committed.
         self._store_keys.update((key, False) for key in owned)
-        codes = integer_results("KeyRange revoke", owned, self._backend.revoke_key_range_store(owned))
+        codes = self._backend.revoke_key_range_store(owned)
         by_key = dict(zip(owned, codes, strict=True))
         for key, code in by_key.items():
             if code == 0:

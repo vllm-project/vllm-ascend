@@ -1,12 +1,10 @@
-"""Register Worker KV memory and expose the facts consumed by projection binding."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from vllm.logger import logger
 
 from ..backend import (
     BackendSpec,
@@ -15,26 +13,23 @@ from ..backend import (
     ObjectSessions,
     Registration,
 )
+from .execution.executor import Executor
 
 if TYPE_CHECKING:
     from ..topology import KVPoolGroupTopology
 
-_GVA_ALIGNMENT = 2 * 1024 * 1024
 
-
-@dataclass(frozen=True, slots=True)
-class GVAObjectLayout:
-    """Global coordinates shared by every GVA object produced by this rank."""
-
-    pipeline_layer_start: int
-    total_hidden_layers: int
-    dcp_rank: int
-    dcp_size: int
-    put_step: int
+_GVA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 
 
 class KVPoolResources:
-    """Own Backend state and extract registered memory facts once."""
+    """Manage resources that need to be started, stopped, or explicitly released.
+
+    Own Executors, Backend object sessions, buffer registrations, and the Backend
+    client. Keep KV tensors alive until cleanup succeeds. The Worker submits work
+    and decides when to start, stop, and release these resources; mappings and
+    per-step execution Sessions remain Worker-owned.
+    """
 
     def __init__(
         self,
@@ -43,51 +38,100 @@ class KVPoolResources:
         num_blocks: int,
         groups: tuple[KVPoolGroupTopology, ...],
         *,
-        gva_layout: GVAObjectLayout | None = None,
         align_shared_storage: bool = False,
     ) -> None:
         self.backend = backend
         self.backend_spec = backend_spec
-        self.backend_sessions: ObjectSessions | None = None
+        self._backend_sessions: ObjectSessions | None = None
         self.num_blocks = num_blocks
         self._groups = groups
-        self._gva_layout = gva_layout
         self._align_shared_storage = align_shared_storage
+        self._registered_regions: tuple[tuple[int, int], ...] = ()
         self.kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None
         self._buffer_registration: Registration | None = None
         self._binding_started = False
         self._closed = False
+        self._executors: tuple[Executor, ...] | None = None
 
-    def bind_kv_caches(self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]) -> dict[str, Any]:
+    def bind_backend_sessions(self, sessions: ObjectSessions) -> None:
+        if self._closed or self._binding_started or self._backend_sessions is not None:
+            raise RuntimeError("Backend sessions must be bound once before KV caches")
+        self._backend_sessions = sessions
+
+    def bind_executors(self, executors: Sequence[Executor]) -> None:
+        if self._closed or self._binding_started or self._executors is not None:
+            raise RuntimeError("Executors must be bound once before KV caches")
+        self._executors = tuple(executors)
+
+    def start_executors(self) -> None:
+        """Call after KV buffer registration; failed starts retain all executors for cleanup."""
+        if self._closed:
+            raise RuntimeError("KV resources are closed")
+        for executor in self._executors or ():
+            executor.start()
+
+    def stop_executors(self) -> None:
+        """Attempt every drain even after a failure, retaining the first error."""
+        close_error: BaseException | None = None
+        for executor in self._executors or ():
+            try:
+                executor.close()
+            except BaseException as error:
+                if close_error is None:
+                    close_error = error
+                else:
+                    logger.exception("Failed to stop executor after an earlier drain failure")
+        if close_error is not None:
+            raise close_error
+
+    @property
+    def executors_stopped(self) -> bool:
+        return all(executor.stopped for executor in self._executors or ())
+
+    def prepare_kv_caches(self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("KV resources are closed")
         if self._binding_started:
             raise RuntimeError("KV caches are already bound")
         self._binding_started = True
         self.kv_caches = kv_caches
+        return self._extract_kv_layout(kv_caches)
+
+    def register_kv_buffers(self) -> None:
+        """Acquire registrations only after the Worker has bound its mappings."""
+        addresses, sizes = [], []
+        for start, end in self._registered_regions:
+            addresses.append(start)
+            sizes.append(end - start)
         try:
-            buffer_registration, registration = self._register_kv_buffers(kv_caches)
+            self._buffer_registration = self.backend.register_buffer(addresses, sizes)
         except BufferRegistrationError as error:
             self._buffer_registration = error.registration
             raise
-        self._buffer_registration = buffer_registration
-        return registration
 
     def close(self) -> None:
+        """Call after the Worker observes results and confirms Store source release.
+
+        Stopped threads alone do not prove source safety. Release sessions before
+        registrations and the client; stop at a failed cleanup and retain ownership
+        so the caller can retry without releasing resources still in use.
+        """
         if self._closed:
             return
-        if self.backend_sessions is not None:
-            self.backend_sessions.close()
+        if not self.executors_stopped:
+            raise RuntimeError("Executors must stop before KV resources are released")
+        if self._backend_sessions is not None:
+            self._backend_sessions.close()
         if self._buffer_registration is not None:
             self._buffer_registration.close()
         self.backend.close()
         self.kv_caches = None
         self._closed = True
 
-    def _register_kv_buffers(
+    def _extract_kv_layout(
         self,
         kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]],
-    ) -> tuple[Registration, dict[str, Any]]:
+    ) -> dict[str, Any]:
         base_addresses: dict[int, list[int]] = {}
         block_lengths: dict[int, list[int]] = {}
         block_strides: dict[int, list[int]] = {}
@@ -142,58 +186,19 @@ class KVPoolResources:
             layer_entry_offsets[group.group_id] = layer_offsets
 
         if self._align_shared_storage:
+            # Hybrid tensor views can start inside a larger allocation. Native GVA
+            # registration needs an aligned start, independently of object offsets.
             for storage_key, (start, end) in registered_regions.items():
-                aligned_start = start // _GVA_ALIGNMENT * _GVA_ALIGNMENT
+                aligned_start = start // _GVA_REGISTRATION_ALIGNMENT * _GVA_REGISTRATION_ALIGNMENT
                 if aligned_start < storage_key:
                     raise ValueError("Shared KV storage cannot satisfy the GVA alignment boundary")
                 registered_regions[storage_key] = aligned_start, end
+
         registration: dict[str, Any] = {
             "base_addresses": base_addresses,
             "block_lengths": block_lengths,
             "block_strides": block_strides,
             "layer_entry_offsets": layer_entry_offsets,
         }
-        if self._gva_layout is not None:
-            object_sizes, object_offsets = self._resolve_gva_objects(block_lengths)
-            registration["object_sizes"] = object_sizes
-            registration["object_offsets"] = object_offsets
-        buffer_registration = self.backend.register_buffer(
-            [start for start, _ in registered_regions.values()],
-            [end - start for start, end in registered_regions.values()],
-        )
-        if not callable(getattr(buffer_registration, "close", None)):
-            raise TypeError(f"{type(self.backend).__name__}.register_buffer must return a Registration owner")
-        return buffer_registration, registration
-
-    def _resolve_gva_objects(
-        self,
-        block_lengths: dict[int, list[int]],
-    ) -> tuple[dict[int, int], dict[int, int]]:
-        layout = self._gva_layout
-        assert layout is not None
-        object_sizes: dict[int, int] = {}
-        object_offsets: dict[int, int] = {}
-        for group in self._groups:
-            local_size = sum(block_lengths[group.group_id])
-            local_layer_count = len(group.layers)
-            if local_layer_count <= 0:
-                raise ValueError(f"GVA cache group {group.group_id} has no local layer")
-            bytes_per_layer = (local_size + local_layer_count - 1) // local_layer_count
-            pipeline_offset = layout.pipeline_layer_start * bytes_per_layer
-            global_layer_slots = max(
-                layout.total_hidden_layers,
-                layout.pipeline_layer_start + local_layer_count,
-            )
-            global_span = max(global_layer_slots * bytes_per_layer, pipeline_offset + local_size)
-            if layout.dcp_size > 1 and layout.put_step > 1:
-                shard_stride = _align_up(global_span, _GVA_ALIGNMENT)
-                object_offsets[group.group_id] = pipeline_offset + layout.dcp_rank * shard_stride
-                object_sizes[group.group_id] = shard_stride * layout.dcp_size
-            else:
-                object_offsets[group.group_id] = pipeline_offset
-                object_sizes[group.group_id] = global_span
-        return object_sizes, object_offsets
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return (value + alignment - 1) // alignment * alignment
+        self._registered_regions = tuple(registered_regions.values())
+        return registration

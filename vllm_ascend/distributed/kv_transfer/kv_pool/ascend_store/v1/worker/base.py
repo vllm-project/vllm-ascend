@@ -5,26 +5,38 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
+from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import torch
 from vllm.logger import logger
 
+from ..infrastructure.execution.executor import Executor
+from ..infrastructure.mapping import BulkMapping
+from ..infrastructure.reachability import HybridReachability, UnitaryReachability
+from ..infrastructure.resources import KVPoolResources
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
 from ..topology import KVPoolTopology
-from .io import BackendIO
-from .resources import KVPoolResources
-from .transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
-from .transfer.evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
-from .transfer.result import LoadFailureLocation, LoadResult
-from .transfer.state import (
-    KVPoolStepContext,
-    PendingStore,
+from .transfer.batch import (
+    KeyAxes,
+    KVGroupBatch,
+    KVTransferBatch,
     StoreCandidates,
     StoreGroupCandidates,
+    TransferSource,
+)
+from .transfer.completion import LoadCompletion, StoreCompletion
+from .transfer.result import LoadFailureLocation, LoadResult
+from .transfer.rows import (
     compact_single_axis_rows,
+    concat_uint64,
+    fine_lookup_chunk_rows,
+    load_block_rows,
+    lookup_chunk_rows,
+    merge_key_axes,
     readonly_bool,
     readonly_indices,
     readonly_uint64,
@@ -36,15 +48,24 @@ _Result = TypeVar("_Result")
 _WorkerT = TypeVar("_WorkerT", bound="KVPoolWorker")
 
 
-class _ExecutionResource(Protocol):
-    """Start after cache binding and stop before registered memory is released."""
+@dataclass(slots=True)
+class KVPoolStepContext:
+    """Adapt one upstream hook batch without owning cross-step executions."""
 
-    def start(self) -> None: ...
+    step: KVTransferStep
+    failed_request_ids: set[str] = field(default_factory=set)
+    failed_block_ids: set[int] = field(default_factory=set)
+    failed_sources: list[TransferSource] = field(default_factory=list)
+    store_submitted: bool = False
 
-    def close(self) -> object: ...
 
-    @property
-    def stopped(self) -> bool: ...
+@dataclass(frozen=True, slots=True)
+class PendingStore:
+    """Associate one submitted Store result with its requests and source leases."""
+
+    future: Future[tuple[StoreCompletion, ...]]
+    request_ids: frozenset[str]
+    store_job_ids: frozenset[int]
 
 
 class KVPoolWorker(ABC):
@@ -54,16 +75,26 @@ class KVPoolWorker(ABC):
         self,
         topology: KVPoolTopology,
         resources: KVPoolResources,
-        backend_io: BackendIO,
-        execution_resources: Sequence[_ExecutionResource],
+        executors: Sequence[Executor],
         *,
         store_enabled: bool,
+        reachability: UnitaryReachability | HybridReachability,
+        kv_cache_layout: str = "NHD",
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._topology = topology
+        self._reachability = reachability
+        self._kv_cache_layout = kv_cache_layout
+        self._mappings: dict[int, BulkMapping] = {}
+        self._state_group_ids = frozenset(
+            group.group_id for group in topology.transfer_groups if group.uses_align_state
+        )
+        self._fine_grained_lookup = any(
+            group.uses_align_state and group.block_size > topology.hash_block_size for group in topology.transfer_groups
+        )
         self._resources = resources
-        self._backend_io = backend_io
-        self._execution_resources = tuple(execution_resources)
+        self._backend = resources.backend
+        resources.bind_executors(executors)
         self._store_enabled = store_enabled
         self._groups = {group.group_id: group for group in topology.transfer_groups}
         self._active_step: KVPoolStepContext | None = None
@@ -79,10 +110,10 @@ class KVPoolWorker(ABC):
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
-            registration = self._resources.bind_kv_caches(kv_caches)
-            self._bind_projection(registration)
-            for execution in self._execution_resources:
-                execution.start()
+            registration = self._resources.prepare_kv_caches(kv_caches)
+            self._bind_mappings(registration)
+            self._resources.register_kv_buffers()
+            self._resources.start_executors()
             self._execution_started = True
         except BaseException:
             try:
@@ -91,15 +122,108 @@ class KVPoolWorker(ABC):
                 logger.exception("Failed to close KV Pool resources after cache registration failed")
             raise
 
-    @abstractmethod
-    def _bind_projection(self, registration: dict[str, Any]) -> None:
-        """Bind the route-specific immutable projection after memory registration."""
+    def _bind_mappings(self, registration: dict[str, Any]) -> None:
+        self._mappings = {group_id: self._create_mapping(group_id, registration) for group_id in self._groups}
 
-    @abstractmethod
+    def _create_mapping(self, group_id: int, registration: dict[str, Any]) -> BulkMapping:
+        return BulkMapping(
+            self._topology,
+            registration["base_addresses"],
+            registration["block_lengths"],
+            registration["block_strides"],
+            registration["layer_entry_offsets"],
+            group_id=group_id,
+            kv_cache_layout=self._kv_cache_layout,
+            kv_caches=self._resources.kv_caches,
+        )
+
+    def _exists(self, keys: list[str]) -> tuple[bool, ...]:
+        return self._backend.exists(keys) if keys else ()
+
     def lookup(self, request: LookupRequest) -> LookupResult:
-        """Resolve the readable remote prefix for one request."""
+        if not self._execution_started:
+            raise RuntimeError("KV caches must be bound before Lookup")
+        if request.transfer_group_ids != self._topology.transfer_group_ids:
+            raise ValueError(
+                f"Lookup groups {request.transfer_group_ids} do not match configured groups "
+                f"{self._topology.transfer_group_ids}"
+            )
+        masks = self._reachability.select_for_lookup(request.block_hashes, request.query_range)
+        observations = []
+        chunk_rows = fine_lookup_chunk_rows if self._fine_grained_lookup else lookup_chunk_rows
+        for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
+            starts, counts, hashes = chunk_rows(
+                request.query_range.end_token,
+                request.block_hashes,
+                block_size=mapping.group_block_size,
+                hash_block_size=mapping.hash_block_size,
+                start_token=request.query_range.start_token,
+                mask=mask,
+            )
+            keys = mapping.lookup_keys(hashes)
+            try:
+                observed = self._exists([key for axis in keys for key in axis])
+            except Exception as error:
+                logger.error("Remote Lookup failed. type=%s, error=%s", type(error).__name__, error)
+                return LookupResult(0)
+            row_count = len(hashes)
+            available = tuple(
+                all(observed[axis_index * row_count + row_index] for axis_index in range(len(keys)))
+                for row_index in range(row_count)
+            )
+            observations.append(((starts, counts, hashes), available))
+        reachable = self._reachability.resolve_available_end(request.query_range, request.block_hashes, observations)
+        return LookupResult(reachable.end_token, reachable.tail_key_boundaries)
+
+    def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
+        rows_by_request = []
+        for command in commands:
+            masks = self._reachability.select_for_load(command.block_hashes, command.load_range)
+            boundaries = {item.group_id: item.boundary_token for item in command.tail_key_boundaries}
+            if len(boundaries) != len(command.tail_key_boundaries):
+                raise ValueError("Load contains duplicate tail-key boundaries for one cache group")
+            unknown = set(boundaries).difference(self._groups)
+            if unknown:
+                raise ValueError(f"Load tail-key boundaries contain unknown cache groups {sorted(unknown)}")
+            rows_by_request.append(
+                {
+                    group_id: load_block_rows(
+                        command.load_range.end_token,
+                        command.block_hashes,
+                        command.block_ids_by_group[group_id],
+                        block_size=mapping.group_block_size,
+                        hash_block_size=mapping.hash_block_size,
+                        start_token=command.load_range.start_token,
+                        tail_boundary_token=boundaries.get(group_id),
+                        mask=mask,
+                        minimum_block_id=1 if group_id in self._state_group_ids else 0,
+                    )
+                    for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True)
+                }
+            )
+        groups = []
+        for group_id, mapping in self._mappings.items():
+            rows = [request_rows[group_id] for request_rows in rows_by_request]
+            splits = [0]
+            for counts, hashes, block_ids in rows:
+                splits.append(splits[-1] + len(block_ids))
+            groups.append(
+                KVGroupBatch(
+                    group_id,
+                    concat_uint64([row[2] for row in rows]),
+                    concat_uint64([row[0] for row in rows]),
+                    merge_key_axes(group_id, [mapping.keys(row[1]) for row in rows]),
+                    readonly_indices(splits),
+                    mapping.physical_layer_ids,
+                    mapping.local_group_block_bytes,
+                    physical_layer_ids_by_axis=mapping.physical_layer_ids_by_key_prefix,
+                )
+            )
+        return KVTransferBatch(tuple(command.request_id for command in commands), tuple(groups))
 
     def begin_step(self, step: KVTransferStep) -> None:
+        if not self._execution_started:
+            raise RuntimeError("KV caches must be bound before a transfer step")
         self._raise_store_fatal_error()
         if self._active_step is not None:
             raise RuntimeError("Previous KV Pool step has not ended")
@@ -325,17 +449,16 @@ class KVPoolWorker(ABC):
             except BaseException as error:
                 close_error = error
 
-        for execution in self._execution_resources:
-            try:
-                execution.close()
-            except BaseException as error:
-                if close_error is None:
-                    close_error = error
-                else:
-                    logger.exception("Failed to close execution resource after an earlier close failure")
+        try:
+            self._resources.stop_executors()
+        except BaseException as error:
+            if close_error is None:
+                close_error = error
+            else:
+                logger.exception("Failed to stop executors after an earlier close failure")
 
-        execution_stopped = all(execution.stopped for execution in self._execution_resources)
-        if execution_stopped:
+        executors_stopped = self._resources.executors_stopped
+        if executors_stopped:
             try:
                 self._check_execution_results()
             except BaseException as error:
@@ -344,7 +467,7 @@ class KVPoolWorker(ABC):
                 else:
                     logger.exception("Failed to check execution results after an earlier close failure")
 
-        if store_handoff_complete and self._pending_store_batch is None and execution_stopped:
+        if store_handoff_complete and self._pending_store_batch is None and executors_stopped:
             try:
                 self._resources.close()
             except BaseException as error:
@@ -480,15 +603,11 @@ class KVPoolWorker(ABC):
         requires_store_observation = self._resources.backend_spec.requires_exists_before_put
         if not requires_store_observation:
             return (set(keys), True) if has_duplicates else (None, False)
-        observed = self._backend_io.exists(list(keys))
+        observed = self._exists(list(keys))
         admitted = tuple(not present for present in observed)
         if not has_duplicates and all(admitted):
             return None, False
         return {key for key, include in zip(keys, admitted, strict=True) if include}, has_duplicates
-
-    @abstractmethod
-    def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
-        """Build the immutable Backend batch for the selected route."""
 
     @abstractmethod
     def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreCandidates:
@@ -499,7 +618,7 @@ class KVPoolWorker(ABC):
             raise RuntimeError("KVPoolWorker cannot continue after a fatal Store failure") from self._store_fatal_error
 
     def _record_load_completion(self, context: KVPoolStepContext, completion: LoadCompletion) -> None:
-        failed_sources = [item.source for item in completion.transfer_evidence if item.result_code != 0]
+        failed_sources = [item.source for item in completion.failures]
         if not failed_sources:
             return
         context.failed_sources.extend(failed_sources)
@@ -518,37 +637,10 @@ class KVPoolWorker(ABC):
             f"cache group/block failures {failed_locations}"
         )
 
-    @abstractmethod
-    def _store_group_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...] | None]:
-        """Return object size and optional key-axis layer provenance."""
+    def _store_group_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
+        mapping = self._mappings[group_id]
+        return mapping.local_group_block_bytes, mapping.physical_layer_ids_by_key_prefix
 
     @property
-    @abstractmethod
     def _transfer_group_count(self) -> int:
-        """Return the number of cache groups represented in one request result."""
-
-
-def _failed_store_completions(
-    batch: KVTransferBatch, evidence: tuple[TransferEvidence, ...], error: Exception
-) -> tuple[StoreCompletion, ...]:
-    by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
-    for item in evidence:
-        by_request[item.source.request_index].append(item)
-    job_ids = batch.store_job_ids or (None,) * len(batch.request_ids)
-    return tuple(
-        StoreCompletion(
-            request_id,
-            StoreEvidence(
-                tuple(items), succeeded=not items, source_release_confirmed=True, error=error if items else None
-            ),
-            store_job_id,
-        )
-        for request_id, store_job_id, items in zip(batch.request_ids, job_ids, by_request, strict=True)
-    )
-
-
-def _store_command_completions(
-    commands: tuple[StoreCommand, ...], error: Exception | None = None
-) -> tuple[StoreCompletion, ...]:
-    evidence = StoreEvidence((), error is None, True, error)
-    return tuple(StoreCompletion(command.request_id, evidence, command.store_job_id) for command in commands)
+        return len(self._groups)

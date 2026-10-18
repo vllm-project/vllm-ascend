@@ -19,21 +19,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     uses_hybrid_kv_cache,
 )
 
-from ..backend import get_layerwise_data_plane, get_layerwise_protocol, validate_layerwise_topology
 from ..layerwise_cache_layout import (
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
-from .backend import LayerwiseAccessKind, resolve_backend_spec
+from .backend import BACKEND_IMPORTS, LayerwiseAccessKind, resolve_backend_spec
 from .infrastructure.reachability import HybridReachability, UnitaryReachability
-from .projection import (
-    BulkProjectionBinder,
-    GVALayerwiseProjectionBinder,
-    KeyRangeLayerwiseProjectionBinder,
-    LayerwiseProjectionBinder,
-    compile_bulk_projection_binder,
-)
+from .infrastructure.resources import KVPoolResources
 from .route import KVPoolRouteSpec
 from .scheduler import (
     AsynchronousBulkScheduler,
@@ -54,7 +47,6 @@ from .topology import (
 from .worker.base import KVPoolWorker
 from .worker.bulk import BulkWorker
 from .worker.layerwise import GVALayerwiseWorker, KeyRangeLayerwiseWorker
-from .worker.resources import GVAObjectLayout, KVPoolResources
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -87,15 +79,15 @@ def create_kv_pool_scheduler(
         use_layerwise=use_layerwise,
         discard_partial_chunks=discard_partial_chunks,
     )
-    if use_layerwise and has_private_state:
-        raise ValueError("AscendStore private KV state requires non-layerwise transfer")
     _validate_kv_pool_topology_support(
         vllm_config,
         kv_cache_config,
         use_layerwise=use_layerwise,
-        has_private_state=has_private_state,
+        transfer_group_ids=transfer_group_ids,
     )
-    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(vllm_config, kv_cache_config)
+    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(
+        vllm_config, kv_cache_config, transfer_group_ids
+    )
 
     store_enabled = _store_enabled(vllm_config, extra_config)
     dcp_size = int(getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1))
@@ -139,69 +131,63 @@ def create_kv_pool_scheduler(
 
 
 def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolWorker:
-    """Create the Worker-side owner of projection, memory, I/O, and timelines."""
+    """Create the Worker-side owner of Mapping, memory, I/O, and execution."""
 
     route_spec = resolve_kv_pool_route_spec(vllm_config, kv_cache_config)
-    projection_binder = _compile_kv_pool_projection_binder(route_spec, vllm_config, kv_cache_config)
+    reachability = create_reachability(
+        route_spec.topology,
+        route_spec.max_model_len,
+        use_eagle=route_spec.use_eagle,
+        retention_interval=route_spec.retention_interval,
+    )
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    store_enabled = _store_enabled(vllm_config, extra_config)
+    prefetch_layers = _resolve_layerwise_prefetch_layers(extra_config, route_spec.use_layerwise)
     backend_spec = resolve_backend_spec(route_spec.backend_name)
+    if route_spec.use_layerwise and backend_spec.layerwise_access is None:
+        raise TypeError("Layerwise route requires a concrete Backend data plane")
+    align_shared_storage = (
+        route_spec.use_layerwise
+        and backend_spec.layerwise_access is LayerwiseAccessKind.GVA
+        and uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups)
+    )
     backend = backend_spec.create(
         vllm_config.parallel_config,
-        extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+        extra_config=extra_config,
     )
     resources: KVPoolResources | None = None
     try:
-        gva_layout = None
-        if route_spec.use_layerwise and backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
-            layer_start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
-            topology = route_spec.topology
-            gva_layout = GVAObjectLayout(
-                layer_start,
-                vllm_config.model_config.get_total_num_hidden_layers(),
-                topology.transfer_groups[0].key_metadata.dcp_rank,
-                topology.dcp_size,
-                topology.put_step,
-            )
         resources = KVPoolResources(
             backend,
             backend_spec,
             kv_cache_config.num_blocks,
             route_spec.topology.transfer_groups,
-            gva_layout=gva_layout,
-            align_shared_storage=gva_layout is not None
-            and uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups),
+            align_shared_storage=align_shared_storage,
         )
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        store_enabled = _store_enabled(vllm_config, extra_config)
         if route_spec.use_layerwise:
-            prefetch_layers = _resolve_layerwise_prefetch_layers(extra_config, True)
             if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
-                if not isinstance(projection_binder, GVALayerwiseProjectionBinder):
-                    raise TypeError("GVA route did not compile a GVA Layerwise projection binder")
                 return GVALayerwiseWorker(
                     route_spec.topology,
-                    projection_binder,
                     resources,
                     store_enabled=store_enabled,
+                    reachability=reachability,
+                    kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                     layerwise_prefetch_layers=prefetch_layers,
                 )
-            if backend_spec.layerwise_access is LayerwiseAccessKind.KEY_RANGE:
-                if not isinstance(projection_binder, KeyRangeLayerwiseProjectionBinder):
-                    raise TypeError("KeyRange route did not compile a KeyRange Layerwise projection binder")
-                return KeyRangeLayerwiseWorker(
-                    route_spec.topology,
-                    projection_binder,
-                    resources,
-                    store_enabled=store_enabled,
-                    layerwise_prefetch_layers=prefetch_layers,
-                )
-            raise TypeError("Layerwise route requires a concrete Backend data plane")
+            return KeyRangeLayerwiseWorker(
+                route_spec.topology,
+                resources,
+                store_enabled=store_enabled,
+                reachability=reachability,
+                kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
+                layerwise_prefetch_layers=prefetch_layers,
+            )
 
-        if not isinstance(projection_binder, BulkProjectionBinder):
-            raise TypeError("Bulk route did not compile a Bulk projection binder")
         return BulkWorker(
             route_spec.topology,
-            projection_binder,
             resources,
+            reachability=reachability,
+            kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
             store_enabled=store_enabled,
             load_async=extra_config.get("load_async", False),
         )
@@ -216,76 +202,33 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
         raise
 
 
-def compile_kv_pool_projection_binder(
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-) -> LayerwiseProjectionBinder | BulkProjectionBinder:
-    """Select static projection from vLLM state and return the memory binder."""
+def create_reachability(
+    topology: KVPoolTopology,
+    max_model_len: int,
+    *,
+    use_eagle: bool = False,
+    retention_interval: int | None = None,
+) -> UnitaryReachability | HybridReachability:
+    """Assemble reusable cache algorithms from admitted static facts, without registered memory."""
 
-    route_spec = resolve_kv_pool_route_spec(vllm_config, kv_cache_config)
-    return _compile_kv_pool_projection_binder(route_spec, vllm_config, kv_cache_config)
-
-
-def _compile_kv_pool_projection_binder(
-    spec: KVPoolRouteSpec,
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-) -> LayerwiseProjectionBinder | BulkProjectionBinder:
-    if not spec.use_layerwise:
-        return compile_bulk_projection_binder(
-            spec.topology,
-            spec.max_model_len,
-            use_eagle=spec.use_eagle,
-            retention_interval=spec.retention_interval,
-            kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
-        )
-
-    protocol = get_layerwise_protocol(spec.backend_name)
-    if protocol is None:
-        raise ValueError(f"Backend {spec.backend_name!r} has no Layerwise key protocol")
-    topology = spec.topology
-    kv_cache_groups = kv_cache_config.kv_cache_groups
-    data_plane = get_layerwise_data_plane(protocol)
-    use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
-        data_plane == "block_key" and len(kv_cache_groups) > 1
-    )
-    model_name = topology.groups[0].key_metadata.model_name
-    key_builder = protocol.bind_layerwise_keys(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        model_name=model_name,
-        use_hybrid=use_hybrid,
-        grouped_block_size=[group.block_size for group in topology.groups],
-    )
-    backend_spec = resolve_backend_spec(spec.backend_name)
-    if backend_spec.layerwise_access is None:
-        raise ValueError(f"Backend {spec.backend_name!r} has no Layerwise data plane")
-    binder_type: type[GVALayerwiseProjectionBinder] | type[KeyRangeLayerwiseProjectionBinder]
-    if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
-        binder_type = GVALayerwiseProjectionBinder
-    else:
-        binder_type = KeyRangeLayerwiseProjectionBinder
     groups = topology.transfer_groups
-    reachability: UnitaryReachability | HybridReachability
-    if len(groups) == 1:
-        reachability = UnitaryReachability(groups[0].group_id, spec.max_model_len, topology.cache_transfer_granularity)
-    else:
-        reachability = HybridReachability(
-            groups,
-            topology.cache_transfer_granularity,
-            topology.hash_block_size,
-            spec.max_model_len,
-            use_eagle=spec.use_eagle,
-            retention_interval=spec.retention_interval,
-        )
-    return binder_type(topology, key_builder.make_full_key, reachability)
+    if len(groups) == 1 and not groups[0].uses_align_state:
+        return UnitaryReachability(groups[0].group_id, max_model_len, topology.cache_transfer_granularity)
+    return HybridReachability(
+        groups,
+        topology.cache_transfer_granularity,
+        topology.hash_block_size,
+        max_model_len,
+        use_eagle=use_eagle,
+        retention_interval=retention_interval,
+    )
 
 
 def resolve_kv_pool_route_spec(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
 ) -> KVPoolRouteSpec:
-    """Validate configuration and capture the static facts consumed by KV projection compilation."""
+    """Validate configuration and capture the static facts consumed by Mapping and Reachability."""
 
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     use_layerwise = bool(extra_config.get("use_layerwise", False))
@@ -297,12 +240,13 @@ def resolve_kv_pool_route_spec(
         use_layerwise=use_layerwise,
         discard_partial_chunks=bool(extra_config.get("discard_partial_chunks", True)),
     )
-    _validate_kv_pool_topology_support(
-        vllm_config,
-        kv_cache_config,
-        use_layerwise=use_layerwise,
+    transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
+    tp_partition, consumer_partitions = _validate_kv_pool_topology_support(
+        vllm_config, kv_cache_config, use_layerwise=use_layerwise, transfer_group_ids=transfer_group_ids
     )
-    topology = _resolve_kv_pool_topology(vllm_config, kv_cache_config)
+    topology = _resolve_kv_pool_topology(
+        vllm_config, kv_cache_config, transfer_group_ids, tp_partition, consumer_partitions
+    )
     return KVPoolRouteSpec(
         topology=topology,
         backend_name=backend_name,
@@ -337,7 +281,8 @@ def _validate_kv_pool_preflight(
 ) -> None:
     if backend_name == "yuanrong":
         raise ValueError("AscendStore v1 temporarily does not support the Yuanrong Backend")
-    resolve_backend_spec(backend_name)
+    if backend_name not in BACKEND_IMPORTS:
+        raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
 
     if _kvpp_size(vllm_config) > 1:
         raise ValueError("AscendStore v1 does not support active KVPP until KVPP ownership is represented")
@@ -364,8 +309,8 @@ def _validate_kv_pool_preflight(
             "the same dcp_size/pcp_size so the layerwise GVA shard layout is consistent."
         )
 
-    protocol = get_layerwise_protocol(backend_name)
-    validate_layerwise_topology(protocol, parallel_config, use_layerwise)
+    if use_layerwise and backend_name == "mooncake" and (dcp_size > 1 or pcp_size > 1):
+        raise ValueError("Mooncake Layerwise does not support context parallelism")
 
 
 def _validate_kv_pool_topology_support(
@@ -373,19 +318,18 @@ def _validate_kv_pool_topology_support(
     kv_cache_config: KVCacheConfig,
     *,
     use_layerwise: bool,
-    has_private_state: bool | None = None,
-) -> None:
+    transfer_group_ids: tuple[int, ...],
+) -> tuple[TPPartitionSpec, tuple[int, ...] | None]:
     """Reject transfer compositions whose identity or writer ownership is unproven."""
 
     cache_groups = kv_cache_config.kv_cache_groups
-    transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
-    if has_private_state is None:
-        has_private_state = len(transfer_group_ids) != len(cache_groups)
-
+    has_private_state = len(transfer_group_ids) != len(cache_groups)
+    partitions = resolve_consumer_pipeline_partitions(vllm_config)
     if use_layerwise:
+        if has_private_state:
+            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         if any(kv_cache_spec_uses_align_state(cache_groups[group_id].kv_cache_spec) for group_id in transfer_group_ids):
             raise ValueError("AscendStore v1 Layerwise transfer does not support Mamba align-state groups")
-        partitions = resolve_consumer_pipeline_partitions(vllm_config)
         if partitions is not None and len(partitions) > 1:
             raise ValueError("AscendStore v1 Layerwise transfer cannot be composed with Consumer pipeline Store")
     else:
@@ -393,17 +337,12 @@ def _validate_kv_pool_topology_support(
             spec = cache_groups[group_id].kv_cache_spec
             if kv_cache_spec_contains_mamba(spec) and not kv_cache_spec_uses_align_state(spec):
                 raise ValueError("AscendStore v1 Bulk supports Mamba state only in mamba_cache_mode='align'")
-    model_config = getattr(vllm_config, "model_config", None)
-    if model_config is None or not callable(getattr(model_config, "get_total_num_kv_heads", None)):
-        # Lightweight Scheduler unit fixtures omit Worker-only model geometry.
-        # Real VllmConfig instances always carry it, and Worker resolution
-        # validates the same boundary independently.
-        return
+    model_config = vllm_config.model_config
     tp_partition = _resolve_tp_partition(vllm_config)
     if use_layerwise:
         if tp_partition.tp_mismatch:
             raise ValueError("AscendStore v1 Layerwise transfer does not support TP mismatch")
-        return
+        return tp_partition, partitions
 
     parallel_config = vllm_config.parallel_config
     pcp_size = int(getattr(parallel_config, "prefill_context_parallel_size", 1))
@@ -417,7 +356,7 @@ def _validate_kv_pool_topology_support(
         raise ValueError("AscendStore v1 Bulk does not support DCP with remaining same-key TP writer replicas")
 
     if not tp_partition.tp_mismatch:
-        return
+        return tp_partition, partitions
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "index_topk"):
         raise ValueError("AscendStore v1 TP mismatch does not support sparse KV layouts")
@@ -428,18 +367,19 @@ def _validate_kv_pool_topology_support(
         or kv_cache_spec_uses_align_state(cache_groups[0].kv_cache_spec)
     ):
         raise ValueError("AscendStore v1 TP mismatch requires one dense transferable KV cache group")
-    partitions = resolve_consumer_pipeline_partitions(vllm_config)
     if partitions is not None and len(partitions) > 1:
         raise ValueError("AscendStore v1 TP mismatch cannot be composed with Consumer pipeline Store")
+    return tp_partition, partitions
 
 
-def _resolve_kv_pool_block_sizes(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> tuple[int, int]:
+def _resolve_kv_pool_block_sizes(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, transfer_group_ids: tuple[int, ...]
+) -> tuple[int, int]:
     """Resolve and validate the geometry consumed by transfer and reachability algorithms."""
 
     scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
     if scheduler_block_size <= 0 or hash_block_size <= 0 or scheduler_block_size % hash_block_size:
         raise ValueError("AscendStore scheduler block size must be a positive multiple of the hash block size")
-    transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
     dcp_size = int(getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1))
     for group_id in transfer_group_ids:
         spec = resolve_dcp_kv_cache_spec(kv_cache_config.kv_cache_groups[group_id].kv_cache_spec, dcp_size)
@@ -518,7 +458,13 @@ def resolve_consumer_pipeline_partitions(vllm_config: VllmConfig) -> tuple[int, 
     return tuple(partitions)
 
 
-def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolTopology:
+def _resolve_kv_pool_topology(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    transfer_group_ids: tuple[int, ...],
+    tp_partition: TPPartitionSpec,
+    consumer_pipeline_partitions: tuple[int, ...] | None,
+) -> KVPoolTopology:
     parallel_config = vllm_config.parallel_config
     model_config = vllm_config.model_config
     tp_rank = get_tp_group().rank_in_group
@@ -532,7 +478,9 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
     num_kv_heads = 1 if getattr(model_config, "use_mla", False) else model_config.get_total_num_kv_heads()
     put_step = tp_size // num_kv_heads if num_kv_heads < tp_size else 1
     head_or_tp_rank = tp_rank // put_step
-    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(vllm_config, kv_cache_config)
+    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(
+        vllm_config, kv_cache_config, transfer_group_ids
+    )
     model_name = model_config.model.rstrip("/").split("/")[-1]
     base_layer_count = model_config.get_total_num_hidden_layers()
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -542,7 +490,6 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
     if compress_ratios is None:
         compress_ratios = getattr(hf_config, "compress_ratios", None)
     kv_cache_groups = kv_cache_config.kv_cache_groups
-    transfer_group_ids, _ = _resolve_transfer_group_ids(kv_cache_config)
     group_cache_families = infer_group_cache_families(
         kv_cache_groups,
         compress_ratios,
@@ -579,10 +526,10 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
         put_step,
         cache_transfer_granularity,
         hash_block_size,
-        _resolve_tp_partition(vllm_config),
+        tp_partition,
         tuple(groups),
         transfer_group_ids,
-        resolve_consumer_pipeline_partitions(vllm_config),
+        consumer_pipeline_partitions,
     )
 
 
@@ -640,6 +587,8 @@ def _parse_pipeline_partitions(
         raise ValueError(f"Invalid prefill PP layer partition: {partition_config}") from error
     if len(partitions) != prefill_pp_size:
         raise ValueError(f"Partition count {len(partitions)} does not match prefill_pp_size {prefill_pp_size}")
+    if any(layer_count < 0 for layer_count in partitions):
+        raise ValueError("Prefill PP layer counts must be nonnegative")
     if sum(partitions) != num_hidden_layers:
         raise ValueError(f"Partition layer count {sum(partitions)} does not match model layers {num_hidden_layers}")
     return partitions

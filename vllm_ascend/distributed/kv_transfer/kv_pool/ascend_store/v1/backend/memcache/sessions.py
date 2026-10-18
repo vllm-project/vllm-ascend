@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..interfaces import GVARegion
-from ..results import integer_results
 from ..validation import validate_session_open
 
 if TYPE_CHECKING:
@@ -46,7 +45,7 @@ class MemcacheSessions:
         if not keys:
             return ()
         self._load_regions.update((key, None) for key in keys)
-        codes = list(integer_results("GVA acquire leases", keys, self._backend.add_gva_leases(keys)))
+        codes = list(self._backend.add_gva_leases(keys))
         for key, code in zip(keys, codes, strict=True):
             if code != 0:
                 del self._load_regions[key]
@@ -91,7 +90,7 @@ class MemcacheSessions:
         if not keys:
             return ()
         self._store_regions.update((key, None) for key in keys)
-        addresses = integer_results("GVA allocate", keys, self._backend.allocate_gva(keys, object_sizes))
+        addresses = self._backend.allocate_gva(keys, object_sizes)
         codes = []
         for key, address, size in zip(keys, addresses, object_sizes, strict=True):
             codes.append(0 if address > 0 else GVA_SESSION_FAILURE)
@@ -111,7 +110,7 @@ class MemcacheSessions:
             raise ValueError("Commit keys must be unique")
         if any(self._store_regions.get(key) is None for key in keys):
             raise RuntimeError("GVA commit has no confirmed owning Store session")
-        codes = integer_results("GVA publish", keys, self._backend.publish_gva(keys))
+        codes = self._backend.publish_gva(keys)
         for key, code in zip(keys, codes, strict=True):
             if code == 0:
                 del self._store_regions[key]
@@ -123,7 +122,7 @@ class MemcacheSessions:
             return (0,) * len(keys)
         # Stop exposing addresses even if the adapter cannot safely release them yet.
         self._store_regions.update((key, None) for key in owned)
-        codes = integer_results("GVA revoke", owned, self._backend.revoke_gva(owned))
+        codes = self._backend.revoke_gva(owned)
         by_key = dict(zip(owned, codes, strict=True))
         for key, code in by_key.items():
             if code == 0:
