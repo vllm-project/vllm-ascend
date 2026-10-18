@@ -1080,6 +1080,38 @@ class TestAscendSFAImpl(TestBase):
             **kwargs,
         )
 
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    @patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable")
+    def test_dummy_run_joins_oproj_collectives(self, mock_oproj_tp, mock_get_forward_context):
+        """An idle DP rank that skips attention must still enter o_proj's OTP collectives."""
+        mock_oproj_tp.return_value = True
+        mock_get_forward_context.return_value = SimpleNamespace(num_tokens=2)
+        hidden_states = torch.zeros(2, 8)
+        output = torch.zeros(2, 8)
+
+        with patch.object(self.impl, "_finalize_o_proj", return_value=output) as mock_finalize:
+            result = self.impl.forward("model.layers.0", hidden_states, None, None, output=output)
+
+        self.assertIs(result, output)
+        mock_finalize.assert_called_once()
+        o_proj_input, output_slice, gather_full_o_proj = mock_finalize.call_args.args
+        self.assertEqual(
+            tuple(o_proj_input.shape),
+            (2, self.impl.local_num_heads * self.impl.v_head_dim),
+        )
+        self.assertEqual(tuple(output_slice.shape), (2, 8))
+        self.assertFalse(gather_full_o_proj)
+
+    @patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False)
+    def test_dummy_run_zeros_output_without_oproj_tp(self, _mock_oproj_tp):
+        output = torch.full((2, 8), 5.0)
+        with patch.object(self.impl, "_finalize_o_proj") as mock_finalize:
+            result = self.impl.forward("model.layers.0", torch.zeros(2, 8), None, None, output=output)
+
+        self.assertIs(result, output)
+        mock_finalize.assert_not_called()
+        self.assertEqual(int(output.count_nonzero()), 0)
+
     def test_kvpp_waits_before_native_and_fused_cache_access(self):
         from vllm_ascend.attention import sfa_v1
 
