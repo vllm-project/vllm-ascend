@@ -83,6 +83,10 @@ class Backend(ABC):
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
         return cls(parallel_config)
 
+    def close(self) -> None:
+        """Release backend resources after all store operations have stopped."""
+        return None
+
     @abstractmethod
     def set_device(self):
         pass
