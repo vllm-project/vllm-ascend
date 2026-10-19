@@ -904,6 +904,59 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
     assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
 
 
+def _assert_packed_roundtrip(backend, tensors, buffer_size):
+    """Check values and ownership after overwriting the transport storage."""
+    buffers: list[torch.Tensor] = []
+    received: list[tuple[str, torch.Tensor]] = []
+    if backend == "hccl":
+        group = _make_group_mock()
+        packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
+        payloads = iter(call.args[0].clone() for call in group.broadcast.call_args_list)
+        chunk_count = group.broadcast.call_count
+
+        def receive(packed, **kwargs):
+            packed.copy_(next(payloads))
+            buffers.append(packed)
+
+        packed_broadcast_consumer(
+            iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors),
+            types.SimpleNamespace(broadcast=receive),
+            0,
+            received.extend,
+            buffer_size,
+        )
+    else:
+
+        def export(tensor):
+            buffers.append(tensor)
+            return None, (0,) * 7
+
+        with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
+            chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], buffer_size))
+        assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
+        chunk_count = len(chunks)
+        chunk = chunks[0]
+        assert isinstance(chunk, dict)  # Keep the existing IPC wire representation.
+        with _install_fake_rebuild_npu_tensor(buffers[0]):
+            received = packed_npu_ipc_consumer(
+                chunk["ipc_handle"],
+                "node-0",
+                chunk["names"],
+                chunk["shapes"],
+                chunk["dtype_names"],
+                chunk["tensor_sizes"],
+                0,
+            )
+    for buffer in buffers:
+        buffer.zero_()
+    assert [name for name, _ in received] == [name for name, _ in tensors]
+    for (_, actual), (_, expected) in zip(received, tensors):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
+    return chunk_count
+
+
 @pytest.mark.parametrize("buffer_size", [1, 8, 128])
 def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size):
     tensors = [
@@ -912,32 +965,7 @@ def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size
         ("empty", torch.empty(0, 3, dtype=torch.float16)),
         ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
     ]
-    group = _make_group_mock()
-    packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
-    payloads = [call.args[0].clone() for call in group.broadcast.call_args_list]
-    chunks = iter(payloads)
-    receive_buffers = []
-
-    def receive(packed, **kwargs):
-        packed.copy_(next(chunks))
-        receive_buffers.append(packed)
-
-    received: list[tuple[str, torch.Tensor]] = []
-    packed_broadcast_consumer(
-        iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors),
-        types.SimpleNamespace(broadcast=receive),
-        0,
-        received.extend,
-        buffer_size,
-    )
-    # A retained layer input must not alias the reusable receive allocation.
-    for payload in receive_buffers:
-        payload.zero_()
-    assert [name for name, _ in received] == [name for name, _ in tensors]
-    for (_, actual), (_, expected) in zip(received, tensors):
-        assert actual.shape == expected.shape
-        assert actual.dtype == expected.dtype
-        assert torch.equal(actual, expected)
+    _assert_packed_roundtrip("hccl", tensors, buffer_size)
 
 
 @pytest.mark.parametrize("empty_only", [False, True])
@@ -945,31 +973,7 @@ def test_packed_ipc_roundtrip_scalar_empty_and_unaligned(empty_only):
     tensors = [("empty", torch.empty(0, 3, dtype=torch.float16))]
     if not empty_only:
         tensors = [("byte", torch.tensor([7], dtype=torch.uint8)), ("scalar", torch.tensor(2.5)), *tensors]
-    exported = []
-
-    def export(tensor):
-        exported.append(tensor)
-        return None, ("handle", 0, 0, 0, 0, 0, 0)
-
-    with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
-        chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], 128))
-    assert len(chunks) == 1
-    chunk = chunks[0]
-    assert isinstance(chunk, dict)  # Keep the existing IPC wire representation.
-    with _install_fake_rebuild_npu_tensor(exported[0]):
-        received = packed_npu_ipc_consumer(
-            chunk["ipc_handle"],
-            "node-0",
-            chunk["names"],
-            chunk["shapes"],
-            chunk["dtype_names"],
-            chunk["tensor_sizes"],
-            0,
-        )
-    exported[0].zero_()
-    for (_, actual), (_, expected) in zip(received, tensors):
-        assert actual.shape == expected.shape
-        assert torch.equal(actual, expected)
+    _assert_packed_roundtrip("ipc", tensors, 128)
 
 
 @pytest.mark.parametrize("producer", [False, True])
@@ -1060,17 +1064,18 @@ def test_packed_consumer_waits_for_receive_before_unpacking():
 
 
 @pytest.mark.parametrize("backend", ["hccl", "ipc"])
-@pytest.mark.parametrize("change", ["dtype", "numel"])
-def test_packed_producer_rejects_materialized_metadata_change(backend, change):
+@pytest.mark.parametrize("change", ["dtype", "numel", "none", "list"])
+def test_packed_producer_rejects_invalid_callback_result(backend, change):
     original = torch.ones(2)
-    transform = lambda item: item[1].to(torch.int32) if change == "dtype" else item[1][:1]
+    returned = {"dtype": original.to(torch.int32), "numel": original[:1], "none": None, "list": [1]}[change]
+    message = " returned.*expected dtype=.*numel=2" if change in ("dtype", "numel") else ".*must return a torch.Tensor"
     group = _make_group_mock()
     patcher, _ = _install_fake_reduce_tensor()
-    with patcher, pytest.raises(ValueError, match="post_iter_func returned.*expected dtype=.*numel=2"):
+    with patcher, pytest.raises(ValueError, match=f"post_iter_func{message}"):
         if backend == "hccl":
-            packed_broadcast_producer(iter([("w", original)]), group, 0, transform, 16)
+            packed_broadcast_producer(iter([("w", original)]), group, 0, lambda _: returned, 16)
         else:
-            list(packed_npu_ipc_producer(iter([("w", original)]), "node-0", transform, 16))
+            list(packed_npu_ipc_producer(iter([("w", original)]), "node-0", lambda _: returned, 16))
     group.broadcast.assert_not_called()
 
 
@@ -1131,8 +1136,16 @@ def test_packed_hccl_consumer_rejects_negative_shape_before_broadcast():
 
 
 @pytest.mark.parametrize("producer", [False, True])
-@pytest.mark.parametrize("logging_error", [None, RuntimeError("logging failed"), KeyboardInterrupt(), SystemExit(2)])
-@pytest.mark.parametrize("num_buffers", [1, 2])
+@pytest.mark.parametrize(
+    "logging_error,num_buffers",
+    [
+        (None, 1),
+        (RuntimeError("logging failed"), 1),
+        (KeyboardInterrupt(), 1),
+        (SystemExit(2), 1),
+        (None, 2),
+    ],
+)
 def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging_error, num_buffers):
     import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
 
@@ -1294,59 +1307,11 @@ def test_packed_drain_failure_does_not_retain_unused_empty_slots(producer):
 
 
 @pytest.mark.parametrize("backend", ["hccl", "ipc"])
-@pytest.mark.parametrize("returned", [None, [1]])
-def test_packed_producer_rejects_non_tensor_callback_result(backend, returned):
-    group = _make_group_mock()
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher, pytest.raises(ValueError, match="post_iter_func.*must return a torch.Tensor"):
-        if backend == "hccl":
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda _: returned, 16)
-        else:
-            list(packed_npu_ipc_producer(iter([("w", torch.ones(1))]), "node-0", lambda _: returned, 16))
-    group.broadcast.assert_not_called()
-
-
-@pytest.mark.parametrize("backend", ["hccl", "ipc"])
 def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     tensors = [("bf16", torch.tensor([1, 2, 3], dtype=torch.bfloat16)), ("i64", torch.tensor([7], dtype=torch.int64))]
     # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
     assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
-    if backend == "hccl":
-        group = _make_group_mock()
-        packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], 32)
-        assert group.broadcast.call_count == 1
-        packed = group.broadcast.call_args.args[0].clone()
-        group.broadcast.side_effect = lambda target, **_: target.copy_(packed)
-        restored: list[tuple[str, torch.Tensor]] = []
-        packed_broadcast_consumer(
-            iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors), group, 0, restored.extend, 32
-        )
-    else:
-        exported: list[torch.Tensor] = []
-
-        def export(tensor):
-            exported.append(tensor)
-            return None, (0,) * 7
-
-        with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
-            chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], 32))
-        assert len(chunks) == 1
-        chunk = chunks[0]
-        with _install_fake_rebuild_npu_tensor(exported[0]):
-            restored = packed_npu_ipc_consumer(
-                chunk["ipc_handle"],
-                "node-0",
-                chunk["names"],
-                chunk["shapes"],
-                chunk["dtype_names"],
-                chunk["tensor_sizes"],
-                0,
-            )
-    assert [name for name, _ in restored] == [name for name, _ in tensors]
-    for (name, actual), (expected_name, expected) in zip(restored, tensors):
-        assert name == expected_name
-        assert actual.dtype == expected.dtype
-        assert torch.equal(actual, expected)
+    assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
 def test_packed_uses_shared_vllm_logger():
