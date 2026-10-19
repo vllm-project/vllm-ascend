@@ -462,6 +462,14 @@ class KVCacheRecvingThread(threading.Thread):
         self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
         self._dsa_pd_mooncake_staging_bytes = 0
         self._dsa_pd_mooncake_staging_lock = threading.Lock()
+        # Async landing: staged copies are submitted to a dedicated NPU stream
+        # and awaited with a per-window event, so the device-wide
+        # torch.npu.synchronize() in the landing loop no longer stalls unrelated
+        # streams. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING=0
+        # restores the legacy synchronous landing path.
+        self._landing_stream = torch.npu.Stream()
+        self._async_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING
+        self._pipeline_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE
         # Host-only offloaded KV leaves the ADXL engine with no device
         # region registered, so the device-side data channel is never
         # established at startup; the first cross-process connect then
@@ -882,6 +890,13 @@ class KVCacheRecvingThread(threading.Thread):
         target_bytes = target_tensor.view(torch.int8).reshape(-1)
         target_bytes.narrow(0, offset, length).copy_(staging[staging_offset : staging_offset + length], non_blocking=False)
 
+    @staticmethod
+    def _drain_dsa_pd_mooncake_slot_events(pending_slot_events: list[torch.npu.Event | None]) -> None:
+        for slot, pending_event in enumerate(pending_slot_events):
+            if pending_event is not None:
+                pending_event.synchronize()
+                pending_slot_events[slot] = None
+
     def _batch_transfer_sync_read_with_optional_staging(
         self,
         session_id: str,
@@ -954,19 +969,47 @@ class KVCacheRecvingThread(threading.Thread):
         staging = self._ensure_dsa_pd_mooncake_staging_tensor()
         staging_ptr = int(staging.data_ptr())
         staging_window = self._get_dsa_pd_mooncake_staging_window()
-        for batch_start in range(0, len(staged_transfers), staging_window):
-            batch = staged_transfers[batch_start : batch_start + staging_window]
+        # Pipeline mode: WINDOW keeps meaning the total staging capacity and
+        # the buffer is split into two banks of half a window that
+        # consecutive reads alternate between (the network batch halves
+        # accordingly; the staging footprint is identical with the pipeline
+        # on or off). Flipping banks needs no wait at all, so one read's
+        # landing hides under the next read; coming back to a bank two reads
+        # later is guarded by a just-in-time per-slot wait. The final drain
+        # keeps the external contract: returning 0 means every window has
+        # landed and is visible.
+        pipeline_active = self._pipeline_landing_enabled and staging_window >= 2
+        if self._pipeline_landing_enabled and not pipeline_active:
+            logger.warning(
+                "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE needs a staging window >= 2 "
+                "(got %s); falling back to per-window async landing.",
+                staging_window,
+            )
+        bank_window = max(1, staging_window // 2) if pipeline_active else staging_window
+        pending_slot_events: list[torch.npu.Event | None] = [None] * (
+            2 * bank_window if pipeline_active else staging_window
+        )
+        for batch_start in range(0, len(staged_transfers), bank_window):
+            batch = staged_transfers[batch_start : batch_start + bank_window]
+            bank_slot_base = ((batch_start // bank_window) % 2) * bank_window if pipeline_active else 0
             local_staging_ptrs = []
             remote_src_ptrs = []
             transfer_lengths = []
             copy_plan = []
-            for slot, (local_dst, remote_src, length) in enumerate(batch):
+            for position, (local_dst, remote_src, length) in enumerate(batch):
+                slot = bank_slot_base + position
                 staging_base_offset = slot * staging_chunk_bytes
                 staging_offset = staging_base_offset + int(remote_src) % (2 * 1024 * 1024)
                 local_staging_ptrs.append(staging_ptr + staging_offset)
                 remote_src_ptrs.append(remote_src)
                 transfer_lengths.append(length)
                 copy_plan.append((local_dst, length, staging_offset))
+            if pipeline_active:
+                for slot in range(bank_slot_base, bank_slot_base + len(batch)):
+                    pending_event = pending_slot_events[slot]
+                    if pending_event is not None:
+                        pending_event.synchronize()
+                        pending_slot_events[slot] = None
             ret = self.engine.batch_transfer_sync_read(session_id, local_staging_ptrs, remote_src_ptrs, transfer_lengths)
             if ret < 0:
                 logger.error(
@@ -980,11 +1023,34 @@ class KVCacheRecvingThread(threading.Thread):
                     transfer_lengths[0] if transfer_lengths else None,
                     ret,
                 )
+                if pipeline_active:
+                    self._drain_dsa_pd_mooncake_slot_events(pending_slot_events)
                 return ret
-            for local_dst, length, staging_offset in copy_plan:
-                self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
-            torch.npu.synchronize()
+            if pipeline_active:
+                with torch.npu.stream(self._landing_stream):
+                    for local_dst, length, staging_offset in copy_plan:
+                        self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+                    for slot in range(bank_slot_base, bank_slot_base + len(batch)):
+                        landing_event = torch.npu.Event()
+                        landing_event.record(self._landing_stream)
+                        pending_slot_events[slot] = landing_event
+            elif self._async_landing_enabled:
+                # The event wait must stay inside the window loop: the next
+                # window's batch_transfer_sync_read overwrites the same staging
+                # slots, so landing of this window must complete first.
+                with torch.npu.stream(self._landing_stream):
+                    for local_dst, length, staging_offset in copy_plan:
+                        self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+                landing_done = torch.npu.Event()
+                landing_done.record(self._landing_stream)
+                landing_done.synchronize()
+            else:
+                for local_dst, length, staging_offset in copy_plan:
+                    self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+                torch.npu.synchronize()
 
+        if pipeline_active:
+            self._drain_dsa_pd_mooncake_slot_events(pending_slot_events)
         return 0
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):

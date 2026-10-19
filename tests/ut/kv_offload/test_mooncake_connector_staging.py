@@ -37,6 +37,9 @@ def _make_fake_recv_thread(staging_chunk_bytes: int) -> KVCacheRecvingThread:
     thread._dsa_pd_mooncake_staging_tensor = None
     thread._dsa_pd_mooncake_staging_bytes = 0
     thread._dsa_pd_mooncake_staging_lock = threading.Lock()
+    thread._landing_stream = MagicMock()
+    thread._async_landing_enabled = False
+    thread._pipeline_landing_enabled = False
     return thread
 
 
@@ -145,6 +148,188 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
     def test_staging_window_uses_central_ascend_env(self):
         with patch.dict(os.environ, {"VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": "3"}):
             self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 3)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
+    def test_async_landing_uses_dedicated_stream_and_event(
+        self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
+    ):
+        offloaded_kv = torch.empty((3 * self.staging_chunk_bytes,), dtype=torch.int8)
+        register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
+        staging = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
+        copied: list[tuple[int, int, int]] = []
+
+        self.thread._dsa_pd_mooncake_staging_tensor = staging
+        self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
+        self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
+        self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
+        self.thread._async_landing_enabled = True
+        self.thread.engine.batch_transfer_sync_read.return_value = 0
+
+        def record_copy(dst: int, length: int, staging_offset: int = 0) -> None:
+            copied.append((dst, length, staging_offset))
+
+        self.thread._copy_dsa_pd_mooncake_staging_to_offloaded_kv = record_copy
+
+        ret = self.thread._batch_transfer_sync_read_with_optional_staging(
+            "remote:7777",
+            [offloaded_kv.data_ptr()],
+            [0xA00000],
+            [offloaded_kv.numel()],
+            "req-async-on",
+        )
+
+        # 3 chunks over a window of 2 -> 2 windows, each awaited by its own
+        # event on the dedicated landing stream; no device-wide sync at all.
+        self.assertEqual(ret, 0)
+        self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 2)
+        self.assertEqual(mock_stream.call_count, 2)
+        mock_stream.assert_called_with(self.thread._landing_stream)
+        self.assertEqual(mock_event_cls.call_count, 2)
+        self.assertEqual(mock_event_cls.return_value.record.call_count, 2)
+        mock_event_cls.return_value.record.assert_called_with(self.thread._landing_stream)
+        self.assertEqual(mock_event_cls.return_value.synchronize.call_count, 2)
+        mock_sync.assert_not_called()
+        mock_register_buffer.assert_not_called()
+        self.assertEqual(
+            copied,
+            [
+                # window 1: slots 0 and 1; window 2 wraps back to slot 0
+                (offloaded_kv.data_ptr(), self.staging_chunk_bytes, 0),
+                (
+                    offloaded_kv.data_ptr() + self.staging_chunk_bytes,
+                    self.staging_chunk_bytes,
+                    self.staging_chunk_bytes,
+                ),
+                (offloaded_kv.data_ptr() + 2 * self.staging_chunk_bytes, self.staging_chunk_bytes, 0),
+            ],
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
+    def test_async_landing_disabled_keeps_global_sync(
+        self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
+    ):
+        offloaded_kv = torch.empty((3 * self.staging_chunk_bytes,), dtype=torch.int8)
+        register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
+        staging = torch.empty((4 * self.staging_chunk_bytes,), dtype=torch.int8)
+
+        self.thread._dsa_pd_mooncake_staging_tensor = staging
+        self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
+        self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
+        self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
+        self.thread._async_landing_enabled = False
+        self.thread.engine.batch_transfer_sync_read.return_value = 0
+
+        ret = self.thread._batch_transfer_sync_read_with_optional_staging(
+            "remote:7777",
+            [offloaded_kv.data_ptr()],
+            [0xA00000],
+            [offloaded_kv.numel()],
+            "req-async-off",
+        )
+
+        # Kill switch off: legacy path — global device sync per window, the
+        # dedicated stream and events are never touched.
+        self.assertEqual(ret, 0)
+        mock_sync.assert_called_once()
+        mock_stream.assert_not_called()
+        mock_event_cls.assert_not_called()
+        mock_register_buffer.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
+    def test_pipeline_landing_overlaps_windows(
+        self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
+    ):
+        # WINDOW=4 means 4 total staging slots; pipeline splits them into two
+        # banks of 2, so 6 chunks become three half-window reads. b1 uses
+        # bank 0 (slots 0,1), b2 flips to bank 1 (slots 2,3) with no wait at
+        # all, b3 comes back to bank 0 and must first reclaim slots 0 and 1.
+        # The final drain waits out every remaining event before success is
+        # reported.
+        offloaded_kv = torch.empty((6 * self.staging_chunk_bytes,), dtype=torch.int8)
+        register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
+        staging = torch.empty((4 * self.staging_chunk_bytes,), dtype=torch.int8)
+
+        self.thread._dsa_pd_mooncake_staging_tensor = staging
+        self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
+        self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
+        self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
+        self.thread._pipeline_landing_enabled = True
+
+        copied: list[tuple[int, int, int]] = []
+
+        def record_copy(dst: int, length: int, staging_offset: int = 0) -> None:
+            copied.append((dst, length, staging_offset))
+
+        self.thread._copy_dsa_pd_mooncake_staging_to_offloaded_kv = record_copy
+
+        # Trace the interleaving of network reads, event records and event
+        # waits to pin down the pipelining discipline.
+        order: list[str] = []
+
+        def make_event(name: str):
+            event = MagicMock()
+            event.record.side_effect = lambda *a, **k: order.append(f"rec{name}")
+            event.synchronize.side_effect = lambda: order.append(f"wait{name}")
+            return event
+
+        events = [make_event(str(i)) for i in range(6)]
+        mock_event_cls.side_effect = events
+        self.thread.engine.batch_transfer_sync_read.side_effect = lambda *a, **k: (
+            order.append("read"),
+            0,
+        )[1]
+
+        ret = self.thread._batch_transfer_sync_read_with_optional_staging(
+            "remote:7777",
+            [offloaded_kv.data_ptr()],
+            [0xA00000],
+            [offloaded_kv.numel()],
+            "req-pipeline",
+        )
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(
+            order,
+            [
+                # b1 (bank 0): read, submit, record per slot
+                "read", "rec0", "rec1",
+                # b2 (bank 1): bank flip -> read starts with no wait
+                "read", "rec2", "rec3",
+                # b3 (bank 0 again): reclaim slots 0 and 1 before overwriting
+                "wait0", "wait1", "read", "rec4", "rec5",
+                # final drain: slots 0,1,2,3
+                "wait4", "wait5", "wait2", "wait3",
+            ],
+        )
+        self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 3)
+        self.assertEqual(mock_event_cls.call_count, 6)
+        for event in events:
+            event.record.assert_called_once_with(self.thread._landing_stream)
+            event.synchronize.assert_called_once()
+        mock_sync.assert_not_called()
+        mock_stream.assert_called_with(self.thread._landing_stream)
+        mock_register_buffer.assert_not_called()
+        chunk = self.staging_chunk_bytes
+        self.assertEqual(
+            copied,
+            [
+                (offloaded_kv.data_ptr(), chunk, 0),
+                (offloaded_kv.data_ptr() + chunk, chunk, chunk),
+                (offloaded_kv.data_ptr() + 2 * chunk, chunk, 2 * chunk),
+                (offloaded_kv.data_ptr() + 3 * chunk, chunk, 3 * chunk),
+                (offloaded_kv.data_ptr() + 4 * chunk, chunk, 0),
+                (offloaded_kv.data_ptr() + 5 * chunk, chunk, chunk),
+            ],
+        )
 
 
 class TestGlobalTERegisterBufferDedup(unittest.TestCase):
