@@ -41,8 +41,12 @@ def packed_broadcast_producer(
         group: Process group (PyHcclCommunicator)
         src: Source rank (0 in current implementation)
         post_iter_func: Function to apply to each (name, tensor) pair before
-                       packing. Must preserve the source dtype and element count;
-                       otherwise raises ValueError. Values/layout may change.
+                       packing. Must return a Tensor with the source dtype and
+                       element count, or raises ValueError. Flattened element
+                       positions must still match the source metadata: values,
+                       device and strides may change, but elements must not be
+                       reordered (e.g. by transposing). Order is a caller contract,
+                       not checked here.
         buffer_size_bytes: Size in bytes for each packed tensor buffer.
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
@@ -82,7 +86,10 @@ def packed_broadcast_producer(
                         done = True
                         break
                     # Apply post processing and convert to linearized uint8 tensor
-                    tensor = post_iter_func(item).contiguous()
+                    tensor = post_iter_func(item)
+                    if not isinstance(tensor, torch.Tensor):
+                        raise ValueError(f"post_iter_func for tensor {item[0]!r} must return a torch.Tensor")
+                    tensor = tensor.contiguous()
                     original = item[1]
                     if tensor.dtype != original.dtype or tensor.numel() != original.numel():
                         raise ValueError(
@@ -124,7 +131,7 @@ def packed_broadcast_producer(
         if cleanup_error is not None and body_error is None:
             raise cleanup_error
         if cleanup_error is not None and body_error is not None:
-            with suppress(BaseException):
+            with suppress(Exception):
                 logger.warning(
                     "Failed to drain a packed HCCL stream while handling another exception; "
                     "retaining its buffer until process exit: %s",
@@ -142,12 +149,17 @@ def packed_broadcast_consumer(
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
+    Unpacking clones one actual chunk's payload in addition to the receive
+    buffer and loader copies. A HCCL chunk may exceed buffer_size_bytes; peak
+    memory also depends on in-flight slots and tensors retained by the loader.
+
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
         group: Process group (PyHcclCommunicator)
         src: Source rank (0 in current implementation)
         post_unpack_func: Function to apply to each list of (name, tensor) after
-                         unpacking
+                         unpacking. Tensors own independent storage and may be
+                         retained or modified without aliasing the packed buffer.
         buffer_size_bytes: Size in bytes for each packed tensor buffer.
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
@@ -257,7 +269,7 @@ def packed_broadcast_consumer(
         if cleanup_error is not None and body_error is None:
             raise cleanup_error
         if cleanup_error is not None and body_error is not None:
-            with suppress(BaseException):
+            with suppress(Exception):
                 logger.warning(
                     "Failed to drain a packed HCCL stream while handling another exception; "
                     "retaining its buffer until process exit: %s",
@@ -286,9 +298,11 @@ def packed_npu_ipc_producer(
     Args:
         iterator: Iterator of (name, tensor) pairs.
         npu_uuid: Physical NPU UUID string for this rank.
-        post_iter_func: Applied to each (name, tensor) before packing. Must preserve
-            the source dtype and element count; otherwise raises ValueError.
-            Values/layout may change.
+        post_iter_func: Applied to each (name, tensor) before packing. Must return
+            a Tensor with the source dtype and element count, or raises ValueError.
+            Flattened element positions must match the source metadata: values,
+            device and strides may change, but elements must not be reordered
+            (e.g. by transposing). Order is a caller contract, not checked here.
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
     """
     if buffer_size_bytes <= 0:
@@ -305,7 +319,10 @@ def packed_npu_ipc_producer(
     total_bytes = 0
 
     for name, orig_tensor in iterator:
-        tensor = post_iter_func((name, orig_tensor)).contiguous()
+        tensor = post_iter_func((name, orig_tensor))
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"post_iter_func for tensor {name!r} must return a torch.Tensor")
+        tensor = tensor.contiguous()
         if tensor.dtype != orig_tensor.dtype or tensor.numel() != orig_tensor.numel():
             raise ValueError(
                 f"post_iter_func returned tensor {name!r} with dtype={tensor.dtype}, "
@@ -365,6 +382,9 @@ def packed_npu_ipc_consumer(
     individual tensors, and clones each into independent storage before
     returning.  The clone is required because the producer reuses one
     IPC buffer across chunks.
+    Clones add one chunk's payload storage on top of the shared buffer and any
+    loader-owned copies. Returned tensors may be retained or modified without
+    aliasing that buffer.
 
     Args:
         ipc_handle: Mapping of NPU UUID to a ``rebuild_npu_tensor`` args tuple
@@ -380,8 +400,8 @@ def packed_npu_ipc_consumer(
     # imported at module load time on non-NPU hosts.
     from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
 
-    if device_index < 0:
-        raise ValueError(f"device_index must be non-negative, got {device_index}")
+    if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
+        raise ValueError(f"device_index must be a non-negative integer, got {device_index!r}")
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"

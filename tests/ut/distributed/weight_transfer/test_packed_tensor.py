@@ -973,7 +973,10 @@ def test_packed_ipc_roundtrip_scalar_empty_and_unaligned(empty_only):
 
 @pytest.mark.parametrize("producer", [False, True])
 def test_packed_transfer_drains_storage_before_propagating_error(producer):
+    import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
+
     events: list[str] = []
+    pinned: list[torch.Tensor] = []
 
     class TrackingStream(_FakeNpuStream):
         buffer = None
@@ -1002,7 +1005,11 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
         raise ValueError("transfer rejected")
 
     group = types.SimpleNamespace(broadcast=broadcast)
-    with patch.object(torch.npu, "Stream", return_value=stream), pytest.raises(ValueError, match="transfer rejected"):
+    with (
+        patch.object(torch.npu, "Stream", return_value=stream),
+        patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
+        pytest.raises(ValueError, match="transfer rejected"),
+    ):
         if producer:
             packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, 1)
         else:
@@ -1015,6 +1022,7 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
                 1,
             )
     assert events == ["error", "drain"]
+    assert pinned == []
 
 
 def test_packed_consumer_waits_for_receive_before_unpacking():
@@ -1069,6 +1077,10 @@ def test_packed_producer_rejects_materialized_metadata_change(backend, change):
     "changes",
     [
         {"device_index": -1},
+        {"device_index": None},
+        {"device_index": "0"},
+        {"device_index": 0.0},
+        {"device_index": True},
         {"ipc_handle": {"node-0": (0,)}},
         {"dtype_names": ["not_a_dtype"]},
         {"dtype_names": ["Tensor"]},
@@ -1077,7 +1089,20 @@ def test_packed_producer_rejects_materialized_metadata_change(backend, change):
         {"tensor_sizes": [-4]},
         {"tensor_sizes": [8]},
     ],
-    ids=["device", "handle", "unknown-dtype", "non-dtype", "lengths", "shape", "negative-size", "byte-count"],
+    ids=[
+        "device",
+        "none-device",
+        "string-device",
+        "float-device",
+        "bool-device",
+        "handle",
+        "unknown-dtype",
+        "non-dtype",
+        "lengths",
+        "shape",
+        "negative-size",
+        "byte-count",
+    ],
 )
 def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
     kwargs: dict[str, Any] = dict(
@@ -1104,7 +1129,9 @@ def test_packed_hccl_consumer_rejects_negative_shape_before_broadcast():
     group.broadcast.assert_not_called()
 
 
-def test_packed_drain_failure_keeps_storage_and_original_error():
+@pytest.mark.parametrize("producer", [False, True])
+@pytest.mark.parametrize("logging_error", [RuntimeError("logging failed"), KeyboardInterrupt(), SystemExit(2)])
+def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging_error):
     import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
 
     class FailedStream(_FakeNpuStream):
@@ -1116,20 +1143,28 @@ def test_packed_drain_failure_keeps_storage_and_original_error():
 
     stream = FailedStream()
     pinned: list[torch.Tensor] = []
+    original_error = ValueError("transfer rejected")
 
     def broadcast(*args, **kwargs):
         stream.failed = True
-        raise ValueError("transfer rejected")
+        raise original_error
 
+    expected_type = ValueError if isinstance(logging_error, Exception) else type(logging_error)
     with (
         patch.object(torch.npu, "Stream", return_value=stream),
         patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
-        patch.object(packed_module.logger, "warning", side_effect=RuntimeError("logging failed")),
-        pytest.raises(ValueError, match="transfer rejected"),
+        patch.object(packed_module.logger, "warning", side_effect=logging_error),
+        pytest.raises(expected_type) as error,
     ):
-        packed_broadcast_producer(
-            iter([("w", torch.ones(1))]), types.SimpleNamespace(broadcast=broadcast), 0, lambda item: item[1], 4, 1
-        )
+        group = types.SimpleNamespace(broadcast=broadcast)
+        if producer:
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, 1)
+        else:
+            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, MagicMock(), 4, 1)
+    if isinstance(logging_error, Exception):
+        assert error.value is original_error
+    else:
+        assert error.value is logging_error
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
 
@@ -1248,3 +1283,59 @@ def test_packed_drain_failure_does_not_retain_unused_empty_slots(producer):
         else:
             packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, 2)
     assert pinned == []
+
+
+@pytest.mark.parametrize("backend", ["hccl", "ipc"])
+@pytest.mark.parametrize("returned", [None, [1]])
+def test_packed_producer_rejects_non_tensor_callback_result(backend, returned):
+    group = _make_group_mock()
+    patcher, _ = _install_fake_reduce_tensor()
+    with patcher, pytest.raises(ValueError, match="post_iter_func.*must return a torch.Tensor"):
+        if backend == "hccl":
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda _: returned, 16)
+        else:
+            list(packed_npu_ipc_producer(iter([("w", torch.ones(1))]), "node-0", lambda _: returned, 16))
+    group.broadcast.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["hccl", "ipc"])
+def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
+    tensors = [("bf16", torch.tensor([1, 2, 3], dtype=torch.bfloat16)), ("i64", torch.tensor([7], dtype=torch.int64))]
+    # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
+    assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
+    if backend == "hccl":
+        group = _make_group_mock()
+        packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], 32)
+        assert group.broadcast.call_count == 1
+        packed = group.broadcast.call_args.args[0].clone()
+        group.broadcast.side_effect = lambda target, **_: target.copy_(packed)
+        restored: list[tuple[str, torch.Tensor]] = []
+        packed_broadcast_consumer(
+            iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors), group, 0, restored.extend, 32
+        )
+    else:
+        exported: list[torch.Tensor] = []
+
+        def export(tensor):
+            exported.append(tensor)
+            return None, (0,) * 7
+
+        with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
+            chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], 32))
+        assert len(chunks) == 1
+        chunk = chunks[0]
+        with _install_fake_rebuild_npu_tensor(exported[0]):
+            restored = packed_npu_ipc_consumer(
+                chunk["ipc_handle"],
+                "node-0",
+                chunk["names"],
+                chunk["shapes"],
+                chunk["dtype_names"],
+                chunk["tensor_sizes"],
+                0,
+            )
+    assert [name for name, _ in restored] == [name for name, _ in tensors]
+    for (name, actual), (expected_name, expected) in zip(restored, tensors):
+        assert name == expected_name
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
