@@ -31,6 +31,12 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -153,6 +159,12 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG

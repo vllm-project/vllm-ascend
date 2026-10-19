@@ -24,6 +24,13 @@ from tests.e2e.common.single_node.single_node_config import (
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
+from tools.profiling.capture import (
+    ProfileSpec,
+    ServeInstance,
+    ServeManifest,
+    configure_profiler_command,
+    profile_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -565,7 +572,10 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
     benchmark_keys = [k for k, v in config.benchmarks.items() if v]
-    aisbench_cases = [config.benchmarks[k] for k in benchmark_keys]
+    aisbench_cases = [
+        {**config.benchmarks[k], "benchmark_name": k, "benchmark_artifact_name": f"{config.name}__{k}"}
+        for k in benchmark_keys
+    ]
     if not aisbench_cases:
         return
 
@@ -597,6 +607,9 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             subprocess.call(command)
     kv_pool_manager = create_single_node_kv_pool_manager(config.kv_pool, config.name)
     if config.service_mode == "epd":
+        if ProfileSpec.from_env().enabled:
+            logger.warning("Profiling is not supported for the single-node EPD service mode")
+            (profile_root() / "serve_manifest.json").unlink(missing_ok=True)
         with (
             kv_pool_manager,
             RemoteEPDServer(
@@ -610,6 +623,12 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         return
 
     # Standard OpenAI service mode
+    spec = ProfileSpec.from_env()
+    if spec.enabled:
+        root = profile_root()
+        instance = ServeInstance.from_endpoint("serve-0", f"http://127.0.0.1:{config.server_port}", root=root)
+        ServeManifest((instance,)).write(root / "serve_manifest.json")
+        config.server_cmd = configure_profiler_command(config.server_cmd, instance, spec)
     with (
         kv_pool_manager,
         RemoteOpenAIServer(

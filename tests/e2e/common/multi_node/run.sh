@@ -221,6 +221,16 @@ run_tests_with_log() {
     pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
     ret=$?
     echo "pytest exit code: ret=${ret}"
+    # Save every AISBench experiment before AOP can rerun tests or pods are deleted.
+    # Each test pod has its own checkout; the destination belongs to this run.
+    local outputs_ret=0
+    if [ -d outputs ]; then
+        local outputs_dest="${LOG_PREFIX}/aisbench_outputs/node-${LWS_WORKER_INDEX:-0}"
+        if ! mkdir -p "$outputs_dest" || ! cp -a outputs/. "$outputs_dest/"; then
+            echo "::error::Failed to preserve AISBench outputs at $outputs_dest"
+            outputs_ret=1
+        fi
+    fi
     set -e
     if [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         if [ $ret -eq 0 ]; then
@@ -301,6 +311,9 @@ run_tests_with_log() {
         else
             echo "Worker: leader finished successfully, exiting"
         fi
+    fi
+    if [ "$outputs_ret" -ne 0 ]; then
+        print_failure "Failed to preserve AISBench outputs"
     fi
 }
 
