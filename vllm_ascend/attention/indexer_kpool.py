@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -31,8 +31,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
-
-logger = init_logger(__name__)
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 

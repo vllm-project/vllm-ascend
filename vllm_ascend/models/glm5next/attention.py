@@ -10,7 +10,7 @@ from vllm.config import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -45,8 +45,6 @@ if vllm_version_is("0.31.0"):
     from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
 else:
     from transformers import Glm5NextConfig
-
-logger = init_logger(__name__)
 
 
 class Indexer(nn.Module):
