@@ -668,6 +668,7 @@ def build_attn_metadata(
                     )
                 )
                 if use_plan:
+                    assert metadata_plan is not None
                     if metadata_plan.is_draft:
                         metadata = metadata_plan.build_draft(
                             attn_metadata_builder,
