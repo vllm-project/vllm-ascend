@@ -2344,6 +2344,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         runner = self._build_runner()
         runner.attn_groups = []
+        runner._needs_seq_lens_cpu_sync = True
         runner._check_and_update_cudagraph_mode = MagicMock()
         runner.calculate_reorder_batch_threshold = MagicMock()
 
@@ -2407,6 +2408,20 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = AscendAttentionBackend
         target_attn.get_attn_backend.return_value = FakeCacheBackend
         draft_attn.get_attn_backend.return_value = FakeCacheBackend
+        runner.attn_groups = []
+        runner.initialize_attn_backend(kv_cache_config)
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        glm_spec = UniformTypeKVCacheSpecs.from_specs(
+            {name: replace(spec, model_version="glm5_next") for name, spec in specs.items()}
+        )
+        assert glm_spec is not None
+        kv_cache_config = replace(
+            kv_cache_config,
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=[target_layer, draft_layer, cache_layer], kv_cache_spec=glm_spec)
+            ],
+        )
         for use_compress in (False, True):
             runner.attn_groups = []
             runner.use_compress = use_compress

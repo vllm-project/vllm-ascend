@@ -546,6 +546,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
+        # Backends that consume CPU seq_lens (AscendAttentionBackend,
+        # AscendMLABackend, and DSV4 compressed attention metadata) need
+        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
+        # in async spec decode mode; others (SFA, GDN, etc.) do not.
+        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
+            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+        )
+
         # kv role
         self.is_kv_producer = False
         self.is_kv_consumer = False
@@ -6306,13 +6314,18 @@ class NPUModelRunner(GPUModelRunner):
             attention_backend_maps.append(attn_backends[0])
             attention_backend_list.append(attn_backends[1])
 
-        # The initial fallback backend can differ from the loaded layers.
-        # Only consumers of exact CPU lengths require the speculative D2H wait.
-        self._needs_seq_lens_cpu_sync = self.use_compress or any(
-            issubclass(backend, (AscendAttentionBackend, AscendMLABackend))
-            for backends in attention_backend_list
-            for backend in backends
-        )
+        # GLM NoPE cache layers can differ from the initial fallback backend.
+        # Preserve the original synchronization policy for other cache families.
+        if any(
+            is_glm5_next_cache_spec(group_key.kv_cache_spec)
+            for backend_map in attention_backend_maps
+            for group_key in backend_map
+        ):
+            self._needs_seq_lens_cpu_sync = self.use_compress or any(
+                issubclass(backend, (AscendAttentionBackend, AscendMLABackend))
+                for backends in attention_backend_list
+                for backend in backends
+            )
 
         self._check_and_update_cudagraph_mode(
             attention_backend_list,
