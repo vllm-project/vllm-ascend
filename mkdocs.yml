@@ -252,6 +252,7 @@ nav:
         - tutorials/models/Minitron-8B-Base.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
         - tutorials/models/gpt-oss-120b.md
+        - tutorials/models/AntAngelMed.md
         - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md
         - tutorials/models/Qwen3-ASR-1.7B.md
         - tutorials/models/Cohere-Transcribe.md
