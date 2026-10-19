@@ -18,13 +18,16 @@
 ARG CANN_QUAY_URL="quay.io/ascend/cann"
 # CANN_VERSION (optional): CANN toolkit version used to select the base image tag.
 ARG CANN_VERSION="9.1.0"
+
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-ubuntu22.04-py3.12
+
 # Build-time arguments (declared once at the top of the stage for clarity).
 # PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 # ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-# MOONCAKE_OBS_PREFIX: OBS路径前缀，存放mooncake whl包
+# MOONCAKE_TAG (optional): Version tag of the mooncake-transfer-engine-npu package.
+ARG MOONCAKE_TAG=0.3.13
 ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
@@ -73,14 +76,15 @@ ARG TARGETPLATFORM
 RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
-            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
+            MOONCAKE_WHL="mooncake_transfer_engine-${MOONCAKE_TAG}-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
         "linux/amd64"|"x86_64") \
-            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_38_x86_64.whl" ;; \
+            MOONCAKE_WHL="mooncake_transfer_engine-${MOONCAKE_TAG}-cp312-cp312-manylinux_2_38_x86_64.whl" ;; \
         *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
     esac && \
     MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
     echo "Download mooncake whl: ${MOONCAKE_URL}" && \
     wget --quiet --no-check-certificate "${MOONCAKE_URL}" -O /tmp/${MOONCAKE_WHL} && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip install /tmp/${MOONCAKE_WHL} && \
     rm -f /tmp/${MOONCAKE_WHL} && \
     python3 -m pip cache purge
@@ -88,6 +92,7 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
+
 # Install vLLM
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
@@ -96,10 +101,12 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
+
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
+
 # Install vllm-ascend
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION=$SOC_VERSION \
@@ -115,6 +122,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
+
 # Install flash-linear-attention-npu (v26.9.1-beta2, A2 ascend910b)
 ARG TARGETPLATFORM
 RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
@@ -133,6 +141,7 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
     rm -f /tmp/${FLA_WHL} && \
     python3 -m pip cache purge
+
 # Install _rust_tool_parser for the Rust frontend.
 # The default toolchain is read from vllm's rust-toolchain.toml (falling back
 # to stable).
@@ -141,9 +150,12 @@ RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
     python3 -m pip install -r requirements/build/rust.txt && \
     bash tools/build_rust.sh
+
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+
 # ===== Conditional installation based on BUILD_TYPE =====
+
 # Install daily packages via shared script
 COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
 RUN if [ "$BUILD_TYPE" = "daily" ]; then \
@@ -151,4 +163,5 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
     else \
         echo "Building release version without daily packages"; \
     fi && rm -f /tmp/install_daily_deps.sh
+
 CMD ["/bin/bash"]
