@@ -21,10 +21,8 @@ def causal_conv1d(
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
-    # Padded requests can be skipped by the kernel; their output must stay zero.
-    output = torch.zeros_like(x)
     if cache_indices.shape[0] == 0:
-        return output
+        return torch.zeros_like(x)
     kernel_state = conv_state
     kernel_indices = cache_indices
     null_block_id = 0

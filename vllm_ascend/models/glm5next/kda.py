@@ -33,9 +33,9 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
-from vllm_ascend.models.glm5next.kda_metadata import Glm5NextKDABackend
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -269,7 +269,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def get_attn_backend(self):
-        return Glm5NextKDABackend
+        return AscendGDNHostMetadataBackend
 
     def forward(
         self,
@@ -469,7 +469,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             return x.reshape(1, -1, self.local_num_heads, self.head_dim)
 
         # Pure decode writes the whole captured buffer, including padding.
-        direct_output = (
+        direct_spec_output = use_spec and (non_spec_token_indx is None or non_spec_token_indx.numel() == 0)
+        direct_output = direct_spec_output or (
             not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
         )
         if not direct_output:
@@ -488,8 +489,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.dt_bias,
                 lower_bound,
                 num_accepted_tokens,
+                output_buffer=core_attn_out if direct_spec_output else None,
             )
-            core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
+            if not direct_spec_output:
+                core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
             maybe_save_kv_layer_to_connector("", [])

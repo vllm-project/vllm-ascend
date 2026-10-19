@@ -337,17 +337,6 @@ def _build_non_spec_chunked_prefill_metadata(
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
-    # Subclasses may opt in when request-order views are supported. Keep
-    # shared GDN builders on their existing staging and gather path.
-    _USE_SPEC_SEQUENCE_VIEWS = False
-
-    def _get_mamba_block_table_tensor(self, common_attn_metadata: CommonAttentionMetadata) -> torch.Tensor:
-        return mamba_get_block_table_tensor(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
 
     def __init__(
         self,
@@ -714,13 +703,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        block_table_tensor = self._get_mamba_block_table_tensor(m)
+        block_table_tensor = mamba_get_block_table_tensor(
+            m.block_table_tensor,
+            m.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
-        all_spec_decodes = False
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -743,14 +736,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
-                all_spec_decodes = self._USE_SPEC_SEQUENCE_VIEWS and num_spec_decodes == num_reqs
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
                 spec_sequence_masks.copy_(spec_sequence_masks_cpu, non_blocking=True)
-                if not all_spec_decodes:
-                    spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
-                        spec_sequence_masks_cpu,
-                        num_spec_decodes,
-                    )
+                spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
+                    spec_sequence_masks_cpu,
+                    num_spec_decodes,
+                )
 
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
@@ -769,13 +760,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
-            if not all_spec_decodes:
-                query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             assert spec_sequence_masks_cpu is not None
-            if not all_spec_decodes:
-                assert spec_sequence_indices is not None
-                assert non_spec_sequence_indices is not None
+            assert spec_sequence_indices is not None
+            assert non_spec_sequence_indices is not None
 
             non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
             num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
@@ -806,16 +795,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
-                # An all-spec batch already has the required request order.
-                # Avoid H2D identity indices and temporary state/accepted gathers.
-                if all_spec_decodes:
-                    spec_state_indices_tensor = block_table_tensor[:, : self.num_spec + 1]
-                else:
-                    spec_state_indices_tensor = torch.index_select(
-                        block_table_tensor[:, : self.num_spec + 1],
-                        0,
-                        spec_sequence_indices,
-                    )
+                spec_state_indices_tensor = torch.index_select(
+                    block_table_tensor[:, : self.num_spec + 1],
+                    0,
+                    spec_sequence_indices,
+                )
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
                 non_spec_query_start_loc = None
@@ -884,14 +868,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
 
             assert num_accepted_tokens is not None
-            if all_spec_decodes:
-                num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
-            else:
-                num_accepted_tokens = torch.index_select(
-                    num_accepted_tokens,
-                    0,
-                    spec_sequence_indices,
-                )
+            num_accepted_tokens = torch.index_select(
+                num_accepted_tokens,
+                0,
+                spec_sequence_indices,
+            )
 
         # A FULL graph retains captured speculative conv/recurrent tasks. Clear
         # their stable inputs on every no-spec replay so an idle or prefill
