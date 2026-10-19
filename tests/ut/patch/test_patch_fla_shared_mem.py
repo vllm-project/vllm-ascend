@@ -20,6 +20,11 @@ class TestFLASharedMemPatch(unittest.TestCase):
         self.patch = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.patch)
         self.original_meta_path = sys.meta_path[:]
+        # Plugin bootstrap may already have installed the persistent finder.
+        # Isolate it from our fake FLA package, including the unpatched control.
+        sys.meta_path[:] = [
+            finder for finder in sys.meta_path if type(finder).__module__ != "vllm_ascend.patch.patch_fla_shared_mem"
+        ]
         self.original_sys_path = sys.path[:]
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -151,6 +156,25 @@ class TestFLASharedMemPatch(unittest.TestCase):
             self.assertTrue(imported[0].loaded)
             self.assertFalse(utils.check_shared_mem())
             self.assertIn(finder, sys.meta_path)
+
+
+class TestFLASharedMemPatchIsolation(unittest.TestCase):
+    def test_unpatched_control_with_bootstrap_finder(self):
+        path = Path(__file__).resolve().parents[3] / "vllm_ascend/patch/patch_fla_shared_mem.py"
+        spec = importlib.util.spec_from_file_location("vllm_ascend.patch.patch_fla_shared_mem", path)
+        assert spec is not None and spec.loader is not None
+        bootstrap_patch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap_patch)
+        original_meta_path = sys.meta_path[:]
+        finder = bootstrap_patch._FLAUtilsFinder()
+        sys.meta_path.insert(0, finder)
+        try:
+            result = unittest.TestResult()
+            TestFLASharedMemPatch("test_unpatched_import_reproduces_initialization").run(result)
+            self.assertEqual(result.failures + result.errors, [])
+            self.assertEqual(sys.meta_path, [finder, *original_meta_path])
+        finally:
+            sys.meta_path[:] = original_meta_path
 
 
 if __name__ == "__main__":
