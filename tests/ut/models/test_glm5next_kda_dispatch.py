@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -11,7 +12,10 @@ import vllm_ascend.models.glm5next.kda as model_kda
 
 @pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
+@pytest.mark.parametrize("empty_non_spec_indices", [False, True])
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, dim_first, empty_non_spec_indices
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
@@ -65,7 +69,10 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             num_decode_tokens=0,
         )
     if spec_only:
-        values.update(num_prefills=0, non_spec_token_indx=None)
+        values.update(
+            num_prefills=0,
+            non_spec_token_indx=torch.empty(0, dtype=torch.int64) if empty_non_spec_indices else None,
+        )
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -158,9 +165,15 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
         events.append("state_write")
         calls.append("recurrent")
-        assert kwargs.get("output_buffer") is None
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        if spec_only:
+            target = kwargs["output_buffer"]
+            assert torch.isnan(target).all()
+            target.zero_()
+            target[:, : q.shape[1]].copy_(q * 2)
+            return target
+        assert kwargs.get("output_buffer") is None
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
@@ -175,7 +188,11 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
     qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
-    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    if spec_only:
+        with patch.object(torch.Tensor, "index_copy_", side_effect=AssertionError("redundant identity scatter")):
+            layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    else:
+        layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)

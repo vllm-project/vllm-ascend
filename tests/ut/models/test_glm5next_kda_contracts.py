@@ -12,7 +12,14 @@ import vllm_ascend.ops.kda as kda_ops
 
 @pytest.mark.parametrize(
     "accepted,qkv_padding,direct_output",
-    [(None, 0, False), (None, 64, False), ([1, 2, 1], 0, False), ([1, 2, 1], 64, False), (None, 64, True)],
+    [
+        (None, 0, False),
+        (None, 64, False),
+        ([1, 2, 1], 0, False),
+        ([1, 2, 1], 64, False),
+        (None, 64, True),
+        ([1, 2, 1], 64, True),
+    ],
 )
 def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
