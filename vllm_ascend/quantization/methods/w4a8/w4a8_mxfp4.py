@@ -312,6 +312,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
+            # EPLB expert scale lists use the packed byte representation.
+            layer.w13_weight_scale.data = (
+                layer.w13_weight_scale.data.view(torch.uint8)
+            )
+            layer.w2_weight_scale.data = (
+                layer.w2_weight_scale.data.view(torch.uint8)
+            )
+
             is_situ = getattr(layer, "activation", None) in (
                 MoEActivation.SITU,
                 "situ",
@@ -622,13 +630,3 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
-
-    def process_weights_after_loading(self, layer):
-        if getattr(layer, "_mxfp4_transformed", False):
-            return
-        if self.use_expert_weight_list:
-            layer.w13_weight.data = layer.w13_weight.data.view(torch.uint8)
-            layer.w2_weight.data = layer.w2_weight.data.view(torch.uint8)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(torch.uint8)
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(torch.uint8)
-        super().process_weights_after_loading(layer)
