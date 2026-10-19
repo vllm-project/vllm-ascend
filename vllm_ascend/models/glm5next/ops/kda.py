@@ -80,24 +80,21 @@ def chunk_kda(
     if any(length % KDA_CHUNK_SIZE for length in lengths):
         # FLA's partial chunks can produce incorrect outputs. Neutral tokens
         # complete each chunk without updating or decaying its final state.
-        parts: list[list[torch.Tensor]] = [[] for _ in range(5)]
         padded_cu_seqlens = [0]
-        chunk_indices = []
-        for sequence, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
-            length = end - start
+        for length in lengths:
             padding = -length % KDA_CHUNK_SIZE
             padded_cu_seqlens.append(padded_cu_seqlens[-1] + length + padding)
-            chunk_indices.extend(
-                index for chunk in range((length + padding) // KDA_CHUNK_SIZE) for index in (sequence, chunk)
-            )
-            for index, tensor in enumerate((q, k, v, raw_gate, beta)):
-                part = tensor[:, start:end]
+        padded_inputs = []
+        paddings = [-length % KDA_CHUNK_SIZE for length in lengths]
+        for tensor, fill in ((q, 0), (k, 0), (v, 0), (raw_gate, float("-inf")), (beta, 0)):
+            neutral = tensor.new_full((tensor.shape[0], max(paddings), *tensor.shape[2:]), fill)
+            parts = []
+            for start, end, padding in zip(cu_seqlens, cu_seqlens[1:], paddings):
+                parts.append(tensor[:, start:end])
                 if padding:
-                    shape = (tensor.shape[0], padding, *tensor.shape[2:])
-                    dummy = tensor.new_full(shape, float("-inf") if index == 3 else 0)
-                    part = torch.cat((part, dummy), dim=1)
-                parts[index].append(part)
-        q, k, v, raw_gate, beta = (torch.cat(part, dim=1) for part in parts)
+                    parts.append(neutral[:, :padding])
+            padded_inputs.append(torch.cat(parts, dim=1))
+        q, k, v, raw_gate, beta = padded_inputs
         cu_seqlens = padded_cu_seqlens
     output, final_state = run_chunk_kda(
         q,
@@ -113,8 +110,11 @@ def chunk_kda(
         lower_bound=lower_bound,
     )
     if padded_cu_seqlens is not None:
-        output = torch.cat(
-            [output[:, start : start + length] for start, length in zip(padded_cu_seqlens, lengths)], dim=1
-        )
+        if len(lengths) == 1:
+            output = output[:, : lengths[0]]
+        else:
+            output = torch.cat(
+                [output[:, start : start + length] for start, length in zip(padded_cu_seqlens, lengths)], dim=1
+            )
     scatter_states(state, final_state.to(state.dtype), state_indices)
     return output
