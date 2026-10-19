@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.spec_decode import disable_profiling_chunk_for_draft
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
 )
@@ -45,7 +46,6 @@ from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
