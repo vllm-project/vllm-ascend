@@ -1235,23 +1235,23 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def _can_skip_spec_cpu_length_sync(self) -> bool:
-        """Use device lengths only for the audited K3/DSpark backends."""
+        """Use device lengths for K3/DSpark FlashMLA, including DCP."""
         parallel = self.vllm_config.parallel_config
         if (
             self.model_config.architecture
             not in {"KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
             or not getattr(self.speculator, "_draft_mla_uses_device_lengths", False)
-            # Other parallel/offload paths have not been audited for host readers.
+            # PP/PCP and offload paths have not been audited for host readers.
             or parallel.pipeline_parallel_size != 1
             or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
             or self.adaptive_verification is not None
             or self.ascend_config.sparse_kv_offload_config.enabled
             or self.ascend_config.kvpp_config.size != 1
         ):
             return False
 
-        # K3's non-MLA attention uses the KDA device-length path.
+        # FlashMLA derives DCP-local lengths from rejection-corrected device
+        # counters. K3's non-MLA attention uses the KDA device-length path.
         return all_mla_use_flashmla(self.model)
 
     def postprocess_sampled(
