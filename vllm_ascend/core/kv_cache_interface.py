@@ -404,6 +404,25 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     def real_page_size_bytes(self) -> int:
         return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # Upstream SlidingWindowSpec.max_memory_usage_bytes asserts
+        # decode_context_parallel_size == 1 ("DCP not support sliding window").
+        # That guard is stricter than upstream's own sharding rule
+        # (dcp_world_size_for_kv_cache_spec keeps sliding-window groups
+        # replicated with dcp_world_size=1 geometry), so per-rank memory
+        # accounting for this replicated group is identical to the non-DCP
+        # case. Re-derive the same value without the assert -- but only when
+        # DCP is actually on: this override replaces the upstream method,
+        # and applying it outside DCP changes the group's block accounting
+        # and breaks prefix-cache hits entirely.
+        if vllm_config.parallel_config.decode_context_parallel_size <= 1:
+            return super().max_memory_usage_bytes(vllm_config)
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
+        )
+        return max_blocks * self.page_size_bytes
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (

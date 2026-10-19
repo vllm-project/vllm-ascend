@@ -146,12 +146,19 @@ def get_or_compute_compressor_metadata(
         metadata.full_compress_sin.shape[0],
         metadata.full_compress_sin.shape[-1],
     )
+    # DSA-DCP feeds an identity table so the emitted slots are global
+    # compressed positions (remapped to local slots by the compressor).
+    compressor_block_table = (
+        metadata.compressor_block_table
+        if metadata.compressor_block_table is not None
+        else metadata.block_table
+    )
     computed_metadata = torch.ops._C_ascend.compressor_metadata(
         full_compress_cos,
         full_compress_sin,
         metadata.query_start_loc,
         metadata.start_pos,
-        metadata.block_table,
+        compressor_block_table,
         metadata.storage_block_size,
         get_dsa_attn_kv_plan(vllm_config).get_dsa_compressor_slot_mapping_format(),
         compress_ratio,
@@ -185,7 +192,9 @@ def build_compressor_metadata_out(
         full_compress_sin,
         metadata.query_start_loc,
         metadata.start_pos,
-        metadata.block_table,
+        metadata.compressor_block_table
+        if metadata.compressor_block_table is not None
+        else metadata.block_table,
         metadata.storage_block_size,
         get_dsa_attn_kv_plan(vllm_config).get_dsa_compressor_slot_mapping_format(),
         compress_ratio,
@@ -238,16 +247,24 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
         from vllm_ascend.utils import enable_dsa_cp
 
+        use_dsa_dcp = enable_dcp()
         use_dsa_cp = enable_dsa_cp()
         use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_dcp and (use_dsa_cp or use_pcp):
+            raise ValueError(
+                "DSA DCP cannot be combined with the legacy enable_dsa_cp path or PCP."
+            )
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
+        if use_dsa_dcp:
+            from vllm_ascend.attention.context_parallel.dsa_dcp import AscendDSADCPMetadataBuilder
+
+            return AscendDSADCPMetadataBuilder
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
 
@@ -270,16 +287,24 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
         from vllm_ascend.utils import enable_dsa_cp
 
+        use_dsa_dcp = enable_dcp()
         use_dsa_cp = enable_dsa_cp()
         use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_dcp and (use_dsa_cp or use_pcp):
+            raise ValueError(
+                "DSA DCP cannot be combined with the legacy enable_dsa_cp path or PCP."
+            )
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
+        if use_dsa_dcp:
+            from vllm_ascend.attention.context_parallel.dsa_dcp import AscendDSADCPImpl
+
+            return AscendDSADCPImpl
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
 
@@ -380,6 +405,11 @@ class AscendDSAReqMetadata:
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
+    # DSA-DCP only: identity block table fed to the compressor metadata
+    # operator so its emitted slots are global compressed positions, plus
+    # the remap callable that converts them to rank-local slots.
+    compressor_block_table: torch.Tensor | None = None
+    dcp_slot_remap: Any = None
 
 
 @dataclass

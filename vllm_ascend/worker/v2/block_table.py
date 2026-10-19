@@ -16,6 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
+
 import torch
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -44,7 +46,10 @@ class AscendBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        # Upstream (main) per-cache-type sharding flag, forwarded to the base.
         dcp_sharded: list[bool] | None = None,
+        # DCP feature: per-group CP world size (1 for replicated groups).
+        group_cp_size: list[int] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -65,6 +70,22 @@ class AscendBlockTables(BlockTables):
             slot_mapping_enabled=slot_mapping_enabled,
             **super_kwargs,
         )
+        # Per-group DCP world size: replicated groups (e.g. the DeepSeek-V4
+        # SWA/state sliding-window caches) pass 1 so their slot mappings keep
+        # the full-sequence positions instead of the interleave ownership mask
+        # that sharded groups apply. Consumed by the Ascend kernel override in
+        # compute_slot_mappings (not forwarded to the upstream constructor).
+        self.group_cp_sizes = (
+            torch.tensor(group_cp_size, dtype=torch.int32, device=self.device)
+            if group_cp_size is not None
+            else None
+        )
+        # Retained for the one-shot width diagnostics below so the per-group
+        # table widths land in the request-time log too.
+        self._dsa_block_sizes = list(block_sizes)
+        self._dsa_row_widths = list(max_num_blocks_per_group)
+        self._dsa_group_cp_sizes = list(group_cp_size) if group_cp_size is not None else None
+        self._dsa_widths_logged = False
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
         # touched by one token tile. Use the smallest kernel block size to
@@ -99,6 +120,17 @@ class AscendBlockTables(BlockTables):
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
+        if not self._dsa_widths_logged:
+            self._dsa_widths_logged = True
+            if os.environ.get("DSA_DCP_DEBUG") == "1":
+                print(
+                    "[dsa-dcp-kv] widths"
+                    f" block_sizes={self._dsa_block_sizes}"
+                    f" row_widths={self._dsa_row_widths}"
+                    f" group_cp_sizes={self._dsa_group_cp_sizes}"
+                    f" cp_size={self.cp_size} cp_interleave={self.cp_interleave}",
+                    flush=True,
+                )
         slot_mappings = self.slot_mappings if out is None else out
         if num_groups == 0:
             return slot_mappings[:, :num_tokens_padded]
@@ -122,5 +154,7 @@ class AscendBlockTables(BlockTables):
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
             HAS_SLOT_MAPPING_ENABLED=True,
+            group_cp_sizes=self.group_cp_sizes,
+            HAS_GROUP_CP_SIZES=self.group_cp_sizes is not None,
         )
         return slot_mappings[:, :num_tokens_padded]

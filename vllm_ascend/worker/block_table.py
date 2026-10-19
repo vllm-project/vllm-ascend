@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group
@@ -6,6 +8,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpecKind,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
     get_kv_cache_spec_kind,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -40,6 +44,26 @@ class BlockTable:
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
+        # Sliding-window caches are REPLICATED across DCP ranks (upstream
+        # dcp_world_size_for_kv_cache_spec semantics).  The interleave
+        # ownership mask must not be applied to their slot mappings, or every
+        # rank outside the first stripe would skip all KV writes and attend an
+        # empty cache (e.g. the DeepSeek-V4 SWA/state groups).
+        if (
+            self.dcp_world_size > 1
+            and kv_cache_group is not None
+            and isinstance(
+                getattr(kv_cache_group, "kv_cache_spec", None),
+                (SlidingWindowSpec, SlidingWindowMLASpec),
+            )
+        ):
+            self.dcp_world_size = 1
+        if os.environ.get("DSA_DCP_DEBUG") == "1" and kv_cache_group is not None:
+            print(
+                f"[dsa-dcp-debug blocktable] spec={type(getattr(kv_cache_group, 'kv_cache_spec', None)).__name__}"
+                f" dcp_world={self.dcp_world_size}",
+                flush=True,
+            )
         is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")

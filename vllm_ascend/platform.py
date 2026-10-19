@@ -478,6 +478,54 @@ class NPUPlatform(Platform):
                         has_topk = True
 
     @classmethod
+    def _apply_dsa_dcp_validate_block_size_patch(cls) -> None:
+        """Relax upstream validate_block_size for the DeepSeek-V4 DSA-DCP path.
+
+        Upstream asserts ``cp_kv_cache_interleave_size <= block_size`` against
+        the finalized block size. Some revisions derive that value as the
+        minimum over the DeepSeek-V4 kernel block table (``[128, 128, 8, 32]``),
+        i.e. 8 -- the compressor-state kernel block. Those groups are
+        replicated under DCP (``dcp_world_size_for_kv_cache_spec`` keeps them
+        at 1), so their block geometry is unrelated to the interleave, which
+        only constrains the DCP-sharded MLA groups (128-token scheduler
+        blocks). The real constraints -- interleave a multiple of the largest
+        compression ratio and a divisor of the scheduler block -- are already
+        enforced by ascend_config's DSA-DCP validation.
+        """
+        from vllm.config import VllmConfig
+
+        if getattr(VllmConfig.validate_block_size, "_dsa_dcp_bypass", False):
+            return
+
+        original_validate_block_size = VllmConfig.validate_block_size
+
+        def validate_block_size(self):
+            try:
+                return original_validate_block_size(self)
+            except AssertionError:
+                parallel_config = self.parallel_config
+                model_config = self.model_config
+                interleave = getattr(parallel_config, "cp_kv_cache_interleave_size", 1)
+                is_dsa_dcp = (
+                    model_config is not None
+                    and getattr(getattr(model_config, "hf_text_config", None), "model_type", "") == "deepseek_v4"
+                    and getattr(parallel_config, "decode_context_parallel_size", 1) > 1
+                    and interleave % 128 == 0
+                )
+                if not is_dsa_dcp:
+                    raise
+                logger.warning(
+                    "Bypassing the upstream validate_block_size DCP assert for the "
+                    "DeepSeek-V4 DSA-DCP path: the finalized block size reflects "
+                    "replicated compressor-state kernel blocks, which are outside "
+                    "the DCP interleave geometry. The real constraints (interleave "
+                    "a multiple of 128) are enforced by ascend_config."
+                )
+
+        validate_block_size._dsa_dcp_bypass = True
+        VllmConfig.validate_block_size = validate_block_size
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
@@ -488,6 +536,7 @@ class NPUPlatform(Platform):
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default runner selection.
         apply_v2_model_runner_config_patch()
+        cls._apply_dsa_dcp_validate_block_size_patch()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs

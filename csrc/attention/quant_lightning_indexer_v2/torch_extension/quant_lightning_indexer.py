@@ -325,6 +325,7 @@ def quant_lightning_indexer_candidate(
     candidate_mode=3,
     candidate_topk_blocks=2048,
     candidate_block_size=8,
+    return_value=0,
 ):
     """两级TopK candidate 入口: mode=1(source)/2(consumer)/3(关闭)"""
     op_module = quant_lightning_indexer_op_builder.load()
@@ -353,6 +354,7 @@ def quant_lightning_indexer_candidate(
         candidate_mode,
         candidate_topk_blocks,
         candidate_block_size,
+        return_value,
     )
 
 
