@@ -1403,8 +1403,16 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
-# ** 28. File: worker/patch_v2/patch_triton.py**
+# ** 28. File: triton_kernel_overrides.py (replaces worker/patch_v2/patch_triton.py)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   NOTE: The monkey-patch file was removed. All overrides below are now
+#   installed through the official vLLM Triton kernel dispatcher
+#   (`vllm.triton_utils.dispatcher.register_kernels`) by
+#   `vllm_ascend/triton_kernel_overrides.py`, triggered by the
+#   `NPUPlatform.register_triton_kernel_overrides` platform hook.
+#   Per-kernel retirement conditions are recorded as comments next to each
+#   entry in the registration table.
+#
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
@@ -1427,10 +1435,9 @@
 #       Triton resolve CUDA libdevice symbols instead of the CANN equivalents,
 #       causing the kernel compilation to fail.
 #    How:
-#       Rebind `metrics.logits.libdevice` to
-#       `triton.language.extra.cann.libdevice`. Existing references to
-#       `get_num_nans` in the sampler and rejection sampler then use the CANN
-#       libdevice when the kernel is compiled.
+#       Replace `get_num_nans` with the Ascend implementation, whose kernel
+#       imports `triton.language.extra.cann.libdevice` directly; no
+#       module-level libdevice rebind exists anymore.
 #    Related PR (if no, explain why):
 #       No. This is a Triton-Ascend backend compatibility patch for the
 #       upstream module-level libdevice import.

@@ -18,13 +18,11 @@ _HAS_COMPACT_IDS = "token_ids" in SamplingMaskTensors._fields
 def _from_logits(logits, num_sampled_tokens, max_num_kept=512):
     if _HAS_COMPACT_IDS:
         return sampling_mask_from_logits_npu(
-            SamplingMaskTensors,
             logits,
             num_sampled_tokens,
             max_num_kept=max_num_kept,
         )
     return sampling_mask_from_logits_npu(
-        SamplingMaskTensors,
         logits,
         num_sampled_tokens,
     )

@@ -8,12 +8,9 @@ pytest.importorskip("triton")
 if not hasattr(torch, "npu") or not torch.npu.is_available():
     pytest.skip("Trace replay kernel test requires an available Ascend NPU", allow_module_level=True)
 
+from vllm.triton_utils.dispatcher import KernelOverride  # noqa: E402
 from vllm.v1.worker.gpu.sample import trace_replay as upstream_trace_replay  # noqa: E402
 
-upstream_apply_trace_tokens = upstream_trace_replay.apply_trace_tokens
-upstream_trace_replay_kernel = upstream_trace_replay._trace_replay_kernel
-
-import vllm_ascend.patch.worker  # noqa: E402,F401
 from vllm_ascend.worker.v2.sample.trace_replay import (  # noqa: E402
     apply_trace_tokens,
 )
@@ -26,9 +23,15 @@ def _tensor(values, dtype):
 
 
 def test_trace_replay_patches_only_outer_call():
-    assert upstream_trace_replay.apply_trace_tokens is apply_trace_tokens
-    assert upstream_trace_replay.apply_trace_tokens is not upstream_apply_trace_tokens
-    assert upstream_trace_replay._trace_replay_kernel is upstream_trace_replay_kernel
+    """The conftest-registered override delegates to the NPU impl: the
+    dispatcher installs a KernelOverride wrapper (not the raw impl) over
+    the module attribute. The inner kernel must stay raw -- our impl
+    launches it through this module attribute, and a wrapper there would
+    drop the launch grid."""
+    wrapper = upstream_trace_replay.apply_trace_tokens
+    assert wrapper.func is apply_trace_tokens
+    inner = upstream_trace_replay._trace_replay_kernel
+    assert not isinstance(inner, KernelOverride)
 
 
 def test_trace_replay_empty_batch_is_a_noop():
