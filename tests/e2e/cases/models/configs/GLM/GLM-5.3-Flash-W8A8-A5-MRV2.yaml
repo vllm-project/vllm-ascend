@@ -1,11 +1,15 @@
 # GLM-5.3-Flash single-node MRV2 accuracy and performance coverage.
-# CI uses shared checkpoints and dynamic service ports.
+# CI provides the CANN/custom-op environment, shared checkpoint and dynamic service port.
+# Host IP/NIC and the served model name follow the existing CI harness.
+# Profiler output is container-local; traces require an explicit profiling request.
 # GSM8K-lite baseline 90 / threshold 10 is an initial gate, pending MRV2 calibration.
 test_cases:
 - name: GLM-5.3-Flash-W8A8-A5-MRV2
   model: /root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8
   envs:
     VLLM_USE_V2_MODEL_RUNNER: '1'
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+    PHYSICAL_DEVICES: 0,1,2,3,4,5,6,7
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_BUFFSIZE: '1024'
     HCCL_EXEC_TIMEOUT: '3600'
@@ -28,6 +32,8 @@ test_cases:
   - '1024'
   - --quantization
   - ascend
+  - --reasoning-parser
+  - glm47
   - --safetensors-load-strategy
   - prefetch
   - --max-num-seqs
@@ -43,13 +49,16 @@ test_cases:
   - auto
   - --attention-config
   - '{"indexer_kv_dtype": "bf16"}'
+  - --enable-prefix-caching
   - --compilation-config
-  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-  - --speculative-config
-  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  - '{"cudagraph_mode": "PIECEWISE"}'
   - --additional-config
-  - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "enable_flashcomm1": true, "enable_cpu_binding":
-    true, "enable_dsa_cp": true, "enable_fused_mc2": 0}'
+  - '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_dsa_cp": false, "enable_fused_mc2": 0,
+    "multistream_overlap_shared_expert": false, "enable_shared_expert_dp": true,
+    "ascend_compilation_config": {"enable_static_kernel": true, "enable_super_kernel": true}}'
+  - --profiler-config
+  - '{"profiler": "torch", "torch_profiler_dir": "/tmp/glm53-flash-a5-mrv2-profiles",
+    "torch_profiler_with_stack": false, "torch_profiler_record_shapes": true}'
   prompts:
   - Reply with one short sentence confirming the service is healthy.
   test_content:
