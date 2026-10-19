@@ -1,0 +1,73 @@
+test_cases:
+  - name: "DeepSeek-V4.1-Flash-W8A8-DSpark-PCP"
+    model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_CONNECT_TIMEOUT: "3600"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--seed"
+      - "1024"
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--prefill-context-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--api-server-count"
+      - "1"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--tokenizer-mode"
+      - "deepseek_v41"
+      - "--reasoning-parser"
+      - "deepseek_v41"
+      - "--tool-call-parser"
+      - "deepseek_v41"
+      - "--enable-auto-tool-choice"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--block-size"
+      - "128"
+      - "--enable-chunked-prefill"
+      - "--enable-prefix-caching"
+      - "--engram-config"
+      - '{"cpu_offload": true, "dp_shared_memory": true}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 5, "method": "dspark", "enforce_eager": true, "enable_adaptive_verification": false}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+      - "--additional-config"
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+    benchmarks:
+      acc-gpqa:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 65536
+        batch_size: 32
+        baseline: 88
+        threshold: 5
+        temperature: 1
+        thinking: true
+        reasoning_effort: low
+    test_content: []
