@@ -16,13 +16,15 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from dataclasses import replace as dataclass_replace
 from typing import Any, cast
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -46,13 +48,60 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode import disable_profiling_chunk_for_draft
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-    prepare_replicated_pcp_config,
-)
+
+
+def _build_dspark_draft_config(vllm_config: VllmConfig) -> VllmConfig:
+    """Derive the PCP=1 config that upstream DFlash/DSpark drafts run with.
+
+    Upstream ``DFlashSpeculator.__init__`` already forces PCP=1. This only adds
+    the Ascend-side settings that must follow that topology (static EPLB when
+    PCP was the only parallel dimension, Engram DP sharing) and keeps
+    ``VllmConfig`` validation away from PCP=1 with the target's DCP.
+    """
+    target_parallel_config = vllm_config.parallel_config
+    if target_parallel_config.prefill_context_parallel_size > 1:
+        enable_eplb = target_parallel_config.enable_eplb
+        eplb_config = target_parallel_config.eplb_config
+        if (
+            enable_eplb
+            and target_parallel_config.tensor_parallel_size == 1
+            and target_parallel_config.data_parallel_size == 1
+        ):
+            # DSpark draft attention uses PCP=1. Keep EP, but use a static
+            # expert layout when PCP is the target's only parallel dimension.
+            enable_eplb = False
+            # Copy declared fields without transient communicator-selection state.
+            eplb_config = dataclass_replace(eplb_config, num_redundant_experts=0)
+            logger.warning_once("EPLB is disabled for the PCP=1 DSpark draft model; target EPLB remains enabled.")
+
+        engram_config = vllm_config.engram_config
+        if (
+            engram_config is not None
+            and engram_config.dp_shared_memory
+            and target_parallel_config.data_parallel_size == 1
+        ):
+            # The PCP=1 draft has no Engram tables; sharing belongs to the target.
+            engram_config = replace(engram_config, dp_shared_memory=False)
+        # TODO: Separate draft execution settings from the worker topology.
+        # Temporarily disable DCP during reconstruction to avoid validating the
+        # target model with PCP=1; restoring DCP below does not rerun DCP checks
+        # or recompute DCP-dependent settings.
+        vllm_config = replace(
+            vllm_config,
+            parallel_config=replace(
+                target_parallel_config,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                enable_eplb=enable_eplb,
+                eplb_config=eplb_config,
+            ),
+            engram_config=engram_config,
+        )
+        vllm_config.parallel_config.decode_context_parallel_size = target_parallel_config.decode_context_parallel_size
+    return vllm_config
 
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
@@ -65,7 +114,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
+        vllm_config = _build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
@@ -383,25 +432,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
-    @torch.inference_mode()
-    def _run_model(
-        self,
-        num_tokens: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> torch.Tensor:
-        hidden_states = super()._run_model(
-            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-        )
-        # PCP replicas must propose identical tokens for the next joint target
-        # verification. Share the backbone output before sequential Markov sampling.
-        hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
-            hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
-        )
-        return hidden_states
-
     def propose(
         self,
         input_batch: InputBatch,
@@ -425,11 +455,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         assert self.input_batch is not None
         # TODO: Remove the adaptive verification condition once upstream vLLM
         # synchronizes the draft DP shape independently of the target.
-        # Replicated drafts consume global requests, unlike sharded targets.
-        # Adaptive verification also negotiates the draft shape independently.
-        # Every DP rank must synchronize the draft batch independently.
+        # Adaptive verification negotiates the draft shape independently.
         sync_state = dp_sync
-        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+        if self.enable_adaptive_verification and not is_profile:
             sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
