@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -55,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
@@ -67,9 +69,11 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
+    get_potential_max_tokens,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    oproj_tp_enable,
 )
 
 if TYPE_CHECKING:
@@ -1779,8 +1783,42 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor,
         gather_full_o_proj: bool,
     ) -> torch.Tensor:
-        output[...] = self.o_proj(attn_output)[0]
+        if not oproj_tp_enable():
+            output[...] = self.o_proj(attn_output)[0]
+            return output
+        group = get_otp_group()
+        tp_size = group.world_size
+        chunk_size = self.o_proj.input_size_per_partition
+        num_tokens = attn_output.shape[0]
+        capacity = get_potential_max_tokens()
+        if num_tokens > capacity:
+            raise ValueError(f"OProj TP token count exceeds decode capacity: {num_tokens} > {capacity}.")
+        # Different ranks can replay different graph buckets; keep every HCCL operand address stable.
+        if not hasattr(self, "_oproj_send_buf"):
+            self._oproj_send_buf = attn_output.new_empty((tp_size, capacity, chunk_size))
+            self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+            self._oproj_reduce_buf = output.new_empty((tp_size * capacity, self.o_proj.output_size))
+            self._oproj_output_buf = output.new_empty((capacity, self.o_proj.output_size))
+        self._oproj_send_buf.zero_()
+        self._oproj_send_buf[:, :num_tokens].copy_(attn_output.reshape(num_tokens, tp_size, chunk_size).transpose(0, 1))
+        dist.all_to_all_single(self._oproj_recv_buf.view(-1), self._oproj_send_buf.view(-1), group=group.device_group)
+        bias = None if group.rank_in_group > 0 or self.o_proj.skip_bias_add else self.o_proj.bias
+        assert self.o_proj.quant_method is not None
+        self._oproj_reduce_buf.copy_(
+            self.o_proj.quant_method.apply(
+                self.o_proj, self._oproj_recv_buf.view(tp_size * capacity, chunk_size), bias=bias
+            )
+        )
+        dist.reduce_scatter_tensor(self._oproj_output_buf, self._oproj_reduce_buf, group=group.device_group)
+        output[...] = self._oproj_output_buf[: output.shape[0]]
         return output
+
+    def _forward_dummy(self, hidden_states: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if oproj_tp_enable():
+            # Idle ranks still contribute their weight shard to active ranks.
+            attn_output = hidden_states.new_empty((0, self.local_num_heads * self.v_head_dim))
+            self._finalize_o_proj(attn_output, output[:0], False)
+        return output.zero_()
 
     def _get_sfa_kv_slot_mapping(
         self,
@@ -1903,15 +1941,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            return self._forward_dummy(hidden_states, output)
 
         if self.qk_rope_head_dim == 0 and not input_is_sequence_parallel:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
                 num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                return output.zero_()
+                return self._forward_dummy(hidden_states, output)
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
 

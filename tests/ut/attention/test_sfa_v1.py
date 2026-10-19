@@ -1078,7 +1078,8 @@ class TestAscendSFAImpl(TestBase):
             **kwargs,
         )
 
-    def test_kvpp_waits_before_native_and_fused_cache_access(self):
+    @patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False)
+    def test_kvpp_waits_before_native_and_fused_cache_access(self, _mock_oproj_tp):
         from vllm_ascend.attention import sfa_v1
 
         hidden = torch.zeros(2, 4)
@@ -1169,6 +1170,121 @@ class TestAscendSFAImpl(TestBase):
                     self.impl.forward("layer", hidden, (), None, output)
                 self.assertEqual(events, [])
                 self.assertEqual(torch.count_nonzero(output).item(), 0)
+
+    def test_idle_rank_participates_in_oproj_tp(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sparse_sfa_turboquant = False
+        impl.local_num_heads = 2
+        impl.v_head_dim = 3
+        impl.qk_rope_head_dim = 0
+        impl._finalize_o_proj = MagicMock()
+        hidden = torch.randn(8, 4)
+        output = torch.empty_like(hidden)
+        empty_metadata = SimpleNamespace(slot_mapping=torch.empty(0), num_actual_tokens=0)
+
+        with (
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=True) as enabled,
+            patch("vllm_ascend.attention.sfa_v1.get_forward_context"),
+        ):
+            for metadata in (None, empty_metadata):
+                with self.subTest(has_metadata=metadata is not None):
+                    impl._finalize_o_proj.reset_mock()
+                    result = impl.forward("layer", hidden, (), metadata, output)
+                    self.assertIs(result, output)
+                    impl._finalize_o_proj.assert_called_once()
+                    attention, projected_output, gather = impl._finalize_o_proj.call_args.args
+                    self.assertEqual(attention.shape, (0, 6))
+                    self.assertEqual(projected_output.shape, (0, 4))
+                    self.assertFalse(gather)
+                    torch.testing.assert_close(output, torch.zeros_like(hidden))
+            enabled.return_value = False
+            for metadata in (None, empty_metadata):
+                impl._finalize_o_proj.reset_mock()
+                result = impl.forward("layer", hidden, (), metadata, output)
+                self.assertIs(result, output)
+                impl._finalize_o_proj.assert_not_called()
+                torch.testing.assert_close(output, torch.zeros_like(hidden))
+
+    def test_oproj_without_tp_preserves_projection_shape_contract(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        attention = torch.randn(2, 6)
+        projected = torch.randn(2, 4)
+        impl.o_proj = MagicMock(return_value=(projected, None))
+        with (
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.attention.sfa_v1.get_potential_max_tokens") as capacity,
+        ):
+            output = torch.empty_like(projected)
+            self.assertIs(impl._finalize_o_proj(attention, output, False), output)
+            self.assertIs(impl.o_proj.call_args.args[0], attention)
+            torch.testing.assert_close(output, projected)
+            with self.assertRaises(RuntimeError):
+                impl._finalize_o_proj(attention, torch.empty(1, 4), False)
+            capacity.assert_not_called()
+
+    def test_oproj_tp_reuses_collective_buffers_and_clears_padding(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        capacity = 4
+        weight = torch.arange(24, dtype=torch.float32).reshape(4, 6) / 10
+        device_group = object()
+        group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=device_group)
+        events = []
+        pointers: list[int] = []
+
+        def exchange(recv, send, *, group):
+            events.append("exchange")
+            self.assertIs(group, device_group)
+            torch.testing.assert_close(send, local_padded.view(capacity, 2, 3).transpose(0, 1).contiguous().view(-1))
+            recv.copy_(torch.cat((local_padded[:, :3], peer_padded[:, :3])).view(-1))
+            pointers.extend((send.data_ptr(), recv.data_ptr()))
+
+        def project(layer, inputs, *, bias):
+            events.append("projection")
+            self.assertIs(layer, impl.o_proj)
+            self.assertIsNone(bias)
+            return torch.nn.functional.linear(inputs, weight[:, :3])
+
+        def reduce_scatter(output, inputs, *, group):
+            events.append("reduce_scatter")
+            self.assertIs(group, device_group)
+            expected = torch.nn.functional.linear(torch.cat((local_padded[:, :3], peer_padded[:, :3])), weight[:, :3])
+            torch.testing.assert_close(inputs, expected)
+            output.copy_(inputs[:capacity] + torch.nn.functional.linear(local_padded[:, 3:], weight[:, 3:]))
+            pointers.extend((inputs.data_ptr(), output.data_ptr()))
+
+        impl.o_proj = SimpleNamespace(
+            input_size_per_partition=3,
+            output_size=4,
+            skip_bias_add=False,
+            bias=None,
+            quant_method=SimpleNamespace(apply=MagicMock(side_effect=project)),
+        )
+        with (
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=True),
+            patch("vllm_ascend.attention.sfa_v1.get_otp_group", return_value=group),
+            patch("vllm_ascend.attention.sfa_v1.get_potential_max_tokens", return_value=capacity),
+            patch("vllm_ascend.attention.sfa_v1.dist.all_to_all_single", side_effect=exchange) as all_to_all,
+            patch("vllm_ascend.attention.sfa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as scatter,
+        ):
+            for num_tokens, peer_tokens in ((2, 1), (1, 2), (0, 1)):
+                with self.subTest(num_tokens=num_tokens):
+                    events.clear()
+                    attention = torch.arange(num_tokens * 6, dtype=torch.float32).reshape(num_tokens, 6) / 10
+                    peer = -torch.arange(peer_tokens * 6, dtype=torch.float32).reshape(peer_tokens, 6) / 10
+                    local_padded = torch.zeros(capacity, 6)
+                    local_padded[:num_tokens] = attention
+                    peer_padded = torch.zeros(capacity, 6)
+                    peer_padded[:peer_tokens] = peer
+                    output = torch.empty(num_tokens, 4)
+                    self.assertIs(impl._finalize_o_proj(attention, output, False), output)
+                    self.assertEqual(events, ["exchange", "projection", "reduce_scatter"])
+                    torch.testing.assert_close(output, torch.nn.functional.linear(attention, weight))
+            self.assertEqual(pointers[:4], pointers[4:8])
+            self.assertEqual(pointers[:4], pointers[8:12])
+            self.assertEqual(all_to_all.call_count, 3)
+            self.assertEqual(scatter.call_count, 3)
+            with self.assertRaisesRegex(ValueError, "exceeds decode capacity"):
+                impl._finalize_o_proj(torch.empty(5, 6), torch.empty(5, 4), False)
 
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
