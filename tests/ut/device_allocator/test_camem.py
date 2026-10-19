@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.device_allocator.cumem import CuMemAllocator
 
 from tests.ut.base import PytestBase
 from vllm_ascend.device_allocator.camem import (
@@ -37,6 +38,16 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
+    def test_lifecycle_is_inherited_from_vllm(self):
+        for method_name in (
+            "sleep",
+            "wake_up",
+            "use_allocation_tag",
+            "use_memory_pool",
+            "get_current_usage",
+        ):
+            assert getattr(CaMemAllocator, method_name) is getattr(CuMemAllocator, method_name)
+
     @pytest.mark.parametrize(
         "handle",
         [
@@ -100,7 +111,8 @@ class TestCaMem(PytestBase):
 
         # check free callback with cpu_backup_tensor
         data.cpu_backup_tensor = torch.zeros(1)
-        result_handle = allocator.python_free_callback(ptr)
+        with patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize"):
+            result_handle = allocator.python_free_callback(ptr)
         assert result_handle == handle
         assert ptr not in allocator.pointer_to_data
         assert data.cpu_backup_tensor is None
@@ -142,19 +154,138 @@ class TestCaMem(PytestBase):
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
-    def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.empty_cache")
+    def test_wake_up_loads_and_clears_cpu_backup(self, mock_empty_cache, mock_memcpy, mock_create_and_map):
         allocator = CaMemAllocator.get_instance()
 
         handle = (1, 10, 1000, 0)
         tensor = torch.zeros(5, dtype=torch.uint8)
-        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor)
+        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor, is_asleep=True)
         allocator.pointer_to_data = {1000: data}
 
         allocator.wake_up(tags=["tag1"])
 
         mock_create_and_map.assert_called_once_with(handle)
+        mock_empty_cache.assert_called_once_with()
         assert data.cpu_backup_tensor is None
         assert mock_memcpy.called
+
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.empty_cache")
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
+    def test_inherited_sleep_and_wake_respect_tags_and_persistent_allocations(self, mock_synchronize, mock_empty_cache):
+        allocator = CaMemAllocator()
+        weights_handle = (0, 16, 1000, 0)
+        cache_handle = (0, 32, 2000, 0)
+        persistent_handle = (0, 64, 3000, 0)
+        weights = AllocationData(weights_handle, "weights")
+        cache = AllocationData(cache_handle, "kv_cache")
+        persistent = AllocationData(persistent_handle, CaMemAllocator.sleep_persistent_tag)
+        allocator.pointer_to_data = {
+            1000: weights,
+            2000: cache,
+            3000: persistent,
+        }
+        backup = torch.empty(16, dtype=torch.uint8)
+
+        with (
+            patch.object(allocator, "_copy_to_cpu", return_value=backup) as copy_to_cpu,
+            patch.object(allocator, "_unmap_and_release") as unmap,
+        ):
+            allocator.sleep(offload_tags="weights")
+
+        mock_synchronize.assert_called_once_with()
+        mock_empty_cache.assert_called_once_with()
+        copy_to_cpu.assert_called_once_with(1000, 16)
+        unmap.assert_any_call(weights_handle)
+        unmap.assert_any_call(cache_handle)
+        assert unmap.call_count == 2
+        assert weights.is_asleep and cache.is_asleep
+        assert weights.cpu_backup_tensor is backup
+        assert cache.cpu_backup_tensor is None
+        assert not persistent.is_asleep
+
+        with (
+            patch.object(allocator, "_create_and_map") as create_and_map,
+            patch.object(allocator, "_copy_to_device") as copy_to_device,
+        ):
+            allocator.wake_up(tags=["weights"])
+
+        create_and_map.assert_called_once_with(weights_handle)
+        copy_to_device.assert_called_once_with(1000, backup)
+        assert not weights.is_asleep
+        assert weights.cpu_backup_tensor is None
+        assert cache.is_asleep
+        assert not persistent.is_asleep
+
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
+    def test_inherited_discard_marks_only_selected_allocations_as_asleep(self, mock_synchronize):
+        allocator = CaMemAllocator()
+        selected = AllocationData((0, 16, 1000, 0), "kv_cache")
+        other = AllocationData((0, 32, 2000, 0), "weights")
+        allocator.pointer_to_data = {1000: selected, 2000: other}
+
+        with patch.object(allocator, "_unmap_and_release") as unmap:
+            allocator.discard(("kv_cache",))
+
+        mock_synchronize.assert_called_once_with(0)
+        unmap.assert_called_once_with(selected.handle)
+        assert selected.is_asleep
+        assert selected.cpu_backup_tensor is None
+        assert not other.is_asleep
+
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.empty_cache")
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
+    def test_repeated_sleep_keeps_existing_offload_policy(self, mock_synchronize, mock_empty_cache, caplog):
+        allocator = CaMemAllocator()
+        backup = torch.empty(16, dtype=torch.uint8)
+        data = AllocationData((0, 16, 1000, 0), "weights", cpu_backup_tensor=backup, is_asleep=True)
+        allocator.pointer_to_data = {1000: data}
+
+        with patch.object(allocator, "_unmap_and_release") as unmap:
+            allocator.sleep(offload_tags=())
+
+        mock_synchronize.assert_called_once_with()
+        mock_empty_cache.assert_called_once_with()
+        unmap.assert_not_called()
+        assert data.cpu_backup_tensor is backup
+        assert data.is_asleep
+        assert "existing policy was kept" in caplog.text
+
+    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    def test_npu_copy_hooks_use_acl_memcpy_directions(self, mock_memcpy):
+        allocator = CaMemAllocator()
+        cpu_tensor = MagicMock()
+        cpu_tensor.data_ptr.return_value = 5000
+        cpu_tensor.numel.return_value = 8
+        cpu_tensor.element_size.return_value = 1
+
+        with patch(
+            "vllm_ascend.device_allocator.camem.torch.empty",
+            return_value=cpu_tensor,
+        ) as empty:
+            result = allocator._copy_to_cpu(1000, 8)
+
+        empty.assert_called_once_with(8, dtype=torch.uint8, device="cpu", pin_memory=True)
+        assert result is cpu_tensor
+        mock_memcpy.assert_called_once_with(5000, 5016, 1000, 8, 2)
+
+        mock_memcpy.reset_mock()
+        allocator._copy_to_device(1000, cpu_tensor)
+        mock_memcpy.assert_called_once_with(1000, 1016, 5000, 8, 1)
+
+    def test_npu_mapping_hooks_delegate_to_cann_extension(self):
+        allocator = CaMemAllocator()
+        handle = (0, 16, 1000, 0)
+
+        with (
+            patch("vllm_ascend.device_allocator.camem.python_create_and_map") as create,
+            patch("vllm_ascend.device_allocator.camem.python_unmap_and_release") as unmap,
+        ):
+            allocator._create_and_map(handle)
+            allocator._unmap_and_release(handle)
+
+        create.assert_called_once_with(*handle)
+        unmap.assert_called_once_with(*handle)
 
     def test_use_memory_pool_context_manager(self):
         allocator = CaMemAllocator.get_instance()
@@ -162,7 +293,7 @@ class TestCaMem(PytestBase):
 
         # mock use_memory_pool_with_allocator
         mock_ctx = MagicMock()
-        mock_ctx.__enter__.return_value = "data"
+        mock_ctx.__enter__.return_value = (MagicMock(snapshot=lambda: []), MagicMock())
         mock_ctx.__exit__.return_value = None
 
         with patch("vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator", return_value=mock_ctx):
@@ -170,6 +301,26 @@ class TestCaMem(PytestBase):
                 assert allocator.current_tag == "my_tag"
             # restore old tag after context manager exits
             assert allocator.current_tag == old_tag
+            assert allocator.allocator_and_pools["my_tag"] == mock_ctx.__enter__.return_value
+
+    def test_use_memory_pool_restores_tag_when_body_raises(self):
+        allocator = CaMemAllocator()
+        old_tag = allocator.current_tag
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = (MagicMock(snapshot=lambda: []), MagicMock())
+        mock_ctx.__exit__.return_value = None
+
+        with (
+            patch(
+                "vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator",
+                return_value=mock_ctx,
+            ),
+            pytest.raises(RuntimeError, match="allocation failed"),
+            allocator.use_memory_pool(tag="weights"),
+        ):
+            raise RuntimeError("allocation failed")
+
+        assert allocator.current_tag == old_tag
 
     def test_get_current_usage(self):
         allocator = CaMemAllocator.get_instance()
