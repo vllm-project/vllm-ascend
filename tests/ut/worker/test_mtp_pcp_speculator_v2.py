@@ -922,6 +922,9 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
     speculator.pcp_manager = object()
     speculator.model_state = SimpleNamespace(pcp_manager=speculator.pcp_manager)
     speculator.last_token_indices = torch.ones(2, dtype=torch.int32)
+    speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
+    speculator.max_num_reqs = 2
+    speculator.share_mtp_topk_indices = False
     speculator.num_speculative_steps = 1
     speculator.prefill_cudagraph_manager = MagicMock(use_breakable_cg=False)
     speculator.target_input_buffers = object()

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
@@ -543,6 +544,8 @@ def test_capture_single_step_only_captures_prefill():
     """Test single-step capture only captures the prefill graph."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.last_token_indices = MagicMock()
+    speculator.idx_mapping = MagicMock()
+    speculator.max_num_reqs = 4
     speculator.prefill_cudagraph_manager = MagicMock()
     speculator.prefill_cudagraph_manager.use_breakable_cg = True
     speculator.decode_cudagraph_manager = MagicMock()
@@ -560,6 +563,7 @@ def test_capture_single_step_only_captures_prefill():
     ):
         speculator.capture()
     speculator.last_token_indices.zero_.assert_called_once_with()
+    speculator.idx_mapping.zero_.assert_called_once_with()
     speculator.prefill_cudagraph_manager.init_breakable_cg_runner.assert_called_once_with(speculator.model)
     speculator.prefill_cudagraph_manager.capture.assert_called_once()
     speculator.decode_cudagraph_manager.capture.assert_not_called()
@@ -569,6 +573,8 @@ def test_capture_multi_step_captures_decode():
     """Test multi-step capture includes the decode graph."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.last_token_indices = MagicMock()
+    speculator.idx_mapping = MagicMock()
+    speculator.max_num_reqs = 4
     speculator.prefill_cudagraph_manager = MagicMock()
     speculator.prefill_cudagraph_manager.use_breakable_cg = False
     speculator.decode_cudagraph_manager = MagicMock()
@@ -594,6 +600,48 @@ def test_capture_multi_step_captures_decode():
         speculator.capture()
     speculator.prefill_cudagraph_manager.capture.assert_called_once()
     speculator.decode_cudagraph_manager.capture.assert_called_once()
+
+
+@pytest.mark.parametrize("num_speculative_steps", [1, 3])
+def test_capture_runs_upstream_draft_hooks(num_speculative_steps):
+    """Test capture brackets each draft graph with the upstream speculator hooks."""
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    events = []
+    speculator.last_token_indices = torch.full((4,), 7)
+    speculator.idx_mapping = torch.full((4,), 9, dtype=torch.int32)
+    speculator.max_num_reqs = 4
+    speculator.model_state = object()
+    speculator.target_input_buffers = object()
+    speculator.input_buffers = object()
+    speculator.block_tables = object()
+    speculator.target_attn_groups = object()
+    speculator.attn_groups = object()
+    speculator.replicated_pcp = False
+    speculator.kv_cache_config = object()
+    speculator.num_speculative_steps = num_speculative_steps
+    for hook in ("on_prefill_begin", "on_prefill_end", "on_multi_step_decode_begin", "on_multi_step_decode_end"):
+        setattr(speculator, hook, lambda num_reqs, hook=hook: events.append((hook, num_reqs)))
+    for name in ("prefill", "decode"):
+        manager = MagicMock(use_breakable_cg=False)
+        manager.capture.side_effect = lambda *args, name=name, **kwargs: events.append((name, None))
+        setattr(speculator, f"{name}_cudagraph_manager", manager)
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ),
+    ):
+        speculator.capture()
+    assert torch.all(speculator.last_token_indices == 0)
+    assert torch.all(speculator.idx_mapping == 0)
+    expected = [("on_prefill_begin", 4), ("prefill", None), ("on_prefill_end", 4)]
+    if num_speculative_steps > 1:
+        expected += [("on_multi_step_decode_begin", 4), ("decode", None), ("on_multi_step_decode_end", 4)]
+    assert events == expected
 
 
 def test_propose_replicated_pcp_disables_dp_sync():
