@@ -317,3 +317,47 @@ def test_no_alias_connectors_inherit_base_stats_default() -> None:
                 break
         else:
             raise AssertionError(f"{cls.__name__} does not define get_kv_connector_stats")
+
+
+def _loader_target(loader) -> tuple[str, str]:
+    """Read back the (module_path, class_name) a lazy loader closes over."""
+    free = zip(loader.__code__.co_freevars, (c.cell_contents for c in loader.__closure__ or ()))
+    captured = dict(free)
+    return captured["module_path"], captured["class_name"]
+
+
+def test_alias_helper_override_replaces_config_name_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``override=True`` is the explicit "take over this config name" switch.
+
+    vllm-ascend re-registers upstream names (``OffloadingConnector``,
+    ``SimpleCPUOffloadConnector``); ``register_connector`` rejects duplicates,
+    so the helper must pop the config-name entry before registering. Keeping
+    this behind a keyword makes the takeover explicit at the call site instead
+    of hiding a stray pop() above it.
+    """
+    from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    KVConnectorFactory.register_connector("FooConnector", "upstream.module", "FooConnector")
+
+    _register_with_class_name_alias("FooConnector", "ascend.module", "AscendFooConnector", override=True)
+
+    assert _loader_target(KVConnectorFactory._registry["FooConnector"]) == ("ascend.module", "AscendFooConnector")
+    assert _loader_target(KVConnectorFactory._registry["AscendFooConnector"]) == (
+        "ascend.module",
+        "AscendFooConnector",
+    )
+
+
+def test_alias_helper_without_override_rejects_duplicate_config_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``override``, a taken config name is a hard error, not a silent
+    replacement. This is what makes the takeover explicit and auditable."""
+    from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    KVConnectorFactory.register_connector("FooConnector", "upstream.module", "FooConnector")
+
+    with pytest.raises(ValueError, match="already registered"):
+        _register_with_class_name_alias("FooConnector", "ascend.module", "AscendFooConnector")

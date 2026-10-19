@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import logger
 
 
-def _register_with_class_name_alias(name: str, module_path: str, class_name: str) -> None:
+def _register_with_class_name_alias(name: str, module_path: str, class_name: str, *, override: bool = False) -> None:
     """Register a connector under its config name and, when they differ, under
     its class name as well.
 
@@ -27,7 +27,20 @@ def _register_with_class_name_alias(name: str, module_path: str, class_name: str
     those keys through KVConnectorFactory, which is otherwise indexed by the
     ``kv_connector`` config name. Without the class-name alias, stats
     reconstruction raises ValueError and tears down EngineCore.
+
+    Each registration key needs its own override switch, because
+    ``register_connector`` rejects duplicates:
+
+    - ``override=True`` replaces an existing entry under the **config name**
+      (used when vllm-ascend takes over an upstream connector). This is the
+      only supported way to re-register a name, and it is never silent: the
+      caller asks for it explicitly.
+    - The **class-name** entry is popped only when this connector is the one
+      claiming that class name, after warning if another connector already
+      holds it.
     """
+    if override:
+        KVConnectorFactory._registry.pop(name, None)
     KVConnectorFactory.register_connector(name, module_path, class_name)
     if class_name != name:
         if class_name in KVConnectorFactory._registry:
@@ -121,12 +134,11 @@ def register_connector():
     # into one Tensor. Ascend keeps K/V as separate tensors, so replace only
     # the connector's worker-side canonicalization boundary while reusing the
     # upstream scheduler, manager, metrics, and transfer lifecycle.
-    if "OffloadingConnector" in KVConnectorFactory._registry:
-        KVConnectorFactory._registry.pop("OffloadingConnector")
     _register_with_class_name_alias(
         "OffloadingConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
+        override=True,
     )
 
     # Override the upstream SimpleCPUOffloadConnector with the NPU
@@ -142,12 +154,11 @@ def register_connector():
     except ImportError:
         pass
     else:
-        if "SimpleCPUOffloadConnector" in KVConnectorFactory._registry:
-            KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
         _register_with_class_name_alias(
             "SimpleCPUOffloadConnector",
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
             "AscendSimpleCPUOffloadConnector",
+            override=True,
         )
 
     # No class-name alias here: this connector does not override
