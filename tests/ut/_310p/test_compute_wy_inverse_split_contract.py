@@ -90,6 +90,31 @@ class TestComputeWyInverseSplitContract(unittest.TestCase):
                 self.assertNotIn("InitBuffer(", body)
                 self.assertNotIn("AllocTensor", body)
 
+    def test_frobenius_admission_preserves_gate_and_retry(self):
+        source = KERNEL.read_text(encoding="utf-8")
+        body = function_body(source, "ProcessOneTaskAttempt")
+        self.assertIn("FAST_DOUBLING_FROB_SQUARED_THRESHOLD = 7.502183356513852f", source)
+        row_gate = body.index("NeedsFp32ForwardSubstitution(")
+        extra_gate = body.index("FrobeniusSquared(")
+        inverse = body.index("ProcessRefinedTask(")
+        self.assertLess(row_gate, extra_gate)
+        self.assertLess(extra_gate, inverse)
+        self.assertIn("allowCompDoubling && useFp32ForwardSubstitution &&", body[row_gate:extra_gate])
+        self.assertIn("gateMaxRowSum_ >= FP32_FS_ROW_SUM_THRESHOLD", body[row_gate:extra_gate])
+        self.assertIn("gateMaxRowSum_ < 1.0e30f", body[row_gate:extra_gate])
+        self.assertIn("frobSquared >= 0.0f && frobSquared < FAST_DOUBLING_FROB_SQUARED_THRESHOLD", body)
+
+    def test_frobenius_reuses_dead_scratch_without_matmul(self):
+        body = function_body(KERNEL.read_text(encoding="utf-8"), "FrobeniusSquared")
+        self.assertIn("qHalfBuf_.Get<half>().ReinterpretCast<float>()", body)
+        self.assertIn("Mul(scratch, a, a, ATTEN_ELEMS)", body)
+        self.assertIn("ReduceSum(reduceScratch, scratch, work, ATTEN_ELEMS)", body)
+        self.assertLess(body.index("Mul("), body.index("PipeBarrier<PIPE_V>()"))
+        self.assertLess(body.index("ReduceSum("), body.index("SyncEvent<HardEvent::V_S>"))
+        self.assertLess(body.index("SyncEvent<HardEvent::V_S>"), body.index("GetValue(0)"))
+        for forbidden in ("InitBuffer(", "AllocTensor", "microMm_", "cubeGemm_", "irSnapshotGm_"):
+            self.assertNotIn(forbidden, body)
+
 
 if __name__ == "__main__":
     unittest.main()
