@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
@@ -18,6 +18,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -88,6 +89,7 @@ else:
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+MIN_DSV4_PREFILL_INDEXER_TP_SHARD_ROWS_PER_RANK = 1024
 CompressorMetadataOutput: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 _DSV4_DSA_OVERLAP_STREAM = None
@@ -347,6 +349,55 @@ class AscendDSAC128StateBackend(AscendDSABackend):
         return [8, 16, 32]
 
 
+@dataclass(frozen=True)
+class AscendDSAPrefillRowShard:
+    """One TP rank's contiguous slice of pure-prefill indexer rows."""
+
+    start: int
+    stop: int
+    sizes: tuple[int, ...]
+    block_table: torch.Tensor
+    qli_cu_seqlens_q: torch.Tensor
+    qli_seqused_k: torch.Tensor
+    qli_cmp_residual_k: torch.Tensor
+    qli_metadata: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_kv: int
+
+
+def balanced_prefill_row_shard(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    compress_ratio: int,
+    tp_size: int,
+    min_rows_per_rank: int,
+) -> tuple[int, ...] | None:
+    """Balance contiguous prefill rows by the number of scored compressed keys."""
+    query_lens = query_lens_cpu.to(dtype=torch.int64, device="cpu")
+    seq_lens = seq_lens_cpu[: query_lens.shape[0]].to(dtype=torch.int64, device="cpu")
+    num_rows = int(query_lens.sum().item())
+    if tp_size < 2 or num_rows < min_rows_per_rank * tp_size:
+        return None
+
+    first_key = torch.repeat_interleave(seq_lens - query_lens + 1, query_lens)
+    row_in_request = torch.arange(num_rows, dtype=torch.int64, device="cpu") - torch.repeat_interleave(
+        torch.cumsum(query_lens, dim=0) - query_lens,
+        query_lens,
+    )
+    cumulative_cost = torch.cumsum((first_key + row_in_request) // compress_ratio, dim=0)
+    total_cost = int(cumulative_cost[-1].item()) if cumulative_cost.numel() else 0
+    if total_cost <= 0:
+        return None
+
+    targets = torch.arange(1, tp_size, dtype=torch.int64, device="cpu") * total_cost // tp_size
+    boundaries = [0, *torch.searchsorted(cumulative_cost, targets).tolist(), num_rows]
+    for index in range(1, tp_size):
+        boundaries[index] = max(boundaries[index], boundaries[index - 1] + 1)
+    for index in range(tp_size - 1, 0, -1):
+        boundaries[index] = min(boundaries[index], boundaries[index + 1] - 1)
+    return tuple(boundaries[index + 1] - boundaries[index] for index in range(tp_size))
+
+
 @dataclass
 class AscendDSAReqMetadata:
     """Unified metadata for all requests in one attention invocation."""
@@ -372,6 +423,7 @@ class AscendDSAReqMetadata:
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
     qli_cmp_residual_k: torch.Tensor = None
+    prefill_row_shard: AscendDSAPrefillRowShard | None = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
     attn_mask: torch.Tensor | None = None
@@ -721,6 +773,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
+            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+        )
+        self.prefill_row_shard_qli_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
@@ -1078,6 +1133,112 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         return self.qli_metadata_buffer
 
+    def _prefill_row_sharding_supported(self, full_graph_mode: bool) -> bool:
+        parallel_config = self.vllm_config.parallel_config
+        return (
+            envs.VLLM_ASCEND_DSV4_PREFILL_INDEXER_TP_SHARD
+            and self.model_config.hf_config.model_type == "deepseek_v4"
+            and self.compressor_ratio == 4
+            and get_tensor_model_parallel_world_size() > 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and not get_ascend_config().enable_dsa_cp
+            and self.num_decode_tokens == 0
+            and self.num_prefills > 0
+            and not full_graph_mode
+        )
+
+    def _prepare_prefill_row_shard(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
+        num_actual_reqs: int,
+        full_graph_mode: bool,
+    ) -> AscendDSAPrefillRowShard | None:
+        if not self._prefill_row_sharding_supported(full_graph_mode):
+            return None
+
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1].to(
+            dtype=torch.int64,
+            device="cpu",
+        )
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        tp_size = get_tensor_model_parallel_world_size()
+        sizes = balanced_prefill_row_shard(
+            seq_lens_cpu[:num_actual_reqs],
+            query_lens_cpu,
+            self.compressor_ratio,
+            tp_size,
+            MIN_DSV4_PREFILL_INDEXER_TP_SHARD_ROWS_PER_RANK,
+        )
+        if sizes is None:
+            return None
+
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_start = sum(sizes[:tp_rank])
+        shard_stop = shard_start + sizes[tp_rank]
+        request_starts = query_start_loc_cpu[:-1]
+        local_starts = (shard_start - request_starts).clamp(min=0)
+        local_stops = (shard_stop - request_starts).clamp(min=0)
+        local_starts = torch.minimum(local_starts, query_lens_cpu)
+        local_stops = torch.minimum(local_stops, query_lens_cpu)
+        active = local_stops > local_starts
+        request_indices = torch.nonzero(active, as_tuple=False).flatten()
+        local_query_lens = local_stops[active] - local_starts[active]
+        local_seq_lens_cpu = (
+            seq_lens_cpu[:num_actual_reqs].to(dtype=torch.int64, device="cpu")[active]
+            - query_lens_cpu[active]
+            + local_stops[active]
+        )
+        if int(local_query_lens.sum().item()) != sizes[tp_rank]:
+            raise RuntimeError("DeepSeek-V4 prefill row shard does not cover the assigned rows")
+
+        local_query_start_loc_cpu = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int64, device="cpu"),
+                torch.cumsum(local_query_lens, dim=0),
+            )
+        )
+        local_query_start_loc = local_query_start_loc_cpu.to(device=self.device, dtype=torch.int32)
+        local_seq_lens = local_seq_lens_cpu.to(device=self.device, dtype=torch.int32)
+        qli_seqused_k = torch.div(local_seq_lens, 4, rounding_mode="floor")
+        qli_cmp_residual_k = torch.remainder(local_seq_lens, 4)
+        request_indices_device = request_indices.to(device=self.device)
+        local_block_table = self.block_table.index_select(0, request_indices_device)
+        return AscendDSAPrefillRowShard(
+            start=shard_start,
+            stop=shard_stop,
+            sizes=sizes,
+            block_table=local_block_table,
+            qli_cu_seqlens_q=local_query_start_loc,
+            qli_seqused_k=qli_seqused_k,
+            qli_cmp_residual_k=qli_cmp_residual_k,
+            qli_metadata=self.prefill_row_shard_qli_metadata_buffer,
+            max_seqlen_q=int(local_query_lens.max().item()),
+            max_seqlen_kv=int(local_seq_lens_cpu.max().item()),
+        )
+
+    def _build_prefill_row_shard_qli_metadata(self, shard: AscendDSAPrefillRowShard) -> None:
+        qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+            num_heads_q=self.model_config.hf_config.index_n_heads,
+            num_heads_k=1,
+            head_dim=self.model_config.hf_config.index_head_dim,
+            topk=self.model_config.hf_config.index_topk,
+            quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+            cu_seqlens_q=shard.qli_cu_seqlens_q,
+            seqused_k=shard.qli_seqused_k,
+            cmp_residual_k=shard.qli_cmp_residual_k,
+            batch_size=shard.qli_seqused_k.shape[0],
+            max_seqlen_q=shard.max_seqlen_q,
+            max_seqlen_k=shard.max_seqlen_kv // 4,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=4,
+            device=str(self.seqused_q.device),
+        )
+        self.prefill_row_shard_qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
         if self.compressor_ratio > 1 and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
@@ -1266,6 +1427,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if num_actual_reqs < num_reqs:
                 self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
+        assert num_actual_reqs is not None
+        prefill_row_shard = self._prepare_prefill_row_shard(
+            common_attn_metadata,
+            seq_lens_cpu,
+            num_actual_reqs,
+            full_graph_mode,
+        )
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
@@ -1364,14 +1532,41 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_kv=max_seqlen_kv,
                 )
 
+            def build_prefill_row_shard_qli_metadata() -> None:
+                assert prefill_row_shard is not None
+                self._build_prefill_row_shard_qli_metadata(prefill_row_shard)
+
             if self.compressor_ratio == 4:
+                indexer_tasks = [
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.INDEXER,
+                        build_qli_metadata,
+                        id(self.qli_metadata_buffer),
+                    ),
+                ]
+                if prefill_row_shard is not None:
+                    indexer_tasks.append(
+                        DeviceMetadataTask(
+                            DeviceMetadataStage.INDEXER,
+                            build_prefill_row_shard_qli_metadata,
+                            id(prefill_row_shard.qli_metadata),
+                        )
+                    )
                 self._device_metadata_tasks = (
-                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
-                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+                    *indexer_tasks,
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.ATTENTION,
+                        build_sas_metadata,
+                        id(self.sas_metadata_buffer),
+                    ),
                 )
             else:
                 self._device_metadata_tasks = (
-                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.ATTENTION,
+                        build_sas_metadata,
+                        id(self.sas_metadata_buffer),
+                    ),
                 )
             sas_metadata = self.sas_metadata_buffer
             qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
@@ -1401,6 +1596,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 if self.compressor_ratio == 4
                 else None
             )
+            if prefill_row_shard is not None:
+                self._build_prefill_row_shard_qli_metadata(prefill_row_shard)
 
         full_compress_cos, full_compress_sin = None, None
         if self.compressor_ratio > 1:
@@ -1446,6 +1643,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_cu_seqlens_q=qli_cu_seqlens_q,
             qli_seqused_k=qli_seqused_k,
             qli_cmp_residual_k=qli_cmp_residual_k,
+            prefill_row_shard=prefill_row_shard,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
             ori_win_left=ori_win_left,
