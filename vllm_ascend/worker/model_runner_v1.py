@@ -1060,9 +1060,8 @@ class NPUModelRunner(GPUModelRunner):
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
         elif self.use_async_scheduling and self.cache_config.mamba_cache_mode == "align":
-            # Align preprocessing consumes the CPU snapshot later. Keep input
-            # preparation asynchronous, but order GPU writes after postprocess.
-            torch.npu.current_stream().wait_event(self.num_accepted_tokens_event)
+            # Align preprocessing consumes the CPU snapshot later.
+            return
         else:
             self.num_accepted_tokens_event.synchronize()
             self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)
@@ -2240,6 +2239,15 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+
+        if (
+            self.use_async_scheduling
+            and self.cache_config.mamba_cache_mode == "align"
+            and self.num_accepted_tokens_event is not None
+        ):
+            # Postprocessing still reads the previous block tables and cache states.
+            # Order all GPU reuse after it, including preemption and _update_states.
+            torch.npu.current_stream().wait_event(self.num_accepted_tokens_event)
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.

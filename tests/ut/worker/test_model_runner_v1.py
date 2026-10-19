@@ -1055,6 +1055,54 @@ class TestDrafterMaxModelLen(unittest.TestCase):
 
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
+    def test_postprocess_wait_precedes_cache_reuse(self):
+        for asynchronous, cache_mode, has_event, preemption, wait_expected in (
+            (True, "align", True, True, True),
+            (True, "align", True, False, True),
+            (False, "align", True, True, False),
+            (True, "all", True, True, False),
+            (True, "align", False, True, False),
+        ):
+            with self.subTest(
+                asynchronous=asynchronous, cache_mode=cache_mode, has_event=has_event, preemption=preemption
+            ):
+                self._check_postprocess_wait(asynchronous, cache_mode, has_event, preemption, wait_expected)
+
+    def _check_postprocess_wait(self, asynchronous, cache_mode, has_event, preemption, wait_expected):
+        runner = MagicMock()
+        runner.execute_model_state = None
+        runner.use_async_scheduling = asynchronous
+        runner.cache_config.mamba_cache_mode = cache_mode
+        runner.num_accepted_tokens_event = MagicMock() if has_event else None
+        runner.speculative_config = None
+        runner.num_spec_tokens = 0
+        runner.synchronize_input_prep.return_value = nullcontext()
+        stream, cached_stream, connector = MagicMock(), MagicMock(), MagicMock()
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=6, kv_connector_metadata=object())
+
+        def cache_reuse(*args):
+            if wait_expected:
+                stream.wait_event.assert_called_once_with(runner.num_accepted_tokens_event)
+            else:
+                stream.wait_event.assert_not_called()
+            cached_stream.wait_event.assert_not_called()
+            if has_event:
+                runner.num_accepted_tokens_event.synchronize.assert_not_called()
+            raise RuntimeError("cache reuse boundary")
+
+        connector.handle_preemptions.side_effect = cache_reuse
+        runner._update_states.side_effect = cache_reuse
+        with (
+            patch("vllm_ascend.worker.model_runner_v1._start_profiling_chunk_timing"),
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(world_size=1)),
+            patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=preemption),
+            patch("vllm_ascend.worker.model_runner_v1.get_kv_transfer_group", return_value=connector),
+            patch.object(torch.npu, "current_stream", return_value=stream),
+            patch("vllm_ascend.utils._CURRENT_STREAM", cached_stream),
+            self.assertRaisesRegex(RuntimeError, "cache reuse boundary"),
+        ):
+            NPUModelRunner.execute_model(runner, scheduler_output)
+
     def test_async_align_defers_host_snapshot_until_preprocessing(self):
         for asynchronous, cache_mode, deferred in (
             (True, "align", True),
@@ -1068,22 +1116,13 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.num_accepted_tokens.np[:3] = [2, 3, 4]
                 runner._sync_num_accepted_tokens = MagicMock()
                 runner.num_accepted_tokens.copy_to_gpu = MagicMock()
-                stream = MagicMock()
-                cached_stream = MagicMock()
-                with (
-                    patch.object(torch.npu, "current_stream", return_value=stream),
-                    patch("vllm_ascend.utils._CURRENT_STREAM", cached_stream),
-                ):
-                    runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
-                cached_stream.wait_event.assert_not_called()
+                runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
                 if deferred:
-                    stream.wait_event.assert_called_once_with(runner.num_accepted_tokens_event)
                     runner.num_accepted_tokens_event.synchronize.assert_not_called()
                     runner._sync_num_accepted_tokens.assert_not_called()
                     runner.num_accepted_tokens.copy_to_gpu.assert_not_called()
                     np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], [2, 3, 4])
                 else:
-                    stream.wait_event.assert_not_called()
                     runner.num_accepted_tokens_event.synchronize.assert_called_once_with()
                     runner._sync_num_accepted_tokens.assert_called_once_with(3, True)
                     runner.num_accepted_tokens.copy_to_gpu.assert_called_once_with()
