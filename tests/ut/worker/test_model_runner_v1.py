@@ -1181,7 +1181,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
-    def _check_load_model_prolog_budget(self, with_draft, pcp_enabled):
+    def _check_load_model_prolog_budget(self, with_draft, use_pcp):
         """Verify persistent PROLOG buffers are charged during weight loading."""
         runner = self._build_runner()
         runner.model_config.model = "test-model"
@@ -1218,7 +1218,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.v_head_dim = 1
             impl.enable_mlapo = False
             impl.fa_quant_layer = False
-            impl.pcp_enabled = pcp_enabled
+            impl.use_pcp = use_pcp
             impl.dcp_enabled = False
             impl.supports_prolog_v3_writer = lambda: True
             layer.impl = impl
@@ -1294,15 +1294,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             runner.load_model()
 
         self.assertEqual(set(layers), {"target.attn", "draft.attn"} if with_draft else {"target.attn"})
-        self.assertEqual(runner.model_memory_usage, 4096 + (0 if pcp_enabled else 32 * len(layers)))
+        self.assertEqual(runner.model_memory_usage, 4096 + (0 if use_pcp else 32 * len(layers)))
         runner.get_kv_cache_spec.assert_not_called()
         for layer in layers.values():
-            self.assertEqual(layer.impl._build_prolog_v3_weights.call_count, int(not pcp_enabled))
+            self.assertEqual(layer.impl._build_prolog_v3_weights.call_count, int(not use_pcp))
 
     def test_load_model_budgets_prolog_weights_for_target_and_draft(self):
-        for with_draft, pcp_enabled in ((False, False), (True, False), (True, True)):
-            with self.subTest(with_draft=with_draft, pcp_enabled=pcp_enabled):
-                self._check_load_model_prolog_budget(with_draft, pcp_enabled)
+        for with_draft, use_pcp in ((False, False), (True, False), (True, True)):
+            with self.subTest(with_draft=with_draft, use_pcp=use_pcp):
+                self._check_load_model_prolog_budget(with_draft, use_pcp)
 
     def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
         runner = self._build_runner()
@@ -1460,7 +1460,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             fa_quant_layer=False,
             enable_kv_nz=True,
             dcp_enabled=False,
-            pcp_enabled=False,
+            use_pcp=False,
             is_pcp_decode_sharded=False,
             supports_strided_mla_writer=lambda: False,
         )
@@ -1479,13 +1479,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
-        attn_module.impl.pcp_enabled = True
+        attn_module.impl.use_pcp = True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
-        attn_module.impl.pcp_enabled = False
+        attn_module.impl.use_pcp = False
 
         attn_module.impl.is_pcp_decode_sharded = True
         with patch(

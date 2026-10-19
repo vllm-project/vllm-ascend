@@ -2477,9 +2477,21 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         full_graph_mode: bool = False,
         **kwargs: Any,
     ) -> dsa_v1.AscendDSAMetadata:
-        assert pcp_context is not None
-        assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None
+        if pcp_context is None:
+            # Without a PCP context the batch runs replicated on every rank,
+            # like a PCP=1 model (e.g. a replicated draft decode), so build the
+            # ordinary DSA metadata that the impl executes without PCP.
+            return super().build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build,
+                num_actual_reqs=num_actual_reqs,
+                common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                full_graph_mode=full_graph_mode,
+                **kwargs,
+            )
+        assert pcp_cache_group_idx is not None
         has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
         # Replicated decode stays on the local metadata path. Sharded decode
         # owns different requests per rank, so it still needs global metadata.

@@ -470,6 +470,59 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
+def test_mla_replicated_draft_decode_skips_pcp_kv_gather() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_pcp = True
+    impl.is_pcp_decode_sharded = True
+    impl.fused_qkv_a_proj = None
+    impl.kv_a_proj_with_mqa = MagicMock(return_value=(torch.zeros(1, 4), None))
+    impl.layerwise_kv_cache_hook = None
+    impl.exec_kv_prefill = MagicMock(side_effect=AssertionError("replicated decode must not gather KV"))
+    impl.mla_preprocess_decode = MagicMock(return_value="decode")
+    # Replicated draft metadata keeps an unexpanded, rank-local slot mapping.
+    metadata = _make_pcp_metadata(num_actual_tokens=1, num_decode_tokens=1)
+    metadata.num_input_tokens = 1
+    metadata.slot_mapping = torch.tensor([5], dtype=torch.int64)
+    with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
+        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None)
+    assert impl.mla_preprocess_decode.call_args.args[-1] is None
+
+
+def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_pcp = True
+    impl.is_pcp_decode_sharded = True
+    impl.fused_qkv_a_proj = None
+    impl.kv_a_proj_with_mqa = MagicMock(return_value=(torch.zeros(1, 4), None))
+    impl.layerwise_kv_cache_hook = MagicMock()
+    impl.exec_kv_prefill = MagicMock(return_value="written")
+    # A rank without local queries still joins the gather of the expanded slots.
+    metadata = _make_pcp_metadata(num_actual_tokens=0, num_decode_tokens=0)
+    metadata.num_input_tokens = 1
+    metadata.slot_mapping = torch.tensor([-1, 7], dtype=torch.int64)
+    with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
+        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None)
+    impl.layerwise_kv_cache_hook.wait_for_layer.assert_called_once_with("target")
+    impl.exec_kv_prefill.assert_called_once()
+
+
+def test_mla_replicated_draft_decode_writes_local_slots() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_pcp = True
+    impl.is_pcp_decode_sharded = True
+    impl.use_mla_rope = False
+    impl._exec_kv_no_rope = MagicMock(return_value=("k_pe", "k_nope"))
+    metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
+    metadata.num_input_tokens = 2
+    metadata.slot_mapping = torch.tensor([5, 7], dtype=torch.int64)
+    kv = torch.zeros(2, 4)
+    with patch("vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs") as gather:
+        impl.exec_kv_prefill(kv, None, None, (), metadata.slot_mapping, attn_metadata=metadata)
+    # An unexpanded slot mapping means the step is replicated: no PCP gather.
+    gather.assert_not_called()
+    impl._exec_kv_no_rope.assert_called_once_with(kv, (), metadata.slot_mapping)
+
+
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.is_pcp_decode_sharded = False
@@ -499,7 +552,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = SimpleNamespace(
         weight=torch.empty(0),
@@ -569,7 +622,7 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
 
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = object()
     impl.num_kv_heads = 1
@@ -623,7 +676,7 @@ def test_mla_pcp_no_rope_gathers_before_cache_write() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
     metadata.slot_mapping = torch.tensor([5, -1, 7, -1], dtype=torch.int64)
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = False
     with (
         patch("vllm_ascend.attention.mla_v1.get_pcp_group", return_value=pcp_group),
@@ -1297,7 +1350,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             self.mock_vllm_config,
             self.mock_device,
         )
-        self.assertFalse(builder.pcp_enabled)
+        self.assertFalse(builder.use_pcp)
         self.assertIs(builder.metadata_cls, AscendMLAMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
@@ -1307,7 +1360,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             self.mock_vllm_config,
             self.mock_device,
         )
-        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMLAMetadata)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
@@ -1505,7 +1558,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             ):
                 self.mock_vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
                 builder.pcp_size = pcp_size
-                builder.pcp_enabled = pcp_size > 1
+                builder.use_pcp = pcp_size > 1
                 common_attn_metadata.slot_mapping = torch.arange(3 * pcp_size)
                 metadata = builder.build(0, common_attn_metadata)
                 expected_decodes = 3 if pcp_size == 1 else 0
@@ -1774,7 +1827,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertFalse(self.impl.pcp_enabled)
+        self.assertFalse(self.impl.use_pcp)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
@@ -3021,6 +3074,7 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.num_actual_tokens = 4
         num_prefill_tokens = 2
         attn_metadata.slot_mapping = torch.arange(4)
+        attn_metadata.prefill.pcp_local_num_input_tokens = None
         attn_metadata.decode.cos = torch.randn(2, 64)
         attn_metadata.decode.sin = torch.randn(2, 64)
         attn_metadata.prefill.cos = torch.randn(2, 64)
@@ -3066,7 +3120,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(prefill_res)
 
     def test_mla_preprocess_prefill_pcp_empty_rank(self):
-        self.impl.pcp_enabled = True
+        self.impl.use_pcp = True
         self.impl.num_heads = 2
         self.impl.num_kv_heads = 1
         self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
@@ -3128,7 +3182,7 @@ class TestAscendMLAImpl(TestBase):
                     num_decode_tokens=num_decode_tokens,
                     num_actual_tokens=num_actual_tokens,
                     slot_mapping=torch.arange(4),
-                    prefill=SimpleNamespace(cos=None, sin=None),
+                    prefill=SimpleNamespace(cos=None, sin=None, pcp_local_num_input_tokens=None),
                 )
                 result = self.impl.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, metadata)
 
