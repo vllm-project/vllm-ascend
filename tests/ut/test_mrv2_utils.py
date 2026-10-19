@@ -35,6 +35,8 @@ def test_environment_override_wins(monkeypatch, env_value):
     "config",
     [
         SimpleNamespace(),
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
+        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(model_config=None),
         SimpleNamespace(
             model_config=SimpleNamespace(
@@ -90,6 +92,8 @@ def test_environment_override_wins(monkeypatch, env_value):
     ],
     ids=[
         "empty-config",
+        "pooling-runner",
+        "pooling-model",
         "no-model",
         "unknown-attention-free-generate",
         "dynamic-unsupported-speculation",
@@ -134,8 +138,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
-        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
-        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
@@ -155,8 +157,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     ],
     ids=[
         "dflash2-graph",
-        "pooling-runner",
-        "pooling-model",
         "encoder-decoder",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
