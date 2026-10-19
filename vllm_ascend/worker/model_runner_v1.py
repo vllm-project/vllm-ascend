@@ -207,7 +207,6 @@ from vllm_ascend.spec_decode.utils import (
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
-    current_stream,
     enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
@@ -1055,7 +1054,7 @@ class NPUModelRunner(GPUModelRunner):
         elif self.use_async_scheduling and self.cache_config.mamba_cache_mode == "align":
             # Align preprocessing consumes the CPU snapshot later. Keep input
             # preparation asynchronous, but order GPU writes after postprocess.
-            current_stream().wait_event(self.num_accepted_tokens_event)
+            torch.npu.current_stream().wait_event(self.num_accepted_tokens_event)
         else:
             self.num_accepted_tokens_event.synchronize()
             self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)

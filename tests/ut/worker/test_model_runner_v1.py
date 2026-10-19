@@ -1069,8 +1069,13 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner._sync_num_accepted_tokens = MagicMock()
                 runner.num_accepted_tokens.copy_to_gpu = MagicMock()
                 stream = MagicMock()
-                with patch("vllm_ascend.worker.model_runner_v1.current_stream", return_value=stream):
+                cached_stream = MagicMock()
+                with (
+                    patch("torch.npu.current_stream", return_value=stream),
+                    patch("vllm_ascend.utils._CURRENT_STREAM", cached_stream),
+                ):
                     runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
+                cached_stream.wait_event.assert_not_called()
                 if deferred:
                     stream.wait_event.assert_called_once_with(runner.num_accepted_tokens_event)
                     runner.num_accepted_tokens_event.synchronize.assert_not_called()
