@@ -49,7 +49,7 @@ def _make_impl() -> AscendMLAImpl:
     impl.qk_head_dim = impl.qk_nope_head_dim + ROPE_DIM
     impl.v_head_dim = 128
     impl.q_lora_rank = 128
-    impl.fused_qkv_a_proj = SimpleNamespace(weight=MagicMock())
+    impl.fused_qkv_a_proj = SimpleNamespace(weight=MagicMock(), input_size=7168)
     impl.q_proj = SimpleNamespace(weight=MagicMock(), _chunk_size=0)
     impl.q_a_layernorm = SimpleNamespace(
         weight=SimpleNamespace(data=torch.ones(128)),
@@ -145,6 +145,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     quant_method = object.__new__(AscendW8A8LinearMethod)
     impl.fused_qkv_a_proj = SimpleNamespace(
         weight=torch.ones(4, 10),
+        input_size=7168,
         weight_scale=torch.ones(10),
         quant_method=SimpleNamespace(quant_method=quant_method),
     )
@@ -1337,3 +1338,189 @@ def test_mla_preprocess_prolog_v3_keeps_prefill_query_unquantized_for_fa_quant()
     kv_b_proj_input = impl.kv_b_proj.call_args.args[0]
     assert kv_b_proj_input.dtype == nope.dtype
     assert torch.equal(decode_kwargs["quant_scale_ckv"], impl.fak_descale_reciprocal)
+
+
+def _make_wide_draft_impl():
+    impl = _make_impl()
+    impl.fused_qkv_a_proj = SimpleNamespace(input_size=14336, weight=torch.empty(1))
+    impl.support_fp8_attention = True
+    impl.is_draft_model = True
+    impl.pcp_enabled = False
+    impl.dcp_enabled = False
+    impl.is_pcp_decode_sharded = False
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=257),
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=[128, 384]),
+        cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
+    )
+    impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(NOPE_DIM), variance_epsilon=1e-6)
+    impl._strided_kv_workspace = None
+    return impl
+
+
+@pytest.mark.parametrize("input_size", [7168, 8192, 14336, None])
+def test_prolog_writer_checks_projection_input_instead_of_model_hidden_size(input_size):
+    impl = _make_wide_draft_impl()
+    impl.fused_qkv_a_proj.input_size = input_size
+    assert impl.supports_prolog_v3_writer() is (input_size in (7168, 8192))
+
+
+@pytest.mark.parametrize("excluded", ["pcp_enabled", "dcp_enabled", "enable_kv_nz", "fa_quant_layer"])
+def test_wide_draft_adapter_preserves_existing_exclusions(excluded):
+    impl = _make_wide_draft_impl()
+    setattr(impl, excluded, True)
+    impl._prepare_strided_kv_workspace()
+    assert not impl.supports_strided_mla_writer()
+    assert impl._strided_kv_workspace is None
+
+
+@pytest.mark.parametrize(
+    "attribute,value", [("support_fp8_attention", False), ("is_draft_model", False), ("dtype", torch.float16)]
+)
+def test_wide_draft_adapter_does_not_expand_hardware_or_dtype_support(attribute, value):
+    impl = _make_wide_draft_impl()
+    setattr(impl, attribute, value)
+    impl._prepare_strided_kv_workspace()
+    assert not impl.supports_strided_mla_writer()
+    assert impl._strided_kv_workspace is None
+
+
+def test_wide_draft_workspace_is_bounded_prepared_and_stable_across_reload():
+    impl = _make_wide_draft_impl()
+    assert not impl.supports_strided_mla_writer()
+    impl._prepare_strided_kv_workspace()
+    assert impl.supports_strided_mla_writer()
+    workspace = impl._strided_kv_workspace
+    assert workspace is not None
+    assert workspace[0].shape == (3, BLOCK_SIZE, 1, NOPE_DIM)
+    assert workspace[1].shape == (3, BLOCK_SIZE, 1, ROPE_DIM)
+    assert torch.equal(workspace[2], torch.arange(384))
+    assert sum(t.numel() * t.element_size() for t in workspace) == 384 * (FUSED_DIM * 2 + 8)
+    impl._prepare_strided_kv_workspace()
+    assert impl._strided_kv_workspace is workspace
+
+
+def test_wide_draft_weight_loading_prepares_workspace_without_prolog_weights():
+    impl = _make_wide_draft_impl()
+    impl.enable_mlapo = False
+    impl._prolog_v3_weights = None
+    impl.kv_b_proj = SimpleNamespace(
+        quant_method=mla_v1.UnquantizedLinearMethod(),
+        weight=torch.empty(impl.num_heads * (impl.qk_nope_head_dim + impl.v_head_dim), NOPE_DIM),
+    )
+    with (
+        patch("torch_npu.npu_format_cast", side_effect=lambda tensor, _format: tensor),
+        patch.object(mla_v1, "maybe_trans_nz", side_effect=lambda tensor: tensor),
+        patch.object(impl, "_prepare_prolog_v3_weights") as prepare_prolog,
+    ):
+        impl.process_weights_after_loading(torch.bfloat16)
+        assert impl.supports_strided_mla_writer()
+        workspace = impl._strided_kv_workspace
+        impl.process_weights_after_loading(torch.bfloat16)
+        assert impl._strided_kv_workspace is workspace
+        prepare_prolog.assert_not_called()
+    assert impl._prolog_v3_weights is None
+
+
+@pytest.mark.parametrize("cache_factory", [_component_major_cache, _token_fused_cache])
+@pytest.mark.parametrize("prefill", [False, True])
+def test_wide_draft_adapter_writes_original_storage_and_skips_padding(cache_factory, prefill):
+    impl = _make_wide_draft_impl()
+    impl._prepare_strided_kv_workspace()
+    cache = cache_factory()
+    base = torch.empty(0, dtype=cache[0].dtype).set_(
+        cache[0].untyped_storage(), 0, (cache[0].untyped_storage().nbytes() // cache[0].element_size(),), (1,)
+    )
+    expected = base.clone()
+    slots = torch.tensor([0, BLOCK_SIZE - 1, BLOCK_SIZE, -1])
+    kv = torch.randn(4, FUSED_DIM, dtype=torch.bfloat16)
+    cos, sin = torch.randn(4, ROPE_DIM), torch.randn(4, ROPE_DIM)
+    normalized = kv[:, :NOPE_DIM].float()
+    normalized = normalized * torch.rsqrt(normalized.square().mean(-1, keepdim=True) + 1e-6)
+    normalized = normalized.to(kv.dtype).unsqueeze(1)
+    raw_rope = kv[:, NOPE_DIM:].float()
+    rotated = torch.stack((-raw_rope[:, 1::2], raw_rope[:, ::2]), dim=-1).flatten(1)
+    rotated = (raw_rope * cos + rotated * sin).to(kv.dtype).unsqueeze(1)
+    for component, values in zip(cache, (normalized, rotated)):
+        target = expected.as_strided(component.shape, component.stride(), component.storage_offset())
+        for token, slot in enumerate(slots.tolist()):
+            if slot >= 0:
+                target[slot // BLOCK_SIZE, slot % BLOCK_SIZE] = values[token]
+
+    def normalize_into_temporary(_kv, _gamma, _cos, _sin, indices, rope, nope, **kwargs):
+        assert rope.is_contiguous() and nope.is_contiguous()
+        assert rope.untyped_storage() is not cache[0].untyped_storage()
+        assert nope.untyped_storage() is not cache[0].untyped_storage()
+        assert torch.equal(indices, torch.arange(4))
+        assert kwargs["is_output_kv"] is False
+        assert kwargs["cache_mode"] == "PA"
+        nope.flatten(0, 1)[:4].copy_(normalized)
+        rope.flatten(0, 1)[:4].copy_(rotated)
+
+    def scatter(**kwargs):
+        assert kwargs["key_cache"] is cache[0]
+        assert kwargs["value_cache"] is cache[1]
+        for token, slot in enumerate(kwargs["slot_mapping"].tolist()):
+            if slot >= 0:
+                kwargs["key_cache"][slot // BLOCK_SIZE, slot % BLOCK_SIZE] = kwargs["key"][token]
+                kwargs["value_cache"][slot // BLOCK_SIZE, slot % BLOCK_SIZE] = kwargs["value"][token]
+
+    with (
+        patch("torch_npu.npu_kv_rmsnorm_rope_cache", side_effect=normalize_into_temporary),
+        patch("torch_npu.npu_mla_prolog_v3") as prolog,
+        patch.object(mla_v1.DeviceOperator, "reshape_and_cache", side_effect=scatter),
+    ):
+        if prefill:
+            rope, nope = impl.exec_kv_prefill(kv, cos, sin, cache, slots)
+        else:
+            history_rope, history_nope, rope, nope = impl.exec_kv_decode(
+                kv, cos, sin, cache, slots, return_current_kv=True
+            )
+            assert history_nope is cache[0] and history_rope is cache[1]
+        prolog.assert_not_called()
+    torch.testing.assert_close(nope, normalized)
+    torch.testing.assert_close(rope, rotated)
+    torch.testing.assert_close(base, expected)
+
+
+def test_wide_draft_workspace_never_grows_during_forward():
+    impl = _make_wide_draft_impl()
+    cache = _token_fused_cache()
+    with pytest.raises(RuntimeError, match="prepared before KV cache sizing"):
+        impl._exec_strided_kv_writer(torch.empty(1, FUSED_DIM), None, None, cache, torch.tensor([0]))
+    impl._prepare_strided_kv_workspace()
+    workspace = impl._strided_kv_workspace
+    with pytest.raises(RuntimeError, match="exceeds the profiled workspace"):
+        impl._exec_strided_kv_writer(torch.empty(385, FUSED_DIM), None, None, cache, torch.arange(385))
+    with (
+        patch("torch_npu.npu_kv_rmsnorm_rope_cache") as writer,
+        patch.object(mla_v1.DeviceOperator, "reshape_and_cache") as scatter,
+    ):
+        rope, nope = impl._exec_strided_kv_writer(torch.empty(0, FUSED_DIM), None, None, cache, torch.empty(0))
+        assert rope.shape == (0, 1, ROPE_DIM) and nope.shape == (0, 1, NOPE_DIM)
+        writer.assert_not_called()
+        scatter.assert_not_called()
+    assert impl._strided_kv_workspace is workspace
+
+
+def test_wide_draft_forward_uses_regular_projection_for_fused_cache():
+    impl = _make_wide_draft_impl()
+    impl._prepare_strided_kv_workspace()
+    impl.use_output_gate = False
+    impl.enable_mlapo = True  # The adapter must take priority even over the older decode fusion.
+    impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
+    impl.mla_preprocess_only_decode = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
+    hidden = torch.zeros(1, 14336)
+    output = torch.empty(1, impl.num_heads * impl.v_head_dim)
+    cache = torch.zeros(2, BLOCK_SIZE, 1, FUSED_DIM)
+    metadata = SimpleNamespace(num_actual_tokens=1, num_decodes=1, num_prefills=0, num_decode_tokens=1)
+    with (
+        patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=1)),
+        patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+    ):
+        assert impl.forward("layer", hidden, cache, metadata, output) is output
+    impl._mla_preprocess.assert_called_once()
+    impl.mla_preprocess_prolog_v3.assert_not_called()
+    impl.mla_preprocess_only_decode.assert_not_called()

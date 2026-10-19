@@ -754,7 +754,7 @@ msgid ""
 " + vLLM-Ascend is recommended.**"
 msgstr ""
 "**客户侧生产环境推荐使用 [MindIE "
-"Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md)"
+"Motor](https://www.hiascend.com/document/detail/zh/mindie/latest/quickstart/docs/zh/user_guide/quick_start.md)"
 " + vLLM-Ascend。**"
 
 msgid ""

@@ -198,6 +198,14 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: MiniMax-M3-BF16-A3.yaml
         config_base_path: tests/e2e/cases/models/configs/MiniMax
+      - name: Kimi-K2.6-W4A8-PCP-DCP
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Kimi-K2.6-W4A8-PCP-DCP.yaml
+        config_base_path: tests/e2e/cases/features/context_parallel
+      - name: glm-5.2-W4A8C8-DSpark-PCP
+        os: linux-aarch64-a3-800i-16
+        config_file_path: glm-5.2-W4A8C8-DSpark-PCP.yaml
+        config_base_path: tests/e2e/cases/features/context_parallel
       - name: Qwen3.5-397B-A17B-w8a8-mtp
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
@@ -265,6 +273,10 @@ a3-560t:
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3-32B-QuaRot-eagle3.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
+      - name: Qwen3-30B-A3B-VWN-eagle3-PCP
+        os: linux-aarch64-a3-800i-8
+        config_file_path: Qwen3-30B-A3B-VWN-eagle3-PCP.yaml
+        config_base_path: tests/e2e/cases/features/context_parallel
 310p:
   single_node:
     test_config:

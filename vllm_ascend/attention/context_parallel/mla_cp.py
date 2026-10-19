@@ -491,25 +491,23 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
-                torch_npu.npu_fused_infer_attention_score.out(
+                torch_npu.npu_fused_infer_attention_score_v2.out(
                     q_nope,
                     k_nope,
                     k_nope,
                     query_rope=q_pe,
                     key_rope=k_pe,
-                    num_heads=num_heads,
+                    num_query_heads=num_heads,
                     num_key_value_heads=num_kv_heads,
                     input_layout=input_layout,
                     atten_mask=spec_attn_mask,
                     sparse_mode=sparse_mode,
-                    scale=scale,
-                    antiquant_mode=0,
-                    antiquant_scale=None,
-                    softmax_lse_flag=True,
+                    softmax_scale=scale,
+                    return_softmax_lse=True,
                     block_table=block_table,
                     block_size=block_size,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    actual_seq_lengths=actual_seq_lengths,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
+                    actual_seq_qlen=actual_seq_lengths,
                     workspace=graph_params.workspaces.get(num_tokens),
                     out=[attn_output, softmax_lse],
                 )
@@ -572,24 +570,22 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_heads": num_heads,
+            "num_query_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": "TND",
             "atten_mask": attn_mask,
             "sparse_mode": sparse_mode,
-            "scale": self.scale,
-            "antiquant_mode": 0,
-            "antiquant_scale": None,
-            "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": actual_seq_lengths_kv,
-            "softmax_lse_flag": True,
+            "softmax_scale": self.scale,
+            "actual_seq_qlen": actual_seq_lengths,
+            "actual_seq_kvlen": actual_seq_lengths_kv,
+            "return_softmax_lse": True,
         }
         if block_table is not None:
             common_kwargs["block_table"] = block_table
             common_kwargs["block_size"] = block_size
 
         if not _EXTRA_CTX.capturing:
-            return torch_npu.npu_fused_infer_attention_score(
+            return torch_npu.npu_fused_infer_attention_score_v2(
                 q_nope,
                 k_nope,
                 k_nope,
@@ -642,7 +638,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
         )
         torch.npu.graph_task_group_begin(stream)
-        torch_npu.npu_fused_infer_attention_score.out(
+        torch_npu.npu_fused_infer_attention_score_v2.out(
             q_nope,
             k_nope,
             k_nope,
@@ -698,37 +694,35 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 workspace_kwargs = {
                     "num_key_value_heads": self.num_kv_heads,
                     "input_layout": "TND",
-                    "scale": self.scale,
-                    "antiquant_mode": 0,
-                    "antiquant_scale": None,
-                    "actual_seq_lengths": decode_meta.actual_seq_lengths_q,
-                    "softmax_lse_flag": True,
+                    "softmax_scale": self.scale,
+                    "actual_seq_qlen": decode_meta.actual_seq_lengths_q,
+                    "return_softmax_lse": True,
                 }
                 workspaces = [
-                    torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                    torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                         q_nope,
                         history_k_nope,
                         history_k_nope,
                         query_rope=q_pe,
                         key_rope=history_k_pe,
-                        num_heads=num_heads,
+                        num_query_heads=num_heads,
                         atten_mask=None,
                         sparse_mode=0,
                         block_table=decode_meta.block_table,
                         block_size=block_size,
-                        actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
+                        actual_seq_kvlen=decode_meta.cp_history_seq_len,
                         **workspace_kwargs,
                     ),
-                    torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                    torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                         current_q_nope,
                         current_k_nope,
                         current_k_nope,
                         query_rope=current_q_pe,
                         key_rope=current_k_pe,
-                        num_heads=self.num_heads,
+                        num_query_heads=self.num_heads,
                         atten_mask=decode_meta.attn_mask,
                         sparse_mode=3,
-                        actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                        actual_seq_kvlen=decode_meta.actual_seq_lengths_q,
                         **workspace_kwargs,
                     ),
                 ]
@@ -870,19 +864,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_heads": num_heads,
+            "num_query_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": spec_attn_mask,
             "sparse_mode": sparse_mode,
-            "scale": self.scale,
-            "antiquant_mode": 0,
-            "antiquant_scale": None,
+            "softmax_scale": self.scale,
             "block_table": decode_meta.block_table,
             "block_size": block_size,
-            "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": decode_meta.cp_seq_len,
-            "softmax_lse_flag": True,
+            "actual_seq_qlen": actual_seq_lengths,
+            "actual_seq_kvlen": decode_meta.cp_seq_len,
+            "return_softmax_lse": True,
         }
 
         if _EXTRA_CTX.is_draft_model:
@@ -900,7 +892,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             graph_params.events[num_tokens].append(event)
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                     q_nope,
                     k_nope,
                     k_nope,
@@ -946,13 +938,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 )
             )
             torch.npu.graph_task_group_begin(stream)
-            torch_npu.npu_fused_infer_attention_score.out(
+            torch_npu.npu_fused_infer_attention_score_v2.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
                 q_nope,
                 k_nope,
                 k_nope,
