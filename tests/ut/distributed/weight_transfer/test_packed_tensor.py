@@ -33,6 +33,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.logger import logger as vllm_logger
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -1339,3 +1340,9 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
         assert name == expected_name
         assert actual.dtype == expected.dtype
         assert torch.equal(actual, expected)
+
+
+def test_packed_uses_shared_vllm_logger():
+    import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
+
+    assert packed_module.logger is vllm_logger

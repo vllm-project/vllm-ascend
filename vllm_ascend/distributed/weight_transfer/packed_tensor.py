@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Packed tensor utilities for efficient weight transfer."""
 
-import logging
 import math
 from collections.abc import Callable, Iterator
 from contextlib import suppress
@@ -10,15 +9,18 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from vllm.logger import logger
 
 # Default values for packed tensor configuration.
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
-logger = logging.getLogger(__name__)
 
 # On a failed stream drain, keep storage alive until process exit. Its async
 # users may still be running, so returning it to the allocator is unsafe.
+# torch_npu's getStreamFromPool uses process-global native streams (see
+# NPUStream.cpp / LeakyStreamInternals). Dropping a Python Stream wrapper is
+# not a completion barrier. This failed-drain path has no completion proof.
 # This failure-only list is intentionally unbounded: retries after a drain
 # failure can exhaust device memory. Do not clear it to recover memory while
 # work may still be pending. Transfers must not concurrently share a communicator
