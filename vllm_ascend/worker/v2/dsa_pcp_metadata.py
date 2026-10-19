@@ -110,9 +110,8 @@ class PCPMetadataPlan:
         common: AscendCommonAttentionMetadata,
         actual_reqs: int | None,
     ) -> BatchScope:
-        if actual_reqs is None:
-            actual_reqs = common.num_reqs
-        actual_reqs = min(actual_reqs, common.num_reqs)
+        num_reqs: int = common.num_reqs
+        resolved_actual_reqs: int = num_reqs if actual_reqs is None else min(actual_reqs, num_reqs)
 
         counts = split_decodes_and_prefills(
             common,
@@ -122,7 +121,7 @@ class PCPMetadataPlan:
 
         return BatchScope(
             common=common,
-            actual_reqs=actual_reqs,
+            actual_reqs=resolved_actual_reqs,
             num_decodes=num_decode,
             num_prefills=npref,
             num_decode_tokens=ndtokens,
@@ -613,6 +612,7 @@ class PCPMetadataPlan:
         if not step["needs_global"]:
             return local_metadata
 
+        assert global_metadata is not None
         return AscendDSAPCPMetadata.from_local_metadata(
             local_metadata, local_common.num_input_tokens, context.hidden_restore_idx, global_metadata
         )
@@ -635,7 +635,7 @@ def bind_pcp_metadata_plan(runner) -> None:
         return
 
     builders = []
-    uses = {}
+    uses: dict[int, MetadataUse] = {}
     seen = set()
     context = config.compilation_config.static_forward_context
 
