@@ -147,13 +147,9 @@ def _probabilistic_rejection_kernel(
                     accepted &= target_argmax == draft_sampled
                     tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             elif USE_BLOCK_VERIFICATION:
-                # Match upstream block verification: a failed threshold does
-                # not end verification; a later step can extend the prefix.
                 accepted = draft_sampled >= 0
                 if accepted:
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
-                    # Match standard acceptance; recovery and draft sampling
-                    # use separate salted RNG domains.
                     u_seed = tl.randint(seed, u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
                     u = tl.maximum(u, 4.6566127342e-10)
@@ -255,8 +251,6 @@ def _probabilistic_rejection_kernel(
                 rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
     if USE_BLOCK_VERIFICATION and temp != 0.0 and rejected_step < num_tokens - 1:
-        # Block verification can select an earlier rejection than the last
-        # inspected step. Recompute its LSE, as in upstream _rejection_kernel.
         rejected_idx = start_idx + rejected_step
         target_lse = _compute_global_lse(
             target_local_max_ptr,
@@ -368,7 +362,6 @@ def rejection_sample(
         has_auto_blockify_blacklist_op=True,
     )
 
-    # Reuse upstream's running joint ratio and residual-mass computation.
     if use_block_verification:
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
         _compute_cumulative_log_p_kernel[(num_reqs,)](
@@ -397,8 +390,6 @@ def rejection_sample(
         )
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-            # The final row is always a bonus. Exclude it so upstream's
-            # look-ahead load stays in bounds even for a shorter last request.
             if num_logits > 1:
                 _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
                     local_residual_mass,
