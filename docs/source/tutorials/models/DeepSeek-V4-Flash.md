@@ -660,7 +660,7 @@ Before you start, please:
 
     The DSpark Prefill node uses PCP8, DP2, and TP1 across 16 NPU devices. The Decode node uses DP16 and TP1.
 
-    PCP requires Model Runner V2. Enable it on the Prefill node with `export VLLM_USE_V2_MODEL_RUNNER=1`, as shown below. Model Runner V2 does not support DSA-CP, so do not set `enable_dsa_cp` in `--additional-config`.
+    PCP requires Model Runner V2. Both DSpark nodes below enable Model Runner V2 with `export VLLM_USE_V2_MODEL_RUNNER=1`, as shown below. Model Runner V2 does not support DSA-CP, so do not set `enable_dsa_cp` in `--additional-config`.
 
     1. Prefill node
 
@@ -684,8 +684,6 @@ Before you start, please:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_USE_V2_MODEL_RUNNER=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -701,7 +699,7 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 8192 \
+            --max-num-batched-tokens 16500 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
@@ -713,10 +711,11 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.9 \
+            --gpu-memory-utilization 0.94 \
             --quantization ascend \
+            --no-enable-prefix-caching \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -725,7 +724,8 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
-                                "tp_size": 1
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -756,6 +756,7 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -770,7 +771,7 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 480 \
+            --max-num-batched-tokens 360 \
             --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
@@ -785,8 +786,8 @@ Before you start, please:
             --reasoning-parser deepseek_v4 \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}' \
+            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
@@ -795,7 +796,8 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
-                                "tp_size": 1
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
