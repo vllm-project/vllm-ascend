@@ -22,9 +22,6 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     KVCacheBlock,
 )
-from vllm.v1.core.kv_cache_utils import (
-    dcp_world_size_for_kv_cache_spec as _upstream_dcp_world_size_for_kv_cache_spec,
-)
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     get_manager_for_kv_cache_spec,
@@ -39,6 +36,15 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+try:
+    # Older vLLM exposed the per-spec DCP geometry here; newer vLLM moved the
+    # sharding decision onto ``KVCacheSpec.dcp_sharded`` and dropped the helper.
+    from vllm.v1.core.kv_cache_utils import (
+        dcp_world_size_for_kv_cache_spec as _upstream_dcp_world_size_for_kv_cache_spec,
+    )
+except ImportError:  # pragma: no cover - depends on the pinned vLLM version
+    _upstream_dcp_world_size_for_kv_cache_spec = None
+
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 
@@ -50,10 +56,19 @@ def dcp_world_size_for_kv_cache_spec(kv_cache_spec, dcp_world_size):
     (e.g. the DeepSeek-V4 SWA/state ``AscendSlidingWindowMLASpec`` groups),
     which would shard their write masks and leave every rank outside the
     first interleave stripe with an empty cache.
+
+    Version adaptive: when the upstream helper is gone (newer vLLM), the
+    per-spec decision is read from ``KVCacheSpec.dcp_sharded`` instead.
     """
     if dcp_world_size > 1 and isinstance(kv_cache_spec, (SlidingWindowSpec, SlidingWindowMLASpec)):
         return 1
-    return _upstream_dcp_world_size_for_kv_cache_spec(kv_cache_spec, dcp_world_size)
+    if _upstream_dcp_world_size_for_kv_cache_spec is not None:
+        return _upstream_dcp_world_size_for_kv_cache_spec(kv_cache_spec, dcp_world_size)
+    # Newer vLLM: each spec reports whether it is DCP-sharded; replicated
+    # groups (sliding-window / recurrent state) keep full-sequence geometry.
+    if not getattr(kv_cache_spec, "dcp_sharded", True):
+        return 1
+    return dcp_world_size
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
