@@ -93,7 +93,7 @@ def _heartbeat(
 
 
 def _format_benchmark_cases(config: ExternalDPConfig) -> str:
-    names = [str(case.get("case_name", "<unnamed>")) for case in config.benchmark_cases]
+    names = [str(case.get("benchmark_name", "<unnamed>")) for case in config.benchmark_cases]
     return ", ".join(names) if names else "<none>"
 
 

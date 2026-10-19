@@ -136,7 +136,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
     # Filter out None benchmark cases; results align with the non-None ones in order
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    valid_items = [(case["benchmark_name"], case) for case in config.benchmark_cases]
 
     tasks = [build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
 
