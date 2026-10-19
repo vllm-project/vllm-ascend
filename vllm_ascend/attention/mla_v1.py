@@ -960,6 +960,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    mlapo_W_UK_T: torch.Tensor
+    weight_dq: torch.Tensor
+    weight_dkv_kr: torch.Tensor
+    weight_uq_qr: torch.Tensor
+    dequant_scale_w_dq: torch.Tensor
+    dequant_scale_w_dkv_kr: torch.Tensor
+    dequant_scale_w_uq_qr: torch.Tensor
     _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
 
     def __init__(
@@ -1292,8 +1299,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
             prefer_copy=True,
         )
-        self.mlapo_W_UK_T = self.W_UK_T
-
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
@@ -1323,8 +1328,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "unsupported weight type, so MLAPO is disabled for these layers."
                 )
         if self.enable_mlapo or self.fa_quant_layer:
+            # Keep a padded UK tensor alive until it is refreshed in place.
+            if not self.enable_mlapo or not self._mlapo_uses_native_weights or self.head_padding == 0:
+                self.mlapo_W_UK_T = self.W_UK_T
             self._process_weights_for_fused(act_dtype)
         else:
+            self.mlapo_W_UK_T = self.W_UK_T
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
         if getattr(self, "_prolog_v3_weights", None) is not None:
@@ -1429,28 +1438,47 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.num_heads_padded * self.qk_head_dim,
                 )
 
-        self.weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
-        self.weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
-        self.weight_uq_qr = weight_uq_qr.contiguous()
-        self.weight_dq = torch_npu.npu_format_cast(self.weight_dq, ACL_FORMAT_FRACTAL_NZ)
-        self.weight_uq_qr = torch_npu.npu_format_cast(self.weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
-        self.weight_dkv_kr = torch_npu.npu_format_cast(self.weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
+        # Captured graphs retain these transformed tensors, not the source
+        # linear weights. Refresh compatible NZ tensors in place on reload.
+        for name, weight in (
+            ("weight_dq", fused_weight[..., : self.q_lora_rank]),
+            ("weight_dkv_kr", fused_weight[..., self.q_lora_rank :]),
+            ("weight_uq_qr", weight_uq_qr),
+        ):
+            replace_parameter(
+                self,
+                name,
+                torch_npu.npu_format_cast(weight.contiguous(), ACL_FORMAT_FRACTAL_NZ),
+                prefer_copy=True,
+            )
 
+        if is_native and self.head_padding > 0:
+            replace_parameter(
+                self,
+                "mlapo_W_UK_T",
+                F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding)),
+                prefer_copy=True,
+            )
         self.mlapo_weight_quant_mode = 0 if is_native else 3
         if is_native:
             self.mlapo_num_heads = self.num_heads_padded
-            if self.head_padding > 0:
-                self.mlapo_W_UK_T = F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding))
         elif get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
+            uq_scale = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
             weight_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1).flatten(1)
-            self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank, ...]
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :, ...]
+            dq_scale = weight_scale[: self.q_lora_rank, ...]
+            dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
         else:
-            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
+            uq_scale = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
             weight_scale = self.fused_qkv_a_proj.weight_scale  # type: ignore[union-attr]
-            self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :].to(torch.float).unsqueeze(0)
+            dq_scale = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
+            dkv_kr_scale = weight_scale[self.q_lora_rank :].to(torch.float).unsqueeze(0)
+        if not is_native:
+            for name, scale in (
+                ("dequant_scale_w_uq_qr", uq_scale),
+                ("dequant_scale_w_dq", dq_scale),
+                ("dequant_scale_w_dkv_kr", dkv_kr_scale),
+            ):
+                replace_parameter(self, name, scale, prefer_copy=True)
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
@@ -3124,6 +3152,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
             quant_scale_ckv = self.quant_kscale[:, :1] if self.fa_quant_layer else None
 
+        norm_kwargs = {}
+        if flash_mlapo:
+            norm_kwargs = {
+                "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
+                "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
+            }
         decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog(
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
@@ -3146,8 +3180,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             weight_quant_mode=weight_quant_mode,
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             quant_scale_ckv=quant_scale_ckv,
-            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
-            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+            **norm_kwargs,
         )
 
         decode_q_nope = decode_q_nope.view(bsz, self.mlapo_num_heads, self.kv_lora_rank)

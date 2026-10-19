@@ -410,6 +410,9 @@ def test_forward_routes_token_fused_decode_with_real_eligibility_helper(case, ex
 @pytest.mark.parametrize("tokens", [4, 129])
 def test_flashmla_no_rope_mlapo_stages_rows_and_preserves_formal_cache(monkeypatch, dcp, current, tokens):
     impl = make_impl()
+    # Both model epsilons differ from mla_prolog's 1e-5 defaults.
+    impl.q_a_layernorm.variance_epsilon = 3e-6
+    impl.kv_a_layernorm.variance_epsilon = 7e-6
     impl.dcp_enabled = dcp
     impl._decode_requires_current_kv = lambda _: current
     impl._flashmla_writer_buffers = workspace(256)
@@ -430,11 +433,11 @@ def test_flashmla_no_rope_mlapo_stages_rows_and_preserves_formal_cache(monkeypat
     )
     captured = {}
 
-    def prolog(**kwargs):
+    def prolog(*, rmsnorm_epsilon_cq=1e-5, rmsnorm_epsilon_ckv=1e-5, **kwargs):
         captured.update(kwargs)
         assert kwargs["rope_sin"] is None and kwargs["rope_cos"] is None
-        assert kwargs["rmsnorm_epsilon_cq"] == impl.q_a_layernorm.variance_epsilon
-        assert kwargs["rmsnorm_epsilon_ckv"] == impl.kv_a_layernorm.variance_epsilon
+        assert rmsnorm_epsilon_cq == impl.q_a_layernorm.variance_epsilon
+        assert rmsnorm_epsilon_ckv == impl.kv_a_layernorm.variance_epsilon
         assert kwargs["cache_mode"] == "PA_BSND"
         assert kwargs["weight_quant_mode"] == 0
         assert kwargs["query_quant_mode"] == kwargs["kv_cache_quant_mode"] == 0
@@ -475,6 +478,8 @@ def test_flashmla_no_rope_mlapo_stages_rows_and_preserves_formal_cache(monkeypat
     result, prefill = impl.mla_preprocess_only_decode(hidden, views, metadata)
     assert prefill is None
     provider.assert_called_once()
+    assert provider.call_args.kwargs["rmsnorm_epsilon_cq"] == impl.q_a_layernorm.variance_epsilon
+    assert provider.call_args.kwargs["rmsnorm_epsilon_ckv"] == impl.kv_a_layernorm.variance_epsilon
     assert captured["token_x"].shape == (tokens, 16)
     assert captured["kv_cache"].data_ptr() == addresses[0]
     assert captured["kr_cache"].data_ptr() == addresses[1]
@@ -500,17 +505,35 @@ def test_flashmla_no_rope_mlapo_stages_rows_and_preserves_formal_cache(monkeypat
     torch.testing.assert_close(raw[~changed], before[~changed])
 
 
-def test_legacy_component_major_mlapo_keeps_direct_history_write(monkeypatch):
+@pytest.mark.parametrize("use_rope", [False, True])
+def test_legacy_component_major_mlapo_keeps_direct_history_write_and_default_epsilons(monkeypatch, use_rope):
     impl = make_impl()
     impl.use_flashmla = False
+    impl.use_mla_rope = use_rope
     impl.mlapo_num_heads = impl.num_heads
+    # Legacy calls retain the provider defaults, even for different model epsilons.
+    impl.q_a_layernorm.variance_epsilon = 3e-6
+    impl.kv_a_layernorm.variance_epsilon = 7e-6
     raw = torch.full((2 * 128 * 576,), -17.0, dtype=torch.bfloat16)
     k = raw.as_strided((2, 128, 1, 512), (128 * 576, 512, 512, 1))
     kr = raw.as_strided((2, 128, 1, 64), (128 * 576, 64, 64, 1), 128 * 512)
     slots = torch.tensor([0, 128], dtype=torch.int32)
-    metadata = SimpleNamespace(num_decode_tokens=2, slot_mapping=slots, external_flashmla=None)
+    cos = torch.ones(2, 64)
+    sin = torch.zeros(2, 64)
+    metadata = SimpleNamespace(
+        num_decode_tokens=2,
+        slot_mapping=slots,
+        external_flashmla=None,
+        decode=SimpleNamespace(cos=cos, sin=sin),
+    )
 
-    def prolog(**kwargs):
+    def prolog(*, rmsnorm_epsilon_cq=1e-5, rmsnorm_epsilon_ckv=1e-5, **kwargs):
+        assert rmsnorm_epsilon_cq == rmsnorm_epsilon_ckv == 1e-5
+        if use_rope:
+            torch.testing.assert_close(kwargs["rope_cos"], cos)
+            torch.testing.assert_close(kwargs["rope_sin"], sin)
+        else:
+            assert kwargs["rope_cos"] is None and kwargs["rope_sin"] is None
         assert kwargs["kv_cache"] is k and kwargs["kr_cache"] is kr
         torch.testing.assert_close(kwargs["cache_index"], slots.to(torch.int64))
         return torch.ones(2, 12, 512), torch.ones(2, 12, 64), None, None, None
@@ -524,4 +547,6 @@ def test_legacy_component_major_mlapo_keeps_direct_history_write(monkeypatch):
     result, prefill = impl.mla_preprocess_only_decode(torch.zeros(2, 16), (k, kr), metadata)
     assert result.k is k and result.kr is kr and prefill is None
     provider.assert_called_once()
+    assert "rmsnorm_epsilon_cq" not in provider.call_args.kwargs
+    assert "rmsnorm_epsilon_ckv" not in provider.call_args.kwargs
     scatter_op.assert_not_called()

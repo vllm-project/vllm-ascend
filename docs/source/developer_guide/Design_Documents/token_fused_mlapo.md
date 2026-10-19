@@ -52,6 +52,10 @@ sizing. Its capacity is bounded by the scheduler token limit and the 1024-row
 MLAPO route limit; its block size is the FlashMLA kernel block size, 128.
 Weight reloads preserve workspace addresses. There is no history-cache copy or
 new device-to-host synchronization in the route.
+Reloads with unchanged tensor shape, dtype and device also refresh the NZ
+weights, padded UK weights and quantization scales in place. Changes to those
+properties require graph recapture. Model RMSNorm epsilons are passed only by
+this FlashMLA route; legacy MLAPO calls retain their operator defaults.
 
 DCP reuses `_dcp_current_kv_buffers`, including its actual configured block
 size. MLAPO requires workspace blocks between 16 and 1024 tokens, aligned to

@@ -16,6 +16,8 @@ torch_npu = pytest.importorskip("torch_npu")
 torch = pytest.importorskip("torch")
 pytest.importorskip("cann_ops_transformer")
 
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod  # noqa: E402
+
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: E402
 from vllm_ascend.device.device_config import check_ascend_device_type  # noqa: E402
 from vllm_ascend.device.device_op import DeviceOperator  # noqa: E402
@@ -187,3 +189,97 @@ def test_flashmla_mlapo_no_rope(tokens, heads, dcp_current, record_property):
         f"T={tokens} heads={heads} dcp_current={dcp_current}: "
         f"MLAPO+scatter={median(times[0]):.4f}ms, unfused+scatter={median(times[1]):.4f}ms"
     )
+
+
+@torch.inference_mode()
+def test_flashmla_mlapo_graph_replay_after_native_weight_reload(monkeypatch):
+    """Replay the original graph after production postload refreshes padded NZ packs."""
+    if not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+    check_ascend_device_type()
+    if not get_current_hardware_profile().supports(HardwareCapability.MLAPO_NATIVE_WEIGHTS):
+        pytest.skip("requires A5 native BF16 MLAPO")
+    torch.manual_seed(23)
+    tokens, heads, padded_heads = 9, 12, 16
+
+    def linear(rows, columns):
+        value = torch.randn(rows, columns, dtype=torch.bfloat16, device="npu") / math.sqrt(columns)
+        return SimpleNamespace(
+            weight=torch.nn.Parameter(value, requires_grad=False),
+            quant_method=UnquantizedLinearMethod(),
+            input_size=columns,
+        )
+
+    impl = object.__new__(AscendMLAImpl)
+    for name, value in {
+        "num_heads": heads,
+        "num_heads_padded": padded_heads,
+        "head_padding": padded_heads - heads,
+        "num_kv_heads": 1,
+        "q_lora_rank": Q_RANK,
+        "kv_lora_rank": KV_RANK,
+        "qk_nope_head_dim": Q_DIM,
+        "qk_rope_head_dim": ROPE_DIM,
+        "qk_head_dim": Q_DIM + ROPE_DIM,
+        "v_head_dim": Q_DIM,
+        "dtype": torch.bfloat16,
+        "use_mla_rope": False,
+        "use_flashmla": True,
+        "enable_mlapo": True,
+        "is_draft_model": False,
+        "dcp_enabled": False,
+        "pcp_enabled": False,
+        "is_pcp_decode_sharded": False,
+        "support_fp8_attention": True,
+        "fa_quant_layer": False,
+        "enable_kv_nz": False,
+        "fused_qkv_a_proj": linear(Q_RANK + KV_RANK + ROPE_DIM, HIDDEN),
+        "q_proj": linear(heads * (Q_DIM + ROPE_DIM), Q_RANK),
+        "kv_b_proj": linear(heads * (Q_DIM + Q_DIM), KV_RANK),
+        "q_a_layernorm": SimpleNamespace(
+            weight=torch.ones(Q_RANK, dtype=torch.bfloat16, device="npu"), variance_epsilon=1e-5
+        ),
+        "kv_a_layernorm": SimpleNamespace(
+            weight=torch.ones(KV_RANK, dtype=torch.bfloat16, device="npu"), variance_epsilon=1e-4
+        ),
+        "_flashmla_writer_buffers": (
+            torch.empty(1, BLOCK, 1, KV_RANK, dtype=torch.bfloat16, device="npu"),
+            torch.empty(1, BLOCK, 1, ROPE_DIM, dtype=torch.bfloat16, device="npu"),
+            torch.arange(tokens, dtype=torch.int64, device="npu"),
+        ),
+    }.items():
+        setattr(impl, name, value)
+    # A5 retains prefill weights; postload does not read config fields here.
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_ascend_config", lambda: SimpleNamespace())
+    impl.process_weights_after_loading(torch.bfloat16)
+    pack_names = ("weight_dq", "weight_dkv_kr", "weight_uq_qr", "mlapo_W_UK_T", "W_UK_T")
+    pointers = {name: getattr(impl, name).data_ptr() for name in pack_names}
+    scratch_pointers = tuple(value.data_ptr() for value in impl._flashmla_writer_buffers)
+    x = torch.randn(tokens, HIDDEN, dtype=torch.bfloat16, device="npu") * 0.03
+    slots = torch.arange(tokens, dtype=torch.int64, device="npu")
+    metadata = SimpleNamespace(
+        num_decode_tokens=tokens, slot_mapping=slots, external_flashmla=SimpleNamespace(slots=slots)
+    )
+    fused, raw = _cache(1)
+    cache = fused[..., :KV_RANK], fused[..., KV_RANK:]
+    for _ in range(2):
+        impl.mla_preprocess_only_decode(x, cache, metadata)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        captured = impl.mla_preprocess_only_decode(x, cache, metadata)[0]
+    graph.replay()
+    old_q = captured.ql_nope.clone()
+    for projection in (impl.fused_qkv_a_proj, impl.q_proj, impl.kv_b_proj):
+        projection.weight.normal_(std=0.02)
+    impl.process_weights_after_loading(torch.bfloat16)
+    assert {name: getattr(impl, name).data_ptr() for name in pack_names} == pointers
+    assert tuple(value.data_ptr() for value in impl._flashmla_writer_buffers) == scratch_pointers
+    eager_fused, eager_raw = _cache(1)
+    eager_cache = eager_fused[..., :KV_RANK], eager_fused[..., KV_RANK:]
+    eager = impl.mla_preprocess_only_decode(x, eager_cache, metadata)[0]
+    graph.replay()
+    torch.npu.synchronize()
+    for actual, reference in ((captured.ql_nope, eager.ql_nope), (captured.q_pe, eager.q_pe), (raw, eager_raw)):
+        torch.testing.assert_close(actual.float(), reference.float(), rtol=0.01, atol=0.003)
+    assert not torch.equal(captured.ql_nope, old_q), "replay must observe the reloaded source weights"

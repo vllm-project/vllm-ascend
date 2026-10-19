@@ -31,6 +31,144 @@ from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8D
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
+def _make_mlapo_reload_impl(native):
+    """Use small CPU weights while exercising both production post-load methods."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.num_heads = 12 if native else 8
+    impl.num_heads_padded = 16 if native else 8
+    impl.head_padding = impl.num_heads_padded - impl.num_heads
+    impl.q_lora_rank, impl.kv_lora_rank = 4, 8
+    impl.qk_nope_head_dim, impl.qk_rope_head_dim, impl.v_head_dim = 2, 2, 3
+    impl.qk_head_dim = impl.qk_nope_head_dim + impl.qk_rope_head_dim
+    impl.num_kv_heads = 1
+    impl.dtype = torch.bfloat16
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.use_mla_rope = False
+    impl.use_flashmla = False
+    impl.support_fp8_attention = True
+    impl.dcp_enabled = impl.pcp_enabled = impl.is_pcp_decode_sharded = False
+    impl.is_draft_model = False
+    impl._strided_kv_workspace = None
+    impl.vllm_config = SimpleNamespace()
+    quant_method = (
+        UnquantizedLinearMethod()
+        if native
+        else SimpleNamespace(quant_method=object.__new__(AscendW8A8MXFP8DynamicLinearMethod))
+    )
+    fused_dim = impl.q_lora_rank + impl.kv_lora_rank + impl.qk_rope_head_dim
+    q_dim = impl.num_heads * impl.qk_head_dim
+    fused_shape = (fused_dim, 8) if native else (8, fused_dim)
+    q_shape = (q_dim, impl.q_lora_rank) if native else (impl.q_lora_rank, q_dim)
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=torch.full(fused_shape, 1.0, dtype=torch.bfloat16),
+        weight_scale=torch.full((2, fused_dim), 3.0),
+        quant_method=quant_method,
+        input_size=8,
+    )
+    impl.q_proj = SimpleNamespace(
+        weight=torch.full(q_shape, 2.0, dtype=torch.bfloat16),
+        weight_scale=torch.full((2, q_dim), 4.0),
+        quant_method=quant_method,
+        _chunk_size=0,
+    )
+    impl.kv_b_proj = SimpleNamespace(
+        weight=torch.full(
+            (impl.num_heads * (impl.qk_nope_head_dim + impl.v_head_dim), impl.kv_lora_rank),
+            5.0,
+            dtype=torch.bfloat16,
+        ),
+        quant_method=UnquantizedLinearMethod(),
+    )
+    return impl
+
+
+def _expected_mlapo_reload_weights(impl, native):
+    fused = impl.fused_qkv_a_proj.weight.T if native else impl.fused_qkv_a_proj.weight
+    uq_qr = impl.q_proj.weight.T if native else impl.q_proj.weight
+    uk = (
+        impl.kv_b_proj.weight.T.reshape(impl.kv_lora_rank, impl.num_heads, impl.qk_nope_head_dim + impl.v_head_dim)[
+            ..., : impl.qk_nope_head_dim
+        ]
+        .permute(1, 2, 0)
+        .contiguous()
+    )
+    if native and impl.head_padding:
+        uq_qr = torch.nn.functional.pad(
+            uq_qr.reshape(impl.q_lora_rank, impl.num_heads, impl.qk_head_dim),
+            (0, 0, 0, impl.head_padding),
+        ).reshape(impl.q_lora_rank, -1)
+        uk = torch.nn.functional.pad(uk, (0, 0, 0, 0, 0, impl.head_padding))
+    expected = {
+        "weight_dq": fused[..., : impl.q_lora_rank],
+        "weight_dkv_kr": fused[..., impl.q_lora_rank :],
+        "weight_uq_qr": uq_qr,
+        "mlapo_W_UK_T": uk,
+    }
+    if not native:
+        scale = impl.fused_qkv_a_proj.weight_scale.T.flatten(1)
+        expected.update(
+            dequant_scale_w_dq=scale[: impl.q_lora_rank],
+            dequant_scale_w_dkv_kr=scale[impl.q_lora_rank :],
+            dequant_scale_w_uq_qr=impl.q_proj.weight_scale.T.flatten(1),
+        )
+    return {name: tensor.contiguous().clone() for name, tensor in expected.items()}
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native-padded-heads", "mxfp8-scales"])
+def test_mlapo_post_load_reload_updates_captured_tensor_references(monkeypatch, native):
+    """Graph-held weights and scales must update, including the padded UK alias."""
+    monkeypatch.setattr(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    # Emulate the format conversion's new allocation rather than returning an
+    # alias, which could conceal missing in-place refreshes on weight reload.
+    monkeypatch.setattr("torch_npu.npu_format_cast", lambda tensor, _format: tensor.clone())
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_ascend_config", lambda: SimpleNamespace())
+    impl = _make_mlapo_reload_impl(native)
+    impl.process_weights_after_loading(torch.bfloat16)
+    expected = _expected_mlapo_reload_weights(impl, native)
+    captured = {name: getattr(impl, name) for name in expected}
+    addresses = {name: tensor.data_ptr() for name, tensor in captured.items()}
+    snapshots = {name: tensor.clone() for name, tensor in captured.items()}
+    for name, tensor in expected.items():
+        torch.testing.assert_close(captured[name], tensor)
+
+    # Reload may replace the source allocations. In particular, retaining a
+    # view of an in-place-mutated scale would conceal a missing scale refresh.
+    impl.fused_qkv_a_proj.weight = torch.full_like(impl.fused_qkv_a_proj.weight, 6)
+    impl.q_proj.weight = torch.full_like(impl.q_proj.weight, 7)
+    impl.kv_b_proj.weight = torch.full_like(impl.kv_b_proj.weight, 8)
+    impl.fused_qkv_a_proj.weight_scale = torch.full_like(impl.fused_qkv_a_proj.weight_scale, 9)
+    impl.q_proj.weight_scale = torch.full_like(impl.q_proj.weight_scale, 10)
+    impl.process_weights_after_loading(torch.bfloat16)
+    expected = _expected_mlapo_reload_weights(impl, native)
+    for name, tensor in expected.items():
+        assert getattr(impl, name).data_ptr() == addresses[name], name
+        torch.testing.assert_close(captured[name], tensor)
+        assert not torch.equal(captured[name], snapshots[name]), name
+
+    if native:
+        # A head-count change requires graph recapture and replacement rather
+        # than copying into the old shape. Keep compatible A-projection tensors.
+        impl.num_heads = impl.num_heads_padded = 8
+        impl.head_padding = 0
+        impl.q_proj.weight = torch.full((8 * impl.qk_head_dim, impl.q_lora_rank), 11.0, dtype=torch.bfloat16)
+        impl.kv_b_proj.weight = torch.full(
+            (8 * (impl.qk_nope_head_dim + impl.v_head_dim), impl.kv_lora_rank), 12.0, dtype=torch.bfloat16
+        )
+    else:
+        # Scale-group shape changes must replace all affected scale buffers.
+        impl.fused_qkv_a_proj.weight_scale = torch.full((3, impl.fused_qkv_a_proj.weight.shape[1]), 11.0)
+        impl.q_proj.weight_scale = torch.full((3, impl.q_proj.weight.shape[1]), 12.0)
+    impl.process_weights_after_loading(torch.bfloat16)
+    for name, tensor in _expected_mlapo_reload_weights(impl, native).items():
+        actual = getattr(impl, name)
+        torch.testing.assert_close(actual, tensor)
+        assert (actual.data_ptr() == addresses[name]) is (actual.shape == captured[name].shape), name
+
+
 @pytest.mark.parametrize("num_tokens", [1, 3])
 @pytest.mark.parametrize(
     "num_heads,kv_lora_rank",
