@@ -1841,3 +1841,21 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: worker/patch_mrope_vit_setup.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.rotary_embedding.mrope_vit_setup`
+#    Why:
+#       The upstream ViT setup kernel's BLOCK_N x BLOCK_D intermediates and
+#       fp32 trigonometric expansion put pressure on Ascend's limited UB.
+#    How:
+#       Replace only _vit_mrope_setup_kernel with bounded 256-element tiles.
+#       Preserve the launch interface, fp32 output, spatial-merge ordering,
+#       section-only writes, and dynamic metadata specialization controls.
+#       No extra host/device transfers or synchronization are introduced.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58526
+#       https://github.com/vllm-project/vllm/pull/58673
+#    Future Plan:
+#       Upstream a backend-selectable setup tile size or bounded kernel;
+#       remove when supported vLLM versions compile within Ascend UB limits.
+#

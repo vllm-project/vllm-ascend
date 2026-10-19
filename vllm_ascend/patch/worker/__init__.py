@@ -24,6 +24,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 # the AscendC patch must be imported first.
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
+    import vllm_ascend.patch.worker.patch_mrope_vit_setup  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa
 
 
