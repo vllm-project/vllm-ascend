@@ -1185,7 +1185,7 @@ Key Parameter Descriptions:
 - `--pipeline-parallel-size` (A3 Prefill: `4`): Splits the 60 MiniMax-M3 layers across four pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=16,15,15,14` and also writes `pp_layer_partition` into the Mooncake extra config. With `TP=4`, use `DP=1` to fit all four stages on one 16-NPU node. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Decode nodes and single-node mixed-serving examples on A3 and 950DT use full graph capture for decode-only batches.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
@@ -1900,7 +1900,11 @@ Proxy (:8009)
 
 ### 5.4 1M-Token Context Deployment
 
-MiniMax-M3 supports a 1M-token context on a single Atlas 800I A3 node with W8A8 weights or a single 950DT node with MXFP8 weights. The following examples use the previously verified long-context deployment layouts with `FULL_DECODE_ONLY` as the graph mode. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
+MiniMax-M3 supports 1M-token contexts with single-node deployment on Atlas 800I A3 (W8A8) and 950DT (MXFP8), and with the three-node A3 Prefill-Decode layout in Section 5.4.2. Here, 1M means 1,048,576 tokens. `--max-model-len` limits the total input and generated tokens, so reserve output space when preparing a request.
+
+#### 5.4.1 Single-Node Deployment
+
+The following single-node examples use the previously verified long-context deployment layouts with `FULL_DECODE_ONLY` as the graph mode.
 
 | Platform / weights | NPUs per node | TP / PP / DP | `max-model-len` | `max-num-batched-tokens` | KV cache dtype |
 | --- | --- | --- | --- | --- | --- |
@@ -2077,6 +2081,342 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
         ```
 
 Wait for `Application startup complete` in the log file at the end of the selected command before sending requests. Check the reported KV cache capacity against the configured context length. These examples demonstrate the verified long-context deployment shapes; tune concurrency and performance separately for the target workload.
+
+#### 5.4.2 Prefill-Decode Disaggregation
+
+This example uses three Atlas 800I A3 nodes (16 × 64GB NPUs per node) with W8A8 weights: one Prefill service and one Decode service distributed across two nodes. It uses `MooncakeConnectorV1` for direct P→D KV transfer. The 1M-context PD configuration below is provided for A3.
+
+| Role | Global DP / TP / PP | Local DP ranks | API ports | `max-num-batched-tokens` | `long-prefill-token-threshold` |
+| --- | --- | --- | --- | --- | --- |
+| Prefill | 1 / 8 / 2 | 0 | 31050 | 8192 | 8192 |
+| First Decode node | 4 / 8 / 1 | 0–1 | 31260, 31261 | 8 | 8 |
+| Second Decode node | 4 / 8 / 1 | 2–3 | 31260, 31261 | 8 | 8 |
+
+Both roles use Model Runner V2, `--max-model-len 1049600`, `--max-num-seqs 1`, `--kv-cache-dtype auto`, FLASHCOMM1, chunked prefill, and text-only serving. Prefix caching, asynchronous scheduling, shared-expert DP, static kernels, and EAGLE3 are disabled. Prefill splits the 60 layers as `30,30` and enables shared-expert multistream overlap; Decode disables that overlap.
+
+Both P and D use `--enforce-eager` with `cudagraph_mode=NONE` in this PD configuration. The earlier Decode candidate using `FULL_DECODE_ONLY` and an automatically sized KV cache failed during allocation in the tested environment. The successful configuration uses a Decode token budget and long-prefill threshold of `8`, plus an explicit KV cache budget of `47620449894` bytes (about 44.35 GiB) per worker. This is a functional long-context deployment example; tune performance separately.
+
+##### 5.4.2.1 Preparation
+
+Prepare the model containers, W8A8 weights, cross-node communication, and Mooncake dependencies as described in Sections 3, 4, and 5.3.1. Run the following commands inside the prepared containers. Replace the IP/NIC placeholders with each host's communication-network IP and matching interface, and set the weight directory visible inside every container. Adjust the CANN environment-script path if the installation uses a different location. On multi-NIC hosts, check startup logs to ensure that the advertised host addresses use the intended communication network; the HCCL/GLOO interface settings alone do not control every component's address selection.
+
+Reuse `launch_online_dp.py` from Section 5.3.1. Create separate role directories on each relevant host:
+
+```bash
+mkdir -p ~/minimax-m3-1m-pd/prefill ~/minimax-m3-1m-pd/decode
+```
+
+Save a copy of `launch_online_dp.py` in each role directory that will be used. Save the Prefill template below as `~/minimax-m3-1m-pd/prefill/run_dp_template.sh` on P, and the Decode template as `~/minimax-m3-1m-pd/decode/run_dp_template.sh` on both D nodes. Keep the role directories separate even when using shared storage: the launcher reads `./run_dp_template.sh` from its working directory.
+
+The four Decode engines share one global DP group. Each process serves one DP rank with `--data-parallel-size-local 1`; the launcher's `--dp-size-local 2` starts two such processes per D host. Both D hosts must use the first D host's IP as `DP_ADDRESS`, and use different global DP rank ranges. If changing TP/PP/DP, update both roles' `kv_connector_extra_config` and all launch mappings together.
+
+##### 5.4.2.2 Service Scripts
+
+=== "Atlas 800I A3 (W8A8)"
+
+    **1. Prefill node: `prefill/run_dp_template.sh`**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    # Set this host's communication IP, NIC and W8A8 weight path.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+
+    # The Section 5.3.1 launcher supplies these values for the Prefill engine.
+    export DP_SIZE=${DP_SIZE:-1}
+    export TP_SIZE=${TP_SIZE:-8}
+    export PP_SIZE=${PP_SIZE:-2}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+    export VLLM_PP_LAYER_PARTITION="30,30"
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=256
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --enforce-eager \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
+        --distributed-executor-backend mp \
+        --served-model-name minimax-m3 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 1049600 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 8192 \
+        --long-prefill-token-threshold 8192 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --trust-remote-code \
+        --quantization ascend \
+        --gpu-memory-utilization 0.95 \
+        --kv-cache-dtype auto \
+        --language-model-only \
+        --reasoning-parser minimax_m3 \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":false,"enable_flashcomm1":true}' \
+        --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_producer",
+        "kv_port": "36000",
+        "engine_id": "minimax-m3-1m-prefill",
+        "kv_connector_extra_config": {
+            "use_ascend_direct": true,
+            "prefill": {
+                "dp_size": 1,
+                "tp_size": 8,
+                "pp_size": 2,
+                "pp_layer_partition": "30,30"
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 8,
+                "pp_size": 1
+            }
+        }
+    }'
+    ```
+
+    **2. Decode nodes: `decode/run_dp_template.sh`**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    # Set this host's communication IP, NIC and W8A8 weight path.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
+
+    # Both D hosts use the first D host's IP as the global DP coordinator.
+    export DP_SIZE=${DP_SIZE:-4}
+    export TP_SIZE=${TP_SIZE:-8}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<FIRST_DECODE_NODE_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-31422}
+    export SERVICE_PORT=${SERVICE_PORT:-31260}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+
+    unset VLLM_PP_LAYER_PARTITION
+
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=64
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-size-local 1 \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --enforce-eager \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
+        --distributed-executor-backend mp \
+        --served-model-name minimax-m3 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 1049600 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 8 \
+        --long-prefill-token-threshold 8 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --trust-remote-code \
+        --quantization ascend \
+        --gpu-memory-utilization 0.99 \
+        --kv-cache-memory-bytes 47620449894 \
+        --kv-cache-dtype auto \
+        --language-model-only \
+        --reasoning-parser minimax_m3 \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":false,"weight_nz_mode":2,"enable_shared_expert_dp":false,"enable_flashcomm1":true}' \
+        --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_port": "36100",
+        "engine_id": "minimax-m3-1m-decode-dp'"$DP_RANK"'",
+        "kv_connector_extra_config": {
+            "use_ascend_direct": true,
+            "prefill": {
+                "dp_size": 1,
+                "tp_size": 8,
+                "pp_size": 2,
+                "pp_layer_partition": "30,30"
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 8,
+                "pp_size": 1
+            }
+        }
+    }'
+    ```
+
+`--kv-cache-memory-bytes` sets the Decode KV allocation explicitly, so the retained `--gpu-memory-utilization 0.99` does not determine or add to that KV budget. The byte value is the tested allocation for this setup, not a portable fraction of NPU memory. Check the available memory and reported token capacity after loading weights and communication resources when reproducing on another stack. `HCCL_BUFFSIZE` is `256` on P and `64` on D.
+
+##### 5.4.2.3 Start the Services
+
+**1. Prefill node**
+
+```bash
+cd ~/minimax-m3-1m-pd/prefill
+
+export LOCAL_IP="<PREFILL_NODE_IP>"
+export NIC_NAME="<PREFILL_NODE_NIC>"
+export MODEL_PATH="<MINIMAX_M3_W8A8_PATH>"
+export DP_SIZE=1
+export TP_SIZE=8
+export PP_SIZE=2
+export LOCAL_DP_SIZE=1
+export DP_RANK_START=0
+export DP_ADDRESS="$LOCAL_IP"
+export DP_RPC_PORT=6884
+export SERVICE_PORT=31050
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
+```
+
+**2. First Decode node: global DP ranks 0–1**
+
+```bash
+cd ~/minimax-m3-1m-pd/decode
+
+export LOCAL_IP="<FIRST_DECODE_NODE_IP>"
+export NIC_NAME="<FIRST_DECODE_NODE_NIC>"
+export MODEL_PATH="<MINIMAX_M3_W8A8_PATH>"
+export DP_SIZE=4
+export TP_SIZE=8
+export PP_SIZE=1
+export LOCAL_DP_SIZE=2
+export DP_RANK_START=0
+export DP_ADDRESS="$LOCAL_IP"
+export DP_RPC_PORT=31422
+export SERVICE_PORT=31260
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
+```
+
+This starts the DP coordinator and the first two engines. Keep this command running and start the second D host from another shell; do not wait for the first D host to become fully healthy before starting the second.
+
+**3. Second Decode node: global DP ranks 2–3**
+
+```bash
+cd ~/minimax-m3-1m-pd/decode
+
+export LOCAL_IP="<SECOND_DECODE_NODE_IP>"
+export NIC_NAME="<SECOND_DECODE_NODE_NIC>"
+export MODEL_PATH="<MINIMAX_M3_W8A8_PATH>"
+export DP_SIZE=4
+export TP_SIZE=8
+export PP_SIZE=1
+export LOCAL_DP_SIZE=2
+export DP_RANK_START=2
+export DP_ADDRESS="<FIRST_DECODE_NODE_IP>"
+export DP_RPC_PORT=31422
+export SERVICE_PORT=31260
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
+```
+
+The launcher's device assignment is:
+
+| Host / DP rank | Local logical NPUs | API port |
+| --- | --- | --- |
+| Prefill / 0 | 0–15 | 31050 |
+| First D / 0 | 0–7 | 31260 |
+| First D / 1 | 8–15 | 31261 |
+| Second D / 2 | 0–7 | 31260 |
+| Second D / 3 | 8–15 | 31261 |
+
+Wait for all five APIs to report `Application startup complete` and return HTTP 200 from `/health`. Run the two D launch commands concurrently until their shared initialization completes.
+
+**4. Proxy: one Prefill endpoint and four Decode endpoints**
+
+Use `load_balance_proxy_server_example.py` from Section 5.3.1. Run it in a container that can reach all five engine APIs, for example on P. Replace all three IP placeholders. This topology has four D endpoints; use the mapping below rather than the eight-endpoint mapping for the ordinary-context A3 example.
+
+```bash
+export PREFILL_IP="<PREFILL_NODE_IP>"
+export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
+export DECODE1_IP="<SECOND_DECODE_NODE_IP>"
+
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+
+python load_balance_proxy_server_example.py \
+    --port 18919 \
+    --host 0.0.0.0 \
+    --prefiller-hosts "$PREFILL_IP" \
+    --prefiller-ports 31050 \
+    --decoder-hosts \
+        "$DECODE0_IP" "$DECODE0_IP" \
+        "$DECODE1_IP" "$DECODE1_IP" \
+    --decoder-ports \
+        31260 31261 31260 31261
+```
+
+Send client requests to `http://<PROXY_HOST_IP>:18919/v1/chat/completions`. The `0.0.0.0` value is the proxy's listen address.
+
+##### 5.4.2.4 Verification
+
+1. Check all five `/health` endpoints and each engine's reported KV token capacity before sending a long request.
+2. Send a short text request through the proxy and verify the generated answer.
+3. Prepare a prompt containing exactly 1,048,576 tokens using the deployed model's tokenizer. Keep input plus requested output within `1049600`; the configuration reserves up to 1024 output tokens for a full 1M-token input.
+4. Verify the API's input-token count and the requested retrieval answers. Check the Prefill prompt-token counter and the receiving Decode rank's external-prefix-cache hit counter to confirm the long prefix was transferred. Decode should not recompute the complete 1M prefill.
+
+The recorded A3 run used vLLM `0.30.0+empty` and vLLM-Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with generic engine identifiers and environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
