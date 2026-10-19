@@ -63,18 +63,6 @@ class RejectionSampler310V2(RejectionSampler):
         self._copy_event = torch.npu.Event()
         self._copy_pending = False
 
-    def _store_sampled_cpu(
-        self,
-        sampled_cpu: torch.Tensor,
-        num_sampled_cpu: torch.Tensor,
-        num_rejected_cpu: torch.Tensor,
-    ) -> None:
-        """Write into the persistent max_num_reqs host buffers (do not replace them)."""
-        n = int(sampled_cpu.shape[0])
-        self.sampled_tokens_cpu[:n].copy_(sampled_cpu)
-        self.num_sampled_cpu[:n].copy_(num_sampled_cpu)
-        self.num_rejected_cpu[:n].copy_(num_rejected_cpu)
-
     def __call__(
         self,
         logits: torch.Tensor,
@@ -82,6 +70,7 @@ class RejectionSampler310V2(RejectionSampler):
         draft_logits: torch.Tensor | None,
     ) -> SamplerOutput:
         del draft_logits
+        num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         processed = self.sampler.apply_sampling_params(
@@ -100,29 +89,30 @@ class RejectionSampler310V2(RejectionSampler):
             assert input_batch.logits_indices_np is not None
             draft_sampled_cpu = input_batch.input_ids_cpu[torch.from_numpy(input_batch.logits_indices_np)]
             source_generators = getattr(self.sampler, "_source_generators", {})
-            # Slice persistent InputBatch views to this step's request count.
-            num_reqs = input_batch.num_reqs
+            # Persistent InputBatch arrays; slice to this step's request count.
             cu_num_logits_np = input_batch.cu_num_logits_np[: num_reqs + 1]
+            idx_np = idx_mapping_np[:num_reqs]
             sampled, _, sampled_cpu, num_sampled_cpu = probabilistic_rejection_sample_cpu(
                 processed,
                 draft_sampled_cpu,
                 cu_num_logits_np,
                 self.num_speculative_steps,
                 temperature_np,
-                idx_mapping_np[:num_reqs],
+                idx_np,
                 source_generators,
             )
             num_sampled, num_rejected, num_sampled_cpu, num_rejected_cpu = get_num_sampled_and_rejected_cpu(
                 num_sampled_cpu,
                 input_batch.seq_lens_np[:num_reqs],
                 cu_num_logits_np,
-                idx_mapping_np[:num_reqs],
+                idx_np,
                 input_batch.prefill_len_np[:num_reqs],
                 logits.device,
             )
-            # Must copy into the preallocated buffers. Assigning sampled_cpu
-            # shrinks storage and breaks a later greedy step with larger batch.
-            self._store_sampled_cpu(sampled_cpu, num_sampled_cpu, num_rejected_cpu)
+            # Copy into preallocated buffers; do not assign (would shrink capacity).
+            self.sampled_tokens_cpu[:num_reqs].copy_(sampled_cpu)
+            self.num_sampled_cpu[:num_reqs].copy_(num_sampled_cpu)
+            self.num_rejected_cpu[:num_reqs].copy_(num_rejected_cpu)
             self._copy_pending = False
             return SamplerOutput(
                 sampled_token_ids=sampled,
@@ -132,7 +122,6 @@ class RejectionSampler310V2(RejectionSampler):
                 num_rejected=num_rejected,
             )
 
-        num_reqs = input_batch.num_reqs
         cu_num_logits_np = input_batch.cu_num_logits_np
         num_draft_tokens = (cu_num_logits_np[1 : num_reqs + 1] - cu_num_logits_np[:num_reqs] - 1).tolist()
         cu_num_logits = input_batch.cu_num_logits[: num_reqs + 1]

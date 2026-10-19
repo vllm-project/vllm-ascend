@@ -41,15 +41,17 @@ def sampler_310v2():
         return RejectionSampler310V2(mock_sampler, spec, device=torch.device("cpu"))
 
 
-def test_store_sampled_cpu_keeps_max_num_reqs_capacity(sampler_310v2):
+def test_host_buffers_keep_max_num_reqs_capacity(sampler_310v2):
     rs = sampler_310v2
     assert rs.sampled_tokens_cpu.shape[0] == 32
 
-    # Temperature path used to replace buffers with a 1-row tensor.
+    # Temperature path used to assign a 1-row tensor and shrink capacity.
     sampled_1 = torch.zeros((1, rs.num_speculative_steps + 1), dtype=torch.int32)
     num_1 = torch.ones(1, dtype=torch.int32)
     rej_1 = torch.zeros(1, dtype=torch.int32)
-    rs._store_sampled_cpu(sampled_1, num_1, rej_1)
+    rs.sampled_tokens_cpu[:1].copy_(sampled_1)
+    rs.num_sampled_cpu[:1].copy_(num_1)
+    rs.num_rejected_cpu[:1].copy_(rej_1)
 
     assert rs.sampled_tokens_cpu.shape[0] == 32
     assert rs.num_sampled_cpu.shape[0] == 32
