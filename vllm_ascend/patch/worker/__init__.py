@@ -20,13 +20,12 @@ from vllm.triton_utils import HAS_TRITON
 import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-# patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers and
-# patch_triton overwrites causal_conv1d_update with the NPU Triton kernel, so
-# the AscendC patch must be imported first.
+# patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers; the NPU
+# Triton kernel overrides are installed through the official vLLM Triton
+# kernel dispatcher by vllm_ascend/triton_kernel_overrides.py, registered
+# by the platform hook.
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
-    import vllm_ascend.patch.worker.patch_triton  # noqa
-
 
 # Apply before model construction on every device, including 310P.
 

@@ -50,7 +50,7 @@ from vllm_ascend.ops.triton.sample.thinking_budget import (
     _load_effective_token_ascend,
     update_committed_marker_cache_npu,
 )
-from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.logprob import (
@@ -118,7 +118,7 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # ---- other upstream modules --------------------------------------------
     # Defined in topk_topp_triton.py; topk_topp_sampler only from-imports
     # it. The identity sweep covers every copy site.
-    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": (apply_top_k_top_p_npu),
+    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": (apply_top_k_top_p),
     "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": (apply_grammar_bitmask_npu),
     "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": (precopy_mamba_align_fused_npu),
 }

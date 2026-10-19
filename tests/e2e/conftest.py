@@ -72,6 +72,21 @@ from vllm_ascend.utils import adapt_patch  # noqa E402
 adapt_patch(True)
 adapt_patch(False)
 
+# The v2 Triton kernel table is registered through the official dispatcher
+# by the NPUPlatform hook, not by adapt_patch anymore. Bare e2e tests (no
+# engine, so the hook never fires in-process) activate the registration
+# here; engine-based e2e still registers in its subprocess via the hook.
+from vllm.triton_utils import HAS_TRITON  # noqa E402
+
+if HAS_TRITON:
+    from vllm_ascend.triton_kernel_overrides import (  # noqa E402
+        register_triton_kernels,
+        swap_device_functions,
+    )
+
+    register_triton_kernels()
+    swap_device_functions()
+
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
     destroy_model_parallel,

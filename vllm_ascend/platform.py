@@ -270,10 +270,34 @@ class NPUPlatform(Platform):
 
     @classmethod
     def register_triton_kernel_overrides(cls) -> None:
+        # 310P (the compatibility adaptor family) runs its own MRV1-aligned
+        # sampler post-processing instead of the Triton dispatcher table;
+        # register that path and stop there.
         if get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.COMPATIBILITY:
             from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
 
             register_sampling_kernel_overrides()
+            return
+
+        # Upstream platform hook (called from init_worker before any Triton
+        # kernel launch). Installs the NPU kernel overrides through the
+        # official dispatcher, replacing the retired
+        # patch/worker/patch_v2/patch_triton.py monkey patch, and performs
+        # the one device-function swap the dispatcher cannot express. The
+        # HAS_TRITON guard mirrors the old import guard in
+        # patch/worker/__init__.py.
+        from vllm.triton_utils import HAS_TRITON
+
+        if not HAS_TRITON:
+            return
+
+        from vllm_ascend.triton_kernel_overrides import (
+            register_triton_kernels,
+            swap_device_functions,
+        )
+
+        register_triton_kernels()
+        swap_device_functions()
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
