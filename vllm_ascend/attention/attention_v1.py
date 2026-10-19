@@ -1015,7 +1015,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     attn_metadata,
                 )
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
-                # FIA call each. A2 also uses the split for eligible BNSD
+                # FIA call each. Also use the split for eligible BNSD
                 # prefill queries.
                 # NOTE: Batch-invariant execution also requires prefill and
                 # decode to be processed separately, regardless of the device
@@ -1088,7 +1088,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """
         if (
             not self.enable_prefill_bnsd
-            or not get_current_hardware_profile().supports(HardwareCapability.BNSD_PREFILL)
             or self.pcp_enabled
             or self.attn_type != AttentionType.DECODER
             or self.head_size != 256

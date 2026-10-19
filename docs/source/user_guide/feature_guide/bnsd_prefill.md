@@ -1,9 +1,10 @@
 # BNSD long-prefill attention
 
-!!! warning
+!!! note
 
-    This optimization is experimental, disabled by default, and currently
-    limited to Atlas A2 hardware.
+    This optimization is disabled by default and applies to eligible cached
+    prefill requests on the standard FIA backend. Atlas 310P uses a separate
+    attention backend and is unaffected by this option.
 
 ## Overview
 
@@ -39,7 +40,6 @@ vllm serve /path/to/model \
 
 The BNSD path is selected only when all of the following are true:
 
-- Atlas A2 hardware;
 - BF16 query and paged KV cache;
 - causal decoder attention without sliding-window attention or sinks;
 - 256-dimensional attention heads;
@@ -77,4 +77,4 @@ the stability criterion. These measurements motivated the query and KV
 eligibility thresholds; they are not end-to-end serving latency results.
 
 Measure the effect with the target model and traffic distribution before
-enabling this experimental option in production.
+enabling this option in production.

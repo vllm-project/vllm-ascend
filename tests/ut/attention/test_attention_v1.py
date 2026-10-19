@@ -871,13 +871,8 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.attention.attention_v1.BNSD_PREFILL_MIN_QUERY_TOKENS", 8)
     @patch("vllm_ascend.attention.attention_v1.BNSD_PREFILL_MIN_KV_TOKENS", 100)
-    @patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile")
     @patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score")
-    def test_bnsd_prefill_keeps_decode_in_tnd(
-        self,
-        mock_fia,
-        mock_hardware_profile,
-    ):
+    def test_bnsd_prefill_keeps_decode_in_tnd(self, mock_fia):
         impl = self.impl
         impl.enable_prefill_bnsd = True
         impl.pcp_enabled = False
@@ -903,7 +898,6 @@ class TestAscendAttentionBackendImpl(TestBase):
             seq_lens_list=[100, 101, 102, 110],
             actual_seq_lengths_q=[4, 8, 12, 20],
         )
-        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
 
         def fake_fia(**kwargs):
             fill_value = 2 if kwargs["input_layout"] == "BNSD" else 1
@@ -975,6 +969,23 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertFalse(eligible(1536, 24575))
         self.assertTrue(eligible(1536, 24576))
         self.assertTrue(eligible(8193, 24576))
+
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
+            with self.subTest(device_type=device_type):
+                mock_hardware_profile.return_value = get_hardware_profile(device_type)
+                self.assertTrue(eligible(1536, 24576))
+
+        impl.enable_prefill_bnsd = False
+        self.assertFalse(eligible(1536, 24576))
+        impl.enable_prefill_bnsd = True
+        self.assertFalse(
+            impl._can_use_bnsd_prefill(query[:1536].to(torch.float16), key, value, 128, metadata.block_tables, metadata)
+        )
+        self.assertFalse(
+            impl._can_use_bnsd_prefill(
+                query[:1536], key.view(1, 1, 128, 256), value.view(1, 1, 128, 256), 128, metadata.block_tables, metadata
+            )
+        )
 
         metadata.num_decodes = 1
         metadata.num_decode_tokens = 1

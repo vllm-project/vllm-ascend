@@ -572,8 +572,8 @@ class AscendConfig:
         == DeviceAdaptorFamily.FP8_OPTIMIZED
     )
     enable_prefill_mc2: bool = False
-    # Experimental A2 optimization. Eligible long cached-prefill queries use
-    # BNSD while the paged KV cache remains in its native NHD layout.
+    # Eligible long cached-prefill queries use BNSD while the paged KV cache
+    # remains in its native NHD layout.
     enable_prefill_bnsd: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
