@@ -176,3 +176,58 @@ def precopy_mamba_align_fused_kernel(
         CONV_STATE_DIM_FIRST,
         TEMPORAL_TILES,
     )
+
+
+def precopy_mamba_align_fused_npu(
+    mamba_state_idx_ptr,
+    src_col_ptr,
+    token_bias_ptr,
+    block_table_ptrs_ptr,
+    block_table_stride_req,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    idx_mapping_ptr,
+    num_reqs,
+    COPY_BLOCK_SIZE,
+    CONV_STATE_DIM_FIRST,
+    HAS_IDX_MAPPING=True,
+    TEMPORAL_TILES=1,
+):
+    """Plain-callable launch adapter for the kernel dispatcher.
+
+    Upstream's run_fused_precopy launches (num_reqs, num_states,
+    TEMPORAL_TILES) over the full state metadata; the V2 layerwise caller
+    (mamba_hybrid.py) slices the metadata per layer and launches
+    (num_reqs, end - start) with the TEMPORAL_TILES default. Both are
+    derived here: num_reqs and TEMPORAL_TILES are launch arguments, and
+    the state axis is the leading dimension of the (possibly sliced)
+    metadata tensor.
+    """
+    grid = (num_reqs, state_base_addrs_ptr.shape[0], TEMPORAL_TILES)
+    return precopy_mamba_align_fused_kernel[grid](
+        mamba_state_idx_ptr,
+        src_col_ptr,
+        token_bias_ptr,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        idx_mapping_ptr,
+        num_reqs,
+        COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST=CONV_STATE_DIM_FIRST,
+        HAS_IDX_MAPPING=HAS_IDX_MAPPING,
+        TEMPORAL_TILES=TEMPORAL_TILES,
+    )

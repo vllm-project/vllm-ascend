@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel
+from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_npu
 
 NUM_LAYERS = 2
 CONV_WIDTH = 4
@@ -90,8 +90,7 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_til
     )
     block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.int64, device=device)
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-    grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
-    precopy_mamba_align_fused_kernel[grid](
+    precopy_mamba_align_fused_npu(
         dst_col,
         src_col,
         bias,

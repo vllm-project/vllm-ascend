@@ -3,10 +3,9 @@
 
 import torch
 import torch_npu  # noqa: F401
-from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import (
-    _apply_grammar_bitmask_kernel,
+    apply_grammar_bitmask_npu,
 )
 
 ROWS = 64
@@ -97,11 +96,7 @@ def test_apply_grammar_bitmask_business_shape():
     cu_num_logits_npu = cu_num_logits.to(device)
     bitmask_npu = bitmask.to(device)
 
-    grid = (
-        ROWS,
-        triton.cdiv(VOCAB_SIZE, BLOCK_SIZE),
-    )
-    _apply_grammar_bitmask_kernel[grid](
+    apply_grammar_bitmask_npu(
         actual,
         actual.stride(0),
         mapping_npu,
