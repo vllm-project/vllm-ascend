@@ -250,7 +250,7 @@ def _probabilistic_rejection_kernel(
             if not USE_BLOCK_VERIFICATION or temp == 0.0:
                 rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
-    if USE_BLOCK_VERIFICATION and temp != 0.0 and rejected_step < num_tokens - 1:
+    if USE_BLOCK_VERIFICATION and (temp != 0.0 and rejected_step < num_tokens - 1):
         rejected_idx = start_idx + rejected_step
         target_lse = _compute_global_lse(
             target_local_max_ptr,
