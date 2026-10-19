@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 # On a failed stream drain, keep storage alive until process exit. Its async
 # users may still be running, so returning it to the allocator is unsafe.
+# This failure-only list is intentionally unbounded: retries after a drain
+# failure can exhaust device memory. Do not clear it to recover memory while
+# work may still be pending. Transfers must not concurrently share a communicator
+# or its buffers; this list only holds references, it does not serialize them.
 _UNSYNCHRONIZED_BUFFERS: list[torch.Tensor] = []
 
 
@@ -37,7 +41,8 @@ def packed_broadcast_producer(
         group: Process group (PyHcclCommunicator)
         src: Source rank (0 in current implementation)
         post_iter_func: Function to apply to each (name, tensor) pair before
-                       packing, should return a tensor
+                       packing. Must preserve the source dtype and element count;
+                       otherwise raises ValueError. Values/layout may change.
         buffer_size_bytes: Size in bytes for each packed tensor buffer.
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
@@ -77,7 +82,10 @@ def packed_broadcast_producer(
                     tensor = post_iter_func(item).contiguous()
                     original = item[1]
                     if tensor.dtype != original.dtype or tensor.numel() != original.numel():
-                        raise ValueError(f"tensor {item[0]!r} materialized with a different dtype or element count")
+                        raise ValueError(
+                            f"post_iter_func returned tensor {item[0]!r} with dtype={tensor.dtype}, "
+                            f"numel={tensor.numel()}; expected dtype={original.dtype}, numel={original.numel()}"
+                        )
                     tensor = tensor.reshape(-1).view(torch.uint8)
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.numel()
@@ -265,7 +273,9 @@ def packed_npu_ipc_producer(
     Args:
         iterator: Iterator of (name, tensor) pairs.
         npu_uuid: Physical NPU UUID string for this rank.
-        post_iter_func: Applied to each (name, tensor) before packing.
+        post_iter_func: Applied to each (name, tensor) before packing. Must preserve
+            the source dtype and element count; otherwise raises ValueError.
+            Values/layout may change.
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
     """
     if buffer_size_bytes <= 0:
@@ -284,7 +294,10 @@ def packed_npu_ipc_producer(
     for name, orig_tensor in iterator:
         tensor = post_iter_func((name, orig_tensor)).contiguous()
         if tensor.dtype != orig_tensor.dtype or tensor.numel() != orig_tensor.numel():
-            raise ValueError(f"tensor {name!r} materialized with a different dtype or element count")
+            raise ValueError(
+                f"post_iter_func returned tensor {name!r} with dtype={tensor.dtype}, "
+                f"numel={tensor.numel()}; expected dtype={orig_tensor.dtype}, numel={orig_tensor.numel()}"
+            )
         flat = tensor.reshape(-1).view(torch.uint8)
 
         if flat.numel() > buffer_size_bytes:
@@ -386,6 +399,8 @@ def packed_npu_ipc_consumer(
     packed = rebuild_npu_tensor(*list_args)
 
     content_size = sum(tensor_sizes)
+    if content_size > packed.numel():
+        raise ValueError(f"packed IPC metadata declares {content_size} bytes, buffer has {packed.numel()}")
     packed = packed[:content_size]
 
     weights: list[tuple[str, torch.Tensor]] = []

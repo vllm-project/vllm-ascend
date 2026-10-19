@@ -103,6 +103,7 @@ def _stub_torch_npu():
     ids=["unindexed-string", "indexed-string", "device-type"],
 )
 def test_cpu_fixture_redirects_all_npu_device_forms(device):
+    """Guard test infrastructure against indexed/device-object allocations."""
     assert torch.empty(1, device=device).device.type == "cpu"
 
 
@@ -1044,7 +1045,7 @@ def test_packed_producer_rejects_materialized_metadata_change(backend, change):
     transform = lambda item: item[1].to(torch.int32) if change == "dtype" else item[1][:1]
     group = _make_group_mock()
     patcher, _ = _install_fake_reduce_tensor()
-    with patcher, pytest.raises(ValueError, match="materialized"):
+    with patcher, pytest.raises(ValueError, match="post_iter_func returned.*expected dtype=.*numel=2"):
         if backend == "hccl":
             packed_broadcast_producer(iter([("w", original)]), group, 0, transform, 16)
         else:
@@ -1119,5 +1120,84 @@ def test_packed_drain_failure_keeps_storage_and_original_error():
         packed_broadcast_producer(
             iter([("w", torch.ones(1))]), types.SimpleNamespace(broadcast=broadcast), 0, lambda item: item[1], 4, 1
         )
+    assert len(pinned) == 1
+    assert pinned[0].numel() == 4
+
+
+def test_packed_ipc_consumer_rejects_payload_larger_than_rebuilt_buffer():
+    with (
+        _install_fake_rebuild_npu_tensor(torch.zeros(3, dtype=torch.uint8)),
+        pytest.raises(ValueError, match="metadata declares 4 bytes, buffer has 3"),
+    ):
+        packed_npu_ipc_consumer({"node-0": (0,) * 7}, "node-0", ["w"], [[1]], ["float32"], [4], 0)
+
+
+@pytest.mark.parametrize("backend", ["hccl-producer", "hccl-consumer", "ipc-producer"])
+@pytest.mark.parametrize("capacity", [0, -1])
+def test_packed_transfer_rejects_nonpositive_capacity(backend, capacity):
+    with pytest.raises(ValueError, match="positive"):
+        if backend == "hccl-producer":
+            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], capacity)
+        elif backend == "hccl-consumer":
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), capacity)
+        else:
+            list(packed_npu_ipc_producer(iter([]), "node-0", lambda item: item[1], capacity))
+
+
+@pytest.mark.parametrize("producer", [False, True])
+@pytest.mark.parametrize("num_buffers", [0, -1])
+def test_packed_hccl_rejects_nonpositive_buffer_count(producer, num_buffers):
+    with pytest.raises(ValueError, match="positive"):
+        if producer:
+            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], 4, num_buffers)
+        else:
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, num_buffers)
+
+
+def test_packed_producer_passes_packing_stream_to_broadcast():
+    streams = [_FakeNpuStream(), _FakeNpuStream()]
+    group = _make_group_mock()
+    with (
+        patch.object(torch.npu, "Stream", side_effect=streams),
+        patch.object(torch.npu, "stream", side_effect=lambda stream: stream) as context,
+    ):
+        packed_broadcast_producer(
+            iter((f"w{i}", torch.ones(1)) for i in range(3)), group, 0, lambda item: item[1], 1, 2
+        )
+    assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == [streams[0], streams[1], streams[0]]
+    assert [call.args[0] for call in context.call_args_list[:3]] == [streams[0], streams[1], streams[0]]
+
+
+@pytest.mark.parametrize("producer", [False, True])
+def test_packed_cleanup_failure_after_success_is_raised_and_retains_storage(producer):
+    import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
+
+    failure = RuntimeError("cleanup failed")
+
+    class CleanupStream(_FakeNpuStream):
+        fail = False
+
+        def synchronize(self):
+            if self.fail:
+                raise failure
+
+    stream = CleanupStream()
+    pinned = []
+
+    def finish(*args, **kwargs):
+        stream.fail = True
+
+    group = types.SimpleNamespace(broadcast=finish if producer else lambda *args, **kwargs: None)
+    with (
+        patch.object(torch.npu, "Stream", return_value=stream),
+        patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
+        pytest.raises(RuntimeError, match="cleanup failed") as error,
+    ):
+        # One tensor below the threshold reaches finally without another slot wait.
+        if producer:
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 1)
+        else:
+            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 1)
+    assert error.value is failure
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
