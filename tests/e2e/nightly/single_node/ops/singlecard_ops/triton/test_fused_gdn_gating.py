@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
@@ -5,13 +6,13 @@ from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
-def test_fused_gdn_gating_310p_parity_precision():
+@pytest.mark.parametrize("num_heads", [8, 16, 24, 32])
+def test_fused_gdn_gating_310p_parity_precision(num_heads):
     init_device_properties_triton()
     torch.manual_seed(0)
     device = "npu"
 
     num_tokens = 37
-    num_heads = 8
 
     A_log = torch.randn(num_heads, dtype=torch.float16, device=device)
     dt_bias = torch.randn(num_heads, dtype=torch.float16, device=device)
