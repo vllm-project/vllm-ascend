@@ -81,8 +81,9 @@ def _spec_config(arch: str) -> SimpleNamespace:
     )
 
 
-def test_init_speculator_routes_dflash2_draft_model():
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "DFlash2BeamDraftModel"])
+def test_init_speculator_routes_dflash2_draft_model(architecture):
+    cfg = SimpleNamespace(speculative_config=_spec_config(architecture))
     with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
         assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
         d2.assert_called_once_with(cfg, torch.device("cpu"))

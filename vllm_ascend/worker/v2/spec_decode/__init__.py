@@ -50,7 +50,9 @@ def init_speculator(
 
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
-        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+        if {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(
+            speculative_config.draft_model_config.architectures
+        ):
             from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
                 AscendDFlash2Speculator,
             )
