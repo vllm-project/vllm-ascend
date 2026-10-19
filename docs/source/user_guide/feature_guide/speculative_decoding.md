@@ -841,6 +841,48 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   }'
 ```
 
+## Block Verification in Model Runner V2
+
+Model Runner V2 supports upstream vLLM's block verification for speculative decoding. It jointly verifies a block of draft tokens using cumulative target-to-draft probability ratios and samples a recovery token from the corresponding residual distribution. This can increase the accepted draft length while preserving the target sampling distribution. Performance gains depend on the draft model and workload.
+
+Enable Model Runner V2 with `VLLM_USE_V2_MODEL_RUNNER=1` and set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
+
+**Offline inference**:
+
+Set the environment variable before starting the Python process:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="path/to/target/model",
+    speculative_config={
+        "method": "eagle3",
+        "model": "path/to/draft/model",
+        "num_speculative_tokens": 3,
+        "rejection_sample_method": "block",
+    },
+)
+outputs = llm.generate(["The future of AI is"], SamplingParams(temperature=0.8))
+```
+
+**Online serving**:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve path/to/target/model \
+  --speculative-config '{"method": "eagle3", "model": "path/to/draft/model", "num_speculative_tokens": 3, "rejection_sample_method": "block"}'
+```
+
+Block verification supports both greedy and probabilistic draft sampling. Target requests with `temperature=0` retain greedy verification behavior. It cannot be combined with synthetic rejection sampling; do not set `synthetic_acceptance_rates` or `synthetic_acceptance_length` when using `"block"`.
+
+!!! note
+
+    This feature uses upstream `speculative_config.rejection_sample_method`. The `additional_config.rejection_sampler_config.enable_block_verify` option described below selects a separate Ascend verification feature and does not enable MRV2 block verification.
+
 ## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
