@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import importlib.abc
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -64,7 +66,8 @@ class TestFLASharedMemPatch(unittest.TestCase):
             ops = __import__("vllm.third_party.flash_linear_attention.ops", fromlist=["BKV_LIST"])
             utils = sys.modules[self.patch._FLA_UTILS_MODULE]
             if install:
-                self.assertFalse(any(isinstance(f, self.patch._FLAUtilsFinder) for f in sys.meta_path))
+                self.patch.install_fla_shared_mem_patch()
+                self.assertEqual(sum(isinstance(f, self.patch._FLAUtilsFinder) for f in sys.meta_path), 1)
             return ops.BKV_LIST, utils.calls
 
     def test_npu_import_does_not_query_device(self):
@@ -86,6 +89,68 @@ class TestFLASharedMemPatch(unittest.TestCase):
 
     def test_unrelated_import_is_not_intercepted(self):
         self.assertIsNone(self.patch._FLAUtilsFinder().find_spec("unrelated_module"))
+
+    def test_concurrent_import_does_not_skip_other_finders(self):
+        # Pause a real import after it has passed our finder. Loading FLA in
+        # parallel must not remove that finder and shift the remaining list.
+        entered = threading.Event()
+        resume = threading.Event()
+        probe_name = "_fla_concurrent_import_probe"
+        imported = []
+        errors = []
+
+        class ProbeLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                module.__dict__["loaded"] = True
+
+        class PausedFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == probe_name:
+                    entered.set()
+                    if not resume.wait(10):
+                        raise RuntimeError("concurrent import was not resumed")
+                return None
+
+        class ProbeFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == probe_name:
+                    return importlib.util.spec_from_loader(fullname, ProbeLoader())
+                return None
+
+        def import_probe():
+            try:
+                imported.append(importlib.import_module(probe_name))
+            except Exception as error:
+                errors.append(error)
+
+        self._fake_fla("npu")
+        with patch.dict(sys.modules):
+            sys.modules.pop(self.patch._FLA_UTILS_MODULE, None)
+            sys.modules.pop(probe_name, None)
+            sys.meta_path[:0] = [PausedFinder(), ProbeFinder()]
+            self.patch.install_fla_shared_mem_patch()
+            finder = next(f for f in sys.meta_path if isinstance(f, self.patch._FLAUtilsFinder))
+            ops_path = str(Path(self.temp.name) / "vllm/third_party/flash_linear_attention/ops")
+            spec = finder.find_spec(self.patch._FLA_UTILS_MODULE, [ops_path])
+            assert spec is not None and spec.loader is not None
+            utils = importlib.util.module_from_spec(spec)
+            thread = threading.Thread(target=import_probe, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(10), "concurrent import did not reach the paused finder")
+                spec.loader.exec_module(utils)
+            finally:
+                resume.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive(), "concurrent import did not finish")
+            self.assertEqual(errors, [])
+            self.assertEqual(len(imported), 1)
+            self.assertTrue(imported[0].loaded)
+            self.assertFalse(utils.check_shared_mem())
+            self.assertIn(finder, sys.meta_path)
 
 
 if __name__ == "__main__":

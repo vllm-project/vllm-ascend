@@ -30,9 +30,8 @@ def _patch_fla_utils(module: ModuleType) -> None:
 
 
 class _FLAUtilsLoader(importlib.abc.Loader):
-    def __init__(self, loader, finder):
+    def __init__(self, loader):
         self.loader = loader
-        self.finder = finder
 
     def create_module(self, spec):
         return self.loader.create_module(spec)
@@ -40,10 +39,6 @@ class _FLAUtilsLoader(importlib.abc.Loader):
     def exec_module(self, module):
         self.loader.exec_module(module)
         _patch_fla_utils(module)
-        # Import locking serializes this module's execution. The hook is only
-        # needed once per interpreter and never runs in the inference hot path.
-        if self.finder in sys.meta_path:
-            sys.meta_path.remove(self.finder)
 
     def __getattr__(self, name):
         return getattr(self.loader, name)
@@ -55,14 +50,16 @@ class _FLAUtilsFinder(importlib.abc.MetaPathFinder):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
         if spec is not None and spec.loader is not None:
-            spec.loader = _FLAUtilsLoader(spec.loader, self)
+            spec.loader = _FLAUtilsLoader(spec.loader)
         return spec
 
 
 def install_fla_shared_mem_patch() -> None:
     """Install before platform patches, model resolution and CustomOp imports.
 
-    The only process-local mutable state is the one-shot sys.meta_path entry.
+    Keep the finder for the interpreter's lifetime: removing it during module
+    execution can make another thread skip finders while iterating meta_path.
+    It returns None for unrelated imports and is not used during inference.
     Repeated plugin registration is idempotent; spawn children install their
     own hook by importing vllm_ascend, without importing FLA eagerly.
     """
