@@ -250,12 +250,13 @@ def test_capture_follows_upstream_contract(num_speculative_steps: int) -> None:
     speculator.target_attn_groups = [["target"]]
     speculator.attn_groups = [["draft"]]
     speculator.kv_cache_config = object()
+    speculator.pcp_manager = object()
     for hook in ("on_prefill_begin", "on_prefill_end", "on_multi_step_decode_begin", "on_multi_step_decode_end"):
         setattr(speculator, hook, lambda n, hook=hook: events.append((hook, n)))
 
     def manager(name):
         mgr = MagicMock(use_breakable_cg=False)
-        mgr.capture.side_effect = lambda fn, *args, **kwargs: events.append((name, (fn, args)))
+        mgr.capture.side_effect = lambda fn, *args, **kwargs: events.append((name, (fn, args, kwargs)))
         return mgr
 
     speculator.prefill_cudagraph_manager = manager("prefill")
@@ -270,14 +271,17 @@ def test_capture_follows_upstream_contract(num_speculative_steps: int) -> None:
     if num_speculative_steps > 1:
         expected += ["on_multi_step_decode_begin", "decode", "on_multi_step_decode_end"]
     assert names == expected
-    prefill_fn, prefill_args = events[1][1]
+    prefill_fn, prefill_args, prefill_kwargs = events[1][1]
     # Prefill captures the routine the runtime replays, with target metadata.
     assert prefill_fn == speculator._prefill
     assert prefill_args[0] is speculator.model_state
     assert prefill_args[1] is speculator.target_input_buffers
     assert prefill_args[3] is speculator.target_attn_groups
+    # Its dummy is staged PCP-locally, like the target capture.
+    assert prefill_kwargs["pcp_manager"] is speculator.pcp_manager
     if num_speculative_steps > 1:
-        decode_fn, decode_args = events[4][1]
+        decode_fn, decode_args, decode_kwargs = events[4][1]
+        assert "pcp_manager" not in decode_kwargs
         assert decode_fn == speculator._multi_step_decode
         assert decode_args[1] is speculator.input_buffers
         assert decode_args[3] is speculator.attn_groups
