@@ -907,6 +907,20 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
+#   2. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
+#    Why:
+#       Normalized YaRN configs express disabled magnitude scaling through
+#       `attention_factor=1.0`. Reading the removed `apply_yarn_scaling` flag
+#       defaults to enabled scaling and changes attention logits.
+#    How:
+#       Select `deepseek_llama_scaling` when `attention_factor=1.0`, matching
+#       upstream. Keep the GLM5Next and Kimi K3 constructor copies consistent.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57563
+#    Future Plan:
+#       Remove this duplicated RoPE selection when the Ascend constructor can
+#       reuse upstream initialization through the MLA plugin interface.
+#
 # ** 4. File: worker/patch_eagle3_init.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
