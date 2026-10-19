@@ -14,7 +14,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -534,12 +533,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
         self._init_cann_ops()
-        if getattr(self.k_cache, "quant_dtype", None) is not None:
-            logger.info(
-                "KPool indexer LI C8 enabled for %s: k_cache dtype=%s, scale dtype=fp32",
-                self.k_cache.prefix,
-                self.k_cache.quant_dtype,
-            )
         for name in (
             "_key_weight",
             "_gate_weight",

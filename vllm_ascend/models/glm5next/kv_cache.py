@@ -90,8 +90,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"compress_ratio greater than one, got {cache_config.block_size} "
                 f"and {compress_ratio}."
             )
-        if quant_dtype is not None and quant_dtype not in (torch.int8, torch.float8_e4m3fn):
-            raise ValueError(f"GLM-Next indexer cache quant_dtype must be int8 or fp8, got {quant_dtype}.")
+        if quant_dtype is not None and quant_dtype != torch.int8:
+            raise ValueError(f"GLM-Next indexer cache quant_dtype must be int8, got {quant_dtype}.")
         self.head_dim = head_dim
         self.dtype = dtype
         self.quant_dtype = quant_dtype

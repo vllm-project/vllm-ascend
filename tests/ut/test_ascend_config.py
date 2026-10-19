@@ -1988,15 +1988,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_kpool_li_c8_derived_on_factory_path(self, mock_fix, mock_sparse, mock_kpool):
         vc = VllmConfig()
-        # enable_sparse_li_c8 / enable_sparse_sfa_c8 key off use_sparse_sfa,
-        # which includes kpool-indexer models (e.g. GLM-5.3-Flash) even when
-        # the model is not an SFA-sparse model.
+        # KPool has its own dynamic indexer quantization switch. The main
+        # packed SFA cache is shared by both indexer families.
         vc.attention_config.indexer_kv_dtype = "int8"
         vc.cache_config.cache_dtype = "int8"
 
         config = init_ascend_config(vc)
 
-        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertFalse(config.enable_sparse_li_c8)
         self.assertTrue(config.enable_sparse_sfa_c8)
         self.assertFalse(config.enable_sparse_li_c4)
         self.assertTrue(config.is_kpool_li_c8_enabled())
@@ -2048,7 +2047,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         config = init_ascend_config(vc)
 
-        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertFalse(config.enable_sparse_li_c8)
         self.assertFalse(config.is_kpool_li_c8_enabled())
 
     @_clean_up

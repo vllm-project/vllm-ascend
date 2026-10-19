@@ -927,10 +927,7 @@ class AscendConfig:
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
-        # LI C8 covers both indexer families: the LightningIndexer layout and
-        # the GLM-Next KPool layout (quantized pooled cache, scale packed into
-        # each pool row). LI C4 stays LightningIndexer-only.
-        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse_sfa
+        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "mxfp4":
             raise ValueError(
@@ -945,8 +942,8 @@ class AscendConfig:
         # quant-description layer filter below: GLM-5.3-Flash checkpoints list
         # every "*.indexer.wq_b.weight" as FLOAT, which enables that filter
         # while matching no layer and would silently turn LI C8 off.
-        self._kpool_li_c8_enabled = self.enable_sparse_li_c8 and use_kpool_indexer
-        if self._kpool_li_c8_enabled and vllm_config.attention_config.indexer_kv_dtype == "fp8":
+        self._kpool_li_c8_enabled = use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "int8"
+        if use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "fp8":
             # The KPool score kernel unpacks quantized rows from INT16 word
             # pairs (Ascend Triton cannot lower 1-byte tile loads in this
             # kernel shape), which only supports int8 payloads. Fall back to
@@ -955,7 +952,6 @@ class AscendConfig:
                 "attention_config.indexer_kv_dtype='fp8' is not supported for the GLM-Next KPool indexer "
                 "yet; falling back to the bf16 pooled cache. Use 'int8' for KPool LI C8."
             )
-            self._kpool_li_c8_enabled = False
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,

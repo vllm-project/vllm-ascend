@@ -28,7 +28,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     yarn_get_mscale,
 )
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.glm5next.kv_cache import (
@@ -114,10 +113,7 @@ class Indexer(nn.Module):
         # stored as head_dim quantized bytes plus one packed FP32 scale.
         li_c8_dtype = None
         if get_ascend_config().is_kpool_li_c8_enabled():
-            li_c8_dtype = kv_cache_dtype_str_to_dtype(
-                vllm_config.attention_config.indexer_kv_dtype,
-                vllm_config.model_config,
-            )
+            li_c8_dtype = torch.int8
             logger.info_once("GLM-Next KPool indexer LI C8 enabled: pooled rows store %s + FP32 scale.", li_c8_dtype)
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,

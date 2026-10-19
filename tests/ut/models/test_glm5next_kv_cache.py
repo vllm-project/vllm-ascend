@@ -256,7 +256,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
 
 
-def test_model_cache_layers_publish_source_compatible_specs():
+@pytest.mark.parametrize("quant_dtype", [None, torch.int8])
+def test_model_cache_layers_publish_source_compatible_specs(quant_dtype):
     current_config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -273,6 +274,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
             cache_config=cache_config,
             prefix="model.layers.0.indexer.k_cache",
             compress_ratio=16,
+            quant_dtype=quant_dtype,
         )
         state = Glm5NextTailCache(
             head_dim=128,
@@ -290,6 +292,9 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
+    assert indexer_spec.dtype == (quant_dtype or torch.bfloat16)
+    assert indexer_spec.scale_dim == (1 if quant_dtype else 0)
+    assert indexer_spec.page_size_bytes == 16 * (132 if quant_dtype else 256)
     assert state_spec.block_size == state_spec.sliding_window == 16
     assert state_spec.head_size == 128
     assert state_spec.dtype == torch.float32
@@ -301,6 +306,19 @@ def test_model_cache_layers_publish_source_compatible_specs():
         indexer.prefix,
         state.prefix,
     }
+
+
+def test_indexer_cache_rejects_unsupported_fp8():
+    with pytest.raises(ValueError, match="quant_dtype must be int8"):
+        Glm5NextIndexerCache(
+            head_dim=128,
+            dtype=torch.bfloat16,
+            cache_role="indexer",
+            cache_config=SimpleNamespace(block_size=256),
+            prefix="indexer.k_cache",
+            compress_ratio=16,
+            quant_dtype=torch.float8_e4m3fn,
+        )
 
 
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
