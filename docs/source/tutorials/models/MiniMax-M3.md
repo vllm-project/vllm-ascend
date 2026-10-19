@@ -2223,9 +2223,6 @@ The four Decode engines share one global DP group. Each process serves one DP ra
     export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
-    # Per-NPU KV cache bytes: tested example; adjust as explained below.
-    KV_CACHE_MEMORY_BYTES=47620449894
-
     unset VLLM_PP_LAYER_PARTITION
 
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -2269,7 +2266,7 @@ The four Decode engines share one global DP group. Each process serves one DP ra
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.99 \
-        --kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES" \
+        --kv-cache-memory-bytes 47620449894 \
         --kv-cache-dtype auto \
         --language-model-only \
         --reasoning-parser minimax_m3 \
@@ -2297,7 +2294,7 @@ The four Decode engines share one global DP group. Each process serves one DP ra
     }'
     ```
 
-Set `KV_CACHE_MEMORY_BYTES` in both Decode templates for the target environment:
+The command above retains the tested `--kv-cache-memory-bytes 47620449894` value. If adjusting it for another environment, use the following guidance:
 
 - **Meaning and units:** `--kv-cache-memory-bytes` specifies the KV cache budget per NPU worker, in bytes (1 GiB = 1,073,741,824 bytes). `47620449894` (about 44.35 GiB) is the tested example for this layout, not a fixed MiniMax-M3 requirement. When set explicitly, it overrides `--gpu-memory-utilization` for KV cache sizing; the two values are not added together.
 - **Choosing a value:** Keep the same value in both Decode templates. Size it for the least available NPU memory across the Decode workers after accounting for model weights, communication buffers, activations, and operator workspaces, with runtime headroom. Recheck this budget when changing hardware, TP/PP, KV dtype, or software versions.
