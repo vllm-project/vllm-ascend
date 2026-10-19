@@ -78,6 +78,9 @@ on:
         type: string
         default: ''
         description: test container file or directory to upload as a GitHub artifact
+      profile_options_json:
+        type: string
+        default: '{}'
       testcase_timeout:
         required: false
         default: 120
@@ -134,6 +137,10 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      HW_OBS_PROFILE_AK:
+        required: false
+      HW_OBS_PROFILE_SK:
+        required: false
       KUBECONFIG_B64:
         required: true
       OBS_ACCESS_KEY_ID:
@@ -175,6 +182,15 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v7
+
+      - name: Configure profiling
+        id: profiling
+        env:
+          PROFILE_OPTIONS_JSON: ${{ inputs.profile_options_json }}
+        run: |
+          python3 -m tools.profiling.capture configure \
+            --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT" \
+            --env-output "$GITHUB_ENV" --env-json "$RUNNER_TEMP/profile-env.json"
 
       - name: Set job variables
         id: vars
@@ -294,7 +310,7 @@ jobs:
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
-          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 \
+          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 "$RUNNER_TEMP/profile-env.json" \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
             -D download_spec="$DOWNLOAD_SPEC" \
@@ -331,6 +347,7 @@ jobs:
             -D bisect_config_base_path="$BISECT_CONFIG_BASE_PATH" \
             --outfile lws.yaml
 
+          python3 -m tools.profiling.capture initialize --root "$LOG_PREFIX/profile_artifact"
           kubectl apply -f ./lws.yaml
 
       - name: Wait for pods ready
@@ -580,6 +597,45 @@ jobs:
             --vllm-ascend-dir "." \
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \
             --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}"
+
+      - name: Publish profiling data
+        id: profile_bundle
+        if: ${{ always() && steps.profiling.outputs.enabled == 'true' }}
+        env:
+          PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_PROFILE_SK }}
+          PROFILE_KEY_PREFIX: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ steps.vars.outputs.benchmark_job_name }}
+        run: |
+          PROFILE_ROOT="$LOG_PREFIX/profile_artifact"
+          upload_status=0
+          echo "::group::Upload raw profiling traces"
+          python3 -c 'import boto3' 2>/dev/null || python3 -m pip install --quiet boto3 || upload_status=$?
+          if [ "$upload_status" -eq 0 ]; then
+            python3 -m tools.profiling.capture upload --root "$PROFILE_ROOT" --prefix "$PROFILE_KEY_PREFIX" || upload_status=$?
+          fi
+          echo "::endgroup::"
+          echo "::group::Prepare profiling index"
+          python3 -m tools.profiling.artifacts package \
+            --manifest "$LOG_PREFIX/profile_artifact/profile_manifest.json" \
+            --output "$RUNNER_TEMP/profile_artifact" \
+            --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit "$upload_status"
+
+      - name: Upload profiling index
+        id: profile_artifact
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: profile-artifact-${{ steps.profile_bundle.outputs.artifact_key }}
+          path: ${{ runner.temp }}/profile_artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Profiling summary
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
 
       - name: Fetch benchmark results from PVC
         if: always()

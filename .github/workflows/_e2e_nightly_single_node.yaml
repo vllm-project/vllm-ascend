@@ -83,6 +83,9 @@ on:
         type: boolean
         default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
+      profile_options_json:
+        type: string
+        default: '{}'
       bisect_good_commit:
         required: false
         type: string
@@ -129,6 +132,10 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      HW_OBS_PROFILE_AK:
+        required: false
+      HW_OBS_PROFILE_SK:
+        required: false
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
@@ -169,6 +176,7 @@ jobs:
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
       VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
+      ASCEND_PROFILE_ROOT: /vllm-workspace/vllm-ascend/profile_artifact/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -309,6 +317,21 @@ jobs:
             echo "Error: Either 'tests' or 'config_file_path' must be provided."
             exit 1
           fi
+
+      - name: Configure profiling
+        if: ${{ fromJSON(inputs.profile_options_json).enabled == true }}
+        id: profiling
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PROFILE_OPTIONS_JSON: ${{ inputs.profile_options_json }}
+        run: |
+          python3 -m tools.profiling.capture configure \
+            --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT" --env-output "$GITHUB_ENV"
+
+      - name: Initialize profiling job
+        if: ${{ steps.profiling.outputs.enabled == 'true' && inputs.config_file_path != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: python3 -m tools.profiling.capture initialize --root "$ASCEND_PROFILE_ROOT"
 
       - name: Run Pytest (py-driven)
         id: pytest-driven
@@ -496,6 +519,46 @@ jobs:
         run: |
           echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
           echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
+
+      - name: Publish profiling data
+        id: profile_bundle
+        if: ${{ always() && steps.profiling.outputs.enabled == 'true' && inputs.config_file_path != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_PROFILE_SK }}
+          PROFILE_KEY_PREFIX: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
+        run: |
+          upload_status=0
+          echo "::group::Upload raw profiling traces"
+          python3 -c 'import boto3' 2>/dev/null || python3 -m pip install --quiet boto3 || upload_status=$?
+          if [ "$upload_status" -eq 0 ]; then
+            python3 -m tools.profiling.capture upload --root "$ASCEND_PROFILE_ROOT" --prefix "$PROFILE_KEY_PREFIX" || upload_status=$?
+          fi
+          echo "::endgroup::"
+          echo "::group::Prepare profiling index"
+          python3 -m tools.profiling.artifacts package \
+            --manifest "$ASCEND_PROFILE_ROOT/profile_manifest.json" \
+            --output "$RUNNER_TEMP/profile_artifact" \
+            --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit "$upload_status"
+
+      - name: Upload profiling index
+        id: profile_artifact
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: profile-artifact-${{ steps.profile_bundle.outputs.artifact_key }}
+          path: ${{ runner.temp }}/profile_artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Profiling summary
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
 
       - name: Upload benchmark results
         if: ${{ always() && inputs.config_file_path != '' }}
