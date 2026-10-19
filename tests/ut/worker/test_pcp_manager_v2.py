@@ -37,6 +37,7 @@ from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
@@ -1447,3 +1448,45 @@ def test_sharded_draft_prefill_handoff_across_pcp_ranks() -> None:
             # Draft decode reads the global positions again after prefill.
             assert torch.equal(buffers.input_ids, global_ids)
             assert torch.equal(buffers.positions, global_positions)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=RuntimeError,
+    reason="Draft-prefill capture views [G, T] dummy slots as [G, PCP, T].",
+)
+@pytest.mark.parametrize(
+    ("dcp_size", "num_reqs"),
+    [(2, 2), (1, 3)],
+    ids=["pcp2_dcp2_replicated", "pcp2_dcp1_nonuniform_dummy"],
+)
+def test_draft_prefill_capture_accepts_draft_slot_mappings(dcp_size: int, num_reqs: int):
+    """Draft-prefill capture builds a target-group PCP context.
+
+    Upstream speculator capture calls prepare_inputs_to_capture without the
+    PCP manager, so its dummy slots come from the runner's BlockTables:
+    shape [G, T], not the gathered [G, PCP * T]. The target attention
+    groups still route it to build_attention_context's dummy path, taken
+    for replicated decode (DCP>1) and for non-uniform dummies (PIECEWISE
+    sizes above max_num_seqs that do not divide by it).
+    """
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=4, max_num_tokens=16)
+    vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE, speculative_config=SimpleNamespace(method="mtp"))
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    manager.vllm_config = vllm_config
+    assert manager.is_decode_sharded == (dcp_size == 1)
+    manager._draft_layer_names = frozenset({"draft.attn"})
+    state = AscendModelState.__new__(AscendModelState)
+    state.pcp_manager = manager
+    target_attn_groups = [[SimpleNamespace(layer_names=["target.attn"])]]
+    buffers = AscendInputBuffers(max_num_reqs=4, max_num_tokens=16, device=torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        dummy = AscendInputBatch.make_dummy(num_reqs, 8, buffers, max_query_len=4)
+    block_tables = (torch.zeros((num_reqs, 4), dtype=torch.int32),)
+    # BlockTables.get_dummy_slot_mappings(num_tokens): a [G, T] view.
+    draft_slot_mappings = torch.full((1, 16), -1, dtype=torch.int64)[:, :8]
+
+    context = state.get_pcp_attention_context(dummy, block_tables, draft_slot_mappings, target_attn_groups)
+
+    assert context is not None
+    assert context.global_slot_mappings.shape == (1, 8)
