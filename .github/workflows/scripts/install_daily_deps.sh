@@ -36,7 +36,7 @@ fi
 # ---- memfabric_hybrid ----
 echo "Resolving memfabric_hybrid wheel url..."
 DOWNLOAD_URL_MF="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/mf_version.json"
-wget -q --no-check-certificate --tries=3 --timeout=30 "${DOWNLOAD_URL_MC}" -O mf_version.json
+wget -q --no-check-certificate --tries=3 --timeout=30 "${DOWNLOAD_URL_MF}" -O mf_version.json
 if [ ! -f "mf_version.json" ]; then
     echo "ERROR: download mf_version.json failed" >&2
     exit 1
