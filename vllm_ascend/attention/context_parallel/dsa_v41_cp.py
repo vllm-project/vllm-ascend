@@ -214,7 +214,6 @@ class AscendDSAV41CPImpl(_ReplicatedCacheImpl):
             padded[output.shape[0] :].zero_()
             padded[: output.shape[0]] = output
         exchanged = restore_tp_heads(padded, get_tp_group())
-        exchanged = restore_tp_heads(padded, get_tp_group())
         # DSpark's DP/FlashComm padding can extend hidden states beyond the
         # metadata token interval. Restore that suffix before O projection so
         # its TP reduction keeps the caller's padded output layout.
