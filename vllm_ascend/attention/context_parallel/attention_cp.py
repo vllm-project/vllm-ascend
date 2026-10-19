@@ -128,7 +128,6 @@ class AscendAttentionDCPMetadataBuilder(
     """Build attention metadata for decode context parallelism."""
 
     metadata_cls = AscendAttentionDCPMetadata
-    consumes_pcp_context = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -148,26 +147,20 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> AscendAttentionDCPMetadata:
         self._pcp_context = pcp_context
         self._pcp_cache_group_idx = pcp_cache_group_idx
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, pcp_context=pcp_context)
         assert isinstance(metadata, AscendAttentionDCPMetadata)
         return metadata
-
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        **kwargs,
-    ) -> AscendAttentionDCPMetadata:
-        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
 
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        has_pcp_context: bool,
     ) -> tuple[int, int, int, int]:
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=(
-                not self.pcp_enabled
+                not has_pcp_context
                 and (
                     self.speculative_config is not None
                     or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
@@ -302,7 +295,7 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> dict[str, object]:
         prefill_metadata = None
         if num_prefills > 0:
-            if self.pcp_enabled:
+            if self._pcp_context is not None:
                 prefill_metadata = self._build_pcp_prefill_metadata(
                     common_attn_metadata, block_table, query_lens, seq_lens, num_decodes, num_prefills
                 )

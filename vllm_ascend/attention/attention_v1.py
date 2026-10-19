@@ -246,6 +246,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
     metadata_cls: type[AscendMetadata] = AscendMetadata
+    # Target metadata under PCP is built from the runner's PCP context.
+    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -295,14 +297,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ) -> AscendMetadata:
+        # Forward the PCP context: it selects the captured PCP layout.
+        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
+
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        has_pcp_context: bool,
     ) -> tuple[int, int, int, int]:
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=not self.pcp_enabled,
+            treat_short_extends_as_decodes=not has_pcp_context,
         )
 
     def _build_backend_metadata(
@@ -328,14 +339,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        pcp_context: Any | None = None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMetadata:
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        expanded_slot_mapping = common_attn_metadata.slot_mapping if pcp_context is not None else None
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
-            common_attn_metadata
+            common_attn_metadata, pcp_context is not None
         )
 
         block_table = common_attn_metadata.block_table_tensor
@@ -457,8 +471,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
         )
-        if self.pcp_enabled:
-            assert expanded_slot_mapping is not None
+        if expanded_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
         return attn_metadata
 

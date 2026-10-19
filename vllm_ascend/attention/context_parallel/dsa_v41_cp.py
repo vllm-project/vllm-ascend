@@ -383,7 +383,13 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         num_actual_reqs: int | None = None,
         **kwargs: Any,
     ) -> AscendDSAV41Metadata:
-        assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
+        if pcp_context is None:
+            # Without a PCP context the batch runs replicated on every rank,
+            # like a PCP=1 model (e.g. a replicated draft decode), so build the
+            # ordinary V4.1 metadata that the impl executes without PCP.
+            if num_actual_reqs is not None:
+                kwargs["num_actual_reqs"] = num_actual_reqs
+            return super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
         assert pcp_cache_group_idx is not None
 
         # Use the global batch so all ranks choose the same prefill/decode path.

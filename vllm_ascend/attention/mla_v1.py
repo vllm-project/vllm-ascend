@@ -268,6 +268,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     """
 
     decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata
+    # Target metadata under PCP is built from the runner's PCP context.
+    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -484,7 +486,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ) -> AscendMLAMetadata:
         self._pcp_context = pcp_context
         self._pcp_cache_group_idx = pcp_cache_group_idx
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        expanded_slot_mapping = common_attn_metadata.slot_mapping if pcp_context is not None else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -494,7 +496,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.pcp_enabled or self.dcp_enabled)
+                    not (pcp_context is not None or self.dcp_enabled)
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
                     or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
@@ -549,8 +551,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
-        if self.pcp_enabled:
-            assert expanded_slot_mapping is not None
+        if expanded_slot_mapping is not None:
             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch

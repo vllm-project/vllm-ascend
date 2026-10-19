@@ -234,6 +234,36 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(pcp_builder.pcp_enabled)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
+    def test_pcp_metadata_follows_pcp_context(self):
+        # Target metadata under PCP is built from the runner's PCP context.
+        self.assertTrue(AscendAttentionMetadataBuilder.consumes_pcp_context)
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
+
+        def common(num_tokens):
+            return AscendCommonAttentionMetadata(
+                query_start_loc=torch.tensor([0, 1]),
+                query_start_loc_cpu=torch.tensor([0, 1]),
+                seq_lens_cpu=torch.tensor([4]),
+                seq_lens=torch.tensor([4]),
+                num_reqs=1,
+                num_actual_tokens=1,
+                max_query_len=1,
+                block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+                slot_mapping=torch.arange(num_tokens),
+                positions=torch.arange(num_tokens),
+                attn_state=AscendAttentionState.DecodeOnly,
+                num_computed_tokens_cpu=None,
+                max_seq_len=4,
+                is_prefilling=torch.tensor([False]),
+            )
+
+        self.assertIsNone(pcp_builder.build(0, common(1)).pcp_local_num_input_tokens)
+        self.assertEqual(pcp_builder.build(0, common(4), pcp_context=object()).pcp_local_num_input_tokens, 2)
+        captured = pcp_builder.build_for_cudagraph_capture(common(4), pcp_context=object(), pcp_cache_group_idx=0)
+        self.assertEqual(captured.pcp_local_num_input_tokens, 2)
+
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -375,10 +405,12 @@ def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_
         assert result[3] is output
 
 
-def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
+@pytest.mark.parametrize(
+    ("has_pcp_context", "expected"), [(True, (0, 2, 0, 5)), (False, (1, 1, 1, 4))], ids=["pcp", "no-context"]
+)
+def test_pcp_builder_keeps_short_extend_in_prefill(has_pcp_context, expected) -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
-    builder.pcp_enabled = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
@@ -388,7 +420,7 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
         is_prefilling=torch.tensor([True, True], dtype=torch.bool),
     )
 
-    assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
+    assert builder._split_decodes_and_prefills(common_metadata, has_pcp_context) == expected
 
 
 class TestAscendAttentionBackendImpl(TestBase):

@@ -2,7 +2,7 @@ import ast
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -323,6 +323,7 @@ def test_prepare_inputs_propagates_padded_request_count():
 def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
+    pcp_context = object()
     state = SimpleNamespace(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=num_spec,
@@ -330,6 +331,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        get_pcp_attention_context=MagicMock(return_value=pcp_context),
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -362,6 +364,9 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
 
     assert metadata is expected_metadata
     kwargs = mock_build_attn_metadata.call_args.kwargs
+    # Hybrid attention groups get the same PCP context as the default state.
+    state.get_pcp_attention_context.assert_called_once_with(input_batch, (), ANY)
+    assert kwargs["pcp_context"] is pcp_context
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
     graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
@@ -385,6 +390,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
+        get_pcp_attention_context=lambda *_: None,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,

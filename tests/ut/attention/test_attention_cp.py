@@ -34,7 +34,8 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert not hasattr(AscendMetadata(), "prefill")
 
 
-def test_gqa_dcp_builder_consumes_pcp_context() -> None:
+def test_gqa_builders_consume_pcp_context() -> None:
+    assert AscendAttentionMetadataBuilder.consumes_pcp_context
     assert AscendAttentionDCPMetadataBuilder.consumes_pcp_context
 
 
@@ -70,8 +71,9 @@ def test_gqa_pcp_dcp_preserves_tp_local_heads_and_merges_pcp_shards(kv_heads) ->
     combine.assert_called_once_with(query, lse, 1, 1, "tp-heads", "pcp-kv-shards", defer_combine=False)
 
 
-def test_gqa_dcp_capture_forwards_pcp_context() -> None:
-    builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
+@pytest.mark.parametrize("builder_cls", [AscendAttentionMetadataBuilder, AscendAttentionDCPMetadataBuilder])
+def test_gqa_capture_forwards_pcp_context(builder_cls) -> None:
+    builder = builder_cls.__new__(builder_cls)
     builder.build = Mock(return_value="metadata")
     common = object()
     context = object()
@@ -372,7 +374,7 @@ def test_dcp_chunked_prefill_keeps_host_parameters_and_device_history_separate(
 ):
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.chunked_prefill_enabled = True
-    builder.pcp_enabled = False
+    builder._pcp_context = None
     builder.dcp_size, builder.dcp_rank = size, rank
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
@@ -473,9 +475,9 @@ def test_dcp_partial_attention_merge_matches_weighted_reference() -> None:
     "is_consumer,is_producer,recompute", [(True, False, True), (True, False, False), (False, True, True)]
 )
 @pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
-@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("has_pcp_context", [False, True])
 def test_dcp_split_uses_builder_config_without_current_context(
-    is_consumer, is_producer, recompute, query_lens, pcp_enabled
+    is_consumer, is_producer, recompute, query_lens, has_pcp_context
 ):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
@@ -495,7 +497,6 @@ def test_dcp_split_uses_builder_config_without_current_context(
     pcp_group.assert_called_once_with()
     assert builder.pcp_group is pcp_group.return_value
     builder.vllm_config = config
-    builder.pcp_enabled = pcp_enabled
     builder.decode_threshold = 3
     builder.speculative_config = None
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
@@ -518,9 +519,9 @@ def test_dcp_split_uses_builder_config_without_current_context(
             side_effect=AssertionError("use cached DCP state"),
         ),
     ):
-        actual = builder._split_decodes_and_prefills(common)
+        actual = builder._split_decodes_and_prefills(common, has_pcp_context)
     num_decodes = (
-        sum(q <= 3 for q in query_lens) if not pcp_enabled and is_consumer and not is_producer and recompute else 0
+        sum(q <= 3 for q in query_lens) if not has_pcp_context and is_consumer and not is_producer and recompute else 0
     )
     num_decode_tokens = sum(query_lens[:num_decodes])
     assert actual == (num_decodes, 2 - num_decodes, num_decode_tokens, sum(query_lens) - num_decode_tokens)

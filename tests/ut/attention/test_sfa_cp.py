@@ -1478,14 +1478,21 @@ def test_sfa_split_counts_with_and_without_pcp(
 ):
     builder = _make_sfa_split_builder(use_pcp, threshold)
     common = _make_sfa_split_common(query_lens, flags, actual, threshold, capture)
+    # Under PCP the runner passes a PCP context for target metadata.
+    context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(flags, dtype=torch.bool)))
+    kwargs = {"pcp_context": context} if use_pcp else {}
     with (
         patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False),
         patch(
             "vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla",
             return_value=(torch.ones(common.num_input_tokens, 64), torch.zeros(common.num_input_tokens, 64)),
         ),
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+        ),
     ):
-        meta = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+        meta = builder.build_for_cudagraph_capture(common, **kwargs) if capture else builder.build(0, common, **kwargs)
     assert (meta.num_decodes, meta.num_prefills, meta.num_decode_tokens) == (
         expected_with if use_pcp else expected_without
     )
