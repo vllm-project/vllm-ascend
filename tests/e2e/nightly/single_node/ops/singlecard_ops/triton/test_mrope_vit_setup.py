@@ -3,11 +3,10 @@
 
 import pytest
 import torch
-from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import vit_mrope_setup
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.patch.worker.patch_mrope_vit_setup import _vit_mrope_setup_kernel
+from vllm_ascend.patch.worker.patch_mrope_vit_setup import _vit_mrope_setup_kernel, vit_mrope_setup
 
 
 def _reference_positions(grids, merge):
@@ -27,6 +26,8 @@ def _reference_positions(grids, merge):
     "grids,merge",
     [
         ([[1, 1, 1]], 1),
+        ([[1, 1, 17]], 1),
+        ([[1, 1, 33]], 1),
         ([[1, 5, 7], [2, 3, 5]], 1),
         ([[1, 2, 2], [3, 6, 10]], 2),
         ([[0, 4, 4], [2, 4, 8], [0, 4, 4]], 2),
@@ -51,7 +52,7 @@ def test_vit_mrope_setup(grids, merge, sections):
     # NaN sentinels detect missing writes and writes outside axis sections.
     cos = torch.full((3, n, half_rot), float("nan"), dtype=torch.float32, device="npu")
     sin = torch.full_like(cos, float("nan"))
-    _vit_mrope_setup_kernel[(triton.cdiv(n, 32),)](
+    _vit_mrope_setup_kernel[(triton.cdiv(n, 16),)](
         *inv,
         cos,
         sin,
@@ -63,7 +64,7 @@ def test_vit_mrope_setup(grids, merge, sections):
         half_h=sections[1],
         half_w=sections[2],
         spatial_merge=merge,
-        BLOCK_N=32,
+        BLOCK_N=16,
         BLOCK_D=triton.next_power_of_2(half_rot),
         num_warps=8,
     )

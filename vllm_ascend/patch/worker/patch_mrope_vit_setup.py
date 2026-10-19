@@ -1,91 +1,77 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Bound the ViT mRoPE setup kernel's live vectors for Ascend UB capacity."""
+import sys
 
-from vllm.triton_utils import tl, triton
-
-try:
-    import vllm.model_executor.layers.rotary_embedding.mrope_vit_setup as mrope_vit_setup
-except ModuleNotFoundError as exc:
-    if exc.name != "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup":
-        raise
-    mrope_vit_setup = None
+import torch
+import vllm.model_executor.layers.rotary_embedding.mrope_vit_setup as mrope_vit_setup
+from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import _vit_mrope_setup_kernel
+from vllm.triton_utils import triton
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
-@triton.jit(
-    do_not_specialize=["num_tokens", "num_grids"],
-    do_not_specialize_on_alignment=["grids_ptr"],
-)
-def _vit_mrope_setup_kernel(
-    inv_freq_t_ptr,
-    inv_freq_h_ptr,
-    inv_freq_w_ptr,
-    cos_out_ptr,
-    sin_out_ptr,
-    cu_seqlens_ptr,
-    grids_ptr,
-    num_tokens,
-    num_grids,
-    half_t: tl.constexpr,
-    half_h: tl.constexpr,
-    half_w: tl.constexpr,
-    spatial_merge: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    # Keep upstream's launch grid and signature: imported vit_mrope_setup
-    # aliases also resolve this kernel through the original module globals.
-    # A flat tile caps all intermediates, including the compiler's fp32 trig
-    # expansion, instead of materializing BLOCK_N x BLOCK_D live tensors.
-    TILE_ELEMENTS: tl.constexpr = 256
-    half_rot: tl.constexpr = half_t + half_h + half_w
-    plane = num_tokens.to(tl.int64) * half_rot
-    for tile in range(tl.cdiv(BLOCK_N * BLOCK_D, TILE_ELEMENTS)):
-        element = tile * TILE_ELEMENTS + tl.arange(0, TILE_ELEMENTS)
-        tok = tl.program_id(0) * BLOCK_N + element // BLOCK_D
-        d = element % BLOCK_D
-        tok_mask = (element < BLOCK_N * BLOCK_D) & (tok < num_tokens)
+def vit_mrope_setup(
+    inv_freq_t: torch.Tensor,
+    inv_freq_h: torch.Tensor,
+    inv_freq_w: torch.Tensor,
+    grid_thw: list[list[int]],
+    spatial_merge_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(3, total_N, half_rot_dim) fp32 cos/sin t/h/w planes for triton_mrope.
 
-        seg = tl.zeros((TILE_ELEMENTS,), tl.int32)
-        for g in range(num_grids):
-            end = tl.load(cu_seqlens_ptr + g + 1)
-            seg += (tok >= end).to(tl.int32)
-        seg_start = tl.load(cu_seqlens_ptr + seg, mask=tok_mask, other=0)
-        grid_h = tl.load(grids_ptr + seg * 3 + 1, mask=tok_mask, other=1)
-        grid_w = tl.load(grids_ptr + seg * 3 + 2, mask=tok_mask, other=1)
-        local = tok - seg_start
-        rem = local % (grid_h * grid_w)
-        tpos = local // (grid_h * grid_w)
-        block_h = rem // (spatial_merge * grid_w)
-        within_row = rem % (spatial_merge * grid_w)
-        block_w = within_row // (spatial_merge * spatial_merge)
-        within_block = within_row % (spatial_merge * spatial_merge)
-        hpos = block_h * spatial_merge + within_block // spatial_merge
-        wpos = block_w * spatial_merge + within_block % spatial_merge
-        row = tok.to(tl.int64) * half_rot + d
+    One fused kernel: positions are computed arithmetically from the grids
+    and the rotation comes from the per-axis inv_freq, so there is no
+    cos/sin cache to size or grow.
 
-        in_t = d < half_t
-        inv_t = tl.load(inv_freq_t_ptr + d, mask=in_t, other=0.0)
-        freq = tpos.to(tl.float32) * inv_t
-        mask = tok_mask & in_t
-        tl.store(cos_out_ptr + row, tl.cos(freq), mask=mask)
-        tl.store(sin_out_ptr + row, tl.sin(freq), mask=mask)
+    Args:
+        inv_freq_t: t-axis inverse frequencies, (t_dim // 2,).
+        inv_freq_h: h-axis inverse frequencies, (h_dim // 2,).
+        inv_freq_w: w-axis inverse frequencies, (w_dim // 2,).
+        grid_thw: per-grid [t, h, w] patch counts (host metadata).
+        spatial_merge_size: spatial merge factor of the ViT.
 
-        in_h = (d >= half_t) & (d < half_t + half_h)
-        inv_h = tl.load(inv_freq_h_ptr + d - half_t, mask=in_h, other=0.0)
-        freq = hpos.to(tl.float32) * inv_h
-        mask = tok_mask & in_h
-        tl.store(cos_out_ptr + plane + row, tl.cos(freq), mask=mask)
-        tl.store(sin_out_ptr + plane + row, tl.sin(freq), mask=mask)
+    """
+    device = inv_freq_t.device
+    cu = [0]
+    for t, h, w in grid_thw:
+        cu.append(cu[-1] + t * h * w)
+    n = cu[-1]
+    g = len(grid_thw)
+    # grid_thw is per-request host metadata, so one H2D is unavoidable;
+    # pack cu_seqlens and grids into a single pinned async copy.
+    buf = async_tensor_h2d(cu + [d for grid in grid_thw for d in grid], device=device, dtype=torch.int32)
+    cu_seqlens = buf[: g + 1]
+    grids = buf[g + 1 :].view(g, 3)
 
-        in_w = (d >= half_t + half_h) & (d < half_rot)
-        inv_w = tl.load(inv_freq_w_ptr + d - half_t - half_h, mask=in_w, other=0.0)
-        freq = wpos.to(tl.float32) * inv_w
-        mask = tok_mask & in_w
-        tl.store(cos_out_ptr + 2 * plane + row, tl.cos(freq), mask=mask)
-        tl.store(sin_out_ptr + 2 * plane + row, tl.sin(freq), mask=mask)
+    half_t = inv_freq_t.numel()
+    half_h = inv_freq_h.numel()
+    half_w = inv_freq_w.numel()
+    half_rot = half_t + half_h + half_w
+    cos = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
+    sin = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
+    block_n = 16
+    _vit_mrope_setup_kernel[(triton.cdiv(n, block_n),)](
+        inv_freq_t,
+        inv_freq_h,
+        inv_freq_w,
+        cos,
+        sin,
+        cu_seqlens,
+        grids,
+        n,
+        g,
+        half_t=half_t,
+        half_h=half_h,
+        half_w=half_w,
+        spatial_merge=spatial_merge_size,
+        BLOCK_N=block_n,
+        BLOCK_D=triton.next_power_of_2(half_rot),
+        num_warps=8,
+    )
+    return cos, sin
 
 
-if mrope_vit_setup is not None:
-    mrope_vit_setup._vit_mrope_setup_kernel = _vit_mrope_setup_kernel
+mrope_vit_setup.vit_mrope_setup = vit_mrope_setup
+# Update the existing model alias if loaded; later imports see the patched module.
+if "vllm.models.minimax_m3.common.vision_tower" in sys.modules:
+    sys.modules["vllm.models.minimax_m3.common.vision_tower"].vit_mrope_setup = vit_mrope_setup

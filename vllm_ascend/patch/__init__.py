@@ -1845,17 +1845,16 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.rotary_embedding.mrope_vit_setup`
 #    Why:
-#       The upstream ViT setup kernel's BLOCK_N x BLOCK_D intermediates and
-#       fp32 trigonometric expansion put pressure on Ascend's limited UB.
+#       Reduce ViT mRoPE setup UB pressure on Ascend A5.
 #    How:
-#       Replace only _vit_mrope_setup_kernel with bounded 256-element tiles.
-#       Preserve the launch interface, fp32 output, spatial-merge ordering,
-#       section-only writes, and dynamic metadata specialization controls.
-#       No extra host/device transfers or synchronization are introduced.
+#       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
+#       to 16, using the same value for the launch grid divisor. Keep the
+#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
+#       it is already loaded; subsequent imports use the patched wrapper.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58526
 #       https://github.com/vllm-project/vllm/pull/58673
 #    Future Plan:
-#       Upstream a backend-selectable setup tile size or bounded kernel;
-#       remove when supported vLLM versions compile within Ascend UB limits.
+#       Remove once upstream supports a backend-specific setup block size
+#       suitable for Ascend UB capacity.
 #
