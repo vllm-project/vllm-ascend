@@ -402,7 +402,8 @@ def _make_replicated_pcp_manager():
     return manager
 
 
-def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
+@pytest.mark.parametrize("requests_already_padded", [False, True])
+def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded(requests_already_padded):
     """Keep request metadata aligned when upstream already pads tokens."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -459,6 +460,13 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     input_buffers.is_padding[:4].fill_(False)
     input_buffers.query_start_loc[:5].copy_(torch.tensor([0, 1, 2, 3, -1], dtype=torch.int32))
     input_buffers.seq_lens[:4].copy_(torch.tensor([11, 21, 31, 99], dtype=torch.int32))
+    if requests_already_padded:
+        local_batch.num_reqs_after_padding = 4
+        local_batch.query_start_loc = input_buffers.query_start_loc[:5]
+        local_batch.query_start_loc_np = np.array([0, 1, 2, 3, 3], dtype=np.int32)
+        local_batch.query_start_loc.copy_(torch.from_numpy(local_batch.query_start_loc_np))
+        local_batch.seq_lens = input_buffers.seq_lens[:4]
+        local_batch.seq_lens_cpu_upper_bound = torch.tensor([11, 21, 31, 0], dtype=torch.int32)
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = input_buffers
