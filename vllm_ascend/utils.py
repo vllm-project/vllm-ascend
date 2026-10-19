@@ -1381,7 +1381,10 @@ C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
 
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
-    return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
 
 
 def is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:

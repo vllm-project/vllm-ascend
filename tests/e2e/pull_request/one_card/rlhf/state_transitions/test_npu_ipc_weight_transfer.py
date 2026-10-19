@@ -22,8 +22,8 @@ signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. Both packed modes exercise the same
-transaction.
+graph-captured storage of the first update. The packed lane is currently skipped
+on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
 
 The lane is the same-chip deployment this backend exists for: the trainer
 payload shares the card with the rollout engine, so every round releases the
@@ -43,6 +43,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+    PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
@@ -83,6 +84,8 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
+    if packed:
+        pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))

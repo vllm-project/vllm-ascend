@@ -314,7 +314,7 @@ The design does not depend on cross-node `flock` behavior.
 
 ## Persistent transport and trust
 
-The restore and save composite actions own the fixed Huawei OBS transport
+The restore and save composite actions own the fixed OBS transport
 configuration. The cache engine has no storage API or credential knowledge.
 
 Read access follows the runner's existing OBS authorization. Shared writes

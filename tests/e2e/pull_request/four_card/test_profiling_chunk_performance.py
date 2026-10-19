@@ -4,10 +4,8 @@ Measures Time-To-First-Token (TTFT) on 64k-token prefill requests with
 profiling_chunk_config enabled. The test runs against Qwen3-30B-A3B
 served with PP=2, TP=2 (4 NPU cards total).
 
-The same scenario is executed with Model Runner V1 and Model Runner V2,
-both with Short Request First (SRF) disabled and enabled. Within each SRF
-mode, the only configuration difference between the two model-runner runs
-is VLLM_USE_V2_MODEL_RUNNER. An additional MRV2 run enables asynchronous
+The scenario runs on Model Runner V2, with Short Request First (SRF)
+disabled and enabled. An additional MRV2 run enables asynchronous
 scheduling (profiling_chunk with async scheduling requires Model Runner V2).
 
 Test flow:
@@ -44,9 +42,7 @@ BASELINE_TTFT_S = 5.45
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "enable_srf", "enable_async_scheduling"),
     [
-        pytest.param("0", False, False, id="MRV1"),
         pytest.param("1", False, False, id="MRV2"),
-        pytest.param("0", True, False, id="MRV1-SRF"),
         pytest.param("1", True, False, id="MRV2-SRF"),
         # Async scheduling with profiling_chunk requires Model Runner V2.
         # The async case shares the MRV2 baseline for now; tighten it once

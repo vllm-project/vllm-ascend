@@ -1,6 +1,6 @@
 # Using Volcano Kthena
 
-This guide shows how to run **prefill–decode (PD) disaggregation** on Huawei Ascend NPUs using **vLLM-Ascend**, with [**Kthena**](https://kthena.volcano.sh/) handling orchestration on Kubernetes. About vLLM support with Kthena, please refer to [Deploy vLLM with Kthena](https://docs.vllm.ai/en/latest/deployment/integrations/kthena/).
+This guide shows how to run **prefill–decode (PD) disaggregation** on Ascend NPUs using **vLLM-Ascend**, with [**Kthena**](https://kthena.volcano.sh/) handling orchestration on Kubernetes. About vLLM support with Kthena, please refer to [Deploy vLLM with Kthena](https://docs.vllm.ai/en/latest/deployment/integrations/kthena/).
 
 ---
 

@@ -28,6 +28,9 @@ if [ ! -f "$BISECT_ARGS_HELPER" ]; then
 fi
 # shellcheck source=../../nightly/scripts/bisect_args.sh
 source "$BISECT_ARGS_HELPER"
+DOWNLOAD_ARCHIVE_HELPER="${SCRIPT_DIR}/download_archive.sh"
+# shellcheck source=download_archive.sh
+source "$DOWNLOAD_ARCHIVE_HELPER"
 
 # The CANN install directory varies between release (cann-9.1.0) and daily
 # (e.g. cann-2026.08.03) images, so discover it dynamically instead of
@@ -167,14 +170,16 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install uv
-    export UV_SYSTEM_PYTHON=1
-    export UV_INDEX_URL="https://mirrors.huaweicloud.com/repository/pypi/simple/"
-    export UV_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-    export UV_INDEX_STRATEGY="unsafe-best-match"
-    export UV_NO_CACHE=1
-    uv pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    uv pip install -e "$WORKSPACE/vllm-ascend"
+    pip install -r "$WORKSPACE/vllm-ascend/requirements-nightly.txt"
+    # Keep the daily-built packages shipped by the image (torch/torch-npu/
+    # torchvision/torchaudio, triton-ascend, memfabric/memcache) while still
+    # installing the other runtime dependencies declared by requirements.txt.
+    # `|| true` matters: grep returns 1 when every line is filtered out while
+    # this script runs with `set -euo pipefail`.
+    grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+        "$WORKSPACE/vllm-ascend/requirements.txt" > /tmp/requirements-runtime.txt || true
+    pip install -r /tmp/requirements-runtime.txt
+    pip install -e "$WORKSPACE/vllm-ascend" --no-deps
 }
 
 install_aisbench() {
@@ -216,6 +221,16 @@ run_tests_with_log() {
     pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
     ret=$?
     echo "pytest exit code: ret=${ret}"
+    # Save every AISBench experiment before AOP can rerun tests or pods are deleted.
+    # Each test pod has its own checkout; the destination belongs to this run.
+    local outputs_ret=0
+    if [ -d outputs ]; then
+        local outputs_dest="${LOG_PREFIX}/aisbench_outputs/node-${LWS_WORKER_INDEX:-0}"
+        if ! mkdir -p "$outputs_dest" || ! cp -a outputs/. "$outputs_dest/"; then
+            echo "::error::Failed to preserve AISBench outputs at $outputs_dest"
+            outputs_ret=1
+        fi
+    fi
     set -e
     if [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         if [ $ret -eq 0 ]; then
@@ -296,6 +311,9 @@ run_tests_with_log() {
         else
             echo "Worker: leader finished successfully, exiting"
         fi
+    fi
+    if [ "$outputs_ret" -ne 0 ]; then
+        print_failure "Failed to preserve AISBench outputs"
     fi
 }
 
@@ -528,6 +546,14 @@ finish_run() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ] && [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         echo "AOP_RUN_FINISHED:${LOG_PREFIX}:${rc}"
     fi
+    backup_requested_directory || true
+    return "$rc"
+}
+
+finish_without_aop() {
+    local rc=$?
+    backup_ascend_logs || true
+    backup_requested_directory || true
     return "$rc"
 }
 
@@ -535,7 +561,7 @@ main() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         trap finish_run EXIT
     else
-        trap backup_ascend_logs EXIT
+        trap finish_without_aop EXIT
     fi
     check_npu_info
     clear_logs

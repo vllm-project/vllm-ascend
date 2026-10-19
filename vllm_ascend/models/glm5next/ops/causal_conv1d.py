@@ -26,12 +26,14 @@ def causal_conv1d(
     if cache_indices.shape[0] == 0:
         return output
     kernel_state = conv_state
-    kernel_indices = cache_indices
+    # GLM metadata shares a contiguous vector across this group's layers.
+    # Standalone callers can still pass a matrix, using its first column.
+    kernel_indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
     null_block_id = 0
-    # aclnnCausalConv1d materializes a non-contiguous state without writing its
-    # mutations back to the view. Stage only this batch's rows, retaining both
-    # page strides and DS layouts; never copy the entire persistent cache.
-    if not conv_state.is_contiguous():
+    # AscendC updates page- and row-strided SD states in place. Keep staging
+    # for unsupported layouts, such as DS views with strided channels.
+    needs_state_copy = conv_state.stride(0) <= 0 or conv_state.stride(1) <= 0 or conv_state.stride(2) != 1
+    if needs_state_copy:
         requests = cache_indices.shape[0]
         state_len, dim = conv_state.shape[1:]
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
@@ -66,6 +68,6 @@ def causal_conv1d(
             query_start_loc=query_start_loc,
             null_block_id=null_block_id,
         )
-    if not conv_state.is_contiguous():
+    if needs_state_copy:
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
     return result

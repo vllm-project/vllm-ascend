@@ -15,6 +15,7 @@ from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
 from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
+from vllm_ascend.utils import vllm_version_is
 
 
 def is_eplb_load_collection_phase_matched(
@@ -105,24 +106,36 @@ class AscendEPLBController(EPLBController):
             if should_record:
                 state._has_fresh_recorded_load = True
 
-    def setup_from_mapping(
-        self,
-        model: nn.Module,
-        model_config: Any,
-        expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int | None = None,
-    ) -> None:
-        model = _unwrap_moe(model)
-        assert is_mixture_of_experts(model)
-        from_mapping_kwargs: dict[str, Any] = dict(
-            model=model,
-            model_config=model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            policy=self.eplb_policy,
-        )
-        if old_num_physical_experts is not None:
-            from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts
-        self.state = AscendEplbState.from_mapping(**from_mapping_kwargs)
-        self._has_registered_models = True
+    if vllm_version_is("0.31.0"):
+
+        def setup_from_mapping(
+            self,
+            model: nn.Module,
+            model_config: Any,
+            expanded_physical_to_logical: torch.Tensor,
+            old_num_physical_experts: int | None = None,
+        ) -> None:
+            model = _unwrap_moe(model)
+            assert is_mixture_of_experts(model)
+            from_mapping_kwargs: dict[str, Any] = dict(
+                model=model,
+                model_config=model_config,
+                device=self.device,
+                parallel_config=self.parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+                policy=self.eplb_policy,
+            )
+            if old_num_physical_experts is not None:
+                from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts
+            self.state = AscendEplbState.from_mapping(**from_mapping_kwargs)
+            self._has_registered_models = True
+
+    else:
+        # The two supported upstream revisions intentionally expose different signatures.
+        def setup_from_mapping(  # type: ignore[misc]
+            self,
+            model_config: Any,
+            expanded_physical_to_logical: torch.Tensor,
+        ) -> None:
+            # Elastic EP reuses the live state and communicator on verified main.
+            super().setup_from_mapping(model_config, expanded_physical_to_logical)
