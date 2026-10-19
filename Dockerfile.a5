@@ -86,7 +86,7 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
         "linux/arm64"|"aarch64") \
             MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
         "linux/amd64"|"x86_64") \
-            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_38_x86_64.whl" ;; \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl" ;; \
         *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
     esac && \
     MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
