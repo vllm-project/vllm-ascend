@@ -22,6 +22,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     MooncakeStoreConfig,
@@ -405,6 +406,73 @@ class TestYuanrongHelper(unittest.TestCase):
 # =========================================================================
 # MooncakeBackend (mocked store)
 # =========================================================================
+class TestMooncakeBackendSetup(unittest.TestCase):
+    def test_dp_schedulers_do_not_claim_ssd_paths(self):
+        for use_fabric_mem in (False, True):
+            with self.subTest(use_fabric_mem=use_fabric_mem):
+                self._check_dp_ssd_setup(use_fabric_mem)
+
+    def _check_dp_ssd_setup(self, use_fabric_mem):
+        with tempfile.TemporaryDirectory() as ssd_path:
+            config = _make_mooncake_store_config(
+                enable_ssd_offload=True,
+                ssd_offload_path=ssd_path,
+                enable_ssd_prefetch=True,
+            )
+            setup_calls = []
+            owned_paths = set()
+
+            def setup(**kwargs):
+                setup_calls.append(kwargs)
+                if kwargs.get("enable_ssd_offload", False):
+                    path = kwargs["ssd_offload_path"]
+                    if path in owned_paths:
+                        return -1  # Mooncake rejects a second live owner.
+                    owned_paths.add(path)
+                return 0
+
+            store_module = MagicMock()
+            store_module.MooncakeDistributedStore.side_effect = lambda: MagicMock(setup=MagicMock(side_effect=setup))
+            prefetch_options = object()
+            with (
+                patch.dict("sys.modules", {"mooncake.store": store_module}),
+                patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": str(int(use_fabric_mem))}),
+                patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+                patch.object(mooncake_backend, "_mooncake_setup_supports_ssd_offload", return_value=True),
+                patch.object(mooncake_backend, "_mooncake_is_exist_supports_prefetch", return_value=True),
+                patch.object(mooncake_backend, "_build_exist_prefetch_options", return_value=prefetch_options),
+                patch.object(
+                    mooncake_backend, "get_global_rank", side_effect=lambda pc: pc.data_parallel_index
+                ) as get_rank,
+                patch.object(mooncake_backend, "get_ip", return_value="127.0.0.1"),
+                patch.object(mooncake_backend, "global_te"),
+                patch.object(mooncake_backend.torch.npu, "set_device"),
+            ):
+                for dp_rank in range(2):
+                    parallel_config = MagicMock(data_parallel_index=dp_rank)
+                    scheduler = mooncake_backend.MooncakeBackend.create_scheduler_client(parallel_config)
+                    mooncake_backend.MooncakeBackend(parallel_config)
+                    scheduler.exists(["ssd_key"])
+                    scheduler.store.batch_is_exist.assert_called_once_with(["ssd_key"], prefetch_options)
+
+            self.assertEqual(len(setup_calls), 4)
+            for scheduler_setup in setup_calls[::2]:
+                self.assertEqual(scheduler_setup["global_segment_size"], 0)
+                self.assertEqual(scheduler_setup["local_buffer_size"], 0)
+                self.assertFalse(scheduler_setup.get("enable_ssd_offload", False))
+                self.assertNotIn("ssd_offload_path", scheduler_setup)
+            for rank, worker_setup in enumerate(setup_calls[1::2]):
+                rank_path = os.path.join(ssd_path, f"rank_{rank}")
+                self.assertTrue(worker_setup["enable_ssd_offload"])
+                self.assertEqual(worker_setup["ssd_offload_path"], rank_path)
+                self.assertGreater(worker_setup["global_segment_size"], 0)
+                self.assertTrue(os.path.isdir(rank_path))
+            self.assertEqual(owned_paths, {os.path.join(ssd_path, f"rank_{rank}") for rank in range(2)})
+            self.assertEqual(get_rank.call_count, 2)
+            self.assertEqual(config.ssd_offload_path, ssd_path)
+            self.assertTrue(config.enable_ssd_offload)
+
+
 class TestMooncakeBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
@@ -441,9 +509,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1, 0, 1]
         result = b.exists(["k1", "k2", "k3"])
         self.assertEqual(result, [1, 0, 1])
-        b.store.batch_is_exist.assert_called_once_with(
-            ["k1", "k2", "k3"], prefetch_options
-        )
+        b.store.batch_is_exist.assert_called_once_with(["k1", "k2", "k3"], prefetch_options)
 
     def test_exists_without_ssd_prefetch(self):
         b = self._make_backend()

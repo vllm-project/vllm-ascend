@@ -155,12 +155,15 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # Scheduler clients only query the pool; they must not register a
+        # LOCAL_DISK segment or claim the shared SSD root directory. Remote
+        # prefetch remains controlled by _resolve_ssd_prefetch() below.
+        ssd_kwargs = _ssd_setup_kwargs(self.config) if self._contribute_memory else {}
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
@@ -209,7 +212,7 @@ class MooncakeBackend(Backend):
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
-                self.config.ssd_offload_path,
+                ssd_kwargs["ssd_offload_path"],
             )
         self._ssd_prefetch_enabled = self._resolve_ssd_prefetch()
         if self._ssd_prefetch_enabled:
@@ -232,8 +235,7 @@ class MooncakeBackend(Backend):
             return False
         if not self.config.enable_ssd_offload:
             logger.warning(
-                "enable_ssd_prefetch is true but SSD offload is disabled; "
-                "prefetch has no effect without SSD offload."
+                "enable_ssd_prefetch is true but SSD offload is disabled; prefetch has no effect without SSD offload."
             )
             return False
         if not _mooncake_is_exist_supports_prefetch():

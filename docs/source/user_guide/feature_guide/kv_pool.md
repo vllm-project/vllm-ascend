@@ -419,6 +419,12 @@ For detailed configuration, refer to [2.2.1](#step-221-configure-mooncakejson) a
 
 With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
 
+Only worker clients own local SSD storage. Each worker uses a subdirectory named `rank_<global_rank>/` under `ssd_offload_path`; the global rank includes the DP offset as well as TP/PP/CP ranks. Scheduler clients do not enable local SSD offload, but can still query SSD-backed keys and trigger remote prefetch when configured.
+
+In a single-node DP=2 deployment, both DP replicas can use the same `mooncake.json`: their workers use distinct rank subdirectories and their schedulers do not claim the shared root directory. Separate vLLM service instances must use different `ssd_offload_path` roots if their global ranks overlap.
+
+The error `storage_path already held by another live client` is emitted by Mooncake's client-side bucket backend when it cannot acquire the local directory lock. Check the Mooncake package and native libraries loaded by the vLLM process, and any other live clients using that directory. The `mooncake_master` version alone does not identify the client's locking implementation. See the [Mooncake SSD ownership contract](https://kvcache-ai.github.io/Mooncake/design/store/ssd-offload.html#bucketstoragebackend-default).
+
 #### Step 2.5.2: SSD Disk Usage Control
 
 The following environment variables control disk space usage for SSD offload (bucket backend):
@@ -432,7 +438,7 @@ The following environment variables control disk space usage for SSD offload (bu
 
 **`MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` risk:** If left at the 2 TB default, master shows a total SSD quota far larger than the physical disk (e.g. 16 ranks → ~32 TB displayed on a 1 TB NVMe). Offload still fails when the disk fills, while monitoring looks healthy. Set this to your actual per-rank budget before production use.
 
-Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
+Since each worker rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
 
 ```shell
 # 800 GB total disk, 8 ranks, ~100 GB per rank
