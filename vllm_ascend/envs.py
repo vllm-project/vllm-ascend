@@ -118,13 +118,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Number of staging banks (and landing streams) used by the pipeline mode
     # above. The window is split into this many banks that consecutive reads
     # round-robin between; each bank's copies land on its own stream. Default
-    # 2 (classic ping-pong) is enough for full pipelining when landing is not
-    # slower than the network; higher values buy deeper overlap against
-    # landing jitter at the cost of smaller network batches (window/K chunks
-    # per engine call). Any value >= 1 works; banks larger than the window are
-    # clamped. This setting is not sensitive.
+    # 4 comes from the 101<->103 K-scan (2026-10-19): under bandwidth
+    # contention K2 leaves a ~1.4s exposed-landing tail, K4 cuts it ~11x and
+    # saturates the request-latency win, and K8 (~200x) only pays off for
+    # tail-intolerant SLOs at the cost of smaller network batches (window/K
+    # chunks per engine call). Any value >= 1 works; banks larger than the
+    # window are clamped. This setting is not sensitive.
     "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS": lambda: max(
-        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "2"))
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "4"))
     ),
     # Opt-in probe for the staged-read timing blind spot: after each engine
     # batch read returns, a device-wide torch.npu.synchronize() reveals how

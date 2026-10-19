@@ -122,7 +122,7 @@ def _make_fake_recv_thread(transfer_engine: Any, staging_bytes: int) -> Any:
     # Mirror the async-landing attributes normally created in __init__
     # (object.__new__ skips it); read the knobs the same way envs.py does.
     thread._landing_stream = torch.npu.Stream()
-    thread._pipeline_banks = max(1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "2")))
+    thread._pipeline_banks = max(1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "4")))
     thread._landing_streams = [
         torch.npu.Stream() for _ in range(max(1, thread._pipeline_banks))
     ]
