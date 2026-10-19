@@ -664,7 +664,7 @@ def build_attn_metadata(
                     and metadata_plan.enable()
                     and (
                         (metadata_plan.is_draft and pcp_context is None)
-                        or (not metadata_plan.is_draft and pcp_context is not None and causal is True)
+                        or (not metadata_plan.is_draft and pcp_context is not None and group_causal is True)
                     )
                 )
                 if use_plan:
