@@ -64,6 +64,7 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
         compact_indices,
         block_table,
         torch.tensor([0], dtype=torch.int32),
+        torch.tensor([7 + tail_tokens], dtype=torch.int32),
         seq_lens,
         output,
     )
@@ -72,6 +73,67 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
     assert calls[0][0] == keys.data_ptr()
     assert calls[0][1] == values.data_ptr()
     torch.testing.assert_close(calls[0][2], block_table)
+
+
+def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gbsa_qsa.py"
+    module = ast.parse(source.read_text())
+    module.body = [
+        node
+        for node in module.body
+        if not isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    calls = []
+
+    def metadata(indices, counts, query_heads, kv_heads, head_dim, block_shape, **kwargs):
+        calls.append((indices.clone(), counts.clone(), kwargs["seqused_kv"].clone()))
+        return torch.empty(0)
+
+    def attention(query, keys, values, indices, counts, block_shape, **kwargs):
+        return torch.zeros_like(query), torch.empty(0)
+
+    namespace = {
+        "torch": torch,
+        "generic_block_sparse_attention_metadata": metadata,
+        "generic_block_sparse_attention": attention,
+    }
+    exec(compile(module, str(source), "exec"), namespace)
+
+    query = torch.randn(4, 4, 128, dtype=torch.bfloat16)
+    keys = torch.randn(2, 128, 2, 128, dtype=torch.bfloat16)
+    values = torch.randn_like(keys)
+    compact_indices = torch.tensor(
+        [
+            [24, 25, -1, -1, -1],
+            [24, 25, -1, -1, -1],
+            [24, 25, -1, -1, -1],
+            [24, 25, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+    )
+    output = torch.empty_like(query)
+
+    namespace["qsa_gbsa_attention"](
+        query,
+        keys,
+        values,
+        compact_indices,
+        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([0, 0, 0, 0], dtype=torch.int32),
+        torch.tensor([101, 102, 103, 104], dtype=torch.int32),
+        torch.tensor([105], dtype=torch.int32),
+        output,
+    )
+
+    indices, counts, visible_lengths = calls[0]
+    assert visible_lengths.tolist() == [102, 103, 104, 105]
+    assert counts[0].tolist() == [1, 1, 2, 2]
+    assert indices[0, :, :2].tolist() == [
+        [24, 25],
+        [24, 25],
+        [24, 25],
+        [24, 25],
+    ]
 
 
 def test_a3_residual_mode_reuses_runtime_kernel_key():
