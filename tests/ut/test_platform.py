@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -30,6 +31,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -805,6 +807,8 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
+        if not vllm_version_is("0.31.0"):
+            self.skipTest("vLLM main removed the sequence-parallel pass config")
         for enabled_option in ("enable_sp", "fuse_gemm_comms"):
             with self.subTest(enabled_option=enabled_option):
                 pass_config = SimpleNamespace(
@@ -974,9 +978,11 @@ class TestNPUPlatform(TestBase):
                 vllm_config.model_config.enforce_eager = False
                 vllm_config.parallel_config.tensor_parallel_size = 8
                 vllm_config._set_cudagraph_sizes = MagicMock()
-                vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[8])
 
-                with patch("vllm_ascend.platform.enable_sp", return_value=upstream_sp):
+                with (
+                    patch("vllm_ascend.platform.enable_sp", return_value=upstream_sp),
+                    patch("vllm_ascend.platform._tp_aligned_capture_sizes", return_value=[8]) as align_sizes,
+                ):
                     _setup_compile_backend(
                         vllm_config,
                         compile_backend="test_backend",
@@ -985,11 +991,11 @@ class TestNPUPlatform(TestBase):
                     )
 
                 if should_align:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
+                    align_sizes.assert_called_once_with([1, 2, 4, 8], 8)
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
                     self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
                 else:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
+                    align_sizes.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
     def test_get_device_capability(self):

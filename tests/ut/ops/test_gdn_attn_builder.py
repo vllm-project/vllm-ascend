@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
@@ -165,7 +166,7 @@ def _make_vllm_config(
             parallel_drafting=False,
         )
 
-    model_config = SimpleNamespace(max_model_len=max_model_len)
+    model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(

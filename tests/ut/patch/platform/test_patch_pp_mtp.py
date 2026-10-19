@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# mypy: ignore-errors
 
 from types import SimpleNamespace
 
@@ -54,6 +55,7 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
     parallel_config = SimpleNamespace(
         tensor_parallel_size=1,
         enable_expert_parallel=False,
+        enable_hc_sp=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
     )
@@ -79,6 +81,7 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
     parallel_config = SimpleNamespace(
         tensor_parallel_size=1,
         enable_expert_parallel=False,
+        enable_hc_sp=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
     )

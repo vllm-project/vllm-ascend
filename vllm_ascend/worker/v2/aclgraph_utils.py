@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.cp_utils import (
     prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
-from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
@@ -51,7 +51,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -86,6 +86,17 @@ def _prepare_pcp_inputs_to_capture(
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     if _block_tables.cp_size > 1:
+        if full_cudagraph and not vllm_version_is("0.31.0"):
+            # vLLM main captures FULL graphs with KV context so a host-side
+            # skip of DCP context attention is not baked into the graph.
+            set_dummy_context(
+                input_batch,
+                _block_tables,
+                _block_tables.cp_size * _block_tables.cp_interleave,
+                kv_cache_config.num_blocks,
+                model_state.max_model_len,
+                input_block_tables=input_block_tables,
+            )
         input_batch.dcp_local_seq_lens = _prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
             input_batch.seq_lens,

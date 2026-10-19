@@ -1518,6 +1518,10 @@ class DeepseekV41CacheBackend(AttentionBackend):
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls():
         from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes

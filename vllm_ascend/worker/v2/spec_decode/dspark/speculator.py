@@ -39,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -420,6 +420,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
+        dp_sync_state: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
@@ -428,7 +430,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # Replicated drafts consume global requests, unlike sharded targets.
         # Adaptive verification also negotiates the draft shape independently.
         # Every DP rank must synchronize the draft batch independently.
-        sync_state = dp_sync
+        sync_state = dp_sync_state if dp_sync_state is not None else dp_sync
         if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
             sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
@@ -456,6 +458,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
+            propose_kwargs = {}
+            if not vllm_version_is("0.31.0"):
+                propose_kwargs["num_speculative_tokens"] = num_speculative_tokens
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -473,4 +478,5 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                **propose_kwargs,
             )

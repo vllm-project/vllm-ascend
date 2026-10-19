@@ -3,6 +3,7 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextConfig
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -27,7 +28,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     yarn_get_mscale,
 )
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,

@@ -177,9 +177,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        reduce_results: bool = True,
     ):
         nn.Module.__init__(self)
         self.disable_tp = disable_tp
+        self.reduce_results = reduce_results
         self.embedding_tp_capacity: int | None = None
         self._embedding_num_tokens_padded: int | None = None
 
@@ -420,7 +422,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # exchange padding so embeddings match the unpadded is_multimodal mask.
         output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
-        if reduce_group is not None and reduce_group.world_size > 1:
+        if self.reduce_results and reduce_group is not None and reduce_group.world_size > 1:
             # PCP reduce-scatter reconstructs the TP-local contribution. This
             # reduction completes the vocabulary result across TP shards.
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
@@ -447,6 +449,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         else:
             return output_parallel
 
+        if not self.reduce_results:
+            return output_parallel
         reduce_group = self.output_reduce_group
         if reduce_group is None or reduce_group.world_size == 1:
             return output_parallel
@@ -472,6 +476,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        reduce_results: bool = True,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -483,6 +488,7 @@ class AscendParallelLMHead(ParallelLMHead):
             quant_config,
             prefix,
             disable_tp=disable_tp,
+            reduce_results=reduce_results,
         )
         self.quant_config = quant_config
         if bias:

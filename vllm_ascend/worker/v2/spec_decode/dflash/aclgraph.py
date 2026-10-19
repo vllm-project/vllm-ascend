@@ -23,7 +23,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -68,22 +68,36 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool] = False,
-        precompute_context_kv: Callable[[int], None] | None = None,
+        prepare_forward: Callable[[int, dict[str, Any] | None], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        precompute_context_kv: Callable[[int], None] | None = None,
     ) -> None:
         """Capture ACL graphs for DFlash."""
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
-            super().capture(
-                forward_fn,
-                input_buffers,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                max_model_len,
-                causal=causal,
-                precompute_context_kv=precompute_context_kv,
-                progress_bar_desc=progress_bar_desc,
-            )
+            if vllm_version_is("0.31.0"):
+                super().capture(  # type: ignore[call-arg, arg-type]
+                    forward_fn,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    max_model_len,
+                    causal=causal,
+                    precompute_context_kv=precompute_context_kv,
+                    progress_bar_desc=progress_bar_desc,
+                )
+            else:
+                super().capture(  # type: ignore[call-arg, arg-type]
+                    forward_fn,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    max_model_len,
+                    causal=causal,
+                    prepare_forward=prepare_forward,
+                    progress_bar_desc=progress_bar_desc,
+                )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

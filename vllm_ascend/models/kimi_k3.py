@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -91,7 +92,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -122,8 +123,16 @@ def _use_attn_res_prefill_cache() -> bool:
 class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
     """Fuse the latent RMSNorm and MXFP8 activation quantization on A5."""
 
-    def __init__(self, norm: RMSNorm | None, up_proj: ReplicatedLinear) -> None:
-        super().__init__(norm, up_proj)
+    def __init__(
+        self,
+        norm: RMSNorm | None,
+        up_proj: ReplicatedLinear | ColumnParallelLinear,
+        row_sharded: bool = False,
+    ) -> None:
+        if vllm_version_is("0.31.0"):
+            super().__init__(norm, up_proj)
+        else:
+            super().__init__(norm, up_proj, row_sharded=row_sharded)  # type: ignore[call-arg]
         self._supports_mx_norm_fusion = get_current_hardware_profile().supports(
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION
         ) and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
@@ -1156,14 +1165,19 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
         self,
         config,
         *args,
+        out_hidden_size: int | None = None,
         prefix: str = "",
         enable_rotation: bool = False,
         **kwargs,
     ) -> None:
+        if out_hidden_size is None:
+            out_hidden_size = config.text_hidden_size
+        if not vllm_version_is("0.31.0"):
+            kwargs["out_hidden_size"] = out_hidden_size
         super().__init__(config, *args, prefix=prefix, **kwargs)
         self.rot_proj: ReplicatedLinear | None = None
         if enable_rotation:
-            output_size = config.text_hidden_size
+            output_size = out_hidden_size
             self.rot_proj = ReplicatedLinear(
                 output_size,
                 output_size,
@@ -1219,6 +1233,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
             self.mm_projector = AscendKimiK3MultiModalProjector(
                 self.config.vision_config,
+                out_hidden_size=self.config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=vision_quant_config,
                 prefix=maybe_prefix(prefix, "mm_projector"),
