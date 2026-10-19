@@ -476,7 +476,8 @@ class AscendDSAV41Impl:
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         padded = output
         if output.shape[0] != hidden_states.shape[0]:
-            padded = output.new_zeros((hidden_states.shape[0], output.shape[1], output.shape[2]))
+            padded = output.new_empty((hidden_states.shape[0], output.shape[1], output.shape[2]))
+            padded[output.shape[0] :].zero_()
             padded[: output.shape[0]] = output
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
