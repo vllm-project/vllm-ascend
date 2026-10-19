@@ -81,6 +81,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(additional_config={"enable_dsa_cp": False}),
         SimpleNamespace(additional_config={"enable_dsa_cp": "false"}),
         SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
+        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
         SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
@@ -115,6 +117,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "dsa-cp-disabled",
         "dsa-cp-string-false",
         "dynamic-eplb",
+        "pooling-runner",
+        "pooling-model",
         "kv-pool-connector",
         "kv-pool-memcache",
     ],
@@ -135,8 +139,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
-        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
-        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
@@ -155,8 +157,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     ],
     ids=[
         "dflash2-graph",
-        "pooling-runner",
-        "pooling-model",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
         "vl-encoder-graph",

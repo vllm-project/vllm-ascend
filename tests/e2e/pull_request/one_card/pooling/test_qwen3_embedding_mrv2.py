@@ -13,15 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from unittest.mock import patch
-
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_embedding_mrv2_pooling_a2():
     """Verify MRV2 pooling execution for Qwen3-Embedding-0.6B on A2."""
