@@ -8,6 +8,10 @@ import yaml
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import KVPoolConfig, parse_kv_pool_config
+from tests.e2e.common.single_node.benchmark_profiling import (
+    BenchmarkProfilingConfig,
+    parse_benchmark_profiling_config,
+)
 
 CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/cases/models/configs/Kimi"
 
@@ -40,6 +44,7 @@ class SingleNodeConfig:
     mm_request: dict[str, Any] = field(default_factory=dict)
     expected_response: dict[str, Any] = field(default_factory=dict)
     kv_pool: KVPoolConfig | None = None
+    profiling: BenchmarkProfilingConfig | None = None
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -124,6 +129,7 @@ class SingleNodeConfigLoader:
         "expected_response",
         "mm_request",
         "kv_pool",
+        "profiling",
     }
 
     @classmethod
@@ -176,6 +182,13 @@ class SingleNodeConfigLoader:
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
             full_cmd = list(server_cmd) + list(server_cmd_extra)
+            expanded_cmd = SingleNodeConfig._expand_values(full_cmd, case.get("envs", {}))
+            profiling = parse_benchmark_profiling_config(
+                case.get("profiling"),
+                benchmarks=case.get("benchmarks") or {},
+                server_cmd=expanded_cmd,
+                service_mode=case.get("service_mode", "openai"),
+            )
             extra_case_fields = {key: value for key, value in case.items() if key not in cls.STANDARD_CASE_FIELDS}
 
             # Safe parsing mapping
@@ -197,6 +210,7 @@ class SingleNodeConfigLoader:
                     expected_response=case.get("expected_response", {}),
                     mm_request=case.get("mm_request", {}),
                     kv_pool=parse_kv_pool_config(case.get("kv_pool")),
+                    profiling=profiling,
                 )
             )
         return result
