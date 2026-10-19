@@ -78,7 +78,11 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as Vllm
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDSAReplicatedSlidingWindowMLASpec,
+    AscendSlidingWindowMLASpec,
+    get_dsv4_dcp_replication_size,
+)
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -130,7 +134,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
         # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
         cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
-        return AscendSlidingWindowMLASpec(
+        replication_size = get_dsv4_dcp_replication_size(vllm_config)
+        spec_cls = AscendDSAReplicatedSlidingWindowMLASpec if replication_size > 1 else AscendSlidingWindowMLASpec
+        return spec_cls(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
@@ -139,6 +145,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
+            **({"dcp_scheduler_replication_size": replication_size} if replication_size > 1 else {}),
         )
 
     def forward(self): ...

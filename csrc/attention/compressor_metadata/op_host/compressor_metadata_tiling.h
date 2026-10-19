@@ -14,6 +14,8 @@ BEGIN_TILING_DATA_DEF(CompressorMetadataTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, kvBlockSize);
     TILING_DATA_FIELD_DEF(uint32_t, slotMappingFormat);
     TILING_DATA_FIELD_DEF(uint32_t, cmpRatio);
+    TILING_DATA_FIELD_DEF(uint32_t, dcpSize);
+    TILING_DATA_FIELD_DEF(uint32_t, dcpRank);
     TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
     TILING_DATA_FIELD_DEF(uint32_t, tileRows);
     TILING_DATA_FIELD_DEF(uint32_t, ropeRowBytes);

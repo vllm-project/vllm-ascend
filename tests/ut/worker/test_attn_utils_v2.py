@@ -45,6 +45,7 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDSAReplicatedMLASpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
@@ -134,6 +135,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
 ):
+    """Check allocated tensor strides and isolation across attention layouts."""
     layer_name = "model.layers.0.self_attn.attn"
     second_layer_name = "model.layers.1.self_attn.attn"
     spec_type = SlidingWindowSpec if cache_kind == "sliding_window" else FullAttentionSpec
@@ -1039,6 +1041,75 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(("replication", "stride_factor"), [(1, None), (1, 1), (1, 2), (2, None)])
+@pytest.mark.parametrize("scale_dim", [0, 1])
+def test_dsv4_cache_views_preserve_explicit_stride_and_replication(monkeypatch, replication, stride_factor, scale_dim):
+    """Keep non-DCP strided pages and legacy DCP lanes at their exact byte addresses."""
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
+    spec_cls = AscendDSAReplicatedMLASpec if replication > 1 else AscendMLAAttentionSpec
+    spec = spec_cls(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        model_version="deepseek_v4",
+        scale_dim=scale_dim,
+        scale_dtype=torch.float16,
+        **({"dcp_replicated_size": replication} if replication > 1 else {}),
+    )
+    num_blocks = 3
+    stride = spec.page_size_bytes * (stride_factor or 1)
+    layer_size = (num_blocks - 1) * stride + spec.page_size_bytes
+    guard_bytes = 16
+    backing = torch.full((guard_bytes + layer_size + guard_bytes,), 42, dtype=torch.int8)
+    raw = backing[guard_bytes : guard_bytes + layer_size]
+    expected = backing.clone()
+    caches = attn_utils._view_dsv4_cache(
+        raw,
+        spec,
+        AscendDSAC4Backend,
+        SimpleNamespace(num_blocks=num_blocks),
+        None if stride_factor is None else stride,
+    )
+    assert caches[0].shape == (num_blocks * replication, 2, 1, 4)
+    assert len(caches) == 1 + scale_dim
+    lane_bytes = spec.page_size_bytes // replication
+    for physical_block in range(num_blocks * replication):
+        scheduler_block, lane = divmod(physical_block, replication)
+        start = guard_bytes + scheduler_block * stride + lane * lane_bytes
+        caches[0][physical_block].fill_(physical_block + 1)
+        expected[start : start + 8].fill_(physical_block + 1)
+        if scale_dim:
+            caches[1][physical_block].fill_(-physical_block - 1)
+            expected[start + 8 : start + 12].view(torch.float16).fill_(-physical_block - 1)
+    torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("replication", [0, -1, 5])
+def test_dsv4_cache_views_reject_invalid_replication(replication):
+    spec = SimpleNamespace(page_size_bytes=12, dcp_replicated_size=replication)
+    with pytest.raises(ValueError, match="positive divisor"):
+        attn_utils._view_dsv4_cache(
+            torch.empty(36, dtype=torch.int8), spec, AscendDSAC4Backend, SimpleNamespace(num_blocks=3)
+        )
+
+
+def test_dsv4_cache_views_reject_noncontiguous_lane_replication():
+    spec = SimpleNamespace(page_size_bytes=12, dcp_replicated_size=2)
+    with pytest.raises(ValueError, match="contiguous scheduler pages"):
+        attn_utils._view_dsv4_cache(
+            torch.empty(60, dtype=torch.int8), spec, AscendDSAC4Backend, SimpleNamespace(num_blocks=3), 24
+        )
+
+
+def test_dsv4_cache_views_keep_strided_allocation_bounds_check():
+    spec = SimpleNamespace(page_size_bytes=12)
+    with pytest.raises(ValueError, match="exceeds the backing allocation"):
+        attn_utils._view_dsv4_cache(
+            torch.empty(59, dtype=torch.int8), spec, AscendDSAC4Backend, SimpleNamespace(num_blocks=3), 24
+        )
+
+
 @pytest.mark.parametrize(
     "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
 )
@@ -1246,6 +1317,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
         assert spec.scale_dim == 0
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
 @pytest.mark.parametrize(
     ("device_type", "cache_dtype", "scale_dtype", "component_dims"),
     [
@@ -1259,6 +1331,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
 )
 def test_mrv2_initializes_dsv4_cache_only_layer(
     monkeypatch,
+    dcp_size,
     device_type,
     cache_dtype,
     scale_dtype,
@@ -1286,7 +1359,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         cache_config=cache_config,
         kv_transfer_config=None,
         quant_config=None,
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size, prefill_context_parallel_size=1),
     )
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
@@ -1329,6 +1402,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert set(discovered_specs) == {layer_name}
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
+    assert getattr(spec, "dcp_scheduler_replication_size", 1) == 1
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])

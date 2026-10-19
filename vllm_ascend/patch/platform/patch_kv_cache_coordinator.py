@@ -34,7 +34,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import (
+    get_dsv4_scheduler_dcp_world_size,
+    is_prefix_cacheable,
+)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -180,7 +183,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=get_dsv4_scheduler_dcp_world_size(
+                    _manager_spec(kv_cache_group.kv_cache_spec),
+                    dcp_world_size,
+                ),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
@@ -262,9 +268,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
-        if self.dcp_world_size > 1:
-            block_size *= self.dcp_world_size
-        return block_size
+        return block_size * get_dsv4_scheduler_dcp_world_size(
+            kv_cache_spec,
+            self.dcp_world_size,
+        )
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -429,7 +436,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=get_dsv4_scheduler_dcp_world_size(
+                        spec,
+                        self.dcp_world_size,
+                    ),
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
@@ -491,7 +501,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
                 alignment_tokens=self._cache_hit_alignment_tokens,
-                dcp_world_size=self.dcp_world_size,
+                dcp_world_size=get_dsv4_scheduler_dcp_world_size(spec, self.dcp_world_size),
                 pcp_world_size=1,
             )
             for gid, blks in zip(group_ids, blocks):

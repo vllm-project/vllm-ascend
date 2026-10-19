@@ -121,6 +121,7 @@ protected:
     GlobalTensor<half> weightsGm;
     GlobalTensor<uint32_t> metadataGm;
     GlobalTensor<int32_t> indiceOutGm;
+    GlobalTensor<int32_t> valueOutBitsGm;
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
     GlobalTensor<int32_t> blockTableGm;
@@ -185,6 +186,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::InitTilingData(const QLIV2TilingDat
     constInfo.keyStride0 = tilingData->keyStride0;                     // A11: key 0轴非连续
     constInfo.keyDequantScaleStride0 = tilingData->keyDequantScaleStride0;
     constInfo.sparseCount = tilingData->sparseCount;
+    constInfo.returnFp32Scores = tilingData->returnValue == 2;
     constInfo.cmpRatio = tilingData->cmpRatio;
     constInfo.outputLayout = Q_LAYOUT_T; // 输出和输入形状一致
     if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
@@ -497,6 +499,10 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
     if ASCEND_IS_AIV {
         vectorService.InitParams(constInfo, ldInfo, tiling);
         indiceOutGm.SetGlobalBuffer((__gm__ int32_t *)sparseIndices);
+        if (constInfo.returnFp32Scores) {
+            valueOutBitsGm.SetGlobalBuffer((__gm__ int32_t *)sparseValues);
+            vectorService.InitVecValuesTensor(sparseValues);
+        }
         weightsGm.SetGlobalBuffer((__gm__ half *)weights);
         qScaleGm.SetGlobalBuffer((__gm__ half *)queryScale);
         kScaleGm.SetGlobalBuffer((__gm__ half *)keyScale);
@@ -685,6 +691,11 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
         uint32_t aivCoreNum = GetBlockNum() * 2; // 2 means c:v = 1:2
         uint64_t totalOutputSize =
             constInfo.batchSize * constInfo.qSeqSize * constInfo.kHeadNum * constInfo.sparseCount;
+        if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+            if (constInfo.returnFp32Scores) {
+                totalOutputSize = constInfo.qSeqSize * constInfo.kHeadNum * constInfo.sparseCount;
+            }
+        }
         uint64_t singleCoreSize =
             QLIV2Common::Align((totalOutputSize + aivCoreNum - 1) / aivCoreNum, GM_ALIGN_BYTES / sizeof(OUT_T));
         uint64_t baseSize = tmpBlockIdx * singleCoreSize;
@@ -693,6 +704,10 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
                 (baseSize + singleCoreSize <= totalOutputSize) ? singleCoreSize : totalOutputSize - baseSize;
             GlobalTensor<OUT_T> output = indiceOutGm[baseSize];
             AscendC::InitGlobalMemory(output, dealSize, constInfo.INVALID_IDX);
+            if (constInfo.returnFp32Scores) {
+                GlobalTensor<int32_t> values = valueOutBitsGm[baseSize];
+                AscendC::InitGlobalMemory(values, dealSize, QLIV2ServiceVec::NEG_INF);
+            }
         }
     }
 }

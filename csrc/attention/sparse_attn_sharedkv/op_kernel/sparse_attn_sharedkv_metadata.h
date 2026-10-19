@@ -29,6 +29,13 @@ using SAS_METADATA_T = int32_t;
 constexpr uint32_t FA_METADATA_SIZE = 8;
 constexpr uint32_t FD_METADATA_SIZE = 8;
 
+// The public metadata tensor reserves SAS_META_SIZE int32 values while the
+// per-core FA/FD schedules use only the prefix below.  Keep the C4-only mode
+// marker in that reserved tail so the existing per-core layout stays intact.
+constexpr uint32_t SAS_CMP_ONLY_FLAG_INDEX =
+    FA_METADATA_SIZE * AIC_CORE_NUM + FD_METADATA_SIZE * AIV_CORE_NUM;
+constexpr uint32_t SAS_CMP_ONLY_FLAG_VALUE = 0x434D504FU; // "CMPO"
+
 // FA Metadata Index Definitions
 constexpr uint32_t FA_CORE_ENABLE_INDEX = 0;
 constexpr uint32_t FA_BN2_START_INDEX = 1;
@@ -70,6 +77,7 @@ namespace detail {
 struct SasMetaData {
     uint32_t faMetadata[AIC_CORE_NUM][FA_METADATA_SIZE];
     uint32_t fdMetadata[AIV_CORE_NUM][FD_METADATA_SIZE];
+    uint32_t cmpOnlyFlag;
 };
 } // namespace detail
 
