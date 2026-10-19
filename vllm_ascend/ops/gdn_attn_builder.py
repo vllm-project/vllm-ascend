@@ -46,6 +46,47 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+_GDN_MAX_CACHED_SPEC_VIEWS = 16
+
+
+def _pure_spec_decode_shape(
+    common: CommonAttentionMetadata,
+    draft_tokens_cpu: torch.Tensor,
+    num_actual_reqs: int,
+    num_spec: int,
+) -> tuple[int, int] | None:
+    """Classify a logical batch using scheduler-owned CPU inputs only."""
+    graph_reqs = common.num_reqs
+    drafts = draft_tokens_cpu.tolist()
+    query = common.query_start_loc_cpu.tolist()
+    if len(drafts) < graph_reqs or len(query) < num_actual_reqs + 1:
+        return None
+    live_drafts = drafts[:num_actual_reqs]
+    if any(value < 0 for value in live_drafts) or not any(value > 0 for value in live_drafts):
+        return None
+    total = query[num_actual_reqs]
+    if query[0] != 0 or total != common.num_actual_tokens:
+        return None
+    if any(not 0 < query[i + 1] - query[i] <= num_spec + 1 for i in range(num_actual_reqs)):
+        return None
+    if num_actual_reqs < graph_reqs:
+        seq_lens_cpu = common.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None or seq_lens_cpu.device.type != "cpu":
+            return None
+        seq_lens = seq_lens_cpu.tolist()
+        if len(seq_lens) < graph_reqs:
+            return None
+        if any(value >= 0 for value in drafts[num_actual_reqs:graph_reqs]):
+            return None
+        if any(value != 0 for value in seq_lens[num_actual_reqs:graph_reqs]):
+            return None
+    return num_actual_reqs, total
+
+
+def _host_tensor_view_key(tensor: torch.Tensor | None) -> tuple:
+    if tensor is None:
+        return ()
+    return tensor.data_ptr(), tuple(tensor.shape), tensor.stride(), tensor.dtype
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -391,6 +432,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.non_spec_actual_seq_lengths = torch.empty(
                 (sequence_index_capacity + 1,), dtype=torch.int32, device=device
             )
+        # Read-only views are independent of the writable mixed-batch buffers.
+        self._pure_spec_views: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        if self.use_full_cuda_graph and self.use_spec_decode:
+            self._pure_spec_masks = torch.ones(sequence_index_capacity, dtype=torch.bool, device=device)
+            self._pure_spec_tokens = torch.arange(
+                max(self.decode_cudagraph_max_bs, sequence_index_capacity * (self.num_spec + 1)),
+                dtype=torch.int32,
+                device=device,
+            )
 
     def _init_reorder_batch_threshold(
         self,
@@ -666,6 +716,97 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             graph_request_count,
         )
 
+    def _try_build_pure_spec_decode(
+        self,
+        common: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None,
+        draft_tokens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        common_gdn_batch_metadata: dict[tuple, tuple[int, int] | None] | None = None,
+    ) -> GDNAttentionMetadata | None:
+        """Skip mixed-batch partitions while refreshing group-specific state.
+
+        The optional cache is owned by one model-runner metadata build call.
+        Only request classification is shared; no device state, accepted-token
+        counts or graph buffers are reused between groups or iterations.
+        """
+        if not self.use_full_cuda_graph or not self.use_spec_decode or num_accepted_tokens is None:
+            return None
+        graph_reqs = common.num_reqs
+        live_reqs = graph_reqs if num_actual_reqs is None else num_actual_reqs
+        if not 0 < live_reqs <= graph_reqs or graph_reqs > self.decode_cudagraph_max_bs:
+            return None
+        if draft_tokens_cpu is None or draft_tokens_cpu.device.type != "cpu":
+            return None
+        if common.query_start_loc_cpu.device.type != "cpu":
+            return None
+        if common_gdn_batch_metadata is None:
+            shape = _pure_spec_decode_shape(common, draft_tokens_cpu, live_reqs, self.num_spec)
+        else:
+            # Views with the same storage but different offsets/shapes must not
+            # alias. This key is safe only within the caller's immutable batch.
+            key = (
+                graph_reqs,
+                live_reqs,
+                common.num_actual_tokens,
+                self.num_spec,
+                _host_tensor_view_key(common.query_start_loc_cpu),
+                _host_tensor_view_key(draft_tokens_cpu),
+                _host_tensor_view_key(common.seq_lens_cpu_upper_bound),
+            )
+            if key not in common_gdn_batch_metadata:
+                common_gdn_batch_metadata[key] = _pure_spec_decode_shape(
+                    common, draft_tokens_cpu, live_reqs, self.num_spec
+                )
+            shape = common_gdn_batch_metadata[key]
+        if shape is None:
+            return None
+        live_reqs, total = shape
+        if not self._can_pad_spec_decode(graph_reqs, total):
+            return None
+
+        views = self._pure_spec_views.get(shape)
+        if views is None:
+            if len(self._pure_spec_views) >= _GDN_MAX_CACHED_SPEC_VIEWS:
+                self._pure_spec_views.clear()
+            views = (self._pure_spec_masks[:live_reqs], self._pure_spec_tokens[:total], self._pure_spec_tokens[:0])
+            self._pure_spec_views[shape] = views
+        masks, token_indices, empty_indices = views
+        block_table = mamba_get_block_table_tensor(
+            common.block_table_tensor[:live_reqs],
+            common.seq_lens[:live_reqs],
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        metadata = GDNAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=live_reqs,
+            num_spec_decode_tokens=total,
+            num_actual_tokens=total,
+            has_initial_state=None,
+            chunk_indices=None,
+            chunk_offsets=None,
+            prefill_query_start_loc=None,
+            prefill_state_indices=None,
+            prefill_has_initial_state=None,
+            spec_query_start_loc=common.query_start_loc[: live_reqs + 1],
+            non_spec_query_start_loc=None,
+            spec_state_indices_tensor=block_table[:, : self.num_spec + 1],
+            non_spec_state_indices_tensor=None,
+            spec_sequence_masks=masks,
+            spec_token_indx=token_indices,
+            non_spec_token_indx=empty_indices,
+            num_accepted_tokens=num_accepted_tokens[:live_reqs],
+        )
+        self._pad_spec_decode_metadata(metadata, graph_reqs)
+        self._attach_non_spec_prefill_metadata(metadata, None, None)
+        self._attach_spec_decode_metadata(metadata)
+        self._attach_non_spec_decode_metadata(metadata, None)
+        return metadata
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -674,7 +815,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
         num_actual_reqs: int | None = None,
+        common_gdn_batch_metadata: dict[tuple, tuple[int, int] | None] | None = None,
     ) -> GDNAttentionMetadata:
+        pure_spec_metadata = self._try_build_pure_spec_decode(
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            num_actual_reqs,
+            common_gdn_batch_metadata,
+        )
+        if pure_spec_metadata is not None:
+            return pure_spec_metadata
         # Normalize FIA's full-width dummy queries before slicing requests:
         # its common token count may still include those inactive rows.
         if self.use_full_cuda_graph and self.use_spec_decode:
