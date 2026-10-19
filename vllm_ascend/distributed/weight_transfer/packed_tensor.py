@@ -74,7 +74,11 @@ def packed_broadcast_producer(
                         done = True
                         break
                     # Apply post processing and convert to linearized uint8 tensor
-                    tensor = post_iter_func(item).contiguous().reshape(-1).view(torch.uint8)
+                    tensor = post_iter_func(item).contiguous()
+                    original = item[1]
+                    if tensor.dtype != original.dtype or tensor.numel() != original.numel():
+                        raise ValueError(f"tensor {item[0]!r} materialized with a different dtype or element count")
+                    tensor = tensor.reshape(-1).view(torch.uint8)
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.numel()
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -181,6 +185,8 @@ def packed_broadcast_consumer(
                     except StopIteration:
                         done = True
                         break
+                    if any(dimension < 0 for dimension in shape):
+                        raise ValueError(f"tensor {name!r} has a negative shape: {shape}")
                     tensor_size = math.prod(shape) * dtype.itemsize
                     packing_tensor_meta_data[buffer_idx].append((name, shape, dtype, tensor_size))
                     packing_tensor_sizes[buffer_idx] += tensor_size
@@ -198,6 +204,8 @@ def packed_broadcast_consumer(
 
             # Broadcast, unpack clones and load_weights share one ordered stream.
             group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
+            # Match #18078: external HCCL work must finish before torch unpacks.
+            streams[buffer_idx].synchronize()
 
             # Unpack and load weights on the custom stream
             with torch.npu.stream(streams[buffer_idx]):
@@ -274,7 +282,10 @@ def packed_npu_ipc_producer(
     total_bytes = 0
 
     for name, orig_tensor in iterator:
-        flat = post_iter_func((name, orig_tensor)).contiguous().reshape(-1).view(torch.uint8)
+        tensor = post_iter_func((name, orig_tensor)).contiguous()
+        if tensor.dtype != orig_tensor.dtype or tensor.numel() != orig_tensor.numel():
+            raise ValueError(f"tensor {name!r} materialized with a different dtype or element count")
+        flat = tensor.reshape(-1).view(torch.uint8)
 
         if flat.numel() > buffer_size_bytes:
             raise ValueError(
@@ -343,22 +354,40 @@ def packed_npu_ipc_consumer(
     # imported at module load time on non-NPU hosts.
     from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
 
+    if device_index < 0:
+        raise ValueError(f"device_index must be non-negative, got {device_index}")
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
         )
 
+    dtypes = []
+    for dtype_name in dtype_names:
+        dtype = getattr(torch, dtype_name, None)
+        if not isinstance(dtype, torch.dtype):
+            raise ValueError(f"unknown torch dtype name {dtype_name!r}")
+        dtypes.append(dtype)
+    if not (len(names) == len(shapes) == len(dtypes) == len(tensor_sizes)):
+        raise ValueError("packed IPC metadata lengths disagree")
+    for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
+        if any(dimension < 0 for dimension in shape) or size < 0:
+            raise ValueError(f"invalid metadata for tensor {name!r}")
+        expected = math.prod(shape) * dtype.itemsize
+        if size != expected:
+            raise ValueError(f"tensor {name!r} metadata says {size} bytes but requires {expected} bytes")
+
     args = ipc_handle[physical_npu_id]
     list_args = list(args)
     # Index 6 of the args from reduce_tensor is the device_index.
     # Overwrite it with the receiver's device index.
+    if len(list_args) <= 6:
+        raise ValueError(f"NPU IPC rebuild arguments do not contain a device index: got {len(list_args)} values")
     list_args[6] = device_index
     packed = rebuild_npu_tensor(*list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]
 
-    dtypes = [getattr(torch, dn) for dn in dtype_names]
     weights: list[tuple[str, torch.Tensor]] = []
     offset = 0
     for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
