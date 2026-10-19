@@ -91,6 +91,8 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # of the retired patch. The impl keeps our historical name; its
     # signature matches the upstream compute_topk_scores.
     "vllm.v1.worker.gpu.sample.logprob.compute_topk_scores": (compute_topk_logprobs),
+    # TODO: Remove when upstream guards empty launch grids (Ascend
+    # rejects an empty grid with coreDim=0).
     "vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens": (apply_trace_tokens),
     # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported
     # version.
@@ -101,6 +103,8 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # is passed at call time; sampling_mask_from_logits_npu therefore keeps
     # a cls-free signature (the retired patch wrapped it in classmethod()).
     # Rationale: strided vocab-dimension loads over-allocate NPU UB.
+    # TODO: Remove when Triton-Ascend can compile and efficiently lower
+    # the upstream kernel.
     "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": (sampling_mask_from_logits_npu),
     # TODO: Remove once the compiler and Triton-Ascend toolkit support the
     # upstream fill_logprob_token_ids_kernel.
@@ -148,7 +152,16 @@ _device_functions_swapped = False
 
 
 def swap_device_functions() -> None:
-    """Swap Triton device functions the dispatcher cannot wrap."""
+    """Swap Triton device functions the dispatcher cannot wrap.
+    
+    Device functions are ``@triton.jit`` helpers called from inside other
+    kernels' bodies and inlined at kernel-compile time; there is no host
+    launch for the dispatcher to intercept, and a ``KernelOverride`` is
+    not a ``JITFunction``, so a wrapped name would break the outer
+    kernel's compilation. The raw attribute swap below keeps the retired
+    patch's semantics: only the defining module is patched, which is
+    where the inliner resolves the callee.
+    """
     global _device_functions_swapped
     if _device_functions_swapped:
         return
