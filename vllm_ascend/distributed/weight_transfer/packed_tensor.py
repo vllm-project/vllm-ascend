@@ -8,29 +8,11 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
-from vllm.distributed.weight_transfer.packed_tensor import (
-    PackedBufferImporter,
-    unpack_tensor,
-)
 
 # Default values for packed tensor configuration.
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
-
-
-def _unpack_tensor(
-    packed_tensor: torch.Tensor,
-    names: list[str],
-    shapes: list[list[int]],
-    dtypes: list[torch.dtype],
-    tensor_sizes: list[int],
-) -> list[tuple[str, torch.Tensor]]:
-    """Reuse upstream unpacking while supporting scalar shapes on older vLLM."""
-    # Older upstream versions call view(*shape), which fails for shape=[].
-    # Unpack scalars as one-element vectors, then restore their original shape.
-    unpacked = unpack_tensor(packed_tensor, names, [shape or [1] for shape in shapes], dtypes, tensor_sizes)
-    return [(name, tensor.view(shape)) for (name, tensor), shape in zip(unpacked, shapes)]
 
 
 def packed_broadcast_producer(
@@ -81,7 +63,7 @@ def packed_broadcast_producer(
                     done = True
                     break
                 # Apply post processing and convert to linearized uint8 tensor
-                tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
+                tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
                 packing_tensor_list[buffer_idx].append(tensor)
                 packing_tensor_sizes[buffer_idx] += tensor.numel()
                 if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -128,6 +110,21 @@ def packed_broadcast_consumer(
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
     """
+
+    def unpack_tensor(
+        packed_tensor: torch.Tensor,
+        names: list[str],
+        shapes: list[list[int]],
+        dtypes: list[torch.dtype],
+        tensor_sizes: list[int],
+    ) -> list[tuple[str, torch.Tensor]]:
+        """Unpack a packed uint8 tensor into a list of typed tensors."""
+        unpacked_tensors = packed_tensor.split(tensor_sizes)
+        unpacked_list = [
+            (name, tensor.contiguous().view(dtype).view(*shape))
+            for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
+        ]
+        return unpacked_list
 
     target_packed_tensor_size = buffer_size_bytes
 
@@ -180,7 +177,7 @@ def packed_broadcast_consumer(
         with torch.npu.stream(streams[buffer_idx]):
             names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
             post_unpack_func(
-                _unpack_tensor(
+                unpack_tensor(
                     packed_tensors[buffer_idx],
                     list(names),
                     list(shapes),
@@ -232,7 +229,7 @@ def packed_npu_ipc_producer(
     total_bytes = 0
 
     for name, orig_tensor in iterator:
-        flat = post_iter_func((name, orig_tensor)).contiguous().view(-1).view(torch.uint8)
+        flat = post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
 
         if flat.numel() > buffer_size_bytes:
             raise ValueError(
@@ -260,7 +257,7 @@ def packed_npu_ipc_producer(
         tensor_sizes.append(flat.numel())
         total_bytes += flat.numel()
 
-    if names:
+    if total_bytes:
         torch.npu.current_stream().synchronize()
         yield {
             "names": names,
@@ -271,22 +268,6 @@ def packed_npu_ipc_producer(
         }
 
 
-class NPUPackedBufferImporter(PackedBufferImporter):
-    """Cache one NPU mapping across chunks; inherit upstream cache cleanup."""
-
-    _entry: tuple[tuple, torch.Tensor] | None
-
-    def rebuild(self, list_args: list) -> torch.Tensor:
-        from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-
-        key = tuple(list_args)
-        if self._entry is not None and self._entry[0] == key:
-            return self._entry[1]
-        packed = rebuild_npu_tensor(*list_args)
-        self._entry = (key, packed)
-        return packed
-
-
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
     physical_npu_id: str,
@@ -295,7 +276,6 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
-    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -313,9 +293,11 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
-        importer: Mapping cache shared across chunks of one buffer export.
-            Omit only for single-chunk consumption.
     """
+    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
+    # imported at module load time on non-NPU hosts.
+    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
@@ -326,12 +308,18 @@ def packed_npu_ipc_consumer(
     # Index 6 of the args from reduce_tensor is the device_index.
     # Overwrite it with the receiver's device index.
     list_args[6] = device_index
-    if importer is None:
-        importer = NPUPackedBufferImporter()
-    packed = importer.rebuild(list_args)
+    packed = rebuild_npu_tensor(*list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]
 
     dtypes = [getattr(torch, dn) for dn in dtype_names]
-    return [(name, tensor.clone()) for name, tensor in _unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)]
+    weights: list[tuple[str, torch.Tensor]] = []
+    offset = 0
+    for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
+        raw = packed[offset : offset + size]
+        tensor = raw.contiguous().view(dtype).view(*shape).clone()
+        weights.append((name, tensor))
+        offset += size
+
+    return weights

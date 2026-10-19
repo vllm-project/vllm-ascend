@@ -52,7 +52,6 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
-from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedBufferImporter
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -197,15 +196,14 @@ def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
-    engine._packed_importer = NPUPackedBufferImporter()
-    engine._packed_importer._entry = (("handle",), torch.zeros(1))
+    engine._packed_importer = MagicMock()
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
     mock_finalize.assert_called_once_with(engine.model, engine.model_config)
-    assert engine._packed_importer._entry is None
+    engine._packed_importer.close.assert_called_once_with()
 
 
 def test_receive_packed_weights_loads_model():
@@ -222,7 +220,6 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
-    engine._packed_importer = NPUPackedBufferImporter()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -241,7 +238,6 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
-        importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
 
@@ -424,15 +420,6 @@ def test_receive_scopes_mtp_completeness_check_to_loading():
     assert is_mtp_completeness_check_enabled()
 
 
-def test_shutdown_releases_packed_mapping():
-    engine = object.__new__(NPUIPCWeightTransferEngine)
-    engine._packed_importer = NPUPackedBufferImporter()
-    engine._packed_importer._entry = (("handle",), torch.ones(1))
-    engine.shutdown()
-    engine.shutdown()
-    assert engine._packed_importer._entry is None
-
-
 def test_uuid_uses_assigned_device_with_visibility_mapping():
     npu_ipc_engine.npu_generate_uuid.cache_clear()
     try:
@@ -501,13 +488,13 @@ def test_trainer_worker_roundtrip_two_updates(packed):
         )
         for _ in range(2):
             trainer.send_weights()
-            assert worker._packed_importer._entry is None
             for (expected_name, expected), (name, actual) in zip(source, loads[-2:]):
                 assert name == expected_name
                 assert torch.equal(expected, actual)
             for _, tensor in source:
                 tensor.add_(10)
     assert len(loads) == 4
-    assert len(rebuilds) == (2 if packed else 4)
+    # The existing packed consumer rebuilds each chunk independently.
+    assert len(rebuilds) == 4
     assert client.start_weight_update.call_count == client.finish_weight_update.call_count == 2
     assert client.update_weights.call_count == (4 if packed else 2)

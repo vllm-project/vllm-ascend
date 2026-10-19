@@ -9,8 +9,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from vllm.config import VllmConfig
-from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
 )
@@ -24,7 +22,6 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -130,17 +127,6 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
             "source=...) and drive it with send_weights()."
         )
 
-    def __init__(
-        self,
-        config: WeightTransferConfig,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        model: torch.nn.Module,
-    ) -> None:
-        super().__init__(config, vllm_config, device, model)
-        # The inherited finish/shutdown methods close this mapping.
-        self._packed_importer = NPUPackedBufferImporter()
-
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
@@ -168,7 +154,6 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
-                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
