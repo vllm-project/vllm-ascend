@@ -29,9 +29,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    _get_encoder_cache_hidden_dim,
-)
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
@@ -42,6 +39,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     MmcDirect,
 )
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #57904 dropped `_get_encoder_cache_hidden_dim` from `cpu.common` on main
+# (encoder output widths are measured at startup now); the v0.31.0 lane still
+# ships it there.
+if vllm_version_is("0.31.0"):
+    from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
+        _get_encoder_cache_hidden_dim,
+    )
+else:
+
+    def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig") -> int:
+        """Width of one encoder-output token, DeepStack-aware.
+
+        Reproduces the helper upstream removed in #57904 so encoder-cache
+        buffers are sized identically on both lanes, including Qwen3-VL's
+        DeepStack packing (``out_hidden_size * (1 + N)``).
+        """
+        model_config = vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        vision_config = getattr(hf_config, "vision_config", None) if hf_config is not None else None
+        if vision_config is not None:
+            out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+            deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+            if out_hidden_size is not None and deepstack_indexes:
+                return out_hidden_size * (1 + len(deepstack_indexes))
+        return model_config.get_inputs_embeds_size()
+
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

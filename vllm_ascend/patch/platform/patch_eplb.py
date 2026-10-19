@@ -575,7 +575,7 @@ def _wrap_async_worker(original_worker):
     transfer_stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
 
     def _run(state, stream, is_profile):
-        rank = get_eplb_group().device_group.rank()
+        rank = _async_worker.get_eplb_group().device_group.rank()
         while state.wait_for_rearrangement(stream):
             eplb_group = _async_worker.get_eplb_group().device_group
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
