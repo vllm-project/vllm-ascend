@@ -118,8 +118,8 @@ def view_compressed_indexer_cache(
         # Padded page with one kernel block per scheduler block: index rows
         # through the padded-page stride.
         shape = (num_blocks, indexer_kernel_block_size, kv_cache_spec.num_kv_heads, row_elems)
-        strides = (page_el, row_elems, row_elems, 1)
-        return (torch.as_strided(typed_slot, size=shape, stride=strides),)
+        padded_strides = (page_el, row_elems, row_elems, 1)
+        return (torch.as_strided(typed_slot, size=shape, stride=padded_strides),)
     shape = tuple(
         attn_backend.get_kv_cache_shape(
             num_blocks * num_blocks_per_kv_block,

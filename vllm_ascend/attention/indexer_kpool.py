@@ -776,11 +776,13 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 glm5_next_lightning_indexer_triton,
             )
 
-            max_pools = indexer_metadata.max_pool_seq_len
+            known_max_pools = indexer_metadata.max_pool_seq_len
             # Captured graphs must cover future sequence growth, not only
             # the sequence lengths used while warming up the graph.
-            if max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                max_pools = indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
+            if known_max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                max_pools = int(indexer_metadata.block_table.shape[1] * indexer_cache.shape[1])
+            else:
+                max_pools = known_max_pools
             indices = glm5_next_lightning_indexer_triton(
                 q_values,
                 indexer_cache,
