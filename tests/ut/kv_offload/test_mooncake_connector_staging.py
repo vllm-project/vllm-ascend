@@ -40,7 +40,6 @@ def _make_fake_recv_thread(staging_chunk_bytes: int) -> KVCacheRecvingThread:
     thread._landing_stream = MagicMock()
     thread._landing_streams = [thread._landing_stream, MagicMock()]
     thread._pipeline_banks = 2
-    thread._async_landing_enabled = False
     thread._pipeline_landing_enabled = False
     return thread
 
@@ -283,9 +282,13 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
-    def test_async_landing_uses_dedicated_stream_and_event(
+    def test_pipeline_single_bank_degenerates_to_per_window_waits(
         self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
     ):
+        # BANKS=1 keeps the whole window as one bank: each window's copies are
+        # recorded on the (single) landing stream and awaited just before the
+        # next window's read reuses the same slots, plus a final drain — the
+        # retired ASYNC_LANDING mode's behavior, now expressed as K=1.
         offloaded_kv = torch.empty((3 * self.staging_chunk_bytes,), dtype=torch.int8)
         register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
         staging = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
@@ -295,7 +298,9 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
-        self.thread._async_landing_enabled = True
+        self.thread._pipeline_landing_enabled = True
+        self.thread._pipeline_banks = 1
+        self.thread._landing_streams = [self.thread._landing_stream]
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
         def record_copy(dst: int, length: int, staging_offset: int = 0) -> None:
@@ -308,21 +313,19 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
             [offloaded_kv.data_ptr()],
             [0xA00000],
             [offloaded_kv.numel()],
-            "req-async-on",
+            "req-banks1",
         )
 
-        # 3 chunks over a window of 2 -> 2 windows, each awaited by its own
-        # event on the dedicated landing stream; no device-wide sync at all.
+        # 3 chunks over a window of 2 -> 2 reads; no device-wide sync at all.
         self.assertEqual(ret, 0)
         self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 2)
-        self.assertEqual(mock_stream.call_count, 2)
         mock_stream.assert_called_with(self.thread._landing_stream)
-        self.assertEqual(mock_event_cls.call_count, 2)
-        self.assertEqual(mock_event_cls.return_value.record.call_count, 2)
-        mock_event_cls.return_value.record.assert_called_with(self.thread._landing_stream)
-        self.assertEqual(mock_event_cls.return_value.synchronize.call_count, 2)
         mock_sync.assert_not_called()
         mock_register_buffer.assert_not_called()
+        # Every slot records an event on the landing stream (2 + 1 slots); the
+        # per-slot awaits happen at the JIT reclaim of window 2 and the drain.
+        self.assertGreaterEqual(mock_event_cls.return_value.record.call_count, 3)
+        self.assertGreaterEqual(mock_event_cls.return_value.synchronize.call_count, 3)
         self.assertEqual(
             copied,
             [
@@ -348,7 +351,6 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
-        self.thread._async_landing_enabled = False
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
         ret = self.thread._batch_transfer_sync_read_with_optional_staging(
@@ -356,11 +358,11 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
             [offloaded_kv.data_ptr()],
             [0xA00000],
             [offloaded_kv.numel()],
-            "req-async-off",
+            "req-pipeline-off",
         )
 
         # Kill switch off: legacy path — global device sync per window, the
-        # dedicated stream and events are never touched.
+        # landing streams and events are never touched.
         self.assertEqual(ret, 0)
         mock_sync.assert_called_once()
         mock_stream.assert_not_called()

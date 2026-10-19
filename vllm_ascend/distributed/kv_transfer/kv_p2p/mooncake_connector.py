@@ -462,20 +462,19 @@ class KVCacheRecvingThread(threading.Thread):
         self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
         self._dsa_pd_mooncake_staging_bytes = 0
         self._dsa_pd_mooncake_staging_lock = threading.Lock()
-        # Async landing: staged copies are submitted to dedicated NPU stream(s)
-        # and awaited with per-slot events, so the device-wide
-        # torch.npu.synchronize() in the landing loop no longer stalls unrelated
-        # streams. Pipeline mode splits the staging window into BANKS banks
-        # (VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS, default 2) that round-robin, each
-        # landing on its own stream, so one bank's landing can execute in
-        # parallel with the others instead of queueing behind them.
+        # Pipeline landing: staged copies are submitted to dedicated NPU
+        # stream(s) and awaited with per-slot events, so the device-wide
+        # torch.npu.synchronize() in the landing loop no longer stalls
+        # unrelated streams. The staging window is split into BANKS banks
+        # (VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS, default 4) that round-robin,
+        # each landing on its own stream, so one bank's landing can execute
+        # in parallel with the others instead of queueing behind them.
         # _landing_stream (stream 0) stays the single stream of the
-        # non-pipeline modes. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING=0
+        # non-pipeline mode. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=0
         # restores the legacy synchronous landing path.
         self._pipeline_banks = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
         self._landing_streams = [torch.npu.Stream() for _ in range(max(1, self._pipeline_banks))]
         self._landing_stream = self._landing_streams[0]
-        self._async_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING
         self._pipeline_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE
         # Host-only offloaded KV leaves the ADXL engine with no device
         # region registered, so the device-side data channel is never
@@ -1009,7 +1008,7 @@ class KVCacheRecvingThread(threading.Thread):
         if self._pipeline_landing_enabled and not pipeline_active:
             logger.warning(
                 "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE needs a staging window >= 2 "
-                "(got %s); falling back to per-window async landing.",
+                "(got %s); falling back to the synchronous landing path.",
                 staging_window,
             )
         banks = self._pipeline_banks if pipeline_active else 1
@@ -1106,20 +1105,9 @@ class KVCacheRecvingThread(threading.Thread):
                         landing_event.record(landing_stream)
                         pending_slot_events[slot] = landing_event
                 timing_batches += 1
-            elif self._async_landing_enabled:
-                # The event wait must stay inside the window loop: the next
-                # window's batch_transfer_sync_read overwrites the same staging
-                # slots, so landing of this window must complete first.
-                land_started = time.perf_counter()
-                with torch.npu.stream(self._landing_stream):
-                    for local_dst, length, staging_offset in copy_plan:
-                        self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
-                landing_done = torch.npu.Event()
-                landing_done.record(self._landing_stream)
-                landing_done.synchronize()
-                timing_land_exposed_secs += time.perf_counter() - land_started
-                timing_batches += 1
             else:
+                # Synchronous fallback (kill switch off, or window < 2):
+                # device-wide sync keeps the legacy v0 contract.
                 land_started = time.perf_counter()
                 for local_dst, length, staging_offset in copy_plan:
                     self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
@@ -1135,7 +1123,7 @@ class KVCacheRecvingThread(threading.Thread):
             "Staged DSA PD mooncake receive timing: request=%s mode=%s batches=%s chunks=%s "
             "copies=%s plan=%s total_s=%.3f read_s=%.3f read_settle_s=%.3f land_exposed_s=%.3f",
             remote_request_id,
-            "pipeline" if pipeline_active else ("async" if self._async_landing_enabled else "sync"),
+            "pipeline" if pipeline_active else "sync",
             timing_batches,
             len(staged_transfers),
             timing_copy_calls,

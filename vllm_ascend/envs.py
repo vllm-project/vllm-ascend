@@ -93,25 +93,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": lambda: max(
         1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW", "16"))
     ),
-    # Kill switch for async landing of DSA PD Mooncake staged reads. 1 = run
-    # the staging -> offloaded-KV copies on a dedicated NPU stream and wait on
-    # a per-window event instead of torch.npu.synchronize(); 0 (default)
-    # keeps the legacy synchronous landing path. Valid values: 0 or 1.
-    # This setting is not sensitive.
-    "VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING": lambda: _strict_binary_env(
-        "VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING"
-    ),
-    # Three-stage pipelining of DSA PD Mooncake staged reads. 1 = the staging
-    # window (VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW, unchanged total
-    # capacity) is split into two half-window banks that consecutive network
-    # reads alternate between, and each bank lands on its own dedicated NPU
-    # stream so the two banks' copies can execute in parallel. The next read
-    # needs no wait while the current read's landing runs; a bank is only
-    # reclaimed, via its per-slot Events, when the pipeline wraps back to it
-    # two reads later, plus a final drain before the receive completes. The
-    # network batch halves accordingly and the staging footprint is identical
-    # with the pipeline on or off. 0 (default) keeps the per-window wait of
-    # the async-landing mode. Valid values: 0 or 1. Not sensitive.
+    # Pipelining of DSA PD Mooncake staged reads. 1 = the staging window
+    # (VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW, unchanged total capacity)
+    # is split into BANKS banks that network reads round-robin between, and
+    # each bank lands on its own dedicated NPU stream so banks' copies can
+    # execute in parallel. A bank is only reclaimed, via its per-slot Events,
+    # when the pipeline wraps back to it BANKS reads later, plus a final
+    # drain before the receive completes. The network batch shrinks to
+    # window/BANKS chunks and the staging footprint is identical with the
+    # pipeline on or off. BANKS=1 degenerates to per-window landing waits.
+    # 0 keeps the legacy synchronous landing path (kill switch). Valid
+    # values: 0 or 1. Not sensitive.
     "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE": lambda: _strict_binary_env(
         "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE"
     ),

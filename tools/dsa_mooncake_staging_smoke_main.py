@@ -127,7 +127,6 @@ def _make_fake_recv_thread(transfer_engine: Any, staging_bytes: int) -> Any:
         torch.npu.Stream() for _ in range(max(1, thread._pipeline_banks))
     ]
     thread._landing_stream = thread._landing_streams[0]
-    thread._async_landing_enabled = os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING", "0") == "1"
     thread._pipeline_landing_enabled = os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE", "0") == "1"
     thread.vllm_config = SimpleNamespace()
     return thread
