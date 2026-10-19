@@ -1444,9 +1444,9 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        if cache_config.block_size is None:
-            cache_config.block_size = 32
-        elif cache_config.block_size not in [32, 64, 128]:
+        # CacheConfig resolves an omitted --block-size on its own default above, so
+        # block_size cannot be None here.
+        if cache_config.block_size not in [32, 64, 128]:
             logger.warning(
                 "For deepseek_v4 model, block size should be 32, 64 or 128. "
                 "Setting block size to 32 for better performance."
