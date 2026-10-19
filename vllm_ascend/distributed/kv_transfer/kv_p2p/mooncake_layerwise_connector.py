@@ -1286,6 +1286,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
+        self.current_layer = 0
 
     def _init_layerwise_reuse_state(self) -> None:
         slot_by_addr: dict[int, int] = {}
@@ -1761,48 +1762,52 @@ class MooncakeLayerwiseConnectorWorker:
                 self._recving_metadata[req_id] = meta
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
-            update_metadata = {}
-            for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
-                transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
-                self._align_remote_block_ids(req_meta)
-                for i, kv_cache_spec in enumerate(self.kv_cache_specs):
-                    if isinstance(kv_cache_spec, MambaSpec):
-                        single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
-                            req_meta, req_idx, req_id, i
-                        )
-                    else:
-                        single_group_transfer_mappings = self._get_kv_split_metadata(req_meta, req_idx, req_id, i)
-                    for (host, port), block_dict in single_group_transfer_mappings.items():
-                        if (host, port) not in transfer_mappings:
-                            transfer_mappings[(host, port)] = {
-                                "local_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
-                                "remote_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
-                                "trans_count": [0 for _ in range(self.num_kv_cache_groups)],
-                            }
-                        transfer_mappings[(host, port)]["local_block_ids"][i].extend(
-                            single_group_transfer_mappings[(host, port)]["local_block_ids"]
-                        )
-                        transfer_mappings[(host, port)]["remote_block_ids"][i].extend(
-                            single_group_transfer_mappings[(host, port)]["remote_block_ids"]
-                        )
-                        transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
-                            (host, port)
-                        ]["trans_count"]
-                assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
-                update_req_meta = copy.deepcopy(req_meta)
-                for (host, port), block_dict in transfer_mappings.items():
-                    update_req_meta.remote_host = host
-                    update_req_meta.remote_port = port
-                    update_req_meta.local_block_ids = self._get_kernel_block_ids(block_dict["local_block_ids"])
-                    update_req_meta.remote_block_ids = self._get_kernel_block_ids(block_dict["remote_block_ids"])
-                    update_req_meta.trans_count = block_dict["trans_count"]
-                    update_metadata[req_id] = update_req_meta
-            metadata.requests = {}
-            for req_id, req_meta in update_metadata.items():
-                metadata.requests[req_id] = update_metadata[req_id]
+            if not all(req.trans_count for req in metadata.requests.values()):
+                self._prepare_layerwise_send_metadata(metadata)
 
-            # update send task trans block info
-            if self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant:
+    def _prepare_layerwise_send_metadata(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
+        update_metadata = {}
+        for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
+            transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
+            self._align_remote_block_ids(req_meta)
+            for i, kv_cache_spec in enumerate(self.kv_cache_specs):
+                if isinstance(kv_cache_spec, MambaSpec):
+                    single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
+                        req_meta, req_idx, req_id, i
+                    )
+                else:
+                    single_group_transfer_mappings = self._get_kv_split_metadata(req_meta, req_idx, req_id, i)
+                for (host, port), block_dict in single_group_transfer_mappings.items():
+                    if (host, port) not in transfer_mappings:
+                        transfer_mappings[(host, port)] = {
+                            "local_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
+                            "remote_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
+                            "trans_count": [0 for _ in range(self.num_kv_cache_groups)],
+                        }
+                    transfer_mappings[(host, port)]["local_block_ids"][i].extend(
+                        single_group_transfer_mappings[(host, port)]["local_block_ids"]
+                    )
+                    transfer_mappings[(host, port)]["remote_block_ids"][i].extend(
+                        single_group_transfer_mappings[(host, port)]["remote_block_ids"]
+                    )
+                    transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
+                        (host, port)
+                    ]["trans_count"]
+            assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
+            update_req_meta = copy.deepcopy(req_meta)
+            for (host, port), block_dict in transfer_mappings.items():
+                update_req_meta.remote_host = host
+                update_req_meta.remote_port = port
+                update_req_meta.local_block_ids = self._get_kernel_block_ids(block_dict["local_block_ids"])
+                update_req_meta.remote_block_ids = self._get_kernel_block_ids(block_dict["remote_block_ids"])
+                update_req_meta.trans_count = block_dict["trans_count"]
+                update_metadata[req_id] = update_req_meta
+        metadata.requests = {}
+        for req_id, req_meta in update_metadata.items():
+            metadata.requests[req_id] = update_metadata[req_id]
+
+        # update send task trans block info
+        if self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant:
                 send_task = metadata.send_task
                 send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
                 send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
@@ -1859,6 +1864,14 @@ class MooncakeLayerwiseConnectorWorker:
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
+            # vLLM defers start_load_kv until after the forward pass when the
+            # step has no synchronous KV loads. The per-rank send metadata
+            # (remote ports, trans_count) must be ready before the layerwise
+            # sender consumes it during forward, so prepare it lazily here on
+            # the first layer of each step. The trans_count guard makes this
+            # idempotent against the deferred start_load_kv pass.
+            if not all(req.trans_count for req in connector_metadata.requests.values()):
+                self._prepare_layerwise_send_metadata(connector_metadata)
             if self.current_layer >= self.total_layers:
                 self.current_layer += 1
                 return
