@@ -36,6 +36,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_BLOCK_SIZE,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
     FlashMLADecode,
@@ -99,6 +100,8 @@ BUILD_METADATA_STEP_DECODE = 1
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+MLAPO_CACHE_BLOCK_ALIGNMENT = 16
+MLAPO_MAX_CACHE_BLOCK_SIZE = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -1334,7 +1337,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
 
-        if self.use_flashmla and self.supports_prolog_v3_writer():
+        if self.use_flashmla and (
+            self.supports_prolog_v3_writer() or (self._supports_flashmla_mlapo() and not self.dcp_enabled)
+        ):
             self._prepare_flashmla_writer_buffers()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
@@ -1343,6 +1348,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
         block_size = self.vllm_config.cache_config.block_size
+        if not self.use_mla_rope:
+            capacity = min(capacity, MLAPO_MAX_SUPPORTED_TOKENS)
+            block_size = FLASHMLA_BLOCK_SIZE
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
@@ -1891,6 +1899,53 @@ class AscendMLAImpl(MLAAttentionImpl):
         return self._supports_strided_mla_projection() and (
             getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
         )
+
+    def _supports_flashmla_mlapo(self) -> bool:
+        """Admit the main model's no-RoPE FlashMLA decode without changing V3 writers."""
+        if not (
+            self.use_flashmla
+            and self.enable_mlapo
+            and not self.is_draft_model
+            and not self.use_mla_rope
+            and self.support_fp8_attention
+            and self.supports_prolog_v3_dtype()
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and not self.pcp_enabled
+            and not self.is_pcp_decode_sharded
+            and self.supports_prolog_v3_projection()
+            and getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
+            and not getattr(self.q_proj, "_chunk_size", 0)
+        ):
+            return False
+        projections = (self.fused_qkv_a_proj, self.q_proj)
+        if self._mlapo_uses_native_weights:
+            return self.mlapo_weight_quant_mode == 0 and all(
+                isinstance(layer.quant_method, UnquantizedLinearMethod) for layer in projections
+            )
+        return self.mlapo_weight_quant_mode == 3 and all(
+            type(self._get_context_prolog_quant_method(layer)) is AscendW8A8MXFP8DynamicLinearMethod
+            for layer in projections
+        )
+
+    def _can_use_flashmla_mlapo(self, kv_cache, attn_metadata) -> bool:
+        """Check padded decode rows and preallocated buffers before entering MLAPO."""
+        num_tokens = attn_metadata.num_decode_tokens
+        if not (
+            self._supports_flashmla_mlapo()
+            and attn_metadata.external_flashmla is not None
+            and attn_metadata.num_prefills == 0
+            and 0 < num_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+        ):
+            return False
+        for cache, width in zip(kv_cache, (self.kv_lora_rank, self.qk_rope_head_dim)):
+            if cache.dtype != torch.bfloat16 or cache.shape[1:] != (FLASHMLA_BLOCK_SIZE, self.num_kv_heads, width):
+                return False
+        buffers = getattr(self, "_dcp_current_kv_buffers", None) if self.dcp_enabled else self._flashmla_writer_buffers
+        if buffers is None or num_tokens > buffers[2].numel():
+            return False
+        block_size = buffers[0].shape[1]
+        return 0 < block_size <= MLAPO_MAX_CACHE_BLOCK_SIZE and block_size % MLAPO_CACHE_BLOCK_ALIGNMENT == 0
 
     def _uses_strided_kv_adapter(self) -> bool:
         """A5 drafts with unsupported He retain their strided cache via scatter.
@@ -2990,20 +3045,30 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         bsz = attn_metadata.num_decode_tokens
         history_slots = attn_metadata.slot_mapping[:bsz]
+        flash_mlapo = attn_metadata.external_flashmla is not None
+        if flash_mlapo:
+            history_slots = attn_metadata.external_flashmla.slots[:bsz]
         return_current_kv = self._decode_requires_current_kv(attn_metadata)
-        if return_current_kv:
+        scatter_history = return_current_kv or flash_mlapo
+        if return_current_kv or (flash_mlapo and self.dcp_enabled):
             # DCP attention needs every current row, while the paged cache keeps
             # only this rank's history. Use the existing prolog cache outputs for
             # the current chunk, then scatter its rank-owned rows to history.
             assert self._dcp_current_kv_buffers is not None
             current_nope_cache, current_pe_cache, current_indices = self._dcp_current_kv_buffers
             assert bsz <= current_indices.numel()
-            block_size = kv_cache[0].shape[1]
+            block_size = current_nope_cache.shape[1]
             num_blocks = cdiv(bsz, block_size)
             current_nope_cache = current_nope_cache[:num_blocks]
             current_pe_cache = current_pe_cache[:num_blocks]
             decode_k_nope, decode_k_pe = current_nope_cache, current_pe_cache
             cache_index = current_indices[:bsz]
+        elif flash_mlapo:
+            # Token-fused views have stride 576 along tokens, which MLAPO does
+            # not accept. Only stage current rows; never materialize history.
+            writer_cache, cache_index, staged = self._prolog_v3_writer_workspace(bsz, kv_cache, history_slots)
+            assert staged
+            decode_k_nope, decode_k_pe = writer_cache
         else:
             # Only the direct prolog needs int64; DCP scatters the original slots.
             cache_index = history_slots.to(torch.int64)
@@ -3081,24 +3146,32 @@ class AscendMLAImpl(MLAAttentionImpl):
             weight_quant_mode=weight_quant_mode,
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             quant_scale_ckv=quant_scale_ckv,
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
         )
 
         decode_q_nope = decode_q_nope.view(bsz, self.mlapo_num_heads, self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
+        if flash_mlapo:
+            # Native MLAPO pads weight heads; FlashMLA and DCP use real heads.
+            decode_q_nope = decode_q_nope[:, : self.num_heads]
+            decode_q_pe = decode_q_pe[:, : self.num_heads]
 
         decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
         current_k_nope = current_k_pe = None
-        if return_current_kv:
-            current_k_nope = current_nope_cache.flatten(0, 1)[:bsz]
-            current_k_pe = current_pe_cache.flatten(0, 1)[:bsz]
+        if scatter_history:
+            written_k_nope = decode_k_nope.flatten(0, 1)[:bsz]
+            written_k_pe = decode_k_pe.flatten(0, 1)[:bsz]
             DeviceOperator.reshape_and_cache(
-                key=current_k_nope,
-                value=current_k_pe,
+                key=written_k_nope,
+                value=written_k_pe,
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
                 slot_mapping=history_slots,
             )
             decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+            if return_current_kv:
+                current_k_nope, current_k_pe = written_k_nope, written_k_pe
         decode_preprocess_res = DecodeMLAPreprocessResult(
             decode_q_nope,
             decode_q_pe,
@@ -3381,7 +3454,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         elif (
             (self.fa_quant_layer or self.enable_mlapo)
-            and not fused_mla_cache
+            and (not fused_mla_cache or self._can_use_flashmla_mlapo(kv_cache, attn_metadata))
             and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
