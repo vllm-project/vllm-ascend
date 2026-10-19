@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.collective import StoreCollective
 
 
@@ -23,13 +22,9 @@ class SharedGVAWrites:
     missing shard prevents publication; no majority or first-writer rule is valid.
     """
 
-    def __init__(self, topology: KVPoolTopology, collective: StoreCollective) -> None:
+    def __init__(self, writers: tuple[int, ...], collective: StoreCollective) -> None:
         self._collective = collective
-        first_rank = (topology.tp_rank // topology.put_step) * topology.put_step
-        leaders: dict[int, int] = {}
-        for rank in range(first_rank, first_rank + topology.put_step):
-            leaders.setdefault(rank % topology.dcp_size, rank)
-        self._writers = tuple(leaders.values())
+        self._writers = writers
 
     def complete_keys(self, local: GVAWriteOutcome) -> set[str]:
         outcomes = self._collective.all_gather(local)

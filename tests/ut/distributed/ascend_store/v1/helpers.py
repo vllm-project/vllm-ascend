@@ -24,10 +24,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     KVPoolConfig,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
+    CPPartitionSpec,
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
+    PPPartitionSpec,
     TPPartitionSpec,
+    context_replica_groups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     KVTransferStep,
@@ -65,7 +68,8 @@ def make_pool_config(topology, backend_name="mooncake", **changes):
         cache_transfer_granularity=topology.cache_transfer_granularity,
         hash_block_size=topology.hash_block_size,
         tp_partition=topology.tp_partition,
-        consumer_pipeline_partitions=topology.consumer_pipeline_partitions,
+        pp_partition=topology.pp_partition,
+        cp_partition=topology.cp_partition,
         put_step=topology.put_step,
         retention_interval=None,
     )
@@ -273,8 +277,6 @@ def make_topology(
         tp_size=tp_size,
         pp_size=pp_size,
         pcp_rank=pcp_rank,
-        pcp_size=pcp_size,
-        dcp_size=dcp_size,
         put_step=put_step,
         cache_transfer_granularity=4,
         hash_block_size=4,
@@ -285,7 +287,13 @@ def make_topology(
         ),
         groups=groups,
         transfer_group_ids=group_ids,
-        consumer_pipeline_partitions=consumer_pipeline_partitions,
+        pp_partition=PPPartitionSpec(consumer_pipeline_partitions),
+        cp_partition=CPPartitionSpec(pcp_size, dcp_size),
+        stage_layer_start=0,
+        stage_layer_count=len(physical_layers),
+        object_shard_index=0,
+        tp_global_ranks=tuple(range(tp_size)),
+        context_replica_groups=context_replica_groups(tp_rank, put_step, dcp_size),
     )
 
 

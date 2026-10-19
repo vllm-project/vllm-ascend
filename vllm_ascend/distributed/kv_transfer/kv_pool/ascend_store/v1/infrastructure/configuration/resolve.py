@@ -24,12 +24,15 @@ from ....layerwise_cache_layout import (
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
-from ...backend import BACKEND_IMPORTS
+from ...backend import BACKEND_IMPORTS, LAYERWISE_OBJECT_FORMATS
 from .topology import (
+    CPPartitionSpec,
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
+    PPPartitionSpec,
     TPPartitionSpec,
+    context_replica_groups,
     kv_cache_spec_uses_align_state,
 )
 
@@ -61,9 +64,14 @@ class KVPoolConfig:
     cache_transfer_granularity: int
     hash_block_size: int
     tp_partition: TPPartitionSpec
-    consumer_pipeline_partitions: tuple[int, ...] | None
+    pp_partition: PPPartitionSpec
+    cp_partition: CPPartitionSpec
     put_step: int
     retention_interval: int | None
+
+    @property
+    def consumer_pipeline_partitions(self) -> tuple[int, ...] | None:
+        return self.pp_partition.target_layer_counts
 
     @property
     def has_private_state(self) -> bool:
@@ -116,6 +124,9 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
     store_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or consumer_store
     tp_partition = _resolve_tp_partition(vllm_config, num_kv_heads, use_mla)
     partitions = resolve_consumer_pipeline_partitions(vllm_config, store_enabled=store_enabled)
+    pp_partition, cp_partition = resolve_object_partitions(
+        vllm_config, backend_name, use_layerwise=use_layerwise, put_step=put_step, target_layer_counts=partitions
+    )
     cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(
         vllm_config, kv_cache_config, group_specs, transfer_group_ids
     )
@@ -135,12 +146,41 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
         cache_transfer_granularity=cache_transfer_granularity,
         hash_block_size=hash_block_size,
         tp_partition=tp_partition,
-        consumer_pipeline_partitions=partitions,
+        pp_partition=pp_partition,
+        cp_partition=cp_partition,
         put_step=put_step,
         retention_interval=getattr(kv_cache_config, "prefix_cache_retention_interval", None),
     )
     _validate_kv_pool_topology_support(vllm_config, config)
     return config
+
+
+def resolve_object_partitions(
+    vllm_config: VllmConfig,
+    backend_name: str,
+    *,
+    use_layerwise: bool,
+    put_step: int,
+    target_layer_counts: tuple[int, ...] | None,
+) -> tuple[PPPartitionSpec, CPPartitionSpec]:
+    """Translate wire requirements and rank-free parallel sizes into partition contracts."""
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_size = parallel.decode_context_parallel_size
+    if not use_layerwise:
+        return PPPartitionSpec(target_layer_counts), CPPartitionSpec(pcp_size, dcp_size)
+    object_format = LAYERWISE_OBJECT_FORMATS[backend_name]
+    global_layers = vllm_config.model_config.get_total_num_hidden_layers() if object_format.global_layer_span else None
+    shared = object_format.shared_context_shards and dcp_size > 1 and put_step > 1
+    return (
+        PPPartitionSpec(target_layer_counts, global_layers),
+        CPPartitionSpec(
+            pcp_size,
+            dcp_size,
+            dcp_size if shared else 1,
+            object_format.context_alignment_bytes if shared else 1,
+        ),
+    )
 
 
 def _validate_kv_pool_preflight(
@@ -423,13 +463,14 @@ def resolve_worker_topology(
 ) -> KVPoolTopology:
     parallel_config = vllm_config.parallel_config
     model_config = vllm_config.model_config
-    tp_rank = get_tp_group().rank_in_group
+    tp_group = get_tp_group()
+    tp_rank = tp_group.rank_in_group
     pp_rank = get_pp_group().rank_in_group
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size
-    pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+    pcp_size = config.cp_partition.pcp_size
     pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    dcp_size = config.cp_partition.dcp_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
     head_or_tp_rank = tp_rank // config.put_step
     model_name = model_config.model.rstrip("/").split("/")[-1]
@@ -467,20 +508,31 @@ def resolve_worker_topology(
                 is_eagle_group=group.is_eagle_group,
             )
         )
+    stage_start = 0
+    stage_count = len(
+        {layer.physical_layer_id for group_id in config.transfer_group_ids for layer in groups[group_id].layers}
+    )
+    if config.pp_partition.global_layer_count is not None:
+        stage_start, _ = model_config.get_layers_start_end_indices(parallel_config)
+        stage_count = max(model_config.get_num_layers(parallel_config), stage_count)
     return KVPoolTopology(
-        tp_rank,
-        tp_size,
-        pp_size,
-        pcp_rank,
-        pcp_size,
-        dcp_size,
-        config.put_step,
-        config.cache_transfer_granularity,
-        config.hash_block_size,
-        config.tp_partition,
-        tuple(groups),
-        config.transfer_group_ids,
-        config.consumer_pipeline_partitions,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        pcp_rank=pcp_rank,
+        put_step=config.put_step,
+        cache_transfer_granularity=config.cache_transfer_granularity,
+        hash_block_size=config.hash_block_size,
+        tp_partition=config.tp_partition,
+        pp_partition=config.pp_partition,
+        cp_partition=config.cp_partition,
+        groups=tuple(groups),
+        transfer_group_ids=config.transfer_group_ids,
+        stage_layer_start=stage_start,
+        stage_layer_count=stage_count,
+        object_shard_index=dcp_rank if config.cp_partition.object_shard_count > 1 else 0,
+        tp_global_ranks=tuple(tp_group.ranks),
+        context_replica_groups=context_replica_groups(tp_rank, config.put_step, dcp_size),
     )
 
 

@@ -8,15 +8,14 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, Generic, ParamSpec, TypeVar
 
 import torch
 from vllm.logger import logger
 
 from ..infrastructure.configuration.topology import KVPoolTopology
 from ..infrastructure.execution.executor import Executor
-from ..infrastructure.mapping import BulkMapping
-from ..infrastructure.mapping.types import ObjectKeyBuilder
+from ..infrastructure.mapping import BulkMapping, LayerwiseMapping
 from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from ..infrastructure.reachability import HybridReachability, UnitaryReachability
 from ..infrastructure.resources import KVPoolResources
@@ -46,6 +45,7 @@ from .transfer.rows import (
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
 _WorkerT = TypeVar("_WorkerT", bound="KVPoolWorker")
+_MappingT = TypeVar("_MappingT", BulkMapping, LayerwiseMapping)
 
 
 @dataclass(slots=True)
@@ -68,7 +68,7 @@ class PendingStore:
     store_job_ids: frozenset[int]
 
 
-class KVPoolWorker(ABC):
+class KVPoolWorker(ABC, Generic[_MappingT]):
     """Own request lifecycle, evidence aggregation, and safe resource release."""
 
     def __init__(
@@ -85,7 +85,7 @@ class KVPoolWorker(ABC):
         self._topology = topology
         self._reachability = reachability
         self._kv_cache_layout = kv_cache_layout
-        self._mappings: dict[int, BulkMapping] = {}
+        self._mappings: dict[int, _MappingT] = {}
         self._state_group_ids = frozenset(
             group.group_id for group in topology.transfer_groups if group.uses_align_state
         )
@@ -122,26 +122,11 @@ class KVPoolWorker(ABC):
                 logger.exception("Failed to close KV Pool resources after cache registration failed")
             raise
 
-    def _bind_mappings(self, registration: dict[str, Any]) -> None:
-        self._mappings = {group_id: self._create_mapping(group_id, registration) for group_id in self._groups}
-
-    def _create_mapping(self, group_id: int, registration: dict[str, Any]) -> BulkMapping:
-        return BulkMapping(
-            self._topology,
-            registration["base_addresses"],
-            registration["block_lengths"],
-            registration["block_strides"],
-            registration["layer_entry_offsets"],
-            group_id=group_id,
-            kv_cache_layout=self._kv_cache_layout,
-            kv_caches=self._resources.kv_caches,
-        )
+    @abstractmethod
+    def _bind_mappings(self, registration: dict[str, Any]) -> None: ...
 
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return self._backend.exists(keys) if keys else ()
-
-    def _key_builder(self, group_id: int) -> ObjectKeyBuilder:
-        return self._mappings[group_id]
 
     def lookup(self, request: LookupRequest) -> LookupResult:
         if not self._execution_started:
@@ -158,12 +143,12 @@ class KVPoolWorker(ABC):
             starts, counts, hashes = chunk_rows(
                 request.end_token,
                 request.block_hashes,
-                block_size=mapping.group_block_size,
-                hash_block_size=mapping.hash_block_size,
+                block_size=mapping.local.group_block_size,
+                hash_block_size=mapping.local.hash_block_size,
                 start_token=request.start_token,
                 mask=mask,
             )
-            keys = self._key_builder(group_id).lookup_keys(hashes)
+            keys = self._mappings[group_id].naming.lookup_keys(hashes)
             try:
                 observed = self._exists([key for axis in keys for key in axis])
             except Exception as error:
@@ -196,8 +181,8 @@ class KVPoolWorker(ABC):
                         command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
-                        block_size=mapping.group_block_size,
-                        hash_block_size=mapping.hash_block_size,
+                        block_size=mapping.local.group_block_size,
+                        hash_block_size=mapping.local.hash_block_size,
                         start_token=command.start_token,
                         tail_boundary_token=boundaries.get(group_id),
                         mask=mask,
@@ -208,7 +193,7 @@ class KVPoolWorker(ABC):
             )
         groups = []
         for group_id, mapping in self._mappings.items():
-            build_keys = self._key_builder(group_id).keys
+            build_keys = self._mappings[group_id].naming.keys
             rows = [request_rows[group_id] for request_rows in rows_by_request]
             splits = [0]
             for counts, hashes, block_ids in rows:
@@ -221,7 +206,7 @@ class KVPoolWorker(ABC):
                     concat_uint64([row[0] for row in rows]),
                     merge_key_axes(group_id, [build_keys(row[1]) for row in rows]),
                     readonly_indices(splits),
-                    mapping.physical_layer_ids,
+                    mapping.local.physical_layer_ids,
                     object_size,
                     physical_layer_ids_by_axis=physical_layer_ids_by_axis,
                 )
@@ -645,8 +630,8 @@ class KVPoolWorker(ABC):
         )
 
     def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
-        mapping = self._mappings[group_id]
-        return mapping.local_group_block_bytes, mapping.physical_layer_ids_by_key_prefix
+        local = self._mappings[group_id].local
+        return local.local_group_block_bytes, local.physical_layer_ids_by_object
 
     @property
     def _transfer_group_count(self) -> int:

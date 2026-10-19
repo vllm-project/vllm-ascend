@@ -126,7 +126,7 @@ def test_preparation_constructs_each_group_and_final_plan_once(load, gva, select
         monkeypatch.setattr(LayerTransferPlan, "__init__", create_plan)
         regions = Mock(side_effect=lambda group, keys: np.arange(len(keys), dtype=np.uint64) + group.group_id * 1000)
         prepare = layer_transfer.prepare_layer_load if load else layer_transfer.prepare_layer_store
-        plan = prepare(batch, worker._layer_mappings, regions if gva else None)
+        plan = prepare(batch, worker._mappings, regions if gva else None)
 
         assert len(constructed_groups) == len(batch.groups)
         assert constructed_plans == [plan]

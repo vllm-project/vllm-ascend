@@ -62,7 +62,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler impor
     AsynchronousBulkScheduler,
     SynchronousBulkScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
@@ -145,7 +144,7 @@ def test_memcache_multi_spec_store_lookup_load_preserves_payloads_and_private_st
     backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: backend_spec)
     monkeypatch.setattr(configuration, "_kvpp_size", lambda _config: 1)
-    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
     monkeypatch.setattr(configuration, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(configuration, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
     monkeypatch.setattr(configuration.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (32, 32))
@@ -819,21 +818,23 @@ def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group
     topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
     worker, _, _ = make_worker(topology=topology)
     events = []
-    make_rows, make_keys = bulk_module.store_candidate_rows, worker_module.BulkMapping.keys
+    key_type = type(worker._mappings[0].naming)
+    key_group_ids = {id(binding.naming): group_id for group_id, binding in worker._mappings.items()}
+    make_rows, make_keys = bulk_module.store_candidate_rows, key_type.keys
 
     def rows(end_token, hashes, block_ids, **kwargs):
         events.append(("rows", tuple(block_ids)))
         return make_rows(end_token, hashes, block_ids, **kwargs)
 
-    def keys(mapping, hashes):
-        events.append(("keys", mapping.group_id))
-        return make_keys(mapping, hashes)
+    def keys(naming, hashes):
+        events.append(("keys", key_group_ids[id(naming)]))
+        return make_keys(naming, hashes)
 
     def reject_unused_empty_rows():
         raise AssertionError("Present ordinary groups must not allocate fallback empty rows")
 
     monkeypatch.setattr(bulk_module, "store_candidate_rows", rows)
-    monkeypatch.setattr(worker_module.BulkMapping, "keys", keys)
+    monkeypatch.setattr(key_type, "keys", keys)
     monkeypatch.setattr(bulk_module, "empty_candidate_rows", reject_unused_empty_rows)
     command = RangeStoreCommand("request", 0, 4, ((1,), (), (), (7,)), (b"a",), 4, 17)
     try:

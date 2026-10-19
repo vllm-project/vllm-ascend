@@ -20,7 +20,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcach
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import integer_result, integer_results
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
-    BulkMapping,
     LayerwiseMapping,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
@@ -199,13 +198,13 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
     registration = resources.prepare_kv_caches({"cache": object()})
-    mapping = BulkMapping(
+    mapping = LayerwiseMapping(
         topology,
         *(registration[name] for name in ("base_addresses", "block_lengths", "block_strides", "layer_entry_offsets")),
     )
     # Exercise Worker copy methods without starting background executors.
     worker = GVALayerwiseWorker(topology, resources, reachability=make_reachability(topology))
-    worker._layer_mappings = {0: LayerwiseMapping(mapping)}
+    worker._mappings = {0: mapping}
     sessions = worker._backend_sessions
 
     hashes = tuple(f"h{index}" for index in range(len(block_ids)))
@@ -214,6 +213,8 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     request_splits = np.asarray([0, len(block_ids)], dtype=np.intp)
     for values in (ids, counts, request_splits):
         values.flags.writeable = False
-    group = KVGroupBatch(0, ids, counts, mapping.keys(hashes), request_splits, (0, 1), mapping.local_group_block_bytes)
+    group = KVGroupBatch(
+        0, ids, counts, mapping.naming.keys(hashes), request_splits, (0, 1), mapping.local.local_group_block_bytes
+    )
     assert backend.native_store is not None
     return worker, KVTransferBatch(("request",), (group,), (17,)), backend.native_store, sessions

@@ -30,7 +30,6 @@ import time
 import numpy as np
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import mapping
 
 _WARMUP_CALLS = 5
 
@@ -91,10 +90,10 @@ def bulk_workload(bound, row_count, mask_kind):
     transfer = getattr(bound, "store", bound)
     hashes = tuple(index.to_bytes(4, "little") for index in range(row_count))
     ids = np.zeros(row_count, dtype=np.uint64)
+    keys = transfer.keys(hashes)
     mask = None
     if mask_kind != "full":
-        mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(transfer.key_prefixes) * row_count)]
-    keys = transfer.keys(hashes)
+        mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(keys) * row_count)]
 
     def keys_and_arguments():
         return transfer.arguments(transfer.keys(hashes), ids, selected_keys=mask)
@@ -106,7 +105,7 @@ def bulk_workload(bound, row_count, mask_kind):
 
 
 def selection_signature(selection):
-    selections = getattr(selection, "by_key_prefix", None)
+    selections = getattr(selection, "by_object", getattr(selection, "by_key_prefix", None))
     if selections is None:
         selections = selection.partitions
     return tuple(None if item is None else (item.keys, item.block_ids.tolist()) for item in selections)
@@ -114,7 +113,12 @@ def selection_signature(selection):
 
 def layer_workload(layer_mapping, bulk_work):
     transfer, hashes, ids, mask, _, _ = bulk_work
-    layer_ids = layer_mapping.bulk.physical_layer_ids
+    if hasattr(layer_mapping, "local"):
+        layer_ids = layer_mapping.local.physical_layer_ids
+    elif hasattr(layer_mapping, "binding"):
+        layer_ids = layer_mapping.binding.local.physical_layer_ids
+    else:
+        layer_ids = layer_mapping.bulk.physical_layer_ids
 
     def keys_and_prepare():
         return layer_mapping.prepare(transfer.keys(hashes), ids, selected_keys=mask)
@@ -141,7 +145,8 @@ def main():
     args = parser.parse_args()
     if args.samples < 5 or args.target_sample_ms <= 0:
         parser.error("Use at least five paired samples and a positive sample duration")
-    spec = importlib.util.spec_from_file_location("mapping_baseline", args.baseline)
+    baseline_name = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure._mapping_baseline"
+    spec = importlib.util.spec_from_file_location(baseline_name, args.baseline)
     if spec is None or spec.loader is None:
         parser.error(f"Not an importable mapping snapshot: {args.baseline}")
     baseline = importlib.util.module_from_spec(spec)
@@ -186,11 +191,11 @@ def main():
             ),
         }
         if args.layerwise:
-            before_layer = baseline.LayerwiseMapping(before)
-            after_layer = mapping.LayerwiseMapping(after)
+            before_layer = case.bind_layers(baseline)
+            after_layer = case.bind_layers()
             result["layer_binding"] = measure(
-                lambda before=before: baseline.LayerwiseMapping(before),
-                lambda after=after: mapping.LayerwiseMapping(after),
+                lambda case=case: case.bind_layers(baseline),
+                case.bind_layers,
                 args.samples,
                 args.target_sample_ms,
             )

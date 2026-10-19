@@ -1,4 +1,4 @@
-"""Shared complete-object Bulk and Layerwise mappings; KV memory remains caller-owned."""
+"""Compose local layout, object naming and object placement into transfer views."""
 
 from .bulk import BulkMapping
 from .layerwise import LayerwiseMapping, LayerwiseSelection

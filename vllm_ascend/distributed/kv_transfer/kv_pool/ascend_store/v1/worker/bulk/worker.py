@@ -11,6 +11,7 @@ from vllm.logger import logger
 
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
+from ...infrastructure.mapping import BulkMapping
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability, checkpoint_companion_indices
 from ...infrastructure.resources import KVPoolResources
@@ -48,7 +49,7 @@ from .transfer import (
 )
 
 
-class BulkWorker(KVPoolWorker):
+class BulkWorker(KVPoolWorker[BulkMapping]):
     """Own Bulk business operations, pending results and independent Load/Store execution."""
 
     def __init__(
@@ -81,6 +82,21 @@ class BulkWorker(KVPoolWorker):
             kv_cache_layout=kv_cache_layout,
             source_ready_event_factory=source_ready_event_factory,
         )
+
+    def _bind_mappings(self, registration: dict[str, Any]) -> None:
+        self._mappings = {
+            group_id: BulkMapping(
+                self._topology,
+                registration["base_addresses"],
+                registration["block_lengths"],
+                registration["block_strides"],
+                registration["layer_entry_offsets"],
+                group_id=group_id,
+                kv_cache_layout=self._kv_cache_layout,
+                kv_caches=self._resources.kv_caches,
+            )
+            for group_id in self._groups
+        }
 
     def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         if self._load_executor is None:
@@ -158,7 +174,7 @@ class BulkWorker(KVPoolWorker):
                     if rows is None:
                         rows = empty_candidate_rows()
                     rows_by_group[group_id].append(rows)
-                    keys_by_group[group_id].append(mapping.keys(rows[1]))
+                    keys_by_group[group_id].append(mapping.naming.keys(rows[1]))
                 continue
 
             masks = self._reachability.select_for_store(
@@ -172,8 +188,8 @@ class BulkWorker(KVPoolWorker):
                         command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
-                        block_size=mapping.group_block_size,
-                        hash_block_size=mapping.hash_block_size,
+                        block_size=mapping.local.group_block_size,
+                        hash_block_size=mapping.local.hash_block_size,
                         start_token=command.start_token,
                         mask=mask,
                     )
@@ -181,7 +197,7 @@ class BulkWorker(KVPoolWorker):
                         self._topology, rows, tp_mismatch=self._topology.tp_partition.tp_mismatch
                     )
                 rows_by_group[group_id].append(rows)
-                keys_by_group[group_id].append(mapping.keys(rows[1]))
+                keys_by_group[group_id].append(mapping.naming.keys(rows[1]))
         return StoreCandidates(
             tuple(
                 StoreGroupCandidates(

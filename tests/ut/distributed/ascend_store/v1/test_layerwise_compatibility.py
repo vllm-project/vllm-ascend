@@ -21,11 +21,19 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 )
 from tests.ut.distributed.ascend_store.v1.worker.native_copy_fixtures import ByteCopySDK, native_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import resolve_backend_spec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.gva_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     GVA_SHARD_ALIGNMENT_BYTES,
+    resolve_backend_spec,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import layout as memcache_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import WireKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
+    resolve_object_partitions,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BulkMapping
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
     LookupRequest,
@@ -42,9 +50,11 @@ def production_worker(monkeypatch, name, topology, objects, readable, *, store=T
     monkeypatch.setattr(factory, "resolve_kv_pool_config", lambda *_args: pool)
     monkeypatch.setattr(factory, "resolve_worker_topology", lambda *_args: topology)
     if collective is not None:
-        monkeypatch.setattr(factory, "StoreCollective", lambda: collective)
+        monkeypatch.setattr(factory, "StoreCollective", lambda _ranks: collective)
     config = TestBoundLayerwiseKeys.make_config(topology.pp_size)
     config.parallel_config.tensor_parallel_size = topology.tp_size
+    config.parallel_config.decode_context_parallel_size = topology.dcp_size
+    config.parallel_config.prefill_context_parallel_size = topology.pcp_size
     config.parallel_config.rank = topology.groups[0].key_metadata.pp_rank * topology.tp_size + topology.tp_rank
     config.model_config.max_model_len = 64
     config.model_config.get_layers_start_end_indices = lambda p: (
@@ -54,6 +64,23 @@ def production_worker(monkeypatch, name, topology, objects, readable, *, store=T
     config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
     config.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     cache = SimpleNamespace(num_blocks=8, kv_cache_groups=topology.groups)
+    pp, cp = resolve_object_partitions(
+        config,
+        name,
+        use_layerwise=True,
+        put_step=topology.put_step,
+        target_layer_counts=topology.consumer_pipeline_partitions,
+    )
+    stage_start, _ = config.model_config.get_layers_start_end_indices(config.parallel_config)
+    topology = replace(
+        topology,
+        pp_partition=pp,
+        cp_partition=cp,
+        stage_layer_start=stage_start if topology.pp_size > 1 else 0,
+        stage_layer_count=config.model_config.get_num_layers(config.parallel_config),
+        object_shard_index=topology.groups[0].key_metadata.dcp_rank if cp.object_shard_count > 1 else 0,
+    )
+    pool = replace(pool, pp_partition=pp, cp_partition=cp)
     worker = factory.create_kv_pool_worker(config, cache)
     worker._source_ready_event_factory = FakeEvent
     worker._start_gate_factory = lambda: FakeLoadStartGate(opened=True)
@@ -84,6 +111,12 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
     topology = make_topology(group_ids=group_ids, physical_layers=(3, 4), pp_size=pp_rank + 1, pp_rank=pp_rank)
     objects: dict[str, ctypes.Array[ctypes.c_char]] = {}
     readable: set[str] = set()
+    monkeypatch.setattr(PoolKey, "to_string", Mock(side_effect=AssertionError("unused canonical prefixes")))
+    monkeypatch.setattr(BulkMapping, "__init__", Mock(side_effect=AssertionError("unused Bulk view")))
+    if name == "mooncake":
+        monkeypatch.setattr(
+            memcache_layout, "build_memcache_object_layouts", Mock(side_effect=AssertionError("unused PP/CP placement"))
+        )
     worker, tensors, sdk, config, cache = production_worker(monkeypatch, name, topology, objects, readable)
     protocol = mooncake_layerwise if name == "mooncake" else memcache_backend
     production_keys = protocol.bind_layerwise_keys(
@@ -97,6 +130,17 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
     offset = 60 if name == "memcache" and pp_rank else 0
     expected = {name: tuple(tensor[1].clone() for tensor in values) for name, values in tensors.items()}
     expected_keys = {production_keys.make_full_key(group, "61", 0, pp_rank) for group in group_ids}
+    # Traffic consumes bound names and coordinates; no model/configuration rebinding is allowed.
+    for owner, method in (
+        (WireKeyBuilder, "bind"),
+        (LayerwiseKeyBuilder, "bind_group"),
+        (protocol, "bind_layerwise_keys"),
+        (memcache_layout, "bind_layer_object_span"),
+        (memcache_layout, "bind_context_object_span"),
+        (config.model_config, "get_layers_start_end_indices"),
+        (config.model_config, "get_num_layers"),
+    ):
+        monkeypatch.setattr(owner, method, Mock(side_effect=AssertionError(f"runtime rebind: {method}")))
     try:
         if production_writes:
             for group_id in group_ids:
@@ -119,7 +163,12 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
         assert set(objects) == expected_keys
         for group_id in group_ids:
             key = production_keys.make_full_key(group_id, "61", 0, pp_rank)
-            assert worker._key_builder(group_id).keys([b"a"]) == ((key,),)
+            assert worker._mappings[group_id].naming.keys([b"a"]) == ((key,),)
+            assert not hasattr(worker._mappings[group_id], "binding")
+            assert (
+                worker._group_object_layout(group_id)[1]
+                is worker._mappings[group_id].local.physical_layer_ids_by_object
+            )
             assert ctypes.sizeof(objects[key]) == object_size
             payload = b"".join(
                 tensor[1].numpy().tobytes()
