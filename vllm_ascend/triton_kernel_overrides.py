@@ -153,7 +153,7 @@ _device_functions_swapped = False
 
 def swap_device_functions() -> None:
     """Swap Triton device functions the dispatcher cannot wrap.
-    
+
     Device functions are ``@triton.jit`` helpers called from inside other
     kernels' bodies and inlined at kernel-compile time; there is no host
     launch for the dispatcher to intercept, and a ``KernelOverride`` is
