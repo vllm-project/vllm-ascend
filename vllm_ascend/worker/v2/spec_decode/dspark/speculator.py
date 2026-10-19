@@ -15,14 +15,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import copy
 from collections.abc import Mapping, Sequence
+from dataclasses import replace as dataclass_replace
 from typing import Any, cast
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -49,10 +52,43 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-    prepare_replicated_pcp_config,
-)
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_profiling_chunk_for_draft
+
+
+def _build_dspark_draft_config(vllm_config: VllmConfig) -> VllmConfig:
+    """Add the Ascend settings that follow the PCP=1 DSpark draft topology.
+
+    Upstream ``DFlashSpeculator.__init__`` copies the config and forces PCP=1
+    (keeping DCP only for MLA drafts). This copies the same way, without
+    re-validating the target config, and only adjusts the Ascend features
+    tied to that topology: static EPLB when PCP was the only parallel
+    dimension, and Engram DP sharing, which belongs to the target.
+    """
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return vllm_config
+
+    vllm_config = copy.copy(vllm_config)
+    if (
+        parallel_config.enable_eplb
+        and parallel_config.tensor_parallel_size == 1
+        and parallel_config.data_parallel_size == 1
+    ):
+        # DSpark draft attention uses PCP=1. Keep EP, but use a static
+        # expert layout when PCP is the target's only parallel dimension.
+        vllm_config.parallel_config = replace(
+            parallel_config,
+            enable_eplb=False,
+            # Copy declared fields without transient communicator-selection state.
+            eplb_config=dataclass_replace(parallel_config.eplb_config, num_redundant_experts=0),
+        )
+        logger.warning_once("EPLB is disabled for the PCP=1 DSpark draft model; target EPLB remains enabled.")
+
+    engram_config = vllm_config.engram_config
+    if engram_config is not None and engram_config.dp_shared_memory and parallel_config.data_parallel_size == 1:
+        # The PCP=1 draft has no Engram tables; sharing belongs to the target.
+        vllm_config.engram_config = replace(engram_config, dp_shared_memory=False)
+    return vllm_config
 
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
@@ -65,7 +101,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
+        # The PCP=1 draft runs replicated on every target PCP rank.
+        self.replicated_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        vllm_config = _build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None

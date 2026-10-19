@@ -117,11 +117,11 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
 def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
     monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
-    monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
+    monkeypatch.setattr(shared, "_build_dspark_draft_config", lambda config: config)
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
         speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
