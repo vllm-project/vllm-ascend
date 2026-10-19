@@ -692,8 +692,11 @@ def build_attn_state(
     if vllm_config.model_config.runner_type == "pooling":
         if kv_cache_config is None:
             raise RuntimeError("Pooling attention state requires KVCacheConfig.")
-        if isinstance(
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        # Encoder-only models (e.g. BERT/BGE) keep no KV cache, so they produce
+        # no kv cache groups and always run as uncached prefill.
+        if not kv_cache_groups or isinstance(
+            kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache

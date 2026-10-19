@@ -2533,6 +2533,8 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
         model_config=SimpleNamespace(runner_type="pooling"),
     )
     encoder_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=encoder_spec)])
+    # Encoder-only models (BERT/BGE) build no KV cache groups at all.
+    empty_kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     other_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())])
     mtp = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="generate"),
@@ -2566,6 +2568,17 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
             seq,
             seq,
             kv_cache_config=encoder_kv_cache_config,
+        )
+        is state.PrefillNoCache
+    )
+    assert (
+        attn_utils.build_attn_state(
+            pooling_encoder,
+            seq,
+            2,
+            seq,
+            seq,
+            kv_cache_config=empty_kv_cache_config,
         )
         is state.PrefillNoCache
     )
