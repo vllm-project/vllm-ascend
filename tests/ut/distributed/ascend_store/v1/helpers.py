@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     KVPoolConfig,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
+    ContextRank,
     CPPartitionSpec,
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -259,6 +260,8 @@ def make_topology(
     key_rank_count: int | None = None,
     key_slices_per_rank: int | None = None,
     consumer_pipeline_partitions: tuple[int, ...] | None = None,
+    context_ranks: tuple[ContextRank, ...] | None = None,
+    global_rank: int | None = None,
 ) -> KVPoolTopology:
     head_or_tp_rank = (tp_rank if tp_mismatch else 0) if head_or_tp_rank is None else head_or_tp_rank
     groups = tuple(
@@ -272,6 +275,13 @@ def make_topology(
         )
         for group_id in range(max(group_ids) + 1)
     )
+    if context_ranks is None:
+        # Synthetic test topology follows vLLM's PCP-first DCP traversal.
+        context_ranks = tuple(
+            ContextRank(pcp * tp_size + tp, tp, (tp * pcp_size + pcp) % dcp_size)
+            for pcp in range(pcp_size)
+            for tp in range(tp_size)
+        )
     return KVPoolTopology(
         tp_rank=tp_rank,
         tp_size=tp_size,
@@ -292,8 +302,9 @@ def make_topology(
         stage_layer_start=0,
         stage_layer_count=len(physical_layers),
         object_shard_index=0,
-        tp_global_ranks=tuple(range(tp_size)),
-        context_replica_groups=context_replica_groups(tp_rank, put_step, dcp_size),
+        global_rank=pcp_rank * tp_size + tp_rank if global_rank is None else global_rank,
+        context_global_ranks=tuple(sorted(rank.global_rank for rank in context_ranks)),
+        context_replica_groups=context_replica_groups(context_ranks, tp_rank, put_step),
     )
 
 

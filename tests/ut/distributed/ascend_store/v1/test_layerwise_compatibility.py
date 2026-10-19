@@ -32,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
     resolve_object_partitions,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
+    ContextRank,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BulkMapping
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
@@ -197,8 +200,9 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
 
 
 class ThreadCollective:
-    def __init__(self, rank, barrier, outcomes):
+    def __init__(self, rank, barrier, outcomes, global_ranks=None):
         self.rank, self.barrier, self.outcomes = rank, barrier, outcomes
+        self.global_ranks = tuple(range(len(outcomes))) if global_ranks is None else global_ranks
         self.entered = threading.Event()
         self.closed = False
 
@@ -206,7 +210,7 @@ class ThreadCollective:
         self.outcomes[self.rank] = value
         self.entered.set()
         self.barrier.wait(timeout=5)
-        result = tuple(self.outcomes)
+        result = dict(zip(self.global_ranks, self.outcomes, strict=True))
         self.barrier.wait(timeout=5)
         return result
 
@@ -274,6 +278,107 @@ def test_shared_dcp_writers_do_not_publish_until_every_shard_finishes(monkeypatc
     finally:
         # The real adapter correctly retains failed writes without an ownership-safe
         # abort. Only this fake CPU store can confirm disposal for test teardown.
+        for worker in workers:
+            worker._backend.revoke_gva = Mock(side_effect=lambda keys: (0,) * len(keys))
+            worker.close()
+    assert all(endpoint.closed for endpoint in endpoints)
+
+
+@pytest.mark.parametrize("failure", (None, "copy", "open", "missing_layer"))
+@pytest.mark.parametrize("dcp_size,put_step", ((2, 2), (4, 2), (2, 1), (4, 1)))
+def test_pcp_dcp_waits_for_actual_context_shards(monkeypatch, failure, dcp_size, put_step):
+    # TP groups [8, 13] and [21, 34], PCP groups [8, 21] and [13, 34].
+    # DCP spans PCP first, then TP; global IDs deliberately differ from group indices.
+    global_ranks = (8, 13, 21, 34)
+    members = tuple(
+        ContextRank(global_rank, index % 2, (index % 2 * 2 + index // 2) % dcp_size)
+        for index, global_rank in enumerate(global_ranks)
+    )
+    objects: dict[str, ctypes.Array[ctypes.c_char]] = {}
+    readable: set[str] = set()
+    barrier, outcomes = threading.Barrier(4), [None] * 4
+    workers, endpoints, sources, sdks = [], [], [], []
+    try:
+        for index, member in enumerate(members):
+            topology = make_topology(
+                physical_layers=(3, 4),
+                tp_rank=member.tp_rank,
+                tp_size=2,
+                put_step=put_step,
+                head_or_tp_rank=member.tp_rank // put_step,
+                dcp_rank=member.dcp_rank,
+                dcp_size=dcp_size,
+                pcp_rank=index // 2,
+                pcp_size=2,
+                pp_size=2,
+                pp_rank=1,
+                context_ranks=members,
+                global_rank=member.global_rank,
+            )
+            endpoint = ThreadCollective(index, barrier, outcomes, global_ranks)
+            worker, tensors, sdk, _, _ = production_worker(
+                monkeypatch, "memcache", topology, objects, readable, collective=endpoint
+            )
+            for values in tensors.values():
+                # Same-head/context replicas carry identical KV; the general
+                # fixture deliberately distinguishes TP ranks for other tests.
+                values[0].sub_(member.tp_rank * 100)
+                for tensor in values:
+                    tensor.add_(member.dcp_rank * 100 + member.tp_rank // put_step * 1000)
+            workers.append(worker)
+            endpoints.append(endpoint)
+            sources.append(tensors)
+            sdks.append(sdk)
+        if failure == "copy":
+            monkeypatch.setattr(sdks[2], "batch_copy", lambda *_args: -7)
+        elif failure == "open":
+            monkeypatch.setattr(sdks[2], "batch_alloc", lambda keys, _sizes: [0] * len(keys))
+        for index, worker in enumerate(workers):
+            begin_step(worker, store=(command(worker._topology),))
+            for layer in (3, 4):
+                if failure == "missing_layer" and index == 2 and layer == 4:
+                    continue
+                worker.save_layer(f"layers.{layer}.group.0")
+            worker.end_step()
+            if index == 1:
+                assert all(endpoint.entered.wait(timeout=3) for endpoint in endpoints[:2])
+                assert not readable  # The entire first TP group finished, but PCP peers have not started.
+                assert not any(call[0] == "publish" for sdk in sdks for call in sdk.calls)
+        results = [worker.fence_previous_store() for worker in workers]
+        assert all(result.evidence.succeeded for batch in results for result in batch) is (failure is None)
+        for head in range(2 // put_step):
+            key = f"model@pp1@61@{head}"
+            expected_visible = failure is None or head != 0
+            assert (key in readable) is expected_visible
+            assert ctypes.sizeof(objects[key]) == dcp_size * GVA_SHARD_ALIGNMENT_BYTES
+            if not expected_visible:
+                assert not any(call[0] == "publish" and key in call[1] for sdk in sdks for call in sdk.calls)
+                continue
+            for index, member in enumerate(members):
+                if member.tp_rank // put_step != head or not workers[index]._layerwise_store_leader:
+                    continue
+                payload = b"".join(
+                    tensor[1].numpy().tobytes() for values in sources[index].values() for tensor in values
+                )
+                offset = member.dcp_rank * GVA_SHARD_ALIGNMENT_BYTES + 60
+                assert objects[key].raw[offset : offset + len(payload)] == payload
+        if failure is None:
+            for worker, tensors in zip(workers, sources, strict=True):
+                expected = {name: tuple(tensor[1].clone() for tensor in values) for name, values in tensors.items()}
+                for values in tensors.values():
+                    for tensor in values:
+                        tensor.fill_(-1)
+                begin_step(worker, load=(LoadCommand("load", 0, 4, ((6,),), (b"a",)),))
+                worker.start_load()
+                for layer in (3, 4):
+                    worker.wait_for_layer_load(f"layers.{layer}.group.0")
+                assert not worker.collect_load_result().failed_locations
+                for name, values in tensors.items():
+                    for tensor, saved in zip(values, expected[name], strict=True):
+                        torch.testing.assert_close(tensor[6], saved)
+                        assert torch.all(tensor[5] == -1) and torch.all(tensor[7] == -1)
+                worker.end_step()
+    finally:
         for worker in workers:
             worker._backend.revoke_gva = Mock(side_effect=lambda keys: (0,) * len(keys))
             worker.close()

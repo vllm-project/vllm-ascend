@@ -44,7 +44,7 @@ class MappingTests(unittest.TestCase):
                     self.assertEqual(
                         tuple(obj.physical_layer_ids for obj in bound.local.objects), ((0, 1, 2, 3),) * heads
                     )
-                self.assertEqual(len(bound.lookup_keys(["hash"])), case.topology.pp_size * 4)
+                self.assertEqual(len(bound.naming.lookup_keys(["hash"])), case.topology.pp_size * 4)
                 for pp_rank in range(2 if pp else 1):
                     for head in range(heads):
                         prefix = bound.naming.key_prefixes[pp_rank * heads + head]
@@ -56,8 +56,8 @@ class MappingTests(unittest.TestCase):
         original = case.bind()
         case.topology.consumer_pipeline_partitions = (2, 2)
         combined = case.bind()
-        self.assertEqual(len(original.lookup_keys(["a"])), 4)
-        self.assertEqual(len(combined.lookup_keys(["a"])), 8)
+        self.assertEqual(len(original.naming.lookup_keys(["a"])), 4)
+        self.assertEqual(len(combined.naming.lookup_keys(["a"])), 8)
         self.assertEqual(tuple(obj.physical_layer_ids for obj in combined.local.objects), ((0, 1),) * 2 + ((2, 3),) * 2)
         for key, layers, size in zip(
             combined.naming.key_prefixes,
@@ -68,8 +68,8 @@ class MappingTests(unittest.TestCase):
             pp_rank = 0 if layers == (0, 1) else 1
             self.assertIn(f"@pp_rank:{pp_rank}@", key)
             self.assertEqual(size, tuple(obj.payload_bytes for obj in original.local.objects)[0] // 2)
-        required = [prefix_keys[0] for prefix_keys in combined.lookup_keys(["a"])]
-        present = set(prefix_keys[0] for prefix_keys in original.lookup_keys(["a"]))
+        required = [prefix_keys[0] for prefix_keys in combined.naming.lookup_keys(["a"])]
+        present = set(prefix_keys[0] for prefix_keys in original.naming.lookup_keys(["a"]))
         self.assertFalse(all(key in present for key in required))  # Missing PP1 cannot be a complete hit.
 
     def test_replicas_share_keys_but_bind_their_own_memory(self):
@@ -83,11 +83,13 @@ class MappingTests(unittest.TestCase):
                 for rank in (2, 3)
             ]
             left, right = (case.bind() for case in cases)
-            self.assertEqual(left.keys(["hash"]), right.keys(["hash"]))
+            self.assertEqual(left.naming.keys(["hash"]), right.naming.keys(["hash"]))
             expected_first_head = head_slices or 1
             self.assertIn(f"@head_or_tp_rank:{expected_first_head}@", left.naming.key_prefixes[0])
-            self.assertNotEqual(left.arguments(left.keys(["h"]), [0])[1], right.arguments(right.keys(["h"]), [0])[1])
-            lookup = left.lookup_keys(["h"])
+            self.assertNotEqual(
+                left.arguments(left.naming.keys(["h"]), [0])[1], right.arguments(right.naming.keys(["h"]), [0])[1]
+            )
+            lookup = left.naming.lookup_keys(["h"])
             self.assertEqual(len(lookup), 8)
             self.assertEqual(len(set(prefix_keys[0] for prefix_keys in lookup)), 8)
 
@@ -153,7 +155,7 @@ class MappingTests(unittest.TestCase):
                                 values.fill_(layer.physical_layer_id * 1000 + kind * 100 + first_head + head)
                     transfer = case.bind()
                     keys, addresses, lengths = transfer.arguments(
-                        transfer.keys(["zero", "one", "two", "repeat"]), [0, 1, 2, 0]
+                        transfer.naming.keys(["zero", "one", "two", "repeat"]), [0, 1, 2, 0]
                     )
                     for key, address, length in zip(keys, addresses, lengths, strict=True):
                         value = read_bytes(address, length)
@@ -176,7 +178,7 @@ class MappingTests(unittest.TestCase):
             ids: NDArray[np.uint64] = np.arange(9, dtype=np.uint64) % 3
             hashes = [f"h{index}" for index in range(9)]
             for transfer in (bound, bound):
-                keys = transfer.keys(hashes)
+                keys = transfer.naming.keys(hashes)
                 for mask_kind in ("none", "all", "empty", "mixed"):
                     mask = (
                         None
@@ -203,7 +205,7 @@ class MappingTests(unittest.TestCase):
                         [read_bytes(a, n) for a, n in zip(addresses, lengths, strict=True)], expected_bytes
                     )
                     comparisons += 1
-                full = transfer.arguments(transfer.keys(["full"]), [0])
+                full = transfer.arguments(transfer.naming.keys(["full"]), [0])
                 self.assertEqual(tuple(map(sum, full[2])), tuple(obj.payload_bytes for obj in transfer.local.objects))
         self.assertEqual(comparisons, 288)
 
@@ -262,7 +264,7 @@ class MappingTests(unittest.TestCase):
                     objects: dict[str, bytes] = {}
                     for case in sources:
                         transfer = bound[id(case)]
-                        keys, addresses, lengths = transfer.arguments(transfer.keys(["a", "b", "c"]), [0, 1, 2])
+                        keys, addresses, lengths = transfer.arguments(transfer.naming.keys(["a", "b", "c"]), [0, 1, 2])
                         for key, address, length in zip(keys, addresses, lengths, strict=True):
                             payload = read_bytes(address, length)
                             if key in objects:
@@ -276,13 +278,13 @@ class MappingTests(unittest.TestCase):
                         self.assertEqual(
                             {
                                 key
-                                for prefix_keys in mapping_for_case.lookup_keys(["a", "b", "c"])
+                                for prefix_keys in mapping_for_case.naming.lookup_keys(["a", "b", "c"])
                                 for key in prefix_keys
                             },
                             objects.keys(),
                         )
                         transfer = mapping_for_case
-                        keys, addresses, lengths = transfer.arguments(transfer.keys(["a", "b", "c"]), [0, 1, 2])
+                        keys, addresses, lengths = transfer.arguments(transfer.naming.keys(["a", "b", "c"]), [0, 1, 2])
                         for key, address, length in zip(keys, addresses, lengths, strict=True):
                             payload = objects[key]
                             self.assertEqual(sum(length), len(payload))
@@ -304,7 +306,7 @@ class MappingTests(unittest.TestCase):
             bound = case.bind()
             ids = [2, 0, 1, 2, 1]
             for transfer in (bound, bound):
-                keys = transfer.keys([str(index) for index in range(len(ids))])
+                keys = transfer.naming.keys([str(index) for index in range(len(ids))])
                 for masked in (False, True):
                     mask = [index % 3 != 2 for index in range(len(keys) * len(ids))] if masked else None
                     _, addresses, lengths = transfer.arguments(keys, ids, selected_keys=mask)
@@ -324,7 +326,7 @@ class MappingTests(unittest.TestCase):
         case.registration_arrays[1][3][:] = [length - 1 for length in case.registration_arrays[1][3]]
         bound = case.bind()
         for transfer in (bound, bound):
-            keys = transfer.keys(["a", "b", "c"])
+            keys = transfer.naming.keys(["a", "b", "c"])
             _, addresses, lengths = transfer.arguments(keys, [0, 2, 1])
             for prefix_index, layers in enumerate(tuple(obj.physical_layer_ids for obj in transfer.local.objects)):
                 entries = [2 * layer + kind for layer in layers for kind in range(2)]
@@ -403,7 +405,7 @@ class MappingTests(unittest.TestCase):
                 8,
             )
             self.assertEqual(
-                bound.arguments(bound.keys(["h"]), [0])[2],
+                bound.arguments(bound.naming.keys(["h"]), [0])[2],
                 [
                     [case.registration_arrays[1][3][2 * layer + kind] for layer in layers for kind in range(2)]
                     for layers in tuple(obj.physical_layer_ids for obj in bound.local.objects)
@@ -452,13 +454,13 @@ class MappingTests(unittest.TestCase):
             patch.object(head_slicing, "_read_head_layout", side_effect=AssertionError("runtime layout")),
             patch.object(head_slicing, "_compile_head_slice_geometry", side_effect=AssertionError("runtime geometry")),
         ):
-            bound.arguments(bound.keys(["a", "b"]), [0, 1])
+            bound.arguments(bound.naming.keys(["a", "b"]), [0, 1])
 
     def test_returned_rows_do_not_alias_each_other_or_bound_segments(self):
         for head_slices, pp_layer_counts in itertools.product((None, 1, 2), (None, (1, 3))):
             case = make_case(head_slices=head_slices, pp_layer_counts=pp_layer_counts)
             transfer = case.bind()
-            keys = transfer.keys(["a", "b"])
+            keys = transfer.naming.keys(["a", "b"])
             _, addresses, lengths = transfer.arguments(keys, [1, 1])
             self.assertEqual(addresses[0], addresses[1])
             self.assertEqual(lengths[0], lengths[1])
@@ -482,26 +484,26 @@ class MappingTests(unittest.TestCase):
             mapping.BulkMapping(case.topology, *case.registration_arrays)
         for head_slices, pp_layer_counts in itertools.product((None, 2), (None, (2, 2))):
             transfer = make_case(head_slices=head_slices, pp_layer_counts=pp_layer_counts).bind()
-            self.assertEqual(transfer.arguments(transfer.keys([]), []), ([], [], []))
+            self.assertEqual(transfer.arguments(transfer.naming.keys([]), []), ([], [], []))
             with self.assertRaises(ValueError):
-                transfer.arguments(transfer.keys(["a"]), [[0]])
+                transfer.arguments(transfer.naming.keys(["a"]), [[0]])
             with self.assertRaises(ValueError):
                 transfer.arguments(
-                    transfer.keys(["a"]), [0], selected_keys=[True] * (len(transfer.naming.key_prefixes) + 1)
+                    transfer.naming.keys(["a"]), [0], selected_keys=[True] * (len(transfer.naming.key_prefixes) + 1)
                 )
             with self.assertRaises(ValueError):
-                transfer.arguments(transfer.keys(["a", "b"]), [0])
+                transfer.arguments(transfer.naming.keys(["a", "b"]), [0])
 
     def test_bulk_empty_or_unselected_rows_skip_segment_materialization(self):
         for head_slices, pp_layer_counts in itertools.product((None, 2), (None, (1, 3))):
             bound = make_case(head_slices=head_slices, pp_layer_counts=pp_layer_counts).bind()
-            keys = bound.keys(["a", "b"])
+            keys = bound.naming.keys(["a", "b"])
             with (
                 patch.object(bulk.np, "broadcast_to", side_effect=AssertionError("unused segment lengths")),
                 patch.object(bulk.np, "flatnonzero", side_effect=AssertionError("unused selected indices")),
                 patch.object(bulk.np, "empty", side_effect=AssertionError("unused address allocation")),
             ):
-                self.assertEqual(bound.arguments(bound.keys([]), []), ([], [], []))
+                self.assertEqual(bound.arguments(bound.naming.keys([]), []), ([], [], []))
                 self.assertEqual(bound.arguments(keys, [0, 1], selected_keys=[False] * (len(keys) * 2)), ([], [], []))
 
     def test_hybrid_groups_bind_original_ids_and_independent_rows(self):
@@ -522,7 +524,7 @@ class MappingTests(unittest.TestCase):
             self.assertEqual(bound.local.hash_block_size, 8)
 
             transfer = bound
-            keys = transfer.keys(hashes)
+            keys = transfer.naming.keys(hashes)
             actual_keys, addresses, lengths = transfer.arguments(keys, ids, selected_keys=mask)
             selected = [
                 (prefix_index, row)
@@ -547,7 +549,7 @@ class MappingTests(unittest.TestCase):
                 list(map(sum, lengths)),
                 [tuple(obj.payload_bytes for obj in transfer.local.objects)[p] for p, _ in selected],
             )
-            self.assertEqual(transfer.arguments(transfer.keys([]), []), ([], [], []))
+            self.assertEqual(transfer.arguments(transfer.naming.keys([]), []), ([], [], []))
             self.assertEqual(transfer.arguments(keys, ids, selected_keys=[False] * len(mask)), ([], [], []))
 
     def test_hybrid_full_payload_excludes_padding_and_preserves_repeated_rows(self):
@@ -557,7 +559,7 @@ class MappingTests(unittest.TestCase):
                 bound = case.bind(group_id=group_id)
                 transfer = bound
                 ids = [2, 0, 1, 2]
-                keys = transfer.keys(["a", "b", "c", "a"])
+                keys = transfer.naming.keys(["a", "b", "c", "a"])
                 _, addresses, lengths = transfer.arguments(keys, ids)
                 self.assertEqual(
                     [read_bytes(address, length) for address, length in zip(addresses, lengths, strict=True)],
@@ -585,9 +587,9 @@ class MappingTests(unittest.TestCase):
         cases = [make_hybrid_case(tp_rank=rank, pp_layer_counts=(2, 2)) for rank in (2, 3)]
         for group_id, key_rank_count, family in ((3, 2, "c16"), (9, 4, "mamba")):
             left, right = (case.bind(group_id=group_id) for case in cases)
-            self.assertEqual(len(left.lookup_keys(["h"])), 2 * key_rank_count)
-            self.assertEqual(left.lookup_keys(["h"]), right.lookup_keys(["h"]))
-            self.assertEqual(left.keys(["h"]) == right.keys(["h"]), group_id == 3)
+            self.assertEqual(len(left.naming.lookup_keys(["h"])), 2 * key_rank_count)
+            self.assertEqual(left.naming.lookup_keys(["h"]), right.naming.lookup_keys(["h"]))
+            self.assertEqual(left.naming.keys(["h"]) == right.naming.keys(["h"]), group_id == 3)
             for bound, rank in ((left, 2), (right, 3)):
                 key_rank = rank // 2 if group_id == 3 else rank
                 for prefix in bound.naming.key_prefixes:
@@ -601,9 +603,9 @@ class MappingTests(unittest.TestCase):
         case.topology.transfer_groups = (case.topology.transfer_groups[0],)
         bound = case.bind()
         self.assertEqual(bound.local.group_id, 9)
-        self.assertEqual(len(bound.lookup_keys(["h"])), 8)
+        self.assertEqual(len(bound.naming.lookup_keys(["h"])), 8)
         self.assertIn("@head_or_tp_rank:3@", bound.naming.key_prefixes[0])
-        _, addresses, lengths = bound.arguments(bound.keys(["h"]), [1])
+        _, addresses, lengths = bound.arguments(bound.naming.keys(["h"]), [1])
         self.assertEqual(read_bytes(addresses[0], lengths[0]), expected_group_bytes(case, 9, (1, 3), 1))
 
     def test_multi_group_whole_objects_do_not_require_recurrent_state(self):
@@ -614,9 +616,9 @@ class MappingTests(unittest.TestCase):
         other_group.key_metadata.cache_family = "c4"
         for group_id in (3, 9):
             bound = case.bind(group_id=group_id)
-            self.assertEqual(len(bound.lookup_keys(["h"])), 4)
+            self.assertEqual(len(bound.naming.lookup_keys(["h"])), 4)
             self.assertIn("@head_or_tp_rank:1@", bound.naming.key_prefixes[0])
-            _, addresses, lengths = bound.arguments(bound.keys(["h"]), [2])
+            _, addresses, lengths = bound.arguments(bound.naming.keys(["h"]), [2])
             self.assertEqual(
                 read_bytes(addresses[0], lengths[0]),
                 expected_group_bytes(case, group_id, bound.local.physical_layer_ids, 2),
@@ -643,7 +645,7 @@ class MappingTests(unittest.TestCase):
             for case in sources:
                 for group_id in (3, 9):
                     transfer = bound[id(case), group_id]
-                    keys, addresses, lengths = transfer.arguments(transfer.keys(["a", "b"]), [2, 1])
+                    keys, addresses, lengths = transfer.arguments(transfer.naming.keys(["a", "b"]), [2, 1])
                     for key, address, length in zip(keys, addresses, lengths, strict=True):
                         payload = read_bytes(address, length)
                         if key in objects:
@@ -657,10 +659,14 @@ class MappingTests(unittest.TestCase):
                 for group_id in (3, 9):
                     group = bound[id(case), group_id]
                     self.assertTrue(
-                        all(key in objects for prefix_keys in group.lookup_keys(["a", "b"]) for key in prefix_keys)
+                        all(
+                            key in objects
+                            for prefix_keys in group.naming.lookup_keys(["a", "b"])
+                            for key in prefix_keys
+                        )
                     )
                     transfer = group
-                    keys, addresses, lengths = transfer.arguments(transfer.keys(["a", "b"]), [2, 1])
+                    keys, addresses, lengths = transfer.arguments(transfer.naming.keys(["a", "b"]), [2, 1])
                     for key, address, length in zip(keys, addresses, lengths, strict=True):
                         payload = objects[key]
                         self.assertEqual(sum(length), len(payload))

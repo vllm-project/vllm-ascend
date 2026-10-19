@@ -18,7 +18,7 @@ def test_store_collective_owns_a_dedicated_cpu_channel(monkeypatch):
     assert create.call_args.kwargs["ranks"] == [4, 5]
     assert create.call_args.kwargs["backend"] == "gloo"
     assert create.call_args.kwargs["use_local_synchronization"] is True
-    assert channel.all_gather("local") == ("local", "peer")
+    assert channel.all_gather("local") == {4: "local", 5: "peer"}
     assert gather.call_args.kwargs["group"] is group
     channel.close()
     channel.close()

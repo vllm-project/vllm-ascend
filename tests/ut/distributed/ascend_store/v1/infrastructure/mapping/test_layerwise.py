@@ -46,7 +46,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         mapping = case.bind_layers(group_id=bulk.local.group_id)
         self.assertFalse(hasattr(layerwise, "LayerwiseView"))
         self.assertFalse(hasattr(layerwise, "LayerRange"))
-        keys = bulk.keys(["a", "a"])
+        keys = bulk.naming.keys(["a", "a"])
         selection = mapping.prepare(keys, [1, 1])
         self.assertEqual(selection.selected_row_count, 4)  # Duplicate keys are still distinct input rows.
         for prefix_index, layout in enumerate(mapping.layer_layouts[0]):
@@ -81,7 +81,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             layers = case.bind_layers(group_id=bulk.local.group_id)
             self.assertIsNot(layers.local, bulk.local)
             ids = [2, 0, 2, 1]
-            keys = bulk.keys(["a", "b", "c", "d"])
+            keys = bulk.naming.keys(["a", "b", "c", "d"])
             for mask_kind in ("none", "all", "empty", "mixed"):
                 with self.subTest(
                     layout=layout, head_slices=head_slices, padding=padding, kernels=kernels, pp=pp, mask=mask_kind
@@ -204,7 +204,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                     )
             with self.assertRaises(TypeError):
                 mapping.layer_layouts[100] = ()
-            selection = mapping.prepare(bulk.keys(["a", "b"]), [0, 2])
+            selection = mapping.prepare(bulk.naming.keys(["a", "b"]), [0, 2])
             self.assertIs(selection.by_object[0].block_ids, selection.by_object[1].block_ids)
             with (
                 patch.object(layerwise.np, "cumsum", side_effect=AssertionError("runtime offsets")),
@@ -235,7 +235,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         case = make_case(head_slices=2, pp_layer_counts=(1, 3))
         bulk = case.bind()
         mapping = case.bind_layers(group_id=bulk.local.group_id)
-        selection = mapping.prepare(bulk.keys(["a", "b"]), [0, 1])
+        selection = mapping.prepare(bulk.naming.keys(["a", "b"]), [0, 1])
         prefix_selections = CountedPrefixSelections(selection.by_object)
         selection = replace(selection, by_object=prefix_selections)
         with patch.object(type(bulk), "arguments", side_effect=AssertionError("no all-layer arguments")):
@@ -251,7 +251,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             case.registration_arrays[1][3][:] = [length - 1 for length in case.registration_arrays[1][3]]
             bulk = case.bind()
             mapping = case.bind_layers(group_id=bulk.local.group_id)
-            keys = bulk.keys(["a", "b"])
+            keys = bulk.naming.keys(["a", "b"])
             names, addresses, lengths = bulk.arguments(keys, [0, 2])
             expected = {key: read_bytes(a, n) for key, a, n in zip(names, addresses, lengths, strict=True)}
             selection = mapping.prepare(keys, [0, 2])
@@ -271,10 +271,10 @@ class LayerwiseMappingTests(unittest.TestCase):
                 tuple(obj.layer_segment_boundaries for obj in bulk.local.objects)[0][-1],
                 tuple(obj.layer_segment_boundaries for obj in bulk.local.objects)[0][-2],
             )
-            keys = bulk.keys(["a"])
+            keys = bulk.naming.keys(["a"])
             all_rows = mapping.prepare(keys, [0])
             no_rows = mapping.prepare(keys, [0], selected_keys=[False] * len(keys))
-            empty_rows = mapping.prepare(bulk.keys([]), [])
+            empty_rows = mapping.prepare(bulk.naming.keys([]), [])
             only_pp0 = mapping.prepare(keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))])
             with (
                 patch.object(layerwise.np, "broadcast_to", side_effect=AssertionError("unused segments")),
@@ -293,7 +293,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         case = make_case(head_slices=2)
         bulk = case.bind()
         mapping = case.bind_layers(group_id=bulk.local.group_id)
-        keys = [list(prefix_keys) for prefix_keys in bulk.keys(["same", "other", "same"])]
+        keys = [list(prefix_keys) for prefix_keys in bulk.naming.keys(["same", "other", "same"])]
         ids = np.array([2, 1, 2], dtype=np.uint64)
         mask = [True, False, True, True, True, True]
         selection = mapping.prepare(keys, ids, selected_keys=mask)
@@ -317,7 +317,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         case = make_case(head_slices=2)
         bulk = case.bind()
         mapping = case.bind_layers(group_id=bulk.local.group_id)
-        keys = bulk.keys(["a", "b"])
+        keys = bulk.naming.keys(["a", "b"])
         for ids, mask, key_rows in (
             ([[0, 1]], None, keys),
             ([0], None, keys),
@@ -335,7 +335,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         for group_id, ids in ((3, [2, 0]), (9, [1, 2, 0])):
             bulk = case.bind(group_id=group_id)
             mapping = case.bind_layers(group_id=bulk.local.group_id)
-            keys = bulk.keys([str(i) for i in range(len(ids))])
+            keys = bulk.naming.keys([str(i) for i in range(len(ids))])
             selection = mapping.prepare(keys, ids)
             expected = {
                 keys[p][i]: expected_group_bytes(case, group_id, layer_ids, block_id)
@@ -397,7 +397,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                     objects: dict[str, bytes] = {}
                     for case in sources:
                         bulk, mapping = bindings[id(case)]
-                        keys = bulk.keys(["a", "b"])
+                        keys = bulk.naming.keys(["a", "b"])
                         if source_layerwise:
                             sizes = {
                                 key: size
@@ -419,7 +419,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                             for tensor in tensors:
                                 tensor.zero_()
                         bulk, mapping = bindings[id(case)]
-                        keys = bulk.keys(["a", "b"])
+                        keys = bulk.naming.keys(["a", "b"])
                         if source_layerwise:
                             names, addresses, lengths = bulk.arguments(keys, [1, 2])
                             for key, destinations, sizes in zip(names, addresses, lengths, strict=True):

@@ -31,11 +31,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .local_layout import LocalMemorySegments, bind_local_layout
 from .object_layout import ObjectLayoutFactory, build_default_object_layouts
 from .object_naming import KeyBuilder, KeyNamer, bind_canonical_keys
-from .types import KeysByObject, LayerTransferArguments, UInt64Array
+from .types import LayerTransferArguments, UInt64Array
 
 if TYPE_CHECKING:
     import torch
@@ -70,10 +71,11 @@ class LayerTransferLayout:
 
 @dataclass(frozen=True, slots=True)
 class _ObjectSelection:
-    """Each position pairs a complete object key with its local cache block ID."""
+    """Selected keys/IDs and their original input rows; no request ownership."""
 
     keys: tuple[str, ...]
     block_ids: UInt64Array
+    row_indices: range | NDArray[np.intp]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +90,10 @@ class LayerwiseSelection:
         by_object[1] = None                no selected rows
 
     This selects block rows, NOT layers: reuse it across layer_id calls without
-    filtering again. It snapshots keys/IDs, not transfer addresses. selected_row_count
-    totals rows across objects (2 above), including duplicates. The caller keeps
-    these object axes aligned with the group's bound layer layouts.
+    filtering again. It snapshots keys/IDs and input-row positions, not transfer
+    addresses or request ownership. selected_row_count totals rows across objects
+    (2 above), including duplicates. The caller keeps these object axes aligned
+    with the group's bound layer layouts and resolves request ownership separately.
     """
 
     by_object: tuple[_ObjectSelection | None, ...]
@@ -98,7 +101,7 @@ class LayerwiseSelection:
 
 
 class LayerwiseMapping:
-    """Bind local sources, naming and object placement, then cache per-layer access layouts."""
+    """Expose bound local/naming capabilities and cache per-layer object access layouts."""
 
     def __init__(
         self,
@@ -174,12 +177,6 @@ class LayerwiseMapping:
             {layer_id: tuple(layouts) for layer_id, layouts in layers.items()}
         )
 
-    def keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
-        return self.naming.keys(hashes)
-
-    def lookup_keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
-        return self.naming.lookup_keys(hashes)
-
     def prepare(
         self,
         keys: Sequence[Sequence[str]],
@@ -231,7 +228,9 @@ class LayerwiseMapping:
                 selected_block_ids = ids[selected_rows]
                 selected_block_ids.flags.writeable = False
                 selected_object_keys = tuple(object_keys[row] for row in selected_rows)
-            selections_by_object.append(_ObjectSelection(selected_object_keys, selected_block_ids))
+                selected_rows.flags.writeable = False
+            row_indices = range(row_count) if selected_rows is None else selected_rows
+            selections_by_object.append(_ObjectSelection(selected_object_keys, selected_block_ids, row_indices))
             selected_row_count += len(selected_block_ids)
         return LayerwiseSelection(tuple(selections_by_object), selected_row_count)
 

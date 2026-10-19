@@ -1097,10 +1097,10 @@ def test_store_builds_shared_layer_information_only_after_backend_admission(star
     monkeypatch.setattr(worker, "_prepare_store_layers", prepare)
     make_group = layer_transfer.make_layer_transfer_group
 
-    def make_admitted_group(group, **kwargs):
+    def make_admitted_group(group, *args, **kwargs):
         assert any(call[0] == ("alloc" if use_gva else "batch_put_start") for call in backend.calls)
         assert len(group.selected_keys()) == start_codes.count(0)
-        return make_group(group, **kwargs)
+        return make_group(group, *args, **kwargs)
 
     shared_group = Mock(side_effect=make_admitted_group)
     monkeypatch.setattr(layer_transfer, "make_layer_transfer_group", shared_group)

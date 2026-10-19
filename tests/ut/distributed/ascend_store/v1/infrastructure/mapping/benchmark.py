@@ -88,15 +88,16 @@ def measure(before, after, samples, target_sample_ms):
 def bulk_workload(bound, row_count, mask_kind):
     # Compatibility belongs only to the benchmark, never to production mapping.
     transfer = getattr(bound, "store", bound)
+    naming = getattr(transfer, "naming", transfer)
     hashes = tuple(index.to_bytes(4, "little") for index in range(row_count))
     ids = np.zeros(row_count, dtype=np.uint64)
-    keys = transfer.keys(hashes)
+    keys = naming.keys(hashes)
     mask = None
     if mask_kind != "full":
         mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(keys) * row_count)]
 
     def keys_and_arguments():
-        return transfer.arguments(transfer.keys(hashes), ids, selected_keys=mask)
+        return transfer.arguments(naming.keys(hashes), ids, selected_keys=mask)
 
     def arguments_only():
         return transfer.arguments(keys, ids, selected_keys=mask)
@@ -113,6 +114,7 @@ def selection_signature(selection):
 
 def layer_workload(layer_mapping, bulk_work):
     transfer, hashes, ids, mask, _, _ = bulk_work
+    naming = getattr(transfer, "naming", transfer)
     if hasattr(layer_mapping, "local"):
         layer_ids = layer_mapping.local.physical_layer_ids
     elif hasattr(layer_mapping, "binding"):
@@ -121,7 +123,7 @@ def layer_workload(layer_mapping, bulk_work):
         layer_ids = layer_mapping.bulk.physical_layer_ids
 
     def keys_and_prepare():
-        return layer_mapping.prepare(transfer.keys(hashes), ids, selected_keys=mask)
+        return layer_mapping.prepare(naming.keys(hashes), ids, selected_keys=mask)
 
     prepared = keys_and_prepare()
 
@@ -183,7 +185,7 @@ def main():
             continue
         case = make_case(layers=tuple(range(32)), block_size=128, vector=16, blocks=1, fill=False, **options)
         before, after = case.bind(baseline), case.bind()
-        assert before.lookup_keys(["a", "b"]) == after.lookup_keys(["a", "b"])
+        assert getattr(before, "naming", before).lookup_keys(["a", "b"]) == after.naming.lookup_keys(["a", "b"])
         result = {
             "route": name,
             "bulk_binding": measure(

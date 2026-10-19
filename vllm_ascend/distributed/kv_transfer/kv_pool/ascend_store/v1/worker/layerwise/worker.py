@@ -93,7 +93,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         self._backend_sessions = backend_sessions
         resources.bind_backend_sessions(backend_sessions)
         self._store_writers = tuple(min(peers) for peers in topology.context_replica_groups)
-        self._layerwise_store_leader = topology.tp_rank in self._store_writers
+        self._layerwise_store_leader = topology.global_rank in self._store_writers
         self._start_gate_factory = start_gate_factory
         self._prefetch_layers = layerwise_prefetch_layers
         self._layer_ids_by_name = compile_layer_ids_by_name(topology)

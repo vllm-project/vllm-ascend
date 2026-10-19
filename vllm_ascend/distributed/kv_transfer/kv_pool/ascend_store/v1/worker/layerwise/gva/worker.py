@@ -11,7 +11,7 @@ from vllm.logger import logger
 from .....attention_fence import reset_attention_compute_start_gate
 from ....backend import GVABackend, GVAObjectSessions, GVARegion
 from ....infrastructure.configuration.topology import KVPoolTopology
-from ....infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
+from ....infrastructure.mapping import LayerwiseMapping
 from ....infrastructure.mapping.object_layout import ObjectLayoutFactory
 from ....infrastructure.mapping.object_naming import KeyBuilder
 from ....infrastructure.reachability import HybridReachability, UnitaryReachability
@@ -171,9 +171,7 @@ def materialize_layer_gva(
     local_addresses: list[int] = []
     sizes: list[int] = []
     for group in plan.groups_by_layer[layer_id]:
-        _, local_rows, size_rows, offset_rows = mappings[group.group_id].arguments(
-            cast(LayerwiseSelection, group.selection), layer_id=layer_id
-        )
+        _, local_rows, size_rows, offset_rows = mappings[group.group_id].arguments(group.selection, layer_id=layer_id)
         remote_addresses.extend(
             int(base) + offset
             for base, offsets in zip(object_bases_by_group[group.group_id], offset_rows, strict=True)

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import regex as re
+import torch.distributed as dist
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed import get_dcp_group, get_pcp_group, get_pp_group, get_tp_group
 from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
@@ -26,6 +27,7 @@ from ....layerwise_cache_layout import (
 )
 from ...backend import BACKEND_IMPORTS, LAYERWISE_OBJECT_FORMATS
 from .topology import (
+    ContextRank,
     CPPartitionSpec,
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -38,6 +40,7 @@ from .topology import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
@@ -171,7 +174,7 @@ def resolve_object_partitions(
         return PPPartitionSpec(target_layer_counts), CPPartitionSpec(pcp_size, dcp_size)
     object_format = LAYERWISE_OBJECT_FORMATS[backend_name]
     global_layers = vllm_config.model_config.get_total_num_hidden_layers() if object_format.global_layer_span else None
-    shared = object_format.shared_context_shards and dcp_size > 1 and put_step > 1
+    shared = object_format.shared_context_shards and dcp_size > 1 and (put_step > 1 or pcp_size > 1)
     return (
         PPPartitionSpec(target_layer_counts, global_layers),
         CPPartitionSpec(
@@ -472,6 +475,13 @@ def resolve_worker_topology(
     pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
     dcp_size = config.cp_partition.dcp_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
+    context_ranks: tuple[ContextRank, ...] = ()
+    if config.use_layerwise and config.store_enabled:
+        context_ranks = (
+            _gather_context_ranks(tp_group, get_pcp_group() if pcp_size > 1 else None, dcp_rank)
+            if dcp_size > 1
+            else tuple(ContextRank(rank, index, 0) for index, rank in enumerate(tp_group.ranks))
+        )
     head_or_tp_rank = tp_rank // config.put_step
     model_name = model_config.model.rstrip("/").split("/")[-1]
     base_layer_count = model_config.get_total_num_hidden_layers()
@@ -531,9 +541,31 @@ def resolve_worker_topology(
         stage_layer_start=stage_start,
         stage_layer_count=stage_count,
         object_shard_index=dcp_rank if config.cp_partition.object_shard_count > 1 else 0,
-        tp_global_ranks=tuple(tp_group.ranks),
-        context_replica_groups=context_replica_groups(tp_rank, config.put_step, dcp_size),
+        global_rank=tp_group.ranks[tp_rank],
+        context_global_ranks=tuple(rank.global_rank for rank in context_ranks),
+        context_replica_groups=context_replica_groups(context_ranks, tp_rank, config.put_step),
     )
+
+
+def _gather_context_ranks(
+    tp_group: GroupCoordinator, pcp_group: GroupCoordinator | None, dcp_rank: int
+) -> tuple[ContextRank, ...]:
+    """Snapshot TP x PCP membership before any background Store can use collectives.
+
+    DCP may traverse PCP before TP. Exchange the actual coordinates instead of
+    inferring them from rank arithmetic. Model CPU groups are used only during
+    initialization; Store execution later owns a separate communication channel.
+    """
+    ranks: tuple[ContextRank, ...] = (
+        ContextRank(tp_group.ranks[tp_group.rank_in_group], tp_group.rank_in_group, dcp_rank),
+    )
+    for group in (pcp_group, tp_group):
+        if group is None or len(group.ranks) == 1:
+            continue
+        gathered: list[tuple[ContextRank, ...] | None] = [None] * len(group.ranks)
+        dist.all_gather_object(gathered, ranks, group=group.cpu_group)
+        ranks = tuple(rank for peers in gathered for rank in cast(tuple[ContextRank, ...], peers))
+    return tuple(sorted(ranks, key=lambda rank: rank.global_rank))
 
 
 def resolve_group_layers(layer_names: list[str], base_layer_count: int) -> tuple[KVPoolLayerTopology, ...]:
