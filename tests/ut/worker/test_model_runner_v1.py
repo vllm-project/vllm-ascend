@@ -1083,11 +1083,21 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                     runner._sync_num_accepted_tokens.assert_called_once_with(3, True)
                     runner.num_accepted_tokens.copy_to_gpu.assert_called_once_with()
 
-    def test_async_state_update_is_submitted_before_mtp_drafting(self):
+    def test_state_update_order_preserves_sync_and_other_cache_modes(self):
+        for asynchronous, cache_mode, update_before_draft in (
+            (True, "align", True),
+            (False, "align", False),
+            (True, "all", False),
+        ):
+            with self.subTest(asynchronous=asynchronous, cache_mode=cache_mode):
+                self._check_state_update_order(asynchronous, cache_mode, update_before_draft)
+
+    def _check_state_update_order(self, asynchronous, cache_mode, update_before_draft):
         runner = MagicMock()
         runner.kv_connector_output = None
         runner.need_accepted_tokens = True
-        runner.use_async_scheduling = True
+        runner.use_async_scheduling = asynchronous
+        runner.cache_config.mamba_cache_mode = cache_mode
         runner.dynamic_eplb = False
         runner.input_batch.vocab_size = 128
         runner.speculative_config.disable_padded_drafter_batch = False
@@ -1117,8 +1127,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
 
         def propose(*args):
             runner.sampling_done_event.record.assert_called_once_with()
-            stream.wait_event.assert_called_once_with(runner.sampling_done_event)
-            runner._update_states_after_model_execute.assert_called_once_with(sampled_token_ids, scheduler_output)
+            if update_before_draft:
+                stream.wait_event.assert_called_once_with(runner.sampling_done_event)
+                runner._update_states_after_model_execute.assert_called_once_with(sampled_token_ids, scheduler_output)
+            else:
+                stream.wait_event.assert_not_called()
+                runner._update_states_after_model_execute.assert_not_called()
             return torch.zeros(1, 5, dtype=torch.int32)
 
         runner.propose_draft_token_ids.side_effect = propose

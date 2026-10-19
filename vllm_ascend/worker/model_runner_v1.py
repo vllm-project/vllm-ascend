@@ -2443,7 +2443,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_accepted_tokens.np[:num_reqs] = (
                         self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                     )
-                    self.num_accepted_tokens.copy_to_gpu()
+                    self.num_accepted_tokens.copy_to_gpu(None if self.use_async_scheduling else num_reqs)
 
                     if mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
@@ -2813,12 +2813,19 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        update_states_before_draft = (
+            self.need_accepted_tokens
+            and self.use_async_scheduling
+            and self.cache_config.mamba_cache_mode == "align"
+        )
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
+
+        if update_states_before_draft:
             # Publish accepted counts while drafting runs, so the next input
             # preparation does not wait for work submitted after the draft.
             with (
@@ -2949,6 +2956,15 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
         self._finalize_dump_data()
+
+        if self.need_accepted_tokens and not update_states_before_draft:
+            assert self.sampling_done_event is not None
+            with (
+                record_function_or_nullcontext("async_state_update"),
+                torch.npu.stream(global_stream()),
+            ):
+                global_stream().wait_event(self.sampling_done_event)
+                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
             return model_runner_output
