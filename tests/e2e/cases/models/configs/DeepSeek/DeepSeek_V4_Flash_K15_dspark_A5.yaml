@@ -58,7 +58,7 @@ server_cmd: &server_cmd
 
 test_cases:
   - name: "DeepSeek-V4-Flash-DSpark-Static"
-    model: "deepseek-ai/DeepSeek-V4-Flash-0731"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -77,7 +77,7 @@ test_cases:
       prompt_tokens: 4
       completion_tokens: 200
   - name: "DeepSeek-V4-Flash-DSpark-DSpark-AdaptiveVerification"
-    model: "deepseek-ai/DeepSeek-V4-Flash-0731"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
     envs:
       <<: *envs
     server_cmd: *server_cmd
