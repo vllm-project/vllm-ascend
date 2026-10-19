@@ -308,19 +308,25 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
     runner.device = torch.device("cpu")
     runner.ascend_config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
         cache_config=SimpleNamespace(),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    runner.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="qwen4_exp"),
     )
     runner.use_sparse = False
     runner.use_compress = False
     runner.use_hybrid_blocks = False
     runner.runner_only_attn_layers = set()
     runner.sparse_kv_offload_enabled = False
+    runner.dcp_size = 1
     runner._kv_cache_spec_attn_group_iterator = lambda: [
         SimpleNamespace(
-            backend=SimpleNamespace(),
+            backend=SimpleNamespace(is_sparse=lambda: False),
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
         )
