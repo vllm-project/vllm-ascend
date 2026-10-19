@@ -29,6 +29,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -535,7 +536,7 @@ class AscendConfig:
             "sparse_kv_offload_config": {
                 "enabled": false,
                 "topk_buffer_size": -1,
-                "dram_size_per_dp_GB": 128,
+                "dram_size_per_dp_GB": 110,
                 "keep_device_kv_cache": false
             }
         }
@@ -735,7 +736,7 @@ class AscendConfig:
             )
 
         # enable_shared_expert_dp = val and ep and tp>1
-        from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_dense_sp, enable_sp
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
@@ -754,15 +755,29 @@ class AscendConfig:
 
         effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
 
+        # Dense Qwen3.5-family sequence parallelism: the same FlashComm switch
+        # also drives SP for dense checkpoints (no MoE to shard).
+        # vllm_ascend.utils.enable_dense_sp is the single predicate for
+        # runtime reads that only see a VllmConfig; it is not an AscendConfig
+        # field (not an external interface).
+        dense_sp_enabled = flashcomm_explicitly_enabled and enable_dense_sp(vllm_config=vc)
+
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
+        elif vc.parallel_config.use_sequence_parallel_moe:
             logger.info_once("FlashComm1 is enabled.")
+        elif dense_sp_enabled:
+            logger.info_once("FlashComm1 dense sequence parallelism is enabled for the Qwen3.5 dense family.")
+        else:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence "
+                "parallelism (requires tensor_parallel_size > 1, pipeline_parallel_size == 1, "
+                "and an SP-capable model family: MoE with expert parallelism or the dense "
+                "Qwen3.5 family). Disabling."
+            )
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
@@ -1674,7 +1689,7 @@ class SparseKVOffloadConfig:
     enabled: bool = False
     # -1 resolves to (1 + num_speculative_tokens) * 2048.
     topk_buffer_size: int = -1
-    dram_size_per_dp_GB: int = 128
+    dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
@@ -1709,6 +1724,13 @@ class SparseKVOffloadConfig:
     def _validate_preconditions(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
+
+        if is_950():
+            raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
+            raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")

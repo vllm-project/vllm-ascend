@@ -265,7 +265,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         )
         task = LayerTransferTask(
             layer_id=0,
-            block_ranges=[],
+            block_ranges=[LayerBlockRange(ReqMeta("r1", block_ids=[7]), 0, 1)],
             shared_block_data=SharedBlockData(
                 block_ids_arr=np.asarray([0]),
                 block_gvas_arr=np.asarray([100]),
@@ -279,15 +279,18 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         thread.request_queue.put([task])
         return thread, store, save_finished, task
 
-    def test_write_finish_failure_does_not_complete_layer(self):
+    def test_write_finish_failure_completes_layer_and_reports_request(self):
         thread, store, save_finished, task = self._make_sending_thread()
         store.batch_write_finish.return_value = [1]
 
-        with self.assertRaisesRegex(RuntimeError, "batch_write_finish failed"):
-            thread._handle_request([task])
+        thread._handle_request([task])
 
-        self.assertEqual(thread.get_and_clear_finished_requests(), set())
-        self.assertFalse(save_finished.is_set())
+        self.assertEqual(thread._invalid_block_ids, {7})
+        self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+        self.assertTrue(save_finished.is_set())
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+        store.batch_write_finish.assert_called_once_with(["k0"], [0])
+        thread.raise_if_failed()
 
     def test_write_finish_uses_last_actual_save_task(self):
         thread, store, _, task = self._make_sending_thread()
@@ -305,18 +308,16 @@ class TestGVALayerTransferFailures(unittest.TestCase):
                     store.store.batch_copy.return_value = copy_result
                     store.batch_write_finish.return_value = [finish_result]
 
-                    if strict:
-                        with self.assertRaises(RuntimeError):
-                            thread._handle_request([task])
-                        self.assertFalse(save_finished.is_set())
-                        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+                    thread._handle_request([task])
+                    self.assertEqual(thread._invalid_block_ids, {7} if strict else set())
+                    self.assertTrue(save_finished.is_set())
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                    self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+                    thread.raise_if_failed()
+                    if copy_result:
+                        store.batch_write_finish.assert_not_called()
                     else:
-                        thread._handle_request([task])
-                        store.batch_write_finish.assert_called_once_with(["k0"], [copy_result])
-                        self.assertTrue(save_finished.is_set())
-                        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
-                        self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
-                        thread.raise_if_failed()
+                        store.batch_write_finish.assert_called_once_with(["k0"], [0])
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
@@ -379,17 +380,12 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                 load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
                 thread.request_queue.put(load_task)
 
-                if strict:
-                    with self.assertRaises(RuntimeError):
-                        thread._handle_request(load_task)
-                    self.assertFalse(load_finished[1].is_set())
-                    self.assertEqual(thread._invalid_block_ids, set())
-                else:
-                    thread._handle_request(load_task)
-                    self.assertEqual(thread._invalid_block_ids, {7, 8})
-                    self.assertTrue(load_finished[1].is_set())
-                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
-                    thread.raise_if_failed()
+                thread._handle_request(load_task)
+                self.assertEqual(thread._invalid_block_ids, {7, 8})
+                self.assertTrue(load_finished[1].is_set())
+                self.assertFalse(request.can_save)
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                thread.raise_if_failed()
 
     def test_handle_request_does_not_clear_worker_owned_tasks(self):
         thread, _, _, _ = self._make_thread()
@@ -442,6 +438,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             layer_id=1,
         )
 
+        thread.request_queue.put(load_task)
         with self.assertRaisesRegex(RuntimeError, "save thread failed"):
             thread._handle_request(load_task)
 

@@ -19,6 +19,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec._draft_mla_uses_device_lengths = False
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
@@ -64,8 +65,10 @@ def test_non_mla_unchanged(architecture):
     assert not prefilling.any()
 
 
-def test_dcp_existing_delegate():
+@pytest.mark.parametrize("device_lengths", [False, True])
+def test_dcp_existing_delegate(device_lengths):
     spec = _spec([73], use_dcp=True)
+    spec._draft_mla_uses_device_lengths = device_lengths
     expected = torch.tensor([73, 0], dtype=torch.int32)
     spec.dcp_manager = SimpleNamespace(prepare_draft_dcp_metadata_inputs=MagicMock(return_value=(expected, object())))
     result = spec._prepare_draft_dcp_metadata_inputs(1, 2, 8)
@@ -73,6 +76,21 @@ def test_dcp_existing_delegate():
     assert spec.dcp_manager.prepare_draft_dcp_metadata_inputs.call_args.kwargs["target_seq_lens_cpu"] is (
         spec.target_input_buffers.seq_lens_cpu
     )
+
+
+@pytest.mark.parametrize("num_reqs,padded", [(0, 4), (1, 1), (2, 4)])
+def test_flashmla_uses_device_lengths_without_reading_host_mirror(num_reqs, padded):
+    spec = _spec([73, 81, 99999, 99999])
+    spec._draft_mla_uses_device_lengths = True
+    # The FlashMLA branch must not copy either the device lengths or the
+    # optimistic target CPU mirror into a separate draft host-length view.
+    spec.input_buffers = object()
+    spec.target_input_buffers = object()
+    actual, prefilling = spec._prepare_draft_dcp_metadata_inputs(num_reqs, padded, 8)
+    assert actual is None
+    assert prefilling.dtype == torch.bool
+    assert prefilling.shape == (padded,)
+    assert not prefilling.any()
 
 
 @pytest.mark.parametrize("entrypoint", ["regular", "ACL_update"])

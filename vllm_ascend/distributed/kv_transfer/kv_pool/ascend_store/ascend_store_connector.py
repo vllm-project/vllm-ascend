@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 
 
+_LOOKUP_SHUTDOWN_POLL_MS = 100
+
+
 class AscendStoreKVEvents(KVConnectorKVEvents):
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
@@ -151,6 +154,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def shutdown(self):
+        """Stop store users before closing the backend's native resources."""
+        try:
+            if self.connector_scheduler is not None:
+                client = self.connector_scheduler.client
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
+                    self.connector_scheduler.store_scheduler.close()
+        finally:
+            if hasattr(self, "lookup_server"):
+                self.lookup_server.close()
+            if self.connector_worker is not None:
+                self.connector_worker.shutdown()
 
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
@@ -485,6 +504,10 @@ class LookupKeyServer:
 
         def process_request():
             while self.running:
+                if not self.socket.poll(timeout=_LOOKUP_SHUTDOWN_POLL_MS):
+                    continue
+                if not self.running:
+                    break
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
@@ -510,4 +533,7 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
+        self.thread.join()
         self.socket.close(linger=0)
+        self.ctx.term()

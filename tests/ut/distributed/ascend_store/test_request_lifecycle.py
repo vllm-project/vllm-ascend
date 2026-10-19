@@ -435,13 +435,5 @@ def test_raw_sequence_lifecycle(
         if has_private_state:
             assert not any("@group:1@" in key for key in pool.m_store.lookups)
     finally:
-        server = worker.lookup_server
-        server.running = False
-        client = scheduler.connector.connector_scheduler.client
-        if client is not None:
-            client.lookup(0, [], list(range(len(plan.kv_cache_groups))))
-            server.thread.join(timeout=5)
-            client.close()
-            client.ctx.term()
-        server.close()
-        server.ctx.term()
+        worker.shutdown()
+        scheduler.connector.shutdown()
