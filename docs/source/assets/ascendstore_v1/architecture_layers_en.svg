@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="architecture-layers-en-title architecture-layers-en-desc">
+<title id="architecture-layers-en-title">AscendStore v1 Architecture</title>
+<desc id="architecture-layers-en-desc">Responsibility layers for integration, business logic, reusable infrastructure, Backend adapters and external storage systems.</desc>
+<defs><style>@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap");</style>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;fill:#526a76}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}.module{fill:#fff;stroke:#c8d4d9}</style>
+</defs><rect width="1280" height="720" fill="#fff"/>
+<text x="48" y="68" class="title">AscendStore v1 Architecture</text><text x="48" y="94" class="muted">Business logic composes infrastructure; Backend adapters connect native clients and storage.</text>
+
+<g data-node="integration"><rect x="48" y="112" width="1184" height="64" rx="6" class="band"/>
+<text x="64" y="139" class="name">Integration</text><text x="64" y="160" class="code">connector / factory</text>
+<text x="240" y="139" class="name">vLLM / AscendStoreV1Connector</text><text x="240" y="160" class="muted">Framework hooks and role adapters</text>
+<text x="816" y="139" class="name">factory</text><text x="816" y="160" class="muted">Build validated Scheduler / Worker / Backend</text></g>
+
+<rect x="48" y="192" width="1184" height="96" rx="6" class="band"/>
+<text x="64" y="228" class="name">Business logic</text><text x="64" y="253" class="muted">Request decisions</text>
+<g data-node="scheduler"><rect x="224" y="204" width="352" height="72" rx="4" class="module"/>
+<text x="240" y="231" class="name">Scheduler</text><text x="240" y="256" class="muted">Lookup · allocation · plans · source leases</text></g>
+<g data-node="worker"><rect x="592" y="204" width="624" height="72" rx="4" class="module"/>
+<text x="608" y="231" class="name">Worker</text><text x="736" y="231" class="muted">Bulk / Layerwise (KeyRange · GVA)</text><text x="608" y="256" class="muted">Object selection · batching · results · publication · source safety</text></g>
+
+<rect x="48" y="304" width="1184" height="168" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.5"/>
+<text x="64" y="370" class="name">Infrastructure</text><text x="64" y="395" class="muted">Reusable capabilities</text><text x="64" y="420" class="code">infrastructure/</text>
+<g data-node="configuration"><rect x="224" y="320" width="320" height="60" rx="4" class="module"/><text x="240" y="344" class="name">configuration</text><text x="240" y="367" class="muted">Validation · groups · topology</text></g>
+<g data-node="reachability"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Reachability</text><text x="576" y="367" class="muted">Recovery rules · prefix · selection</text></g>
+<g data-node="mapping"><rect x="896" y="320" width="320" height="60" rx="4" class="module"/><text x="912" y="344" class="name">Mapping</text><text x="912" y="367" class="muted">Object identity · layout · byte locations</text></g>
+<g data-node="protocol"><rect x="224" y="396" width="320" height="60" rx="4" class="module"/><text x="240" y="420" class="name">protocol</text><text x="240" y="443" class="muted">Messages · Lookup codec and RPC</text></g>
+<g data-node="execution"><rect x="560" y="396" width="320" height="60" rx="4" class="module"/><text x="576" y="420" class="name">Execution</text><text x="576" y="443" class="muted">Executor / Session · queues and prefetch</text></g>
+<g data-node="resources"><rect x="896" y="396" width="320" height="60" rx="4" class="module"/><text x="912" y="420" class="name">Resources</text><text x="912" y="443" class="muted">Ownership · registration · safe close</text></g>
+
+<g data-node="backend"><rect x="48" y="488" width="1184" height="80" rx="6" class="band"/><text x="64" y="521" class="name">Backend adapters</text><text x="64" y="547" class="code">backend/</text>
+<text x="240" y="519" class="name">Access</text><text x="360" y="519">Whole objects / KeyRange / GVA</text><text x="240" y="545" class="muted">Registration · native results · object sessions</text>
+<text x="816" y="519" class="name">MooncakeBackend / MemcacheBackend</text><text x="816" y="545" class="muted">Native access and completion guarantees</text></g>
+
+<g data-node="external"><rect x="48" y="584" width="1184" height="64" rx="6" fill="#f4f7f7" stroke="#c8d4d9"/><text x="64" y="611" class="name">Storage systems</text><text x="64" y="633" class="muted">Native clients / services</text>
+<text x="240" y="611" class="name">Mooncake</text><text x="240" y="633" class="muted">Native Store / transport and external storage</text>
+<text x="816" y="611" class="name">Memcache</text><text x="816" y="633" class="muted">Native client / global addresses and storage</text></g>
+<line x1="48" y1="652" x2="1232" y2="652" stroke="#c8d4d9"/><text x="48" y="676" class="muted">Layers group responsibilities; business paths compose capabilities and use Backend access.</text>
+</svg>
