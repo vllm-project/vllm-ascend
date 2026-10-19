@@ -80,7 +80,7 @@ class LmheadTPDraftSamplingMixin:
     else:
         # vLLM #59554 added `num_steps` to `Speculator.sample_draft`; DFlash
         # passes it so the draft watermarker can key its draw by the step count.
-        def sample_draft(
+        def sample_draft(  # type: ignore[misc]
             self,
             hidden_states: torch.Tensor,
             positions: torch.Tensor,

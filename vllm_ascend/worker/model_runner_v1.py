@@ -275,7 +275,7 @@ if vllm_version_is("0.31.0"):
     from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 else:
 
-    class AscendMedusaProposer:
+    class AscendMedusaProposer:  # type: ignore[no-redef]
         pass
 
 

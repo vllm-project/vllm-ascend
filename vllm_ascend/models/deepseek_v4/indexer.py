@@ -57,7 +57,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_dev
 # main; the v0.31.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
 if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
 

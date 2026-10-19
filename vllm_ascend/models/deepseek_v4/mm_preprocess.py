@@ -53,7 +53,7 @@ from vllm_ascend.utils import vllm_version_is
 # main; the v0.31.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
 if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
 

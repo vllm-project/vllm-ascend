@@ -63,7 +63,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 # vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
 # main; the v0.31.0 lane still ships them in `kv_cache_utils`.
 if vllm_version_is("0.31.0"):
-    kv_cache_planning = kv_cache_utils
+    from vllm.v1.core import kv_cache_utils as kv_cache_planning
 else:
     from vllm.v1.core import kv_cache_planning
 

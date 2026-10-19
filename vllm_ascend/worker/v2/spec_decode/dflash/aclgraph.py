@@ -78,7 +78,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
-        prepare_kwargs = (
+        prepare_kwargs: dict[str, Any] = (
             {"precompute_context_kv": precompute_context_kv}
             if vllm_version_is("0.31.0")
             else {"prepare_forward": prepare_forward}

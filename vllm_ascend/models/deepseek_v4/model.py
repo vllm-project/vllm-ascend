@@ -111,7 +111,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 # main; the v0.31.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
 if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
 
@@ -485,8 +485,8 @@ class DeepseekV4MoE(nn.Module):
             self.ep_group = get_ep_group().device_group
             self.ep_rank = get_ep_group().rank_in_group
             self.ep_size = self.ep_group.size()
-            self.n_routed_experts: int = config.n_routed_experts
-            self.n_shared_experts: int = config.n_shared_experts
+            self.n_routed_experts: int = config.n_routed_experts  # type: ignore[no-redef]
+            self.n_shared_experts: int = config.n_shared_experts  # type: ignore[no-redef]
 
             self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
