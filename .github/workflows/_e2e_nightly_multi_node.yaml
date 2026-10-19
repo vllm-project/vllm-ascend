@@ -73,6 +73,11 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      download_path:
+        required: false
+        type: string
+        default: ''
+        description: test container file or directory to upload as a GitHub artifact
       testcase_timeout:
         required: false
         default: 120
@@ -210,7 +215,9 @@ jobs:
       - name: Prepare scripts
         run: |
           install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
+          install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
 
       - name: Clear resources
         run: |
@@ -254,10 +261,14 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
           OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+          DOWNLOAD_SPEC: ${{ inputs.download_path }}
         run: |
           set -euo pipefail
 
           size="${{ inputs.size }}"
+          if [ -n "$DOWNLOAD_SPEC" ]; then
+            python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" --list --node-count "$size" > /dev/null
+          fi
           replicas="${{ inputs.replicas }}"
           image="${{ inputs.image }}"
           config_file_path="${{ inputs.config_file_path }}"
@@ -286,6 +297,7 @@ jobs:
           jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
+            -D download_spec="$DOWNLOAD_SPEC" \
             -D size="$size" \
             -D replicas="$replicas" \
             -D image="$image" \
@@ -593,12 +605,35 @@ jobs:
 
       - name: Post process
         if: always()
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
         run: |
+          # Archive once after the test finishes, before deleting running pods.
+          # The exit trap covers pods that exit earlier.
+          if [ -n "$DOWNLOAD_PATH" ]; then
+            while IFS=$'\t' read -r node requested_path; do
+              index="${node#node}"
+              if [ "$index" -eq 0 ]; then
+                pod="${LWS_NAME}-0"
+                container=vllm-leader
+              else
+                pod="${LWS_NAME}-0-${index}"
+                container=vllm-worker
+              fi
+              echo "Archiving requested path from $pod: $requested_path"
+              if ! kubectl exec "$pod" -c "$container" -n "$NAMESPACE" -- \
+                  /bin/bash /root/.cache/tests/download_archive.sh --strict; then
+                echo "::warning::Could not archive $requested_path from $pod before deletion"
+              fi
+            done < <(python3 .github/workflows/scripts/collect_download.py \
+              "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }})
+          fi
+
           echo "Current pod status:"
           kubectl get pods -n "$NAMESPACE" --ignore-not-found=true
 
           echo "Deleting resources for [$LWS_NAME]..."
-          kubectl delete -f ./lws.yaml --ignore-not-found=true || true
+          kubectl delete -f ./lws.yaml --ignore-not-found=true --wait=false || true
 
           echo "Waiting for pods of [$LWS_NAME] to fully terminate..."
           TIMEOUT=300
@@ -620,6 +655,70 @@ jobs:
             echo "Waiting for pods to terminate: $PODS_EXIST"
             sleep $SLEEP_INTERVAL
           done
+
+      - name: Collect requested paths from test pods
+        if: ${{ always() && inputs.download_path != '' }}
+        id: collect_download
+        continue-on-error: true
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
+        run: |
+          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
+          mkdir -p /tmp/download-artifact
+          for attempt in $(seq 1 12); do
+            pending=0
+            while IFS=$'\t' read -r NODE REQUESTED_PATH; do
+              [ -f "${LOG_PREFIX}/${NODE}_download.tar.gz" ] && continue
+              index="${NODE#node}"
+              if [ "$index" -eq 0 ]; then
+                pod="${LWS_NAME}-0"
+              else
+                pod="${LWS_NAME}-0-${index}"
+              fi
+              phase=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [ "$phase" = "Running" ] || [ "$phase" = "Pending" ]; then
+                pending=1
+              fi
+            done < /tmp/download-paths.tsv
+            [ "$pending" -eq 0 ] && break
+            echo "Waiting for requested archives (attempt $attempt/12)"
+            sleep 5
+          done
+          copied=0
+          while IFS=$'\t' read -r NODE REQUESTED_PATH; do
+            source_archive="${LOG_PREFIX}/${NODE}_download.tar.gz"
+            if [ -f "$source_archive" ]; then
+              cp "$source_archive" "/tmp/download-artifact/${NODE}.tar.gz"
+              echo "Collected ${NODE}: ${REQUESTED_PATH} -> ${NODE}.tar.gz ($(wc -c < "$source_archive") bytes)"
+              copied=$((copied + 1))
+            else
+              echo "::warning::No archive from ${NODE} for ${REQUESTED_PATH}"
+            fi
+          done < /tmp/download-paths.tsv
+          if [ "$copied" -eq 0 ]; then
+            echo "::warning::No requested paths were archived by test pods"
+            exit 1
+          fi
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
+          echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload requested paths
+        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        id: upload_download
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_download.outputs.name }}
+          path: /tmp/download-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Remove uploaded archives from shared storage
+        if: ${{ always() && steps.upload_download.outcome == 'success' }}
+        continue-on-error: true
+        run: rm -f "${LOG_PREFIX}"/node*_download.tar.gz
 
       - name: Collect Ascend logs
         if: always()

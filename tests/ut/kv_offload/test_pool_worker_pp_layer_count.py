@@ -111,6 +111,9 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     # Supply backend allocation results; keep task and address construction real.
     worker._prepare_load_gvas = Mock()
     worker._alloc_gvas_for_save = Mock()
+    # The worker is built via __new__ (no __init__), so the per-step memo
+    # cache that process_layer_data clears must be seeded manually.
+    worker._masked_runs_cache = {}
     request = ReqMeta(
         req_id="pp-layer",
         token_len_chunk=16,

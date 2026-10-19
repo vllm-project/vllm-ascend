@@ -18,8 +18,6 @@ from vllm_ascend.attention.indexer_kpool import (
     Glm5NextKPoolIndexerBackend,
 )
 
-# The operator PR owns these kernels. Each orchestration test below replaces
-# the kernel call with an asserting CPU implementation.
 with patch.dict(
     "sys.modules",
     {
@@ -226,6 +224,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     graph_mode,
     dsa_cp,
 ) -> None:
+    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -243,12 +242,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     backend.tail_cache = SimpleNamespace(
         prefix="indexer.tail",
-        kv_cache=torch.zeros(2, 2, 4, 2, dtype=torch.float32),
+        kv_cache=torch.zeros(2, 4, 4, dtype=torch.float32),
     )
     backend.topk_indices_buffer = torch.empty(64, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
-    backend._wk_weight_f32 = None
-    backend.indexer_op = _RecordingKPool()
+    backend._key_weight = None
+    recorder = _RecordingKPool()
+    backend._forward_cann = recorder.forward
     tail_metadata = _tail_metadata()
     monkeypatch.setattr(
         backend_module,
@@ -267,19 +267,22 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
     metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
     metadata.seq_lens = torch.zeros(8, dtype=torch.int32)
-    metadata.seq_lens_cpu = metadata.seq_lens.clone()
     metadata.block_table = torch.zeros(8, 1, dtype=torch.int32)
     metadata.positions = torch.zeros(64, dtype=torch.int64)
     metadata.slot_mapping = torch.full((64,), -1, dtype=torch.int64)
+
     if dsa_cp:
-        metadata.query_metadata = AscendIndexerKPoolQueryMetadata(
+        metadata.query_metadata = backend_module.AscendIndexerKPoolQueryMetadata(
             positions=metadata.positions,
             cum_query_lens=metadata.cum_query_lens,
             num_actual_tokens=metadata.num_actual_tokens,
+            seq_lens=metadata.seq_lens,
+            pool_tail=torch.zeros(8, dtype=torch.int64),
         )
         metadata.positions = torch.zeros(128, dtype=torch.int64)
-        group = SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x)))
-        monkeypatch.setattr(backend_module, "get_tp_group", lambda: group)
+        monkeypatch.setattr(
+            backend_module, "get_tp_group", lambda: SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x)))
+        )
 
     result = backend.forward(
         hidden,
@@ -290,40 +293,34 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
 
     assert result is not None
-    assert backend.indexer_op.args is not None
+    assert recorder.args is not None
+    assert recorder.kwargs is not None
     expected_rows = 64 if dsa_cp or graph_mode == CUDAGraphMode.FULL else 8
     assert result.shape[0] == expected_rows
-    torch.testing.assert_close(
-        backend.indexer_op.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2)
-    )
-    expected_k = torch.nn.functional.layer_norm(
-        torch.nn.functional.linear(hidden[:expected_rows] + 3, backend.wk_weights_proj.weight)[:, :2],
-        (2,),
-        backend.k_norm.weight,
-        backend.k_norm.bias,
-        backend.k_norm.eps,
-    )
-    torch.testing.assert_close(
-        backend.indexer_op.args[0], torch.cat((expected_k, expected_k)) if dsa_cp else expected_k
-    )
-    assert backend.indexer_op.args[0].dtype == torch.float32
+    torch.testing.assert_close(recorder.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2))
+    if dsa_cp:
+        torch.testing.assert_close(recorder.args[0], torch.cat((hidden + 3, hidden + 3)))
+    else:
+        torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
+    torch.testing.assert_close(backend._key_weight, backend.wk_weights_proj.weight[:2])
+    torch.testing.assert_close(backend._norm_weight_f32, backend.k_norm.weight.float())
     expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
         0.5 * 2**-0.5
     )
-    torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
-    assert backend.indexer_op.args[7] is tail_metadata
-    assert backend.indexer_op.kwargs is not None
-    assert backend.indexer_op.kwargs["compute_topk"] is True
-    assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
-    assert backend.indexer_op.kwargs["allow_cache_packing"] is (graph_mode != CUDAGraphMode.FULL)
-    assert backend.indexer_op.kwargs["query_metadata"] is metadata.query_metadata
+    torch.testing.assert_close(recorder.args[2], expected_weights)
+    assert recorder.args[-1] is tail_metadata
+    assert recorder.kwargs["compute_topk"] is True
 
 
 def test_dsacp_kpool_compresses_global_tokens_and_selects_local_queries(monkeypatch):
     metadata = _indexer_metadata()
     local_positions = metadata.positions[4:]
     query_metadata = AscendIndexerKPoolQueryMetadata(
-        positions=local_positions, cum_query_lens=torch.tensor([0, 4], dtype=torch.int32), num_actual_tokens=3
+        positions=local_positions,
+        cum_query_lens=torch.tensor([0, 4], dtype=torch.int32),
+        num_actual_tokens=3,
+        seq_lens=metadata.seq_lens,
+        pool_tail=torch.zeros(2, dtype=torch.int64),
     )
     compress = MagicMock()
     select = MagicMock(return_value=torch.zeros((4, 1, 7), dtype=torch.int32))
@@ -352,3 +349,127 @@ def test_dsacp_kpool_compresses_global_tokens_and_selects_local_queries(monkeypa
     assert result.shape[0] == 4
     assert torch.all(result[3] == -1)
     torch.testing.assert_close(result[:3, 0, 0], torch.tensor([0, 0, 0], dtype=torch.int32))
+
+
+@pytest.mark.parametrize("missing", ["cann_ops_transformer", "vllm_ascend.ops.triton.glm5_next_cann_keypool"])
+def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing):
+    def load(name):
+        if name == missing:
+            raise ImportError(name)
+        return MagicMock()
+
+    loader = MagicMock(side_effect=load)
+    monkeypatch.setattr(backend_module, "import_module", loader)
+    with pytest.raises(RuntimeError, match="CANN ops-transformer operator package and Triton cache/index adapters"):
+        Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
+    assert missing in [call.args[0] for call in loader.call_args_list]
+
+
+@pytest.mark.parametrize("compute_topk", [False, True])
+@pytest.mark.parametrize(
+    "dsa_cp,actual_query_tokens,runtime_mode",
+    [
+        (False, 8, CUDAGraphMode.NONE),
+        (True, 4, CUDAGraphMode.NONE),
+        (True, 3, CUDAGraphMode.NONE),
+        (True, 0, CUDAGraphMode.NONE),
+        (True, 0, CUDAGraphMode.PIECEWISE),
+        (True, 0, CUDAGraphMode.FULL),
+    ],
+)
+@pytest.mark.parametrize("reuse_output", [False, True])
+def test_cann_indexer_writes_caches_before_optional_selection(
+    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output
+):
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+    )
+    op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(op)
+    op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
+    op._key_weight = torch.empty(2, 3, dtype=torch.bfloat16)
+    op._gate_weight = torch.empty(2, 3, dtype=torch.bfloat16)
+    op._norm_weight_f32 = op._norm_bias_f32 = None
+    op.k_norm = SimpleNamespace(eps=1e-6)
+    op.index_kpool_compress_ape = torch.empty(4, 2)
+    storage = torch.full((20, 22), 77, dtype=torch.int32)
+    op.topk_indices_buffer = storage[::2, :11] if reuse_output else None
+    pooled = torch.empty(2, 2, dtype=torch.bfloat16)
+    state = torch.empty(5, 4, 4)
+    query_rows = 4 if dsa_cp else 8
+    packed = torch.empty(query_rows, 1, 7, dtype=torch.int32)
+    calls = MagicMock()
+    for name, result in (
+        ("prepare_keypool_state", state),
+        ("key_pool", pooled),
+        ("write_keypool_caches", None),
+        ("pool_key_indexer", (torch.empty(query_rows, 7, dtype=torch.int32), None)),
+        ("pack_keypool_indices", packed),
+    ):
+        mock = MagicMock(return_value=result)
+        setattr(op, "_" + name, mock)
+        calls.attach_mock(mock, name)
+    metadata = _indexer_metadata()
+    metadata.query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
+    metadata.start_pos = torch.zeros(2, dtype=torch.int32)
+    metadata.pool_tail = torch.zeros(2, dtype=torch.int64)
+    metadata.pooled_slot_mapping = torch.tensor([0, 2], dtype=torch.int64)
+    metadata.keypool_state_table = torch.empty(2, 2, dtype=torch.int32)
+    metadata.keypool_start_offsets = torch.empty(2, dtype=torch.int32)
+    if dsa_cp:
+        metadata.query_metadata = AscendIndexerKPoolQueryMetadata(
+            positions=metadata.positions[4:],
+            cum_query_lens=torch.tensor([0, actual_query_tokens], dtype=torch.int64),
+            num_actual_tokens=actual_query_tokens,
+            seq_lens=torch.tensor([0, int(actual_query_tokens > 0)], dtype=torch.int64),
+            pool_tail=torch.zeros(2, dtype=torch.int64),
+        )
+    query_metadata = metadata.query_metadata or metadata
+    tail_metadata = _tail_metadata()
+    tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
+    cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
+    tail = torch.empty(2, 4, 4)
+    with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
+        result = op._forward_cann(
+            torch.empty(8, 3, dtype=torch.bfloat16),
+            torch.empty(query_rows, 1, 2, dtype=torch.bfloat16),
+            torch.empty(query_rows, 1, dtype=torch.bfloat16),
+            cache,
+            tail,
+            metadata,
+            tail_metadata,
+            compute_topk=compute_topk,
+        )
+    names = [call[0] for call in calls.mock_calls]
+    assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
+    assert op._key_pool.call_args.args[1:3] == (op._key_weight, op._gate_weight)
+    assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
+    assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
+    assert op._write_keypool_caches.call_args.args[4] is pooled
+    skip_empty_query = actual_query_tokens == 0 and runtime_mode != CUDAGraphMode.FULL
+    if compute_topk and skip_empty_query:
+        assert result.shape == (query_rows, 1, 7)
+        assert result.dtype == torch.int32
+        assert torch.all(result == -1)
+        assert names[3:] == []
+        op._pool_key_indexer.assert_not_called()
+        op._pack_keypool_indices.assert_not_called()
+        if reuse_output:
+            assert result.data_ptr() == storage.data_ptr()
+            assert torch.all(op.topk_indices_buffer[:query_rows] == -1)
+            assert torch.all(op.topk_indices_buffer[query_rows:] == 77)
+            assert torch.all(storage[1::2] == 77)
+            assert torch.all(storage[:, 11:] == 77)
+    elif compute_topk:
+        assert result is packed
+        assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
+        assert op._pool_key_indexer.call_args.args[1] is cache
+        assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is query_metadata.cum_query_lens
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
+        assert op._pool_key_indexer.call_args.args[3] is query_metadata.pool_tail
+        assert op._pack_keypool_indices.call_args.args[1] is query_metadata
+    else:
+        assert result is None
+        op._pool_key_indexer.assert_not_called()
+        op._pack_keypool_indices.assert_not_called()

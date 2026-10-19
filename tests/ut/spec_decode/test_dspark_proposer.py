@@ -976,6 +976,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.dcp_size = 1
         proposer._per_group_block_tables = {}
         proposer._per_group_slot_mappings = {}
+        proposer.num_query_per_req = 4
         return proposer
 
     def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
@@ -1026,6 +1027,10 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         class DraftBuilder:
             def __init__(self):
                 self.max_num_tokens = None
+                self.num_query_per_req = None
+
+            def set_dspark_num_query_per_req(self, num_query_per_req):
+                self.num_query_per_req = num_query_per_req
 
             def enable_dspark_device_metadata(self, max_num_tokens):
                 self.max_num_tokens = max_num_tokens
@@ -1059,6 +1064,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
             proposer.initialize_attn_backend(kv_cache_config)
 
         assert builder.max_num_tokens == expected_tokens
+        assert builder.num_query_per_req == (proposer.num_query_per_req if expected_tokens is not None else None)
 
     def test_initialization_tracks_logical_block_size_per_gid(self, monkeypatch):
         manager_specs = [MagicMock(), MagicMock()]

@@ -16,8 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import copy
+
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CompilationMode, VllmConfig
 
 
 def init_speculator(
@@ -29,6 +31,10 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.enforce_eager:
+        vllm_config = copy.copy(vllm_config)
+        vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
+        vllm_config.compilation_config.mode = CompilationMode.NONE
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.

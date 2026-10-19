@@ -92,24 +92,18 @@ def _layer_idx(layer_name: str) -> int:
 def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     """Pick the KV transfer backend.
 
-    Read from ``kv_connector_extra_config["transfer_backend"]``. The SFA PD
-    RD2H connector currently requires ``"memfabric"``.
+    Read from ``kv_connector_extra_config["transfer_backend"]``, defaulting
+    to ``"memfabric"``, the only supported backend.
     """
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-    backend = extra.get("transfer_backend")
-    if backend is None:
-        raise ValueError(
-            'SfaRemoteD2HConnector requires kv_connector_extra_config["transfer_backend"] '
-            'to be set (currently only "memfabric" is supported).'
-        )
-    return backend
+    return extra.get("transfer_backend", BACKEND_MEMFABRIC)
 
 
 def _resolve_memfabric_transfer_protocol(vllm_config: VllmConfig) -> str | None:
     """Read the optional MemFabric data-path protocol.
 
     Read from ``kv_connector_extra_config["memfabric_transfer_protocol"]``:
-    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for A5 nodes.
+    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for 950PR&950DT Products.
     """
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
     return extra.get("memfabric_transfer_protocol")

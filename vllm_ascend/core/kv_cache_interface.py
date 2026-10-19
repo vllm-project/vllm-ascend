@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 from typing_extensions import Self
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
@@ -65,6 +68,87 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     )
 
 
+def declared_kwarg(owner: type, name: str, value: Any) -> dict[str, Any]:
+    """Spell one optional field out for a constructor that declares it.
+
+    Used for the fields upstream adds to the sliding-window specs and their
+    caches over time -- ``extra_retained_tokens`` on the spec, ``bounded_replay``
+    on both the spec and the SWA cache (vLLM #56227). Naming such a keyword
+    unconditionally is a ``TypeError`` on a lane that does not have it, and this
+    repository supports two: main, which grows the fields, and the release tag,
+    which never does. Probing the owner keeps that decision in one place.
+    """
+    return {name: value} if name in inspect.signature(owner).parameters else {}
+
+
+# The architectures bounded replay was written for. Upstream wires the feature
+# into ``vllm/models/deepseek_v41/`` alone -- the DeepSeek-V4 tree never reads
+# the switch -- so the architecture name is the honest test for "this model may
+# replay". Both of this project's spellings for the target are listed: missing
+# the one a checkpoint declares is a switch that can never be turned on.
+#
+# The DSpark draft is deliberately left out. Its SWA cache is a different class
+# (``DeepseekV41DSparkSWACache``) that does not carry the field, so a draft
+# checkpoint would pass a gate that then replays nothing.
+BOUNDED_REPLAY_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV41ForCausalLM",  # this repository's registry key
+        "DeepseekV41ForConditionalGeneration",  # the VL spelling
+    }
+)
+
+
+def supports_bounded_replay(model_config: Any) -> bool:
+    """Whether this model is one the feature was written for."""
+    architectures = getattr(model_config, "architectures", None) or ()
+    return any(architecture in BOUNDED_REPLAY_ARCHITECTURES for architecture in architectures)
+
+
+def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | None) -> bool:
+    """Whether a sliding-window layer may declare a replay window.
+
+    The switch and both guards are upstream's (vLLM #56227), re-decided here
+    because the layer upstream applies them in -- its own SWA attention layer --
+    is the one Ascend replaces. The Ascend scheduler conditions, the ones that
+    cannot rewind a prefix hit at all, are decided in ``platform.py`` before any
+    layer exists: they turn the switch itself off, so this reads the result.
+
+    It reads that switch and nothing else, deliberately: a V4.1 model that does
+    not turn it off in its cache config replays.
+
+    There is no capability guard beside them. Keeping a replayed window off the
+    blocks below ``replay_start`` -- whose KV the sliding-window group does not
+    hold, those positions having been retired to the null block -- is the
+    operator's job now: band mode reads ``ori_topk_length`` as the per-token
+    visible length and floors the window's left edge with it. See
+    ``build_replay_swa_visible_lens`` in ``attention/dsa_v41.py`` for the read
+    side and ``npu_sparse_flash_mla``'s band path for the clamp.
+    """
+    if not supports_bounded_replay(getattr(vllm_config, "model_config", None)):
+        # Upstream wires the feature into the DeepSeek-V4.1 tree only -- the V4
+        # tree's attention layer never reads the switch -- so a V4 model is
+        # silent here too: the feature is not part of this model, and no user
+        # can have turned it on for it.
+        return False
+    if not getattr(cache_config, "swa_bounded_replay", False):
+        # Absent from the release lane, where the feature does not exist at all:
+        # no switch to turn on, no spec field for the flag to reach, so there is
+        # nothing to warn about. Probed rather than read, so the lane does not
+        # have to be named here.
+        return False
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        # The PAD pass walks the batch the rank was handed, which under PCP is
+        # not the batch the scheduler rewound. Keep replay disabled until the
+        # per-rank replay boundaries can be mapped correctly.
+        logger.warning_once(
+            "SWA bounded replay is off under prefill context parallelism (the replayed tokens' slot "
+            "padding knows the rank-local batch only); the sliding-window cache takes part in prefix "
+            "caching instead."
+        )
+        return False
+    return True
+
+
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     """Whether state caches advance by a padded page size shared with attention.
 
@@ -89,6 +173,34 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
+def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
+    """Whether PD transfer can preserve a component-major MLA cache layout.
+
+    A component-major MLA page packs NoPE and RoPE into one physical slot:
+    ``[all NoPE][all RoPE][padding]``.  MooncakeV2 pull connectors transfer
+    that page as one raw block when the published base address, block length,
+    and block stride describe the complete slot.  Other connectors still use
+    the legacy separate NoPE/RoPE protocol.
+
+    Without PD, local layout selection is unrestricted. With supported PD,
+    both endpoints must use component-major pages because raw transfers carry
+    no metadata distinguishing them from token-fused FlashMLA pages.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return True
+
+    # Connectors loaded through a custom module path are not identified by the
+    # registry name, so conservatively fall back to the legacy layout.
+    if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
+        return False
+
+    return getattr(kv_transfer_config, "kv_connector", None) in {
+        "MooncakeConnectorV2",
+        "MooncakePullConnector",
+    }
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.
@@ -98,6 +210,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
+    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
+    # caches without query heads use the one-latent-head cache contract.
+    num_heads: int = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -117,6 +232,16 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant
 
     @property
+    def supports_single_raw_backing(self) -> bool:
+        """Whether this geometry can be exposed from one raw MLA backing."""
+        return (
+            get_kv_cache_compression_ratio(self) == 1
+            and self.model_version is None
+            and not self.indexes_kv_by_block_stride
+            and not self.cache_sparse_sfa_c8
+        )
+
+    @property
     def real_page_size_bytes(self) -> int:
         return (
             get_storage_block_size(self)
@@ -130,12 +255,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        # Uniformity probes may include indexer specs, which share the upstream
+        # MLA base class but do not have the main cache's layout metadata.
+        assert all(isinstance(spec, AscendMLAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be AscendMLAAttentionSpec."
         )
         ascend_layouts = {
             (
                 spec.scale_dim,
+                spec.num_heads,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -158,6 +286,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
+            num_heads=first_spec.num_heads,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
@@ -254,6 +383,15 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     compress_ratio: int = 1
     model_version: str | None = None
     indexes_kv_by_block_stride: bool = False
+    bounded_replay: bool = False
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return not self.bounded_replay
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.sliding_window if self.bounded_replay else 0
 
     def __post_init__(self):
         pass
@@ -275,16 +413,32 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
+        # ``bounded_replay`` arrives with vLLM #56227. This override builds the
+        # merged spec from scratch rather than through the parent's ``merge``,
+        # so it has to carry both across itself, and dropping either is silent:
+        # the first leaves a multi-layer group with a narrower window than its
+        # layers asked for, the second leaves it replaying nothing. ``None`` is
+        # what a lane without the field reads back, and is not carried.
+        extra_retained_set = set(getattr(spec, "extra_retained_tokens", None) for spec in specs)
+        bounded_replay_set = set(getattr(spec, "bounded_replay", None) for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
+            and len(extra_retained_set) == 1
+            and len(bounded_replay_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version and sliding "
-            "window size."
+            "quantization method, compress ratio, model version, sliding "
+            "window size, retained token count and replay policy."
         )
+        carried_kwargs: dict[str, Any] = {}
+        if None not in bounded_replay_set:
+            carried_kwargs.update(declared_kwarg(cls, "bounded_replay", bounded_replay_set.pop()))
+        if None not in extra_retained_set:
+            carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -295,12 +449,13 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            **carried_kwargs,
         )
 
 
 @dataclass(frozen=True, kw_only=True)
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
-    """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
+    """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
     pool boundaries independently. The dedicated manager never slides or grows.

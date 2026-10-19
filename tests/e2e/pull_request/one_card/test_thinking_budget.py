@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend coverage for the upstream Model Runner V2 thinking-budget path."""
 
+import numpy as np
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsContext
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -62,14 +64,21 @@ def _apply(
 ) -> torch.Tensor:
     idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
     expanded_idx_mapping = torch.tensor([3] * len(input_ids), dtype=torch.int32, device=DEVICE)
-    state.apply(
-        logits,
-        expanded_idx_mapping,
-        idx_mapping,
-        idx_mapping.cpu().numpy(),
-        torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
-        torch.tensor(local_pos, dtype=torch.int32, device=DEVICE),
+    input_ids_t = torch.tensor(input_ids, dtype=torch.int32, device=DEVICE)
+    local_pos_t = torch.tensor(local_pos, dtype=torch.int32, device=DEVICE)
+    # vLLM #56497 passes the step's batch layout to apply() via LogitsContext.
+    # pos / seq_lens_upper_bound_np are required fields but unused by the
+    # thinking-budget op.
+    ctx = LogitsContext(
+        expanded_idx_mapping=expanded_idx_mapping,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=idx_mapping.cpu().numpy(),
+        expanded_local_pos=local_pos_t,
+        input_ids=input_ids_t,
+        pos=torch.zeros(len(input_ids), dtype=torch.int32, device=DEVICE),
+        seq_lens_upper_bound_np=np.zeros(1, dtype=np.int32),
     )
+    state.apply(logits, ctx)
     return logits.cpu()
 
 

@@ -127,7 +127,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
+        # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
+        # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
+        cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -878,17 +880,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        self._needs_mtp_hidden_states = bool(
+        self._mtp_hidden_buffer: torch.Tensor | None = None
+        if (
             get_pp_group().is_last_rank
             and spec_config is not None
             and (spec_config.use_eagle() or spec_config.uses_draft_model())
-        )
-        self._mtp_buffer_shape = (
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-        )
-        self._mtp_buffer_dtype = vllm_config.model_config.dtype
-        self._mtp_hidden_buffer: torch.Tensor | None = None
+        ):
+            # Bind the buffer before compilation: lazy allocation in forward
+            # can leave FULL graph replay writing a different tensor from the
+            # model-owned residual restored for the replicated PCP draft.
+            self._mtp_hidden_buffer = torch.empty(
+                (vllm_config.scheduler_config.max_num_batched_tokens, hc_dim),
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -983,13 +988,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._needs_mtp_hidden_states:
-            if self._mtp_hidden_buffer is None:
-                self._mtp_hidden_buffer = torch.empty(
-                    self._mtp_buffer_shape,
-                    dtype=self._mtp_buffer_dtype,
-                    device=self.device,
-                )
+        if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -1222,12 +1221,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

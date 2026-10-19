@@ -64,6 +64,9 @@ class AscendInputBuffers(InputBuffers):
         # Logical query token count, scoped to _dummy_run before graph padding.
         # None keeps the default layout for other dummy/capture paths.
         self.dummy_num_tokens: int | None = None
+        # CPP latency profiling must model one real prefill request. The generic
+        # MRV2 dummy path otherwise describes every dummy batch as decode-only.
+        self.profile_cpp: bool = False
 
 
 @dataclass
@@ -78,6 +81,35 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    is_cpp_profile: bool = False
+
+    @staticmethod
+    def _prepare_cpp_profile_dummy(
+        input_batch: InputBatch,
+        input_buffers: AscendInputBuffers,
+        num_tokens: int,
+    ) -> None:
+        """Configure a generic dummy as one fresh CPP prefill request."""
+        # CPP predicts prefill latency, so its synthetic request must carry
+        # the same metadata as a fresh prompt. In particular, PCP uses
+        # is_prefilling_np to decide whether and how to shard the sequence.
+        input_batch.is_prefilling_np[:] = True
+        input_batch.has_prefill = True
+        input_batch.prefill_len_np[:] = input_batch.num_scheduled_tokens
+        input_batch.num_computed_tokens_np[:] = 0
+        input_batch.num_computed_prefill_tokens_np[:] = 0
+        input_buffers.is_padding[:num_tokens].fill_(False)
+        for start, end in zip(
+            input_batch.query_start_loc_np[:-1],
+            input_batch.query_start_loc_np[1:],
+        ):
+            input_buffers.positions[start:end].copy_(
+                torch.arange(
+                    end - start,
+                    dtype=input_buffers.positions.dtype,
+                    device=input_buffers.device,
+                )
+            )
 
     @classmethod
     def make_dummy(
@@ -86,6 +118,7 @@ class AscendInputBatch(InputBatch):
         num_tokens: int,
         input_buffers: AscendInputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         # The incoming count includes graph padding. Save it for the model input
@@ -101,6 +134,7 @@ class AscendInputBatch(InputBatch):
             num_tokens,
             input_buffers,
             max_query_len=max_query_len,
+            is_padding=is_padding,
         )
         if num_tokens_after_padding != num_tokens:
             input_batch.num_tokens_after_padding = num_tokens_after_padding
@@ -116,11 +150,15 @@ class AscendInputBatch(InputBatch):
         input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
+        is_cpp_profile = input_buffers.profile_cpp
+        if is_cpp_profile:
+            cls._prepare_cpp_profile_dummy(input_batch, input_buffers, num_tokens)
         update_cos_sin(input_batch.positions)
         base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
         return cls(
             **base_fields,
             seq_lens_np=seq_lens_np,
-            attn_state=AscendAttentionState.DecodeOnly,
+            attn_state=(AscendAttentionState.PrefillNoCache if is_cpp_profile else AscendAttentionState.DecodeOnly),
             is_dummy=True,
+            is_cpp_profile=is_cpp_profile,
         )
