@@ -517,6 +517,7 @@ def test_capture_single_step_only_captures_prefill():
     speculator.block_tables = object()
     speculator.target_attn_groups = object()
     speculator.kv_cache_config = object()
+    speculator.pcp_manager = None
     speculator.num_speculative_steps = 1
     with patch(
         "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
@@ -545,6 +546,7 @@ def test_capture_multi_step_captures_decode():
     speculator.target_attn_groups = object()
     speculator.attn_groups = object()
     speculator.kv_cache_config = object()
+    speculator.pcp_manager = None
     speculator.num_speculative_steps = 3
     with patch(
         "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",

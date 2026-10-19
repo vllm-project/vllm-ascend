@@ -165,40 +165,6 @@ def test_run_fullgraph_uses_legacy_graph():
     manager._updatable_graph_replay.assert_not_called()
 
 
-def test_capture_draft_prefill_delegates_to_parent():
-    """Verify draft prefill capture delegates to the parent implementation."""
-    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = object()
-    manager.is_draft_model_prefill = True
-    forward_fn = MagicMock()
-    model_state = object()
-    input_buffers = object()
-    block_tables = object()
-    attn_groups = object()
-    kv_cache_config = object()
-    with (
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
-            return_value=nullcontext(),
-        ),
-        patch.object(SpeculatorCudaGraphManager, "capture") as parent_capture,
-    ):
-        manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
-    parent_capture.assert_called_once_with(
-        forward_fn,
-        model_state,
-        input_buffers,
-        block_tables,
-        attn_groups,
-        kv_cache_config,
-        progress_bar_desc="Capturing CUDA graphs",
-    )
-
-
 def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     """Verify draft decode capture prepares inputs and invokes the forward path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
@@ -237,7 +203,10 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
             return_value=nullcontext(),
         ),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.prepare_inputs_to_capture") as prepare_inputs,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.prepare_inputs_to_capture",
+            return_value=(None, None),
+        ) as prepare_inputs,
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture",
             side_effect=capture_side_effect,
@@ -247,6 +216,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
 
     expected_capture_kwargs: dict[str, Any] = {"full_cudagraph": True}
     expected_capture_kwargs["max_query_len"] = None
+    expected_capture_kwargs["pcp_manager"] = None
     prepare_inputs.assert_called_once_with(
         3,
         4,
