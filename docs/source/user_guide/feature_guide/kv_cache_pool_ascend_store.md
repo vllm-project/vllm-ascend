@@ -52,6 +52,12 @@ KV Cache supports the following three external storage backends, choose the stor
     | Software Dependencies | Requires `openyuanrong-datasystem` |
     | Feature Mutex | • Worker cannot configure both Coordinator and etcd discovery backends simultaneously.<br>• Under `P2P_TRANSFER` or FabricMem mode, client-side device memory pre-registration is always skipped regardless of `enable_dev_mem_pregister` value. |
 
+### Upgrading Pools with Strided MLA Caches
+
+Bulk and layerwise pooling transfer MLA components in separate physical-block segments when a scheduler block contains multiple kernel blocks with gaps between their payloads. The components must be contiguous inside each physical block. Partial layerwise transfers copy only the token interval covered by each segment. Dense cache layouts retain their existing packed representation.
+
+Pool objects written by the older contiguous-range implementation are incompatible with the corrected representation for affected layouts, even though their total byte size is unchanged. Upgrade all writers and readers together, and invalidate the affected pool entries or use a fresh cache namespace. For request-level isolation, use a new `cache_salt` consistently for requests that should share cached prefixes. Restarting vLLM workers alone does not invalidate persisted pool objects.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
