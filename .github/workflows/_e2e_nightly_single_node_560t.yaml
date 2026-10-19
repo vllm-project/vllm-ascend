@@ -531,13 +531,16 @@ jobs:
         if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: profile-artifact-${{ steps.profile_bundle.outputs.artifact_key }}
+          name: ${{ steps.profiling.outputs.parse == 'true' && 'profile-capture' || 'profile-artifact' }}-${{ steps.profile_bundle.outputs.artifact_key }}
           path: ${{ runner.temp }}/profile_artifact/
           if-no-files-found: error
           retention-days: 90
 
       - name: Profiling summary
-        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        if: >-
+          always() && steps.profile_bundle.outputs.artifact_key != '' &&
+          (steps.profiling.outputs.parse != 'true' || steps.profile_bundle.outcome != 'success' ||
+           steps.profile_artifact.outcome != 'success')
         working-directory: /vllm-workspace/vllm-ascend
         run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
 

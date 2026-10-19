@@ -151,6 +151,7 @@ jobs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
       profile_options: ${{ steps.profile-options.outputs.value }}
+      profile_parse: ${{ steps.profile-options.outputs.parse }}
       multi_node: ${{ steps.set-matrix.outputs.multi_node }}
       double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
@@ -442,6 +443,108 @@ jobs:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+
+  parse-multi-node-profiles:
+    name: Parse multi-node profiles
+    needs: [setup-vars, parse-trigger, multi-node-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.multi-node-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
+
+  parse-double-node-profiles:
+    name: Parse double-node profiles
+    needs: [setup-vars, parse-trigger, double-node-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.double-node-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
+
+  parse-single-node-profiles:
+    name: Parse single-node profiles
+    needs: [setup-vars, parse-trigger, single-node-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.single-node-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ matrix.test_config.config_file_path != '' &&
+            (needs.parse-trigger.outputs.filter == 'all' ||
+             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
+
+  parse-multi-card-profiles:
+    name: Parse multi-card profiles
+    needs: [setup-vars, parse-trigger, multi-card-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.multi-card-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ matrix.test_config.config_file_path != '' &&
+            (needs.parse-trigger.outputs.filter == 'all' ||
+             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-800t-0

@@ -30,7 +30,7 @@ from tools.profiling.storage import (
 # Configuration and serving topology
 # =============================================================================
 
-ProfileOutput = Literal["raw"]
+ProfileOutput = Literal["parsed", "raw"]
 DEFAULT_START_AFTER_SECONDS = 60
 
 
@@ -62,7 +62,7 @@ class ProfileSpec:
     start_after_requests: int | None = None
     duration: int = 8
     with_stack: bool = False
-    output: ProfileOutput = "raw"
+    output: ProfileOutput = "parsed"
     benchmark_names: tuple[str, ...] = ()
 
     @classmethod
@@ -88,7 +88,7 @@ class ProfileSpec:
         if "\n" in benchmark_names or "\r" in benchmark_names:
             raise ValueError("Profile benchmark_names must be single-line")
         output = options.get("output", defaults.output)
-        if output != "raw":
+        if output not in ("parsed", "raw"):
             raise ValueError("Invalid profile output mode")
         if "start_after" in options and "start_after_requests" in options:
             raise ValueError("Choose either start_after or start_after_requests")
@@ -539,6 +539,7 @@ def main() -> None:
             with args.output.open("a") as file:
                 file.write(f"value={json.dumps(spec.options())}\n")
                 file.write(f"enabled={str(spec.enabled).lower()}\n")
+                file.write(f"parse={str(spec.enabled and spec.output == 'parsed').lower()}\n")
         if args.env_output:
             with args.env_output.open("a") as file:
                 for name, value in spec.environment().items():

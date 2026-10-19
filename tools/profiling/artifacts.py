@@ -20,6 +20,11 @@ def _natural_key(name: str) -> list:
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
 
 
+def _rank_label(name: str) -> str:
+    fields = re.findall(r"(?:^|_)(dp|pp|tp|dcp|ep|rank)(\d+)(?=_|$)", Path(name).name)
+    return " / ".join(f"{key.upper()}={value}" for key, value in fields) or name
+
+
 def _downloads(manifest: dict) -> list[dict]:
     """Extract confirmed objects once for the documents, log, and shell script."""
     downloads = []
@@ -28,14 +33,14 @@ def _downloads(manifest: dict) -> list[dict]:
         artifact = benchmark["benchmark_artifact_name"]
         for target in benchmark["targets"]:
             group = f"{artifact} / {target['name']}"
-            for stage, records in (("raw", [target]),):
+            for stage, records in (("raw", [target]), ("parsed", target.get("ranks", []))):
                 for record in records:
                     if record.get("obs_url"):
                         downloads.append(
                             {
                                 "stage": stage,
                                 "group": group,
-                                "label": target["name"],
+                                "label": target["name"] if stage == "raw" else _rank_label(record["name"]),
                                 "path": f"{stage}/{record['archive']}",
                                 "url": obs_http_url(record["obs_url"], endpoint),
                             }
@@ -50,8 +55,10 @@ def _failures(manifest: dict) -> list[str]:
         if benchmark["status"] != "success" and benchmark.get("reason"):
             failures.append(f"{name}: {benchmark['reason']}")
         for target in benchmark["targets"]:
-            for record in (target,):
+            for record in (target, *target.get("ranks", [])):
                 label = f"{name}/{target['name']}"
+                if record is not target:
+                    label += f"/{record['name']}"
                 failures.extend(
                     f"{label}: {key}: {value}" for key, value in record.items() if key.endswith("_error") and value
                 )
@@ -87,7 +94,7 @@ def _quick_download(manifest: dict, downloads: list[dict]) -> str:
     source = f"obs://{storage['bucket']}/{storage['prefix'].strip('/')}"
     lines = [_heading("QUICK DOWNLOAD"), ""]
     if downloads:
-        for stage in ("all", "raw"):
+        for stage in ("all", "raw", "parsed"):
             if stage != "all" and not any(item["stage"] == stage for item in downloads):
                 continue
             suffix = "" if stage == "all" else stage + "/"
@@ -102,7 +109,7 @@ def _quick_download(manifest: dict, downloads: list[dict]) -> str:
             [
                 "After extracting the index into ./profile_artifact (Bash + curl):",
                 "bash ./profile_artifact/download.sh all",
-                "Use raw to download only raw traces.",
+                "Replace all with raw or parsed to download only that output.",
                 "",
                 "obsutil needs list/download access; HTTPS links use the object's existing read permissions.",
             ]
@@ -119,8 +126,8 @@ def _download_script(downloads: list[dict]) -> str:
         'mode="${1:-all}"',
         'destination="${2:-./profile-download}"',
         'case "$mode" in',
-        "  all|raw) ;;",
-        '  *) echo "Usage: bash download.sh [all|raw] [destination]" >&2; exit 2 ;;',
+        "  all|raw|parsed) ;;",
+        '  *) echo "Usage: bash download.sh [all|raw|parsed] [destination]" >&2; exit 2 ;;',
         "esac",
         "",
         "download() {",
@@ -132,7 +139,7 @@ def _download_script(downloads: list[dict]) -> str:
         "}",
         "",
     ]
-    for stage in ("raw",):
+    for stage in ("raw", "parsed"):
         lines.append(f'if [[ "$mode" == all || "$mode" == {stage} ]]; then')
         selected = [item for item in downloads if item["stage"] == stage]
         if selected:
@@ -150,12 +157,15 @@ def _summary(manifest: dict, downloads: list[dict], *, fold_links: bool = False)
         f"Status     : {manifest['status']}",
         f"Benchmarks : {len(manifest['benchmarks'])}",
         f"RAW        : {sum(item['stage'] == 'raw' for item in downloads)} files",
+        f"PARSED     : {sum(item['stage'] == 'parsed' for item in downloads)} files",
     ]
     failures = _failures(manifest)
     if failures:
         overview.extend(["", _heading("FAILURES"), *failures])
     sections = ["\n".join(overview), _quick_download(manifest, downloads)]
-    for stage in ("raw",):
+    for stage in ("raw", "parsed"):
+        if stage == "parsed" and manifest["requested"]["output"] == "raw":
+            continue
         section = _download_section(stage, downloads)
         if fold_links:
             section = f"::group::{stage.upper()} download links\n{section}\n::endgroup::"
@@ -189,7 +199,9 @@ def write_artifact_bundle(manifest_path: Path, output: Path, prefix: str | None 
             shutil.copyfile(source, destination)
     (output / "profile_manifest.json").write_text(json.dumps(manifest, indent=2))
     downloads = _downloads(manifest)
-    for stage in ("raw",):
+    for stage in ("raw", "parsed"):
+        if stage == "parsed" and manifest["requested"]["output"] == "raw":
+            continue
         directory = output / stage
         directory.mkdir(exist_ok=True)
         (directory / "downloads.md").write_text(_download_section(stage, downloads, markdown=True))
