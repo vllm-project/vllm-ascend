@@ -116,9 +116,8 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
         assert scheduler._query_layerwise_block_hits([keys]) == [False]
 
 
-@pytest.mark.parametrize("cached_hit", [False, True])
-@pytest.mark.parametrize("mode", ["dspark", "reuse"])
-def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit, mode):
+@pytest.mark.parametrize("mode", ["dspark", "plain"])
+def test_prefix_lookup_probes_fresh_on_every_request(mode):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
@@ -126,16 +125,12 @@ def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl
     scheduler.dspark_prefix_keys = (
         DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
     )
-    scheduler.layerwise_offload = mode == "reuse"
+    scheduler.layerwise_offload = False
     scheduler.dspark_draft_only_group_ids = frozenset({1})
     scheduler.layerwise_max_transfer_blocks = 0
     scheduler.hash_block_size = 16
     scheduler.grouped_block_size = [16, 16]
     scheduler.use_layerwise = True
-    scheduler._lw_block_hit_cache = {(group_id, "block-hash"): (cached_hit, float("inf")) for group_id in (0, 1)}
-    original_cache = scheduler._lw_block_hit_cache.copy()
-    scheduler._lw_hit_cache_ttl, scheduler._lw_hit_cache_hit_ttl = 30.0, 0.5
-    scheduler._lw_hit_cache_max = 200_000
     request = SimpleNamespace(request_id="request", block_hashes=["block-hash"])
     readable_keys: set[str] = set()
     scheduler.store_scheduler = SimpleNamespace(
@@ -148,12 +143,12 @@ def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 16
     readable_keys.remove(draft_keys[-1] if draft_keys else "target")
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
+    # No result caching: saves and evictions are reflected on the very next
+    # request, and every lookup issues a fresh readability probe per group
+    # (2 groups x 4 lookups below).
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
-    assert scheduler._lw_block_hit_cache == original_cache
-    scheduler.dspark_prefix_keys = None
-    scheduler.layerwise_offload = False
-    assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == (16 if cached_hit else 0)
-    assert scheduler.store_scheduler.batch_is_readable.call_count == 6
+    assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
+    assert scheduler.store_scheduler.batch_is_readable.call_count == 8
 
 
 @pytest.mark.parametrize("draft_first", [False, True])

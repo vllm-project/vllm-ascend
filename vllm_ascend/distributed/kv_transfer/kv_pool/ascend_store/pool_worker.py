@@ -490,12 +490,6 @@ class KVPoolWorker:
         # step in process_layer_data(). masked_block_runs inputs are
         # layer-invariant, so only the first layer pays the O(blocks) scan.
         self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
-        # PERF-TUNE(4): per-step RPC result caches. Defined once here so
-        # mypy does not flag repeated attribute definitions; they are reset
-        # per step via .clear() in process_layer_data().
-        self._step_keyinfo_cache: dict[str, Any] = {}
-        self._step_lease_result: dict[str, int] = {}
-        self._step_exist_cache: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -1839,12 +1833,9 @@ class KVPoolWorker:
         """
         if not keys:
             return set()
-        # PERF-TUNE(4): reuse this step's existence results for repeated keys
-        step_cache = getattr(self, "_step_exist_cache", None) or {}
-        self._step_exist_cache = step_cache
         unique_keys = list(dict.fromkeys(keys))
-        uncached_keys = [k for k in unique_keys if k not in step_cache]
-        for key_batch in self._layerwise_key_batches(uncached_keys):
+        missing: set[str] = set()
+        for key_batch in self._layerwise_key_batches(unique_keys):
             try:
                 states = self.m_store.batch_is_exist(key_batch)
                 if len(states) != len(key_batch):
@@ -1852,17 +1843,15 @@ class KVPoolWorker:
                         "MemCache exists check returned unexpected number of states: "
                         f"expected={len(key_batch)}, actual={len(states)}"
                     )
-                for k, state in zip(key_batch, states):
-                    step_cache[k] = int(state)
+                missing.update(key for key, state in zip(key_batch, states) if int(state) != 1)
             except Exception as exc:
                 logger.error(
                     "Pool exists check failed keys=%d error=%s; treating all as missing",
                     len(key_batch),
                     exc,
                 )
-                for k in key_batch:
-                    step_cache[k] = 0
-        return {k for k in unique_keys if step_cache.get(k, 0) != 1}
+                missing.update(key_batch)
+        return missing
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         if not self.use_layerwise_transfer:
@@ -2203,17 +2192,9 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
-                # PERF-TUNE(4): dedup identical keys across concurrent requests.
-                ki_cache = getattr(self, "_step_keyinfo_cache", None) or {}
-                self._step_keyinfo_cache = ki_cache
-                uncached = [k for k in keys if k not in ki_cache]
-                if uncached:
-                    fetched_infos = self.m_store.batch_get_key_info(uncached, for_load=True)
-                    if fetched_infos is None or len(fetched_infos) != len(uncached):
-                        return False
-                    for k, ki in zip(uncached, fetched_infos):
-                        ki_cache[k] = ki
-                key_infos = [ki_cache[k] for k in keys]
+                key_infos = self.m_store.batch_get_key_info(keys, for_load=True)
+                if key_infos is None or len(key_infos) != len(keys):
+                    return False
                 gvas = []
                 valid_gva_indices = []
                 invalid_block_ids: list[int] = []
@@ -2238,23 +2219,14 @@ class KVPoolWorker:
                         )
 
                 # Only call batch_add_lease for keys with valid size.
-                # PERF-TUNE(4): keys leased earlier in this step reuse their
-                # recorded result code; only new keys hit the RPC. The result
-                # list below stays aligned with valid_gva_indices.
-                lease_cache = getattr(self, "_step_lease_result", None) or {}
-                self._step_lease_result = lease_cache
                 valid_keys = [keys[index] for index in valid_gva_indices]
-                new_lease_keys = [k for k in valid_keys if k not in lease_cache]
-                if new_lease_keys:
-                    new_results = self.m_store.batch_add_lease(new_lease_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if new_results is None or len(new_results) != len(new_lease_keys):
-                        return False
-                    for k, res in zip(new_lease_keys, new_results):
-                        lease_cache[k] = res
-                        if res == 0:
-                            self._step_load_keys.add(k)
                 if valid_keys:
-                    lease_results = [lease_cache[k] for k in valid_keys]
+                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
+                    if lease_results is None or len(lease_results) != len(valid_keys):
+                        return False
+                    for key, lease_res in zip(valid_keys, lease_results):
+                        if lease_res == 0:
+                            self._step_load_keys.add(key)
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]
@@ -2269,7 +2241,6 @@ class KVPoolWorker:
                                 if retry_results is None or len(retry_results) != 1:
                                     return False
                                 lease_res = retry_results[0]
-                                lease_cache[partial_key] = lease_res
                                 if lease_res == 0:
                                     self._step_load_keys.add(partial_key)
                                 if lease_res != MEMCACHE_UNMATCHED_STATE:
@@ -2880,10 +2851,6 @@ class KVPoolWorker:
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        # PERF-TUNE(4): cache repeated memcache RPC results within this step.
-        self._step_keyinfo_cache = {}
-        self._step_lease_result = {}
-        self._step_exist_cache = {}
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
