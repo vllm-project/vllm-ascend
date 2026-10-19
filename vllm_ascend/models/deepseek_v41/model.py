@@ -1017,7 +1017,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
         for role in topology.layers[self.start_layer : self.end_layer]:
-            sources = (role.kv_source_layer, role.index_source_layer)
+            sources: tuple[int | None, ...] = (role.kv_source_layer, role.index_source_layer)
             if role.uses_candidate_filter:
                 sources += (topology.candidate_source_layer_id,)
             if any(source is not None and source < self.start_layer for source in sources):
