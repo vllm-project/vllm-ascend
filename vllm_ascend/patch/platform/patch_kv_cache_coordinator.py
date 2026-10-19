@@ -501,17 +501,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             (type(group.spec).__name__, group.spec.block_size, self._get_effective_block_size(group.spec))
             for group in self.attention_groups
         ]
-        print(
-            "[dsa-dcp-cache] groups="
-            f"{groups_desc}"
-            f" full_attn_gid={self.full_attention_group_id}"
-            f" hash_block_size={self.hash_block_size}"
-            f" scheduler_block_size={self.scheduler_block_size}"
-            f" lcm_block_size={self.lcm_block_size} unscaled={self.lcm_block_size_unscaled}"
-            f" partial_hits={self.enable_partial_hash_hits} tail_pool_align={self.tail_pool_alignment}"
-            f" hit_align={self._cache_hit_alignment_tokens}",
-            flush=True,
-        )
 
     def find_longest_cache_hit(
         self,
@@ -599,16 +588,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
-                if _CACHE_HIT_TRACE_BUDGET[0] > 0:
-                    _CACHE_HIT_TRACE_BUDGET[0] -= 1
-                    print(
-                        "[dsa-dcp-cache-hit]"
-                        f" idx={idx} spec={type(spec).__name__} gbs={group_block_size}"
-                        f" req_align={self._cache_hit_alignment_tokens} dcp={self.dcp_world_size}"
-                        f" curr_before={curr_hit_length} max_len={_max_length}"
-                        f" drop_eagle={drop_eagle_block} new_hit={_new_hit_length}",
-                        flush=True,
-                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
