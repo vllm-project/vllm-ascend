@@ -1241,6 +1241,17 @@ class TestAscendSFAImpl(TestBase):
         raw = layer.weight.view(2, self.impl.qk_nope_head_dim + self.impl.v_head_dim, 512)
         torch.testing.assert_close(self.impl.W_UK_T, raw[:, : self.impl.qk_nope_head_dim], rtol=0, atol=0)
 
+        # DCP keeps an explicit inverse rotation, so an enabled user switch
+        # must not fold its weights even though configuration allows TQ+DCP.
+        self.impl.enable_turboquant_rotation_fusion = True
+        self.impl.vllm_config.parallel_config.decode_context_parallel_size = 2
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        self.assertFalse(self.impl._tq_rotations_folded)
+        torch.testing.assert_close(self.impl.W_UK_T, raw[:, : self.impl.qk_nope_head_dim], rtol=0, atol=0)
+        torch.testing.assert_close(
+            self.impl.W_UV, raw[:, self.impl.qk_nope_head_dim :].transpose(1, 2), rtol=0, atol=0
+        )
+
     # ============ process_weights_after_loading ============
 
     @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")

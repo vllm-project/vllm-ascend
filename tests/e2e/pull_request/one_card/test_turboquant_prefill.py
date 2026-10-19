@@ -108,3 +108,89 @@ def test_shared_prefix_pages_tail_and_attention(page, empty_request, invalid_top
         scores.masked_fill_(~(valid[None, None, :] & causal[:, None, :]), float("-inf"))
         expected = torch.einsum("thk,kd->thd", scores.softmax(-1), keys).cpu()
         assert ((actual[start:end] - expected).norm() / expected.norm()).item() < 0.01
+
+
+@pytest.mark.parametrize("page", [128, 256])
+@pytest.mark.parametrize("history", [False, True])
+@pytest.mark.parametrize("clipped", [False, True])
+@torch.inference_mode()
+def test_current_bf16_mixed_with_quantized_history(page, history, clipped):
+    """Check full prefill, prefix/chunks, rank-local lengths and poisoned fresh pages."""
+    init_device_properties_triton()
+    enable_custom_op()
+    torch.manual_seed(91)
+    full_lengths = [2051, 3073, 0]
+    new_counts = [32, 65, 0] if history else full_lengths
+    prefix_lengths = [length - count for length, count in zip(full_lengths, new_counts)]
+    used_lengths = [prefix_lengths[0] + 16, prefix_lengths[1] + 22, 0] if clipped else full_lengths
+    columns = (max(full_lengths) + page - 1) // page
+    table = torch.arange(3 * columns, dtype=torch.int32).reshape(3, columns)
+    if history:
+        table[1, :1024 // page] = table[0, :1024 // page]
+    store = TurboQuantLatent()
+    nrows = 3 * columns * page
+    packed = store.compress(torch.randn(nrows, 512, dtype=torch.bfloat16, device="npu")).reshape(-1, 258)
+    scale = packed[:, 256:].contiguous().view(torch.float16)
+    saved_rope = (torch.randn(nrows, 64, device="npu") / scale.float()).bfloat16()
+    cache = torch.cat((packed[:, :256], saved_rope.view(torch.uint8), packed[:, 256:]), -1)
+    cache = cache.view(3 * columns, page, 1, 386).view(torch.int8)
+    before = cache.cpu().clone()
+    codes = torch.stack((packed[:, :256] & 15, packed[:, :256] >> 4), -1).flatten(1).long()
+    decoded = (store.centroids.bfloat16().float()[codes] * scale.float()).bfloat16().cpu()
+    decoded_rope = (saved_rope.float() * scale.float()).bfloat16().cpu()
+    # Poison every page that only contains fresh KV. Expansion must not read it.
+    for i, prefix in enumerate(prefix_lengths):
+        table[i, (prefix + page - 1) // page:] = -1
+    current = torch.randn(sum(new_counts), 576, dtype=torch.bfloat16, device="npu")
+    current_cpu = current.cpu()
+    shapes = workspace_shapes(3, max(full_lengths), 128, 32 * 1024**2)
+    nope, rope, out_table = [torch.empty(shape, dtype=dtype, device="npu") for shape, dtype in shapes]
+    qends = torch.tensor(new_counts, dtype=torch.int32, device="npu").cumsum(0).int()
+    used = torch.tensor(used_lengths, dtype=torch.int32, device="npu")
+    expand_turboquant_pages(
+        cache, table.npu(), used, store.centroids, nope, rope, out_table,
+        current_kv=current, current_query_lens=qends,
+        full_seq_lens=torch.tensor(full_lengths, dtype=torch.int32, device="npu"),
+    )
+    padded = out_table.shape[1] * 128
+    expected = torch.zeros(3, padded, 576, dtype=torch.bfloat16)
+    start = 0
+    for i, (prefix, count, length) in enumerate(zip(prefix_lengths, new_counts, used_lengths)):
+        pos = torch.arange(prefix)
+        physical = table[i, pos // page].long() * page + pos % page
+        expected[i, :prefix, :512] = decoded[physical]
+        expected[i, :prefix, 512:] = decoded_rope[physical]
+        expected[i, prefix:length] = current_cpu[start:start + length - prefix]
+        start += count
+    torch.testing.assert_close(nope.cpu().reshape(3, padded, 512), expected[:, :, :512], rtol=0, atol=0)
+    torch.testing.assert_close(rope.cpu().reshape(3, padded, 64), expected[:, :, 512:], rtol=0, atol=0)
+    torch.testing.assert_close(cache.cpu(), before, rtol=0, atol=0)
+    torch.testing.assert_close(out_table.cpu().flatten(), torch.arange(nope.shape[0], dtype=torch.int32))
+
+    # Sparse attention must consume the mixed cache in the same coordinates;
+    # compare against independent FP32 attention rather than the old TQ kernel.
+    q = torch.randn(32, 64, 512, dtype=torch.bfloat16, device="npu")
+    qr = torch.randn(32, 64, 64, dtype=torch.bfloat16, device="npu")
+    indices = torch.arange(2048, dtype=torch.int32, device="npu").repeat(32, 1).unsqueeze(1)
+    # Include the fresh suffix of both requests, including the request whose
+    # historical prefix exceeds Top-K. Keep future entries for causal masking.
+    for i, length in enumerate(used_lengths[:2]):
+        indices[i * 16:(i + 1) * 16] += max(length - 2048, 0)
+    indices[:, :, -1] = -1
+    output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        q, nope, nope, indices, block_table=out_table,
+        actual_seq_lengths_query=torch.tensor([16, 32, 32], dtype=torch.int32, device="npu"),
+        actual_seq_lengths_kv=used, query_rope=qr, key_rope=rope, scale_value=576**-0.5,
+        sparse_block_size=1, layout_query="TND", layout_kv="PA_BSND", sparse_mode=3, attention_mode=2,
+    )
+    output = output[0] if isinstance(output, tuple) else output
+    for i, length in enumerate(used_lengths[:2]):
+        selected = indices[i * 16, 0].long()
+        keys = expected[i].npu()[selected.clamp_min(0)].float()
+        scores = torch.einsum("thd,kd->thk", q[i * 16:(i + 1) * 16].float(), keys[:, :512])
+        scores += torch.einsum("thd,kd->thk", qr[i * 16:(i + 1) * 16].float(), keys[:, 512:])
+        scores *= 576**-0.5
+        visible = selected[None, :] <= (length - 16 + torch.arange(16, device="npu"))[:, None]
+        scores.masked_fill_(~((selected >= 0)[None, None, :] & visible[:, None, :]), float("-inf"))
+        reference = torch.einsum("thk,kd->thd", scores.softmax(-1), keys[:, :512])
+        assert ((output[i * 16:(i + 1) * 16].float() - reference).norm() / reference.norm()).item() < 0.01

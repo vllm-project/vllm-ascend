@@ -37,6 +37,21 @@ def workspace_shapes(num_requests: int, max_seq_len: int, query_tokens: int, bud
     return shapes if required <= budget_bytes else None
 
 
+def current_workspace_shapes(num_requests, max_seq_len, local_tokens, gathered_tokens, budget_bytes):
+    """Budget history expansion and both current-KV communication buffers together."""
+    if local_tokens <= 0 or gathered_tokens < local_tokens:
+        return None
+    current_shapes = [((local_tokens, LATENT_DIM + ROPE_DIM), torch.bfloat16)]
+    if gathered_tokens != local_tokens:
+        current_shapes.append(((gathered_tokens, LATENT_DIM + ROPE_DIM), torch.bfloat16))
+    scratch_bytes = sum(
+        triton.cdiv(shape[0] * shape[1] * 2, WORKSPACE_ALIGNMENT) * WORKSPACE_ALIGNMENT
+        for shape, _ in current_shapes
+    )
+    shapes = workspace_shapes(num_requests, max_seq_len, local_tokens, budget_bytes - scratch_bytes)
+    return (*shapes, *current_shapes) if shapes is not None else None
+
+
 @triton.jit(do_not_specialize=["rows", "rows_per_request"])
 def _expand_pages(
     packed,
@@ -47,11 +62,15 @@ def _expand_pages(
     nope,
     rope,
     output_table,
+    current_kv,
+    current_query_lens,
+    full_seq_lens,
     rows,
     rows_per_request,
     TABLE_STRIDE: tl.constexpr,
     SOURCE_PAGE: tl.constexpr,
     TILE: tl.constexpr,
+    HAS_CURRENT: tl.constexpr,
 ):
     code_col = tl.arange(0, 256)
     latent_col = tl.arange(0, 512)
@@ -62,29 +81,50 @@ def _expand_pages(
         request = base // rows_per_request
         position = base % rows_per_request
         length = tl.load(seq_lens + request)
+        history_length = length
+        if HAS_CURRENT:
+            current_start = tl.load(current_query_lens + request - 1, request > 0, other=0)
+            current_end = tl.load(current_query_lens + request)
+            history_length = tl.load(full_seq_lens + request) - (current_end - current_start)
         # TILE divides both supported source page sizes and the output page.
         # No tile crosses a request or page boundary. Invalid tail pages must
         # never be read: prefix caches may leave these table entries stale.
         source_page = tl.load(
-            block_table + request * TABLE_STRIDE + position // SOURCE_PAGE, position < length, other=0
+            block_table + request * TABLE_STRIDE + position // SOURCE_PAGE,
+            (position < length) & (position < history_length), other=0
         )
         offset = tl.arange(0, TILE)
-        valid = position + offset < length
+        valid = (position + offset < length) & (position + offset < history_length)
         source_row = source_page * SOURCE_PAGE + position % SOURCE_PAGE + offset
-        codes_byte = tl.load(
-            packed + source_row[:, None] * 386 + code_col[None, :], valid[:, None], other=0
-        ).to(tl.int32)
-        codes = tl.interleave(codes_byte & 15, codes_byte >> 4)
-        decoded = tl.gather(lut, codes.reshape((TILE * 512,)), 0).reshape((TILE, 512))
-        scale_bits = tl.load(packed16 + source_row * 193 + 192, valid, other=0).to(tl.uint16)
-        scale = scale_bits.to(tl.float16, bitcast=True).to(tl.float32)
+        nope_value = tl.full((TILE, 512), 0, tl.float32)
+        rope_value = tl.full((TILE, 64), 0, tl.float32)
+        if not HAS_CURRENT or position < history_length:
+            codes_byte = tl.load(
+                packed + source_row[:, None] * 386 + code_col[None, :], valid[:, None], other=0
+            ).to(tl.int32)
+            codes = tl.interleave(codes_byte & 15, codes_byte >> 4)
+            decoded = tl.gather(lut, codes.reshape((TILE * 512,)), 0).reshape((TILE, 512))
+            scale_bits = tl.load(packed16 + source_row * 193 + 192, valid, other=0).to(tl.uint16)
+            scale = scale_bits.to(tl.float16, bitcast=True).to(tl.float32)
+            nope_value = decoded * scale[:, None]
+            rope_bits = tl.load(
+                packed16 + source_row[:, None] * 193 + 128 + rope_col[None, :], valid[:, None], other=0
+            ).to(tl.uint16)
+            rope_value = rope_bits.to(tl.bfloat16, bitcast=True).to(tl.float32) * scale[:, None]
+        if HAS_CURRENT:
+            fresh = (position + offset >= history_length) & (position + offset < length)
+            current_row = current_start + position + offset - history_length
+            fresh_nope = tl.load(
+                current_kv + current_row[:, None] * 576 + latent_col[None, :], fresh[:, None], other=0
+            ).to(tl.float32)
+            fresh_rope = tl.load(
+                current_kv + current_row[:, None] * 576 + 512 + rope_col[None, :], fresh[:, None], other=0
+            ).to(tl.float32)
+            nope_value = tl.where(fresh[:, None], fresh_nope, nope_value)
+            rope_value = tl.where(fresh[:, None], fresh_rope, rope_value)
         out_row = base + offset
-        tl.store(nope + out_row[:, None] * 512 + latent_col[None, :], decoded * scale[:, None])
-        rope_bits = tl.load(
-            packed16 + source_row[:, None] * 193 + 128 + rope_col[None, :], valid[:, None], other=0
-        ).to(tl.uint16)
-        rope_value = rope_bits.to(tl.bfloat16, bitcast=True).to(tl.float32)
-        tl.store(rope + out_row[:, None] * 64 + rope_col[None, :], rope_value * scale[:, None])
+        tl.store(nope + out_row[:, None] * 512 + latent_col[None, :], nope_value)
+        tl.store(rope + out_row[:, None] * 64 + rope_col[None, :], rope_value)
         if position % 128 == 0:
             tl.store(output_table + base // 128, base // 128)
 
@@ -97,6 +137,10 @@ def expand_turboquant_pages(
     nope: torch.Tensor,
     rope: torch.Tensor,
     output_table: torch.Tensor,
+    *,
+    current_kv: torch.Tensor | None = None,
+    current_query_lens: torch.Tensor | None = None,
+    full_seq_lens: torch.Tensor | None = None,
 ) -> None:
     """Read packed cache without modifying it; populate caller-owned workspace.
 
@@ -115,9 +159,13 @@ def expand_turboquant_pages(
         nope,
         rope,
         output_table,
+        current_kv,
+        current_query_lens,
+        full_seq_lens,
         rows,
         rows_per_request,
         block_table.stride(0),
         cache.shape[1],
         TILE_ROWS,
+        current_kv is not None,
     )

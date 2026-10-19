@@ -105,7 +105,7 @@ class TurboQuantLatent:
         assert inverse_rotation is not None
         return (x.float().reshape(-1, HEAD_DIM) @ inverse_rotation).to(x.dtype).reshape(x.shape)
 
-    def compress(self, x):
+    def compress(self, x, *, rotated_out: torch.Tensor | None = None):
         self._initialize(x.device)
         rotation = self.rotation
         centroids = self.centroids
@@ -114,6 +114,8 @@ class TurboQuantLatent:
         assert centroids is not None
         assert norm_lut is not None
         rotated = (x.float().reshape(-1, HEAD_DIM) @ rotation).contiguous()
+        if rotated_out is not None:
+            rotated_out.copy_(rotated)
         packed, norm = _get_turbo_quant_op()(rotated, centroids)
         # ops-nn returns the original norm. MixedQuantSparseFlashMla multiplies
         # centroids by scale directly; retain the old DS norm correction here.

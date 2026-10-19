@@ -356,6 +356,8 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     ascend_config = SimpleNamespace(
         enable_sparse_sfa_c8=enable_c8,
         enable_sparse_sfa_turboquant=False,
+        enable_turboquant_rotation_fusion=False,
+        enable_turboquant_prefill_bf16_current=False,
         enable_mlapo=False,
         rl_config=SimpleNamespace(enabled=False),
     )

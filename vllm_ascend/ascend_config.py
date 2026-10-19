@@ -587,6 +587,9 @@ class AscendConfig:
     enable_turboquant_fused_finalize: bool = False
     # Opt-in BF16 layer workspace, shared across SFA layers; zero disables it.
     turboquant_prefill_workspace_mb: int = 0
+    # Keep current Prefill KV in BF16 before quantization; scratch and TP gather
+    # buffers share the workspace budget. Changes the Prefill numerical path.
+    enable_turboquant_prefill_bf16_current: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True

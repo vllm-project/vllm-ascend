@@ -64,6 +64,19 @@ def test_transform_storage_is_reused():
     assert pointers == (store.rotation.data_ptr(), store.centroids.data_ptr(), store.norm_lut.data_ptr())
 
 
+def test_compress_retains_rotated_bf16_without_changing_packed_cache():
+    torch.manual_seed(19)
+    store = TurboQuantLatent()
+    x = torch.randn(17, 512, dtype=torch.bfloat16)
+    scratch = torch.full((17, 576), 42, dtype=torch.bfloat16)
+    with patch.object(latent_module, "_get_turbo_quant_op", return_value=_quantize_reference):
+        expected = store.compress(x)
+        actual = store.compress(x, rotated_out=scratch[:, :512])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(scratch[:, :512], (x.float() @ store.rotation).bfloat16(), rtol=0, atol=0)
+    assert (scratch[:, 512:] == 42).all()
+
+
 @pytest.mark.parametrize("legacy_hadamard", [False, True])
 def test_transform_sharing_and_inverse_layout(legacy_hadamard):
     first, second = TurboQuantLatent(legacy_hadamard=legacy_hadamard), TurboQuantLatent(legacy_hadamard=legacy_hadamard)
