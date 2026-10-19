@@ -17,8 +17,153 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm_ascend.models.qwen4_exp import ple
+
+
+def test_compact_prefill_output_matches_dense_reference() -> None:
+    torch.manual_seed(0)
+    source = torch.randn(3, 5, 4)
+    conv_output = source.clone()
+    q_starts = torch.tensor([0, 2, 5, 6], dtype=torch.int64)
+    positions = torch.arange(6, dtype=torch.int64)
+    req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
+    col_indices = positions - q_starts[req_indices]
+    valid_state = torch.tensor([True, False, True])
+
+    dense = F.silu(source).transpose(1, 2).contiguous()
+    valid_tokens = torch.arange(4).view(1, 4) < torch.tensor([2, 3, 1]).view(
+        3, 1
+    )
+    dense.masked_fill_(~(valid_tokens & valid_state.view(3, 1)).unsqueeze(-1), 0)
+    expected = dense[req_indices, col_indices]
+    output = torch.empty(6, 5)
+
+    output.zero_()
+    storage = conv_output.untyped_storage().data_ptr()
+    for request_start in range(0, 3, 2):
+        ple._accumulate_compact_prefill_output(
+            conv_output[request_start : request_start + 2],
+            output,
+            req_indices,
+            col_indices,
+            valid_state,
+            request_start,
+        )
+
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(conv_output, F.silu(source))
+    assert conv_output.untyped_storage().data_ptr() == storage
+
+
+def test_compact_prefill_path_matches_upstream_state_semantics() -> None:
+    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+
+    torch.manual_seed(1)
+    num_prefills = 2
+    num_prefill_tokens = 5
+    hidden_size = 4
+    conv_state_len = 9
+    metadata = SimpleNamespace(
+        query_start_loc_p=torch.tensor([0, 2, 5], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
+        has_initial_states_p=torch.tensor([False, True]),
+        max_prefill_query_len=3,
+    )
+    layer = SimpleNamespace(
+        conv_state_len=conv_state_len,
+        short_conv_dilation=3,
+    )
+    x_p = torch.randn(num_prefill_tokens, hidden_size)
+    conv_weights = torch.randn(hidden_size, 4)
+    state_indices = torch.tensor([0, 2], dtype=torch.int32)
+    reference_state = torch.randn(4, hidden_size, conv_state_len)
+    compact_state = reference_state.clone()
+
+    original_attr = "_ascend_original_short_conv_dilated_prefill_batched"
+    original = getattr(
+        Qwen4ExpPLELayer,
+        original_attr,
+        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched,
+    )
+    expected = original(
+        layer,
+        x_p,
+        metadata,
+        reference_state,
+        conv_weights,
+        state_indices,
+        num_prefills,
+        0,
+        num_prefill_tokens,
+    )
+    actual = ple._short_conv_dilated_prefill_batched(
+        layer,
+        x_p,
+        metadata,
+        compact_state,
+        conv_weights,
+        state_indices,
+        num_prefills,
+        0,
+        num_prefill_tokens,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(compact_state, reference_state)
+
+
+def test_compact_prefill_path_bounds_convolution_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(2)
+    num_prefills = 9
+    hidden_size = 4
+    query_len = 3
+    num_prefill_tokens = num_prefills * query_len
+    metadata = SimpleNamespace(
+        query_start_loc_p=torch.arange(
+            0,
+            num_prefill_tokens + 1,
+            query_len,
+            dtype=torch.int32,
+        ),
+        non_spec_query_start_loc=torch.arange(
+            0,
+            num_prefill_tokens + 1,
+            query_len,
+            dtype=torch.int32,
+        ),
+        has_initial_states_p=torch.ones(num_prefills, dtype=torch.bool),
+        max_prefill_query_len=query_len,
+    )
+    layer = SimpleNamespace(conv_state_len=9, short_conv_dilation=3)
+    x_p = torch.randn(num_prefill_tokens, hidden_size)
+    conv_weights = torch.randn(hidden_size, 4)
+    conv_state = torch.randn(num_prefills, hidden_size, layer.conv_state_len)
+    state_indices = torch.arange(num_prefills, dtype=torch.int32)
+    batch_sizes: list[int] = []
+    conv1d = F.conv1d
+
+    def record_batch_size(*args: object, **kwargs: object) -> torch.Tensor:
+        batch_sizes.append(args[0].shape[0])
+        return conv1d(*args, **kwargs)
+
+    monkeypatch.setattr(ple.F, "conv1d", record_batch_size)
+    ple._short_conv_dilated_prefill_batched(
+        layer,
+        x_p,
+        metadata,
+        conv_state,
+        conv_weights,
+        state_indices,
+        num_prefills,
+        0,
+        num_prefill_tokens,
+    )
+
+    assert batch_sizes == [4, 4, 1]
 
 
 def test_set_internal_format_prefers_high_level_config(
@@ -114,6 +259,36 @@ def test_installing_ple_patch_is_idempotent() -> None:
         assert getattr(Qwen4ExpPLELayer, original_attr) is original
     finally:
         Qwen4ExpPLELayer._short_conv = initial_method
+        if had_original:
+            setattr(Qwen4ExpPLELayer, original_attr, initial_original)
+        elif hasattr(Qwen4ExpPLELayer, original_attr):
+            delattr(Qwen4ExpPLELayer, original_attr)
+
+
+def test_installing_ple_prefill_patch_is_idempotent() -> None:
+    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+
+    original_attr = "_ascend_original_short_conv_dilated_prefill_batched"
+    initial_method = Qwen4ExpPLELayer._short_conv_dilated_prefill_batched
+    had_original = hasattr(Qwen4ExpPLELayer, original_attr)
+    initial_original = getattr(Qwen4ExpPLELayer, original_attr, None)
+
+    def original(_layer: object, *_args: object) -> torch.Tensor:
+        return torch.empty(0)
+
+    try:
+        if had_original:
+            delattr(Qwen4ExpPLELayer, original_attr)
+        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched = original
+        ple.patch_upstream_ple_short_conv()
+        installed = Qwen4ExpPLELayer._short_conv_dilated_prefill_batched
+        ple.patch_upstream_ple_short_conv()
+
+        assert installed is ple._short_conv_dilated_prefill_batched
+        assert Qwen4ExpPLELayer._short_conv_dilated_prefill_batched is installed
+        assert getattr(Qwen4ExpPLELayer, original_attr) is original
+    finally:
+        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched = initial_method
         if had_original:
             setattr(Qwen4ExpPLELayer, original_attr, initial_original)
         elif hasattr(Qwen4ExpPLELayer, original_attr):
