@@ -34,9 +34,9 @@
   triton-ascend 不提供该模块。
 - vLLM Ascend 版本直接导入 `triton.language.extra.cann.libdevice`，内核逻辑
   与上游一致，仅 libdevice 来源不同。
-- 通过 patch 整体替换 `sampler.get_num_nans` 与
+- 通过 kernel dispatcher 注册整体替换 `sampler.get_num_nans` 与
   `rejection_sampler.get_num_nans`；待编译器与 Triton Ascend toolkit 支持上游
-  实现后可回退（见 `patch_triton.py` 内注释）。
+  实现后可回退（见 `triton_kernel_overrides.py` 内注释）。
 
 ## 参数说明
 
