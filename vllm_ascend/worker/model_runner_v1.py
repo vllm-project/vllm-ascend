@@ -2816,6 +2816,9 @@ class NPUModelRunner(GPUModelRunner):
             self.need_accepted_tokens
             and self.use_async_scheduling
             and self.cache_config.mamba_cache_mode == "align"
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and not self.is_kv_producer
         )
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:

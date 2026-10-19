@@ -1071,7 +1071,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 stream = MagicMock()
                 cached_stream = MagicMock()
                 with (
-                    patch("torch.npu.current_stream", return_value=stream),
+                    patch.object(torch.npu, "current_stream", return_value=stream),
                     patch("vllm_ascend.utils._CURRENT_STREAM", cached_stream),
                 ):
                     runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
@@ -1089,20 +1089,24 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                     runner.num_accepted_tokens.copy_to_gpu.assert_called_once_with()
 
     def test_state_update_order_preserves_sync_and_other_cache_modes(self):
-        for asynchronous, cache_mode, update_before_draft in (
-            (True, "align", True),
-            (False, "align", False),
-            (True, "all", False),
+        for asynchronous, cache_mode, method, producer, update_before_draft in (
+            (True, "align", "mtp", False, True),
+            (False, "align", "mtp", False, False),
+            (True, "all", "mtp", False, False),
+            (True, "align", "eagle3", False, False),
+            (True, "align", "mtp", True, False),
         ):
-            with self.subTest(asynchronous=asynchronous, cache_mode=cache_mode):
-                self._check_state_update_order(asynchronous, cache_mode, update_before_draft)
+            with self.subTest(asynchronous=asynchronous, cache_mode=cache_mode, method=method, producer=producer):
+                self._check_state_update_order(asynchronous, cache_mode, method, producer, update_before_draft)
 
-    def _check_state_update_order(self, asynchronous, cache_mode, update_before_draft):
+    def _check_state_update_order(self, asynchronous, cache_mode, method, producer, update_before_draft):
         runner = MagicMock()
         runner.kv_connector_output = None
         runner.need_accepted_tokens = True
         runner.use_async_scheduling = asynchronous
         runner.cache_config.mamba_cache_mode = cache_mode
+        runner.speculative_config.method = method
+        runner.is_kv_producer = producer
         runner.dynamic_eplb = False
         runner.input_batch.vocab_size = 128
         runner.speculative_config.disable_padded_drafter_batch = False
@@ -1129,6 +1133,14 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner._sample.return_value = SimpleNamespace(sampled_token_ids=sampled_token_ids, logprobs_tensors=None)
         runner._bookkeeping_sync.return_value = ({}, None, None, [], {}, ["request-0"], {"request-0": 0}, [])
         stream = MagicMock()
+
+        def update_states(*args):
+            if update_before_draft:
+                runner.finalize_kv_connector.assert_not_called()
+            else:
+                runner.finalize_kv_connector.assert_called_once_with()
+
+        runner._update_states_after_model_execute.side_effect = update_states
 
         def propose(*args):
             runner.sampling_done_event.record.assert_called_once_with()
