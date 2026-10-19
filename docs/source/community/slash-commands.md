@@ -49,12 +49,30 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
 | `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
+| `/nightly <test_cases> --log-path <path>` | Upload a test file or directory as a downloadable artifact |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
 
 Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
 automatically captures test results, classifies failures (env vs. code), and triggers
 binary bisect for genuine failures. By default, AOP hooks are disabled.
+
+Use `--log-path <path>` to collect a file or directory from `node0` after
+the test, including when the test fails. Absolute paths refer to the test
+container; relative paths start at `/vllm-workspace/vllm-ascend`. For
+multi-node tests, pass a compact JSON map to select paths on each node:
+`--log-path '{"node0":"logs/leader.txt","node1":"/tmp/test-logs"}'`.
+To collect multiple paths from one node, repeat that node in a single
+mapping, for example
+`--log-path '{"node1":"logs/worker.txt","node1":"/tmp/test-logs"}'`.
+The equivalent list of single-path entries is also supported:
+`--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
+Multiple paths from one node are placed under `path-1/`, `path-2/`, etc.
+inside that node's archive. The JSON must not contain spaces. Each selected
+node produces a `nodeN.tar.gz` file in the workflow run's **Artifacts** section.
+Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missing
+paths are reported in the workflow log. System and credential directories
+cannot be selected.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
@@ -92,6 +110,18 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 # Run specific test with AOP on a release branch
 /nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
+
+# Download a directory from a single-node test
+/nightly test_custom_op --log-path /tmp/test-logs
+
+# Download a file relative to the test repository
+/nightly test_custom_op --log-path logs/output.txt
+
+# Download logs from the leader and a worker pod
+/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '{"node0":"/tmp/test-logs","node1":"/tmp/test-logs"}'
+
+# Download two files from the same worker pod
+/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '[{"node1":"logs/worker.txt"},{"node1":"logs/metrics.txt"}]'
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.

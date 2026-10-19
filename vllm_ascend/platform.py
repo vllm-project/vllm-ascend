@@ -34,10 +34,12 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
+    DeepSeekV4TPPolicy,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -56,7 +58,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -311,15 +312,6 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
-        # Registration imports vLLM's model config converter and therefore must
-        # happen after the global patch package has finished importing. Keeping
-        # it out of patch module scope also makes multiprocessing spawn safe.
-        from vllm_ascend.patch.platform.patch_deepseek_v4_vision import (
-            register_deepseek_v4_vision_config_convertor,
-        )
-
-        register_deepseek_v4_vision_config_convertor()
-
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -487,9 +479,22 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # NOTE: This still monkey-patches VllmConfig by replacing the
+        # use_v2_model_runner property (the "patch way"). It is kept here
+        # because upstream vLLM does not yet expose a platform hook to
+        # make V2 the unconditional platform default.
+        # The upstream V2 validation is also neutralized, since Ascend fully
+        # owns the V2 enablement decision.
+        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
+        # override the default runner selection.
+        apply_v2_model_runner_config_patch()
+
         # Lazy import vllm/vllm-ascend to avoid circular import
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+
+        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -530,6 +535,7 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
+        _validate_deepseek_v4_tp_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -596,6 +602,7 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
+            sync_v2_extra_kwargs,
             use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
@@ -610,6 +617,7 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        sync_v2_extra_kwargs(vllm_config)
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
@@ -627,7 +635,12 @@ class NPUPlatform(Platform):
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
 
-        tp_world_size = get_tensor_model_parallel_world_size()
+        try:
+            tp_world_size = get_tensor_model_parallel_world_size()
+        except AssertionError:
+            # Kernel / precision tests call set_forward_context without
+            # initializing TP. Keep V1 extras there.
+            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing.
@@ -1351,6 +1364,7 @@ def _setup_compile_backend(
             [
                 "vllm::mla_forward",
                 "vllm::dsa_forward",
+                "vllm::minimax_m3_fused_sparse_forward",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
@@ -1766,15 +1780,6 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
-        # support DCP with a replicated indexer. Reject that combination early.
-        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
-            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
-        ):
-            raise NotImplementedError(
-                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
-                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
-            )
 
 
 def _validate_model_pcp_dcp_config(
@@ -1812,8 +1817,6 @@ def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
     connector up. Without this guard a V1 run enables the scheduler-side
     connector and crashes with "auxiliary output worker output is missing".
     """
-    if vllm_version_is("0.30.0"):
-        return
     if getattr(vllm_config, "aux_output_config", None) is None:
         return
     if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
@@ -1822,6 +1825,57 @@ def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
             "supported by Model Runner V2 on Ascend. Set "
             "VLLM_USE_V2_MODEL_RUNNER=1."
         )
+
+
+def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
+    hf_config = model_config.hf_config
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_types = {
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+    }
+
+    if model_types & {
+        "deepseek_v4.1",
+        "deepseek_v4.1_text",
+        "deepseek_v41",
+        "deepseek_v41_text",
+    }:
+        return "V4.1"
+
+    if "deepseek_v4" not in model_types:
+        return None
+
+    text_config = hf_text_config if getattr(hf_text_config, "model_type", None) == "deepseek_v4" else hf_config
+    num_experts = getattr(text_config, "n_routed_experts", None)
+    if num_experts == 256:
+        return "V4 Flash"
+    if num_experts == 384:
+        return "V4 Pro"
+    return None
+
+
+def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any) -> None:
+    variant = _get_deepseek_v4_variant(vllm_config.model_config)
+    if variant is None:
+        return
+
+    # Model Runner V1 with DSA-CP has its own TP topology. Model Runner V2
+    # does not use that exception, even if enable_dsa_cp is present.
+    if not vllm_config.use_v2_model_runner and ascend_config.enable_dsa_cp:
+        return
+
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    tp_policy = get_current_hardware_profile().deepseek_v4_tp_policy
+    if tp_policy is DeepSeekV4TPPolicy.SINGLE_RANK_ONLY and tp_size > 1:
+        raise ValueError(f"DeepSeek {variant} does not support tensor parallelism on A5. Got tp_size={tp_size}.")
+
+    if tp_policy is not DeepSeekV4TPPolicy.STANDARD_LIMITS:
+        return
+
+    max_tp_size = 16 if variant == "V4 Pro" else 8
+    if tp_size > max_tp_size:
+        raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size} on this device. Got tp_size={tp_size}.")
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

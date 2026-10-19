@@ -172,7 +172,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
         "dequant_situ_quant"
-        "gmm_dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
@@ -198,12 +197,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "sparse_flash_attention"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
-        "kv_compress_epilog"
         "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"

@@ -111,12 +111,13 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         torch.testing.assert_close(weight, expected_weight)
         assert weight is layer._merged_conv_weight
         if kwargs["run_mode"] == 0:
-            assert kwargs["cache_indices_opt"] is prefill_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], prefill_conv.cache_indices[:, 0])
             assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
             assert kwargs["num_accepted_tokens_opt"] is None
         else:
             spec_conv = metadata.spec_decode_metadata.spec_causal_conv1d
-            assert kwargs["cache_indices_opt"] is spec_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], spec_conv.cache_indices[:, 0])
+            assert kwargs["cache_indices_opt"].is_contiguous()
             assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
             assert kwargs["initial_state_mode_opt"] is None
         return x.clone()

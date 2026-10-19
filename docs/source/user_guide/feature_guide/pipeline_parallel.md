@@ -298,7 +298,7 @@ Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,
 | EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model Runner V2 restriction is lifted for these architectures. |
 | DFlash | Not supported. |
 | DSpark | Supported only for DeepSeek-V4 and GLM-5.2 MoE-DSA models. The drafter taps intermediate target layers, and the tapped hidden states are relayed across PP stages. |
-| PCP (Prefill Context Parallel) | Not supported. |
+| PCP (Prefill Context Parallel) | Supported. |
 | DCP (Decode Context Parallel) | Supported; use `MooncakeConnectorV2` for KV transfer. |
 | LayerSplit (KVPP) | Supported. An intermittent output-mismatch issue in the e2e test is under investigation. |
 | KV offloading (Sparse KV Cache Offload) | Supported with the layerwise connector. |
@@ -423,8 +423,6 @@ adjusts chunk sizes using measured execution time to reduce stage idle time.
 
 ## Compatibility and Limitations
 
-- PP cannot be combined with Prefill Context Parallelism (PCP). See
-  [Context Parallel](context_parallel.md).
 - Xlite graph mode is not compatible with PP.
 - Sparse KV Cache Offload supports PP with the layerwise connector.
 - `MooncakeConnectorV1` currently requires the Decode-side PP size to be `1`.

@@ -883,6 +883,56 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_950_rejects_sparse_offload(self, mock_is_950):
+        for keep_device_kv_cache in (False, True):
+            for use_fused_overlap in (False, True):
+                with (
+                    self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
+                    self.assertRaisesRegex(ValueError, "not supported on 950PR&950DT Products"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(speculative_config=None),
+                        {
+                            "enabled": True,
+                            "keep_device_kv_cache": keep_device_kv_cache,
+                            "use_fused_overlap": use_fused_overlap,
+                        },
+                    )
+        mock_is_950.assert_called()
+
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_a5_allows_sparse_offload_disabled(self, mock_is_950):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(speculative_config=None), {})
+        self.assertFalse(config.enabled)
+        mock_is_950.assert_not_called()
+
+    def test_preempt_offload_is_mutually_exclusive(self):
+        for multi_connector in (False, True):
+            transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector" if multi_connector else "PreemptOffloadConnector",
+                kv_role="kv_consumer",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "SfaRemoteD2HConnector", "kv_role": "kv_consumer"},
+                        {"kv_connector": "PreemptOffloadConnector", "kv_role": "kv_consumer"},
+                    ]
+                }
+                if multi_connector
+                else {},
+            )
+            vllm_config = SimpleNamespace(kv_transfer_config=transfer_config, speculative_config=None)
+            for keep_device_kv_cache in (False, True):
+                with (
+                    self.subTest(multi_connector=multi_connector, keep_device_kv_cache=keep_device_kv_cache),
+                    self.assertRaisesRegex(ValueError, "cannot be combined with PreemptOffloadConnector"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        vllm_config, {"enabled": True, "keep_device_kv_cache": keep_device_kv_cache}
+                    )
+            # Preempt offload alone remains supported.
+            self.assertFalse(SparseKVOffloadConfig.from_additional_config(vllm_config, {}).enabled)
+
     def test_topk_buffer_default_is_unset(self):
         self.assertEqual(SparseKVOffloadConfig().topk_buffer_size, -1)
 
@@ -927,7 +977,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
         )
 
@@ -956,7 +1006,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -978,7 +1028,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -1006,7 +1056,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )
@@ -1456,6 +1506,22 @@ class TestUpstreamConfigCompatibility(TestBase):
             )
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
+
+    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self):
+        kimi_k3 = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=8193,
+                    routed_expert_hidden_size=3584,
+                    moe_intermediate_size=3072,
+                    moe_quantize="w4a8",
+                )
+            )
+        )
+
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(kimi_k3))
+        kimi_k3.model_config.hf_text_config.routed_expert_hidden_size = 8193
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(kimi_k3))
 
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
@@ -2044,6 +2110,46 @@ class TestKVPPConfig(TestBase):
                 else:
                     with self.assertRaisesRegex(ValueError, "PIECEWISE"):
                         KVPPConfig.from_vllm_config(config).validate(config)
+
+    def test_kv_transfer_connectors(self):
+        from copy import deepcopy
+
+        from vllm.config import KVTransferConfig
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+
+        mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
+
+        def multi(children):
+            return {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {"connectors": children},
+            }
+
+        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                KVPPConfig.from_vllm_config(config).validate(config)
+
+        consumer = {**mooncake, "kv_role": "kv_consumer"}
+        unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
+        cases = (
+            (consumer, "decode-only"),
+            (multi([store, consumer]), "decode-only"),
+            (unsupported, "MooncakeConnectorV1"),
+            (multi([mooncake, unsupported]), "MooncakeConnectorV1"),
+            (multi([]), "non-empty"),
+            (multi([multi([mooncake])]), "MultiConnector"),
+        )
+        for transfer, message in cases:
+            with self.subTest(transfer=transfer):
+                config = make_kvpp_config()
+                config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
+                with self.assertRaisesRegex(ValueError, message):
+                    KVPPConfig.from_vllm_config(config).validate(config)
 
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config

@@ -160,7 +160,8 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     features: list[str] = []
     command_args = [command.cmd for command in commands]
     command_displays = [" ".join(shlex.quote(arg) for arg in command.cmd) for command in commands]
-
+    if any("--pipeline-parallel-size" in cmd for cmd in command_args):
+        features.append("pipeline_parallel")
     if any("--async-scheduling" in cmd for cmd in command_args):
         features.append("async_scheduling")
     if any("--enable-expert-parallel" in cmd for cmd in command_args):
@@ -204,7 +205,16 @@ def _build_serve_cmd(
     for rank, command in zip(ranks, commands):
         prefix = rank.role
         if config.routing.type == ROUTING_DISAGGREGATED_PREFILL:
-            prefix = "prefill" if rank.role == "prefiller" else "decode"
+            if rank.role == "prefiller":
+                prefix = (
+                    "prefill_pp_master"
+                    if rank.nnodes > 1 and not rank.is_headless
+                    else "prefill_pp_worker"
+                    if rank.is_headless
+                    else "prefill"
+                )
+            else:
+                prefix = "decode"
         entries[f"{prefix}-node{rank.node_index}-rank{rank.local_rank}"] = command.display_cmd
     key = "external_dp_pd" if config.routing.type == ROUTING_DISAGGREGATED_PREFILL else "external_dp"
     return {key: entries}

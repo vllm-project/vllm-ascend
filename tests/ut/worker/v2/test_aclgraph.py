@@ -174,7 +174,12 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     manager.speculator = object()
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
-    manager.dp_size = 2
+    if vllm_version_is("0.31.0"):
+        # v0.31.0 stores dp_size as a plain instance attribute.
+        manager.dp_size = 2
+    else:
+        # vLLM main exposes dp_size as a read-only property backed by vllm_config.
+        manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
     forward_fn = MagicMock()
     model_state = object()
     input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([10, 20, 30], dtype=torch.int32))
@@ -184,8 +189,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     desc_fields = {"num_tokens": 4, "num_reqs": None, "cg_mode": CUDAGraphMode.FULL}
     # vLLM main (#58275) reads max_query_len/uniform_token_count off the
     # descriptor when preparing capture inputs.
-    if not vllm_version_is("0.30.0"):
-        desc_fields.update(max_query_len=None, uniform_token_count=None)
+    desc_fields.update(max_query_len=None, uniform_token_count=None)
     desc = SimpleNamespace(**desc_fields)
 
     def capture_side_effect(manager_arg, create_forward_fn, progress_bar_desc=None):
@@ -211,8 +215,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
         manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
 
     expected_capture_kwargs: dict[str, Any] = {"full_cudagraph": True}
-    if not vllm_version_is("0.30.0"):
-        expected_capture_kwargs["max_query_len"] = None
+    expected_capture_kwargs["max_query_len"] = None
     prepare_inputs.assert_called_once_with(
         3,
         4,

@@ -59,7 +59,6 @@
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -155,6 +154,18 @@ std::mutex& get_device_print_mutex()
 {
     static std::mutex device_print_mutex;
     return device_print_mutex;
+}
+
+std::mutex& get_pinned_host_mmap_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<void*, uint64_t>& get_pinned_host_mmaps()
+{
+    static std::unordered_map<void*, uint64_t> regions;
+    return regions;
 }
 
 void device_print_callback(void* args)
@@ -260,7 +271,10 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         // aclrtMemcpyBatchAttr uses srcLoc/dstLoc (aclrtMemLocation)
         // to specify memory locations, not aclrtMemcpyKind.
         int32_t device_id = 0;
-        aclrtGetDevice(&device_id);
+        const aclError get_device_result = aclrtGetDevice(&device_id);
+        TORCH_CHECK(get_device_result == ACL_SUCCESS,
+                    "aclrtGetDevice failed with error code ",
+                    get_device_result);
 
         aclrtMemLocation host_loc = {};
         host_loc.type = ACL_MEM_LOCATION_TYPE_HOST;
@@ -318,6 +332,85 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                     ", dst=", dst_data[i],
                     ", size=", size_data[i]);
     }
+}
+
+bool supports_eccpu_offload()
+{
+#if defined(CANN_MEMCPY_BATCH_ASYNC) && defined(CANN_HOST_REGISTER_V2_PINNED)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void register_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    // mmap is pageable by default; request page locking explicitly.
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "register_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "register_pinned_host_mmap expects a contiguous tensor");
+
+    void* ptr = host_tensor.data_ptr();
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(size > 0, "register_pinned_host_mmap expects a non-empty tensor");
+    TORCH_CHECK(reinterpret_cast<std::uintptr_t>(ptr) % 4096 == 0,
+                "register_pinned_host_mmap requires a 4 KiB-aligned mmap address, got ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    // Track the address and size to reject duplicate or mismatched operations.
+    TORCH_CHECK(regions.find(ptr) == regions.end(),
+                "Host mmap address is already registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+    const aclError ret = aclrtHostRegisterV2(ptr, size, ACL_HOST_REG_PINNED);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostRegisterV2(ACL_HOST_REG_PINNED) failed with error code ",
+                ret, ", address=", reinterpret_cast<std::uintptr_t>(ptr),
+                ", size=", size);
+    regions.emplace(ptr, size);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap requires aclrtHostRegisterV2 with "
+                "ACL_HOST_REG_PINNED in the CANN headers/runtime");
+#endif
+}
+
+void unregister_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "unregister_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "unregister_pinned_host_mmap expects a contiguous tensor");
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    void* ptr = host_tensor.data_ptr();
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    const auto it = regions.find(ptr);
+    TORCH_CHECK(it != regions.end(),
+                "Host mmap address is not registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(it->second == size,
+                "Pinned host mmap size changed before unregister: registered=",
+                it->second, ", current=", size);
+
+    const aclError ret = aclrtHostUnregister(ptr);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostUnregister failed with error code ", ret,
+                ", address=", reinterpret_cast<std::uintptr_t>(ptr));
+    regions.erase(it);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap unregister is unavailable because this "
+                "extension was built without aclrtHostRegisterV2 support");
+#endif
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -932,7 +1025,6 @@ std::vector<bool> is_contiguous_axes(const at::Tensor &tensor)
         contiguous_stride[i] = contiguous_stride[i + 1] * sizes[i + 1];
     }
 
-
     for (int64_t i = 0; i < ndim; i++) {
         result[i] = (strides[i] == contiguous_stride[i]);
     }
@@ -959,7 +1051,6 @@ std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, c
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
-
 
 std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
                                   at::Tensor &state_cache, const at::Tensor &ape, const at::Tensor &norm_weight,
@@ -1623,54 +1714,6 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
                  y_out, y2_out, scale_out, scale2_out);
 
     return std::make_tuple(y_out, scale_out);
-}
-
-void validate_kv_compress_epilog_inputs(
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    at::Tensor& kv_compress_cache)
-{
-    TORCH_CHECK(x.dim() == 2, "x must be 2D tensor, but got dimensions: ", x.dim());
-    TORCH_CHECK(x.size(0) > 0 && x.size(1) > 0,
-                "x dimensions must be positive, but got: [", x.size(0), ", ", x.size(1), "]");
-    TORCH_CHECK(slot_mapping.dim() == 1,
-                "slot_mapping must be 1D tensor, but got dimensions: ", slot_mapping.dim());
-    TORCH_CHECK(slot_mapping.size(0) == x.size(0),
-                "slot_mapping size must equal x's first dimension, but got slot_mapping_size=",
-                slot_mapping.size(0), ", x.dim(0)=", x.size(0));
-    if (kv_compress_cache.dim() == 4) {
-        TORCH_CHECK(kv_compress_cache.size(2) == 1,
-                    "kv_compress_cache 4D tensor requires headnum (dim 2) == 1, but got ",
-                    kv_compress_cache.size(2));
-    }
-    TORCH_CHECK(x.dtype() == at::kBFloat16, "x must be BF16, but got ", x.dtype());
-    TORCH_CHECK(slot_mapping.dtype() == at::kInt || slot_mapping.dtype() == at::kLong,
-                "slot_mapping must be INT32 or INT64, but got ", slot_mapping.dtype());
-    TORCH_CHECK(kv_compress_cache.dtype() == at::ScalarType::Float8_e5m2 ||
-                kv_compress_cache.dtype() == at::ScalarType::Float8_e4m3fn,
-                "kv_compress_cache must be FP8_E5M2 or FP8_E4M3, but got ", kv_compress_cache.dtype());
-}
-
-void kv_compress_epilog_npu(
-    at::Tensor& kv_compress_cache,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_group_size,
-    int64_t quant_mode,
-    bool round_scale_flag,
-    int64_t layout)
-{
-    validate_kv_compress_epilog_inputs(x, slot_mapping, kv_compress_cache);
-
-    at::Tensor cache = kv_compress_cache;
-    if (cache.dim() == 4) {
-        cache = cache.squeeze(2);
-    }
-
-    int64_t round_scale = round_scale_flag ? 1 : 0;
-    int64_t cache_stride = cache.stride(0);
-    EXEC_NPU_CMD(aclnnKvCompressEpilog, cache, x, slot_mapping, quant_group_size, quant_mode, round_scale,
-                 layout, cache_stride);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_npu(
@@ -2809,12 +2852,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
 
     ops.def(
-        "gmm_dequant_situ_quant(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
-        "Tensor x_scale, Tensor group_list, Tensor[] weight_assist_matrix, "
-        "float beta=1.0, float? linear_beta=None, int group_list_type=1) -> (Tensor y, Tensor scale)");
-    ops.impl("gmm_dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::gmm_dequant_situ_quant);
-
-    ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
         "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
         "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
@@ -2929,6 +2966,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              });
 #endif
 
+    ops.def("supports_eccpu_offload() -> bool");
+    ops.impl("supports_eccpu_offload", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::supports_eccpu_offload);
+    ops.def("register_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("register_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::register_pinned_host_mmap);
+    ops.def("unregister_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("unregister_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::unregister_pinned_host_mmap);
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
@@ -3343,19 +3389,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y_out, Tensor scale_out)"
         );
     ops.impl("npu_rms_norm_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_dynamic_quant_npu);
-
-    ops.def(
-        "kv_compress_epilog("
-            "Tensor(a!) kv_compress_cache, "
-            "Tensor x, "
-            "Tensor slot_mapping, "
-            "int quant_group_size, "
-            "int quant_mode, "
-            "bool round_scale_flag, "
-            "int layout"
-        ") -> ()"
-    );
-    ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
 
     ops.def(
         "kv_compress_epilog_v2(Tensor(a!) cache, Tensor x, Tensor slot_mapping, *, "

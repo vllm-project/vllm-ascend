@@ -105,3 +105,15 @@ msgstr ""
 
 msgid "To enable SP MoE, set `additional_config.enable_flashcomm1`:"
 msgstr "要启用 SP MoE，请设置 `additional_config.enable_flashcomm1`："
+
+msgid "### Matmul reduce-scatter fusion"
+msgstr "### Matmul reduce-scatter 融合"
+
+msgid ""
+"On supported Ascend devices, enable `fuse_gemm_comms` to fuse a\n"
+"sequence-parallel, bias-free row-parallel projection with its token-dimension\n"
+"reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,\n"
+"4, or 8; unmatched graphs continue to use the unfused path."
+msgstr ""
+"在支持的昇腾设备上，启用 `fuse_gemm_comms` 可将序列并行、无偏置的行并行投影与其 token 维度上的 reduce-scatter "
+"融合。融合实现支持 BF16/FP16，TP 大小为 2、4 或 8；不匹配的计算图仍使用未融合路径。"

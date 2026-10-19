@@ -55,10 +55,20 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
+    pp_layer_partition: str = ""
+    nnodes: int = 1
+    node_rank: int = 0
+    master_addr: str = ""
+    master_port: int = 7060
+    distributed_executor_backend: str = ""
+    is_headless: bool = False
 
     @property
     def devices_per_rank(self) -> int:
-        return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+        base = self.tp_size * self.cp_size * self.sp_size
+        if self.nnodes > 1:
+            return base
+        return base * self.pp_size
 
     @property
     def devices_per_node(self) -> int:
@@ -93,6 +103,13 @@ class RankInfo:
     dp_address: str
     dp_rpc_port: int
     port_start: int
+    pp_layer_partition: str
+    nnodes: int
+    node_rank: int
+    master_addr: str
+    master_port: int
+    distributed_executor_backend: str
+    is_headless: bool
 
 
 @dataclass(frozen=True)
@@ -311,6 +328,13 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    pp_layer_partition=str(node.get("pp_layer_partition", "")),
+                    nnodes=int(node.get("nnodes", 1)),
+                    node_rank=int(node.get("node_rank", 0)),
+                    master_addr=str(node.get("master_addr", "")),
+                    master_port=int(node.get("master_port", 7060)),
+                    distributed_executor_backend=str(node.get("distributed_executor_backend", "")),
+                    is_headless=bool(node.get("is_headless", False)),
                 )
             )
         return nodes
@@ -407,6 +431,10 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+            if node.nnodes > 1 and node.node_rank > 0 and not node.is_headless:
+                raise ValueError(f"node {node_index} is PP worker but not headless")
+            if node.nnodes > 1 and not node.master_addr:
+                raise ValueError(f"node {node_index} uses multi-node PP but master_addr is empty")
 
     @staticmethod
     def _validate_kv_pool(config: ExternalDPConfig) -> None:
@@ -470,6 +498,13 @@ class RankResolver:
                     dp_address=node_info.dp_address,
                     dp_rpc_port=node_info.dp_rpc_port,
                     port_start=node_info.port_start,
+                    pp_layer_partition=node_info.pp_layer_partition,
+                    nnodes=node_info.nnodes,
+                    node_rank=node_info.node_rank,
+                    master_addr=node_info.master_addr,
+                    master_port=node_info.master_port,
+                    distributed_executor_backend=node_info.distributed_executor_backend,
+                    is_headless=node_info.is_headless,
                 )
             )
         return ranks
