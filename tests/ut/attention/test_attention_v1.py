@@ -225,13 +225,13 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     def test_pcp_mode_is_initialized_from_config(self):
-        self.assertFalse(self.builder.pcp_enabled)
+        self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
         pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
@@ -378,7 +378,7 @@ def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
