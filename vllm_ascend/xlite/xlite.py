@@ -285,6 +285,8 @@ class XliteModelBase(ABC):
         Returns:
             torch.Tensor: The repacked scale tensor for fixpipe computation.
         """
+        if deq_scale.dtype == torch.int64:
+            return deq_scale
         deq_scale_fp32 = deq_scale.to(torch.float32)
         scale = deq_scale_fp32.new_zeros(deq_scale.shape[0] * 2)
         scale[0::2] = deq_scale_fp32[0::1]
@@ -444,6 +446,9 @@ class StandardXliteModel(XliteModelBase):
 
         xlite_config.quant_attn_weight_nz = bool(xlite_model.mha_qkv) and self.is_tensor_nz(xlite_model.mha_qkv[0])
         xlite_config.quant_attn_weight_transpose = bool(xlite_model.mha_qkv)
+
+        xlite_model.re_up_gate_scale_bias = get_layer_weights(layers, f"{re_prefix}.w13_scale_bias", **re_kwargs)
+        xlite_model.re_down_scale_bias = get_layer_weights(layers, f"{re_prefix}.w2_scale_bias", **re_kwargs)
 
         re_kwargs["post_processor"] = self._transform_deq_scale
         xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{re_prefix}.w13_weight_scale", **re_kwargs)
