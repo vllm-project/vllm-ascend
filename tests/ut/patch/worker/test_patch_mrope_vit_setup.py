@@ -1,85 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import builtins
 import importlib.util
 import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class TestVitMropeSetupPatch(unittest.TestCase):
-    def load_patch(self, missing=None):
+    def test_launch_grid_matches_block_size(self):
         target = "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
-        modules = {}
-        parts = target.split(".")
-        for end in range(1, len(parts) + 1):
-            name = ".".join(parts[:end])
-            modules[name] = types.ModuleType(name)
-            modules[name].__path__ = []
-            if end > 1:
-                setattr(modules[".".join(parts[: end - 1])], parts[end - 1], modules[name])
-        upstream = modules[target]
-        original = object()
-        upstream._vit_mrope_setup_kernel = original
-        # Model modules may import the wrapper before the worker patch runs.
-        exec("def vit_mrope_setup(): return _vit_mrope_setup_kernel", upstream.__dict__)
-        alias = upstream.vit_mrope_setup
-        jit_options = {}
-
-        def jit(**kwargs):
-            jit_options.update(kwargs)
-            return lambda fn: fn
-
-        triton_utils = types.ModuleType("vllm.triton_utils")
-        triton_utils.triton = types.SimpleNamespace(jit=jit)
-        triton_utils.tl = types.SimpleNamespace(constexpr=int)
-        modules["vllm.triton_utils"] = triton_utils
-        if missing == target:
-            modules[target] = None
-            delattr(modules[".".join(parts[:-1])], parts[-1])
-        elif missing:
-            del modules[target]
-            delattr(modules[".".join(parts[:-1])], parts[-1])
-
-        path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_mrope_vit_setup.py"
-        spec = importlib.util.spec_from_file_location("_test_vit_mrope_patch", path)
-        module = importlib.util.module_from_spec(spec)
-        real_import = builtins.__import__
-
-        def import_with_missing_dependency(name, *args, **kwargs):
-            if name == target:
-                raise ModuleNotFoundError(name=missing)
-            return real_import(name, *args, **kwargs)
-
-        with patch.dict(sys.modules, modules):
-            if missing and missing != target:
-                with patch("builtins.__import__", side_effect=import_with_missing_dependency):
-                    spec.loader.exec_module(module)
-            else:
-                spec.loader.exec_module(module)
-        return module, upstream, alias, original, jit_options
-
-    def test_existing_wrapper_alias_uses_replacement(self):
-        module, upstream, alias, original, options = self.load_patch()
-        self.assertIs(alias(), module._vit_mrope_setup_kernel)
-        self.assertIs(upstream._vit_mrope_setup_kernel, module._vit_mrope_setup_kernel)
-        self.assertIsNot(alias(), original)
-        self.assertEqual(options["do_not_specialize"], ["num_tokens", "num_grids"])
-        self.assertEqual(options["do_not_specialize_on_alignment"], ["grids_ptr"])
-
-    def test_older_vllm_without_setup_module(self):
-        module, _, alias, original, _ = self.load_patch(
-            missing="vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
-        )
-        self.assertIsNone(module.mrope_vit_setup)
-        self.assertIs(alias(), original)
-
-    def test_missing_dependency_is_not_silenced(self):
-        with self.assertRaises(ModuleNotFoundError):
-            self.load_patch(missing="unexpected_dependency")
+        model = "vllm.models.minimax_m3.common.vision_tower"
+        for n in (1, 16, 17, 32, 33, 65):
+            for model_loaded in (False, True):
+                with self.subTest(n=n, model_loaded=model_loaded):
+                    modules = {}
+                    names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
+                    if model_loaded:
+                        names.append(model)
+                    for name in names:
+                        parts = name.split(".")
+                        for end in range(1, len(parts) + 1):
+                            key = ".".join(parts[:end])
+                            if key not in modules:
+                                modules[key] = types.ModuleType(key)
+                                modules[key].__path__ = []
+                            if end > 1:
+                                setattr(modules[".".join(parts[: end - 1])], parts[end - 1], modules[key])
+                    torch = MagicMock()
+                    modules["torch"] = torch
+                    kernel = MagicMock()
+                    upstream = modules[target]
+                    upstream._vit_mrope_setup_kernel = kernel
+                    modules["vllm.triton_utils"].triton = types.SimpleNamespace(
+                        cdiv=lambda x, y: (x + y - 1) // y,
+                        next_power_of_2=lambda x: 1 << (x - 1).bit_length(),
+                    )
+                    copy = MagicMock()
+                    modules["vllm.utils.torch_utils"].async_tensor_h2d = copy
+                    path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_mrope_vit_setup.py"
+                    spec = importlib.util.spec_from_file_location("_test_vit_mrope_patch", path)
+                    module = importlib.util.module_from_spec(spec)
+                    with patch.dict(sys.modules, modules):
+                        spec.loader.exec_module(module)
+                        self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
+                        self.assertIs(upstream._vit_mrope_setup_kernel, kernel)
+                        if model_loaded:
+                            self.assertIs(modules[model].vit_mrope_setup, module.vit_mrope_setup)
+                        inv = MagicMock()
+                        inv.numel.return_value = 21
+                        upstream.vit_mrope_setup(inv, inv, inv, [[1, 1, n]], 1)
+                    kernel.__getitem__.assert_called_once_with(((n + 15) // 16,))
+                    args, kwargs = kernel.__getitem__.return_value.call_args
+                    self.assertEqual(args[7:9], (n, 1))
+                    self.assertEqual(kwargs["BLOCK_N"], 16)
+                    self.assertEqual(kwargs["BLOCK_D"], 64)
+                    self.assertEqual(kwargs["num_warps"], 8)
+                    self.assertEqual(copy.call_args.args[0], [0, n, 1, 1, n])
+                    self.assertEqual(torch.empty.call_args.args, (3, n, 63))
 
 
 if __name__ == "__main__":
