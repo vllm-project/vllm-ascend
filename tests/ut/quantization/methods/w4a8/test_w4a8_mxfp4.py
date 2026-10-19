@@ -7,6 +7,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
+    AscendW4A8MXFPDSDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -403,3 +404,108 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+
+
+class TestAscendW4A8MXFP4DSMoEMethod(TestBase):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config")
+    def setUp(self, mock_ascend, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.use_v2_model_runner = False
+        mock_ascend.return_value = create_mock_ascend_config()
+        self.scheme = AscendW4A8MXFPDSDynamicFusedMoEMethod()
+
+    def _make_layer(self):
+        layer = nn.Module()
+        weights = self.scheme.get_weight(2, 128, 64, torch.bfloat16)
+        scales = self.scheme.get_dynamic_quant_param(2, 128, 64, torch.bfloat16)
+        originals = {}
+        for name, weight in weights.items():
+            # Reproduce the loader's signed checkpoint -> uint8 parameter copy.
+            checkpoint = torch.arange(weight.numel()).to(torch.int8).reshape(weight.shape)
+            weight.copy_(checkpoint)
+            torch.testing.assert_close(weight, checkpoint.view(torch.uint8))
+            originals[name] = weight.clone()
+            layer.register_parameter(name, nn.Parameter(weight, requires_grad=False))
+        for name, scale in scales.items():
+            self.assertEqual(scale.dtype, torch.float8_e8m0fnu)
+            raw = torch.arange(scale.numel()).to(torch.uint8).reshape(scale.shape)
+            scale.view(torch.uint8).copy_(raw)
+            originals[name] = raw.clone()
+            layer.register_parameter(name, nn.Parameter(scale, requires_grad=False))
+        return layer, originals
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.dispose_tensor")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_megamoe_prepares_all_expert_lists(self, mock_npu, mock_use_cann, mock_vllm, mock_dispose):
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        layer, originals = self._make_layer()
+
+        self.scheme.process_weights_after_loading(layer)
+
+        for name, original in originals.items():
+            experts = getattr(layer, f"cann_mega_moe_{name}_list")
+            self.assertEqual(len(experts), original.shape[0])
+            expected = original
+            if name.endswith("scale"):
+                g, n, k = original.shape
+                expected = original.reshape(g, n, k // 2, 2)
+            for expert, actual in enumerate(experts):
+                with self.subTest(name=name, expert=expert):
+                    self.assertEqual(actual.dtype, torch.float8_e8m0fnu if name.endswith("scale") else torch.uint8)
+                    torch.testing.assert_close(actual.view(torch.uint8), expected[expert])
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 4)
+        self.assertEqual(mock_dispose.call_count, 4)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 4)
+        self.assertEqual(mock_dispose.call_count, 4)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_non_megamoe_preserves_weight_and_scale_layout(self, mock_npu, mock_use_cann, mock_vllm):
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        layer, originals = self._make_layer()
+
+        self.scheme.process_weights_after_loading(layer)
+        self.scheme.process_weights_after_loading(layer)
+
+        for name, original in originals.items():
+            expected = original
+            if name.endswith("scale"):
+                g, n, k = original.shape
+                expected = original.reshape(g, n, k // 2, 2)
+            expected = expected.transpose(1, 2)
+            torch.testing.assert_close(getattr(layer, name).view(torch.uint8), expected)
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 2)
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+        for name, original in originals.items():
+            torch.testing.assert_close(getattr(layer, name).view(torch.uint8), original)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_eplb_preserves_byte_lists_and_repeated_processing(self, mock_npu, mock_empty_cache):
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        self.scheme.use_expert_weight_list = True
+        layer, originals = self._make_layer()
+
+        self.scheme.process_weights_after_loading(layer)
+        self.scheme.process_weights_after_loading(layer)
+
+        for name, original in originals.items():
+            self.assertFalse(hasattr(layer, name))
+            experts = getattr(layer, f"{name}_list")
+            self.assertEqual(len(experts), original.shape[0])
+            expected = original
+            if name.endswith("scale"):
+                g, n, k = original.shape
+                expected = original.reshape(g, n, k // 2, 2)
+            for expert, actual in enumerate(experts):
+                with self.subTest(name=name, expert=expert):
+                    self.assertEqual(actual.dtype, torch.uint8)
+                    torch.testing.assert_close(actual, expected[expert])
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 4)
+        mock_empty_cache.assert_called_once_with()
