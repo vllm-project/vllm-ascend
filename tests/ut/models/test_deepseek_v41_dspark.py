@@ -251,13 +251,18 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
             )
         ),
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        model_config=SimpleNamespace(dtype=torch.float16),
         quant_config=quant_config,
     )
     module = deepseek_v41_dspark_module
+    draft_impls = []
 
     def layer(*args, **kwargs):
         result = torch.nn.Module()
         result.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        impl = MagicMock(spec=module.AscendDSAImpl)
+        draft_impls.append(impl)
+        result.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
         return result
 
     monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
@@ -279,3 +284,9 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     confidence.assert_called_once_with(input_dim=12, prefix="model.confidence_head", bias=False, with_markov=True)
     assert linear.call_args.kwargs["quant_config"] is quant_config
     assert model.layers["42"].markov_head is model.markov_head
+    assert len(draft_impls) == 3
+    for impl in draft_impls:
+        assert impl._oproj_buffer_pool is model._oproj_buffer_pool
+        impl.reserve_oproj_buffers.assert_called_once_with(
+            torch.device(module.current_platform.device_type), torch.float16
+        )
