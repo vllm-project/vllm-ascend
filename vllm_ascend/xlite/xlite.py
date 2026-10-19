@@ -608,6 +608,13 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         xlite_config.index_rope_interleaved = getattr(hf_config, "indexer_rope_interleave", False)
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
         xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
+        layers, _ = self._get_layers_and_model_prefix()
+        index_c8_mask = [
+            get_dotted_attr(layer, "self_attn.mla_attn.mla_attn.impl.indexer.enable_sparse_li_c8", default=False)
+            for layer in layers
+        ]
+        if any(index_c8_mask):
+            xlite_config.index_c8_mask = index_c8_mask
 
     def _build_model(self) -> None:
         super()._build_model()
@@ -624,19 +631,31 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
     def extract_kv_cache(self, kv_caches: list[tuple[torch.Tensor, ...]], /) -> list[tuple[torch.Tensor, ...]]:
         from vllm_ascend.xlite.utils import _DUMMY_TENSOR
 
-        # For DSA, the kv_caches are passed as [(indexer_k_cache,), (k_nope_cache, k_pe_cache), ..., <mtp_layer>]
-        # TODO: consider the compatibility with `enable_sparse_sfa_c8` and `enable_sparse_li_c8`
+        # TODO: support enable_sparse_sfa_c8.
         indexer_caches: list[tuple[torch.Tensor, ...]] = []
         mla_caches: list[tuple[torch.Tensor, ...]] = []
 
         idx = 0
         index_mask = getattr(self.xlite_config, "index_full_mask", None) or [True] * self.xlite_config.n_layers
+        index_c8_mask = getattr(self.xlite_config, "index_c8_mask", None)
         dummy_indexer_cache = (_DUMMY_TENSOR,)
-        for mask in index_mask:
-            indexer_caches.append(kv_caches[idx] if mask else dummy_indexer_cache)
-            mla_caches.append(kv_caches[idx + int(mask)])
+        for i, mask in enumerate(index_mask):
+            c8 = bool(index_c8_mask and i < len(index_c8_mask) and index_c8_mask[i])
+            indexer_cache = kv_caches[idx] if mask else dummy_indexer_cache
+            mla_cache = kv_caches[idx + int(mask)]
+
+            if mask and c8:
+                # LI-C8 uses INT8 keys; the main MLA cache remains floating-point.
+                if indexer_cache[0].dtype != torch.int8 and mla_cache[0].dtype == torch.int8:
+                    indexer_cache, mla_cache = mla_cache, indexer_cache
+            elif mask and len(indexer_cache) > 1 and len(mla_cache) == 1:
+                # A floating-point Indexer cache contains one tensor.
+                indexer_cache, mla_cache = mla_cache, indexer_cache
+
+            indexer_caches.append(indexer_cache[:2] if c8 else indexer_cache[:1])
+            mla_caches.append(mla_cache)
             idx += 1 + int(mask)
-        return [mla_c[:2] + indexer_c[:1] for mla_c, indexer_c in zip(mla_caches, indexer_caches)]
+        return [mla_c[:2] + indexer_c for mla_c, indexer_c in zip(mla_caches, indexer_caches)]
 
 
 class MiniMaxM2XliteModel(StandardXliteModel):

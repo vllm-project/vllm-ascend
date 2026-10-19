@@ -42,8 +42,8 @@ class XliteModelRunner(NPUModelRunner):
         assert get_ascend_config().xlite_graph_config.enabled, "xlite graph must be enabled to use XliteModelRunner"
         super().__init__(*args, **kwargs)
 
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            logger.error("xlite does not currently support Sparse SFA/LI C8.")
+        if self.enable_sparse_sfa_c8:
+            logger.error("xlite does not currently support Sparse SFA C8.")
 
     def get_model(self) -> nn.Module:
         """Returns the unwrapper fallback model. See :meth:`NPUModelRunner.get_model` for details."""
