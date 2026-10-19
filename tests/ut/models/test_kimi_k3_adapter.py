@@ -368,7 +368,7 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
     assert len(calls) == 1
     legacy.assert_not_called()
     assert calls[0]["cache_mode"] == "PA_BSND"
-    assert calls[0]["tile_size"] == cache[0].shape[1]
+    assert calls[0]["tile_size"] == 128
     assert calls[0]["kv_cache"] is cache[0]
     assert calls[0]["kr_cache"] is cache[1]
     assert calls[0]["cache_index"].dtype is torch.int64
