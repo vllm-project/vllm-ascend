@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, FullAttentionSpec
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -279,9 +279,22 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             seq_lens=None,
             max_seq_len=6,
         )
-        mock_model = MagicMock()
-
-        self.builder.build(1, common_attn_metadata, mock_model)
+        for spec_type, input_causal, expected_causal in (
+            (FullAttentionSpec, True, True),
+            (EncoderOnlyAttentionSpec, True, False),
+            (FullAttentionSpec, False, False),
+        ):
+            with self.subTest(spec=spec_type, causal=input_causal):
+                self.builder.kv_cache_spec = spec_type(
+                    block_size=64, num_kv_heads=2, head_size=128, dtype=torch.bfloat16
+                )
+                common_attn_metadata.causal = input_causal
+                with patch.object(self.builder.attn_mask_builder, "get_attention_mask", return_value=None) as mask:
+                    self.builder.build(1, common_attn_metadata)
+                mask.assert_called_once_with(expected_causal, self.builder.model_config)
+                self.assertIs(mock_ascend_metadata.call_args.kwargs["causal"], expected_causal)
+                # Group-local overrides must not change metadata shared with GDN.
+                self.assertIs(common_attn_metadata.causal, input_causal)
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
