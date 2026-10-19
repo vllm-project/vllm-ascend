@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -417,8 +418,8 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                     enable_ssd_offload=True,
                     ssd_offload_path=ssd_path,
                 )
-                setup_calls = []
-                owned_paths = set()
+                setup_calls: list[dict[str, Any]] = []
+                owned_paths: set[str] = set()
 
                 def setup(setup_calls=setup_calls, owned_paths=owned_paths, **kwargs):
                     setup_calls.append(kwargs)
