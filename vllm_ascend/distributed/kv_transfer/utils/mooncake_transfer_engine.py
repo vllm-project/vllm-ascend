@@ -5,6 +5,7 @@ class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
         self.is_register_buffer: bool = False
+        self.registered_buffers: set[tuple[int, int]] = set()
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -31,13 +32,19 @@ class GlobalTE:
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            if self.is_register_buffer:
-                return
+            # Register each buffer at most once, so lazily allocated buffers
+            # (e.g. the NPU staging window) can register after the initial
+            # kv_caches registration instead of being silently skipped.
             for ptr, size in zip(ptrs, sizes):
+                key = (int(ptr), int(size))
+                if key in self.registered_buffers:
+                    continue
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory registration failed.")
-            self.is_register_buffer = True
+                self.registered_buffers.add(key)
+            if ptrs:
+                self.is_register_buffer = True
 
 
 global_te = GlobalTE()

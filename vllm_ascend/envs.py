@@ -87,6 +87,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Number of reusable 2 MiB-aligned NPU staging chunks used when Mooncake
+    # transfers into DSA PD CPU-offloaded KV buffers. Default: 16; valid: >= 1.
+    # This setting is not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW", "16"))
+    ),
 }
 
 # end-env-vars-definition

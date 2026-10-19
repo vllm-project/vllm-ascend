@@ -59,6 +59,8 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend import envs as ascend_envs
+from vllm_ascend.kv_offload.dsa_pd_mooncake import get_dsa_pd_mooncake_offloaded_kv_tensor
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -456,6 +458,30 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_caches_base_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.block_len_per_addr = block_len_per_addr
+        self._dsa_pd_mooncake_staging_storage: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_bytes = 0
+        self._dsa_pd_mooncake_staging_lock = threading.Lock()
+        # Host-only offloaded KV leaves the ADXL engine with no device
+        # region registered, so the device-side data channel is never
+        # established at startup; the first cross-process connect then
+        # fails on the NPU NIC socket (EI0020 -> 503900). Pre-registering
+        # the NPU staging window here keeps a device region registered
+        # before any transfer connects.
+        if any(
+            get_dsa_pd_mooncake_offloaded_kv_tensor(
+                int(t.data_ptr()), int(t.numel() * t.element_size())
+            )
+            is not None
+            for kv_tuple in kv_caches.values()
+            for t in (kv_tuple if isinstance(kv_tuple, (list, tuple)) else [kv_tuple])
+            if isinstance(t, torch.Tensor)
+        ):
+            self._ensure_dsa_pd_mooncake_staging_tensor()
+            logger.info(
+                "Pre-registered DSA PD Mooncake NPU staging buffer at startup: bytes=%s",
+                self._dsa_pd_mooncake_staging_bytes,
+            )
         self.block_stride_per_addr = block_stride_per_addr
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
@@ -786,6 +812,181 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_host_ = remote_port_send_num[remote_port]["host"]
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
 
+    @staticmethod
+    def _iter_kv_cache_tensors(kv_cache_tuple: Any) -> Iterator[torch.Tensor]:
+        if isinstance(kv_cache_tuple, torch.Tensor):
+            yield kv_cache_tuple
+            return
+        if isinstance(kv_cache_tuple, (list, tuple)):
+            for item in kv_cache_tuple:
+                if isinstance(item, torch.Tensor):
+                    yield item
+
+    def _get_dsa_pd_mooncake_staging_device(self) -> torch.device | str:
+        for kv_cache_tuple in self.kv_caches.values():
+            for tensor in self._iter_kv_cache_tensors(kv_cache_tuple):
+                if tensor.device.type != "cpu":
+                    return tensor.device
+        return "npu"
+
+    def _get_dsa_pd_mooncake_staging_chunk_bytes(self) -> int:
+        block_bytes = [
+            int(block_len)
+            for per_layer_block_lens in self.block_len_per_addr
+            for block_len in per_layer_block_lens
+            if int(block_len) > 0
+        ]
+        alignment = 2 * 1024 * 1024
+        chunk_bytes = max(max(block_bytes, default=alignment), alignment)
+        return ((chunk_bytes + alignment - 1) // alignment) * alignment
+
+    def _get_dsa_pd_mooncake_staging_window(self) -> int:
+        return ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW
+
+    def _ensure_dsa_pd_mooncake_staging_tensor(self) -> torch.Tensor:
+        chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
+        staging_window = self._get_dsa_pd_mooncake_staging_window()
+        required_bytes = chunk_bytes * staging_window
+        if self._dsa_pd_mooncake_staging_tensor is not None and self._dsa_pd_mooncake_staging_bytes >= required_bytes:
+            return self._dsa_pd_mooncake_staging_tensor
+
+        alignment = 2 * 1024 * 1024
+        device = self._get_dsa_pd_mooncake_staging_device()
+        storage = torch.empty((required_bytes + alignment,), dtype=torch.int8, device=device)
+        offset = (-int(storage.data_ptr())) % alignment
+        staging = storage[offset : offset + required_bytes]
+        if staging.data_ptr() % alignment != 0:
+            raise RuntimeError("DSA PD Mooncake NPU staging tensor is not 2MB aligned.")
+
+        global_te.register_buffer([int(staging.data_ptr())], [required_bytes])
+        self._dsa_pd_mooncake_staging_storage = storage
+        self._dsa_pd_mooncake_staging_tensor = staging
+        self._dsa_pd_mooncake_staging_bytes = required_bytes
+        logger.info(
+            "Allocated Mooncake NPU staging buffer: bytes=%s chunk_bytes=%s window=%s device=%s",
+            required_bytes,
+            chunk_bytes,
+            staging_window,
+            staging.device,
+        )
+        return staging
+
+    def _copy_dsa_pd_mooncake_staging_to_offloaded_kv(
+        self, dst: int, length: int, staging_offset: int = 0
+    ) -> None:
+        resolved = get_dsa_pd_mooncake_offloaded_kv_tensor(dst, length)
+        if resolved is None:
+            raise RuntimeError(f"Missing DSA PD Mooncake offloaded KV tensor for dst={dst} length={length}.")
+        target_tensor, offset = resolved
+        staging = self._ensure_dsa_pd_mooncake_staging_tensor()
+        target_bytes = target_tensor.view(torch.int8).reshape(-1)
+        target_bytes.narrow(0, offset, length).copy_(staging[staging_offset : staging_offset + length], non_blocking=False)
+
+    def _batch_transfer_sync_read_with_optional_staging(
+        self,
+        session_id: str,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        remote_request_id: str,
+    ) -> int:
+        requires_staging = any(
+            get_dsa_pd_mooncake_offloaded_kv_tensor(local_dst, length) is not None
+            for local_dst, length in zip(src_list, length_list)
+        )
+        if not requires_staging:
+            return self._batch_transfer_sync_read_with_optional_staging_unlocked(
+                session_id, src_list, dst_list, length_list, remote_request_id
+            )
+
+        # The staging slots are shared by all peer handlers on this worker.
+        # Keep ownership across both the Mooncake read and the NPU-to-offload
+        # copy so another request cannot overwrite a slot still being consumed.
+        with self._dsa_pd_mooncake_staging_lock:
+            return self._batch_transfer_sync_read_with_optional_staging_unlocked(
+                session_id, src_list, dst_list, length_list, remote_request_id
+            )
+
+    def _batch_transfer_sync_read_with_optional_staging_unlocked(
+        self,
+        session_id: str,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        remote_request_id: str,
+    ) -> int:
+        direct_src_list: list[int] = []
+        direct_dst_list: list[int] = []
+        direct_length_list: list[int] = []
+        staged_transfers: list[tuple[int, int, int]] = []
+        staging_chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
+        staging_alignment = 2 * 1024 * 1024
+
+        for local_dst, remote_src, length in zip(src_list, dst_list, length_list):
+            if get_dsa_pd_mooncake_offloaded_kv_tensor(local_dst, length) is None:
+                direct_src_list.append(local_dst)
+                direct_dst_list.append(remote_src)
+                direct_length_list.append(length)
+                continue
+            remaining = int(length)
+            offset = 0
+            while remaining > 0:
+                remote_page_offset = (int(remote_src) + offset) % staging_alignment
+                piece_capacity = staging_chunk_bytes - remote_page_offset
+                piece_len = min(remaining, piece_capacity)
+                staged_transfers.append((int(local_dst) + offset, int(remote_src) + offset, piece_len))
+                offset += piece_len
+                remaining -= piece_len
+
+        if direct_src_list:
+            ret = self.engine.batch_transfer_sync_read(
+                session_id,
+                direct_src_list,
+                direct_dst_list,
+                direct_length_list,
+            )
+            if ret < 0:
+                return ret
+
+        if not staged_transfers:
+            return 0
+
+        staging = self._ensure_dsa_pd_mooncake_staging_tensor()
+        staging_ptr = int(staging.data_ptr())
+        staging_window = self._get_dsa_pd_mooncake_staging_window()
+        for batch_start in range(0, len(staged_transfers), staging_window):
+            batch = staged_transfers[batch_start : batch_start + staging_window]
+            local_staging_ptrs = []
+            remote_src_ptrs = []
+            transfer_lengths = []
+            copy_plan = []
+            for slot, (local_dst, remote_src, length) in enumerate(batch):
+                staging_base_offset = slot * staging_chunk_bytes
+                staging_offset = staging_base_offset + int(remote_src) % (2 * 1024 * 1024)
+                local_staging_ptrs.append(staging_ptr + staging_offset)
+                remote_src_ptrs.append(remote_src)
+                transfer_lengths.append(length)
+                copy_plan.append((local_dst, length, staging_offset))
+            ret = self.engine.batch_transfer_sync_read(session_id, local_staging_ptrs, remote_src_ptrs, transfer_lengths)
+            if ret < 0:
+                logger.error(
+                    "Staged Mooncake batch read failed: request=%s "
+                    "batch_start=%s batch_size=%s first_local=%s first_remote=%s first_len=%s ret=%s",
+                    remote_request_id,
+                    batch_start,
+                    len(batch),
+                    local_staging_ptrs[0] if local_staging_ptrs else None,
+                    remote_src_ptrs[0] if remote_src_ptrs else None,
+                    transfer_lengths[0] if transfer_lengths else None,
+                    ret,
+                )
+                return ret
+            for local_dst, length, staging_offset in copy_plan:
+                self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+            torch.npu.synchronize()
+
+        return 0
+
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
         remote_request_id = req_meta["remote_request_id"]
@@ -1039,7 +1240,9 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        ret = self._batch_transfer_sync_read_with_optional_staging(
+            session_id, src_list, dst_list, length_list, remote_request_id
+        )
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
@@ -2192,7 +2395,10 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        # The Ascend ADXL transport requires an explicit device binding even
+        # for single-PP workers; without it rtsHostRegister fails with an
+        # invalid device handle during HcclCommPrepare.
+        device_name = str(torch.npu.current_device())
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
@@ -2676,7 +2882,18 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        # Offloaded (swap-backed) KV regions must stay OUT of the transfer
+        # engine: rtsHostRegister rejects swap-backed host memory during
+        # HcclCommPrepare (EL0003 invalid handle -> 503900). Those regions
+        # are served through the NPU staging window, which stays the only
+        # device region this engine registers.
+        region_ptrs, region_lengths = [], []
+        for region_ptr, region_length in zip(register_regions.ptrs, register_regions.lengths):
+            if get_dsa_pd_mooncake_offloaded_kv_tensor(int(region_ptr), int(region_length)) is not None:
+                continue
+            region_ptrs.append(region_ptr)
+            region_lengths.append(region_length)
+        global_te.register_buffer(region_ptrs, region_lengths)
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "

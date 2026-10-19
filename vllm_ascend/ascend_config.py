@@ -624,6 +624,7 @@ class AscendConfig:
     dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
+    dsa_sparse_attention_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
@@ -1658,6 +1659,70 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+class DSASparseAttentionConfig:
+    """
+    Configuration for ``additional_config["dsa_sparse_attention_config"]``:
+    Mooncake-backed CPU KV store for DeepSeek-style sparse attention (DSA).
+    """
+
+    _valid_modes = ("baseline", "fused_overlap")
+
+    def __init__(self, dsa_sparse_attention_config: Any, vllm_config: VllmConfig):
+        if dsa_sparse_attention_config is None:
+            dsa_sparse_attention_config = {}
+        if not isinstance(dsa_sparse_attention_config, dict):
+            raise TypeError("dsa_sparse_attention_config must be a dict")
+
+        self.mode = dsa_sparse_attention_config.get("mode", "baseline")
+        if self.mode not in self._valid_modes:
+            raise ValueError(
+                f"dsa_sparse_attention_config.mode must be one of {list(self._valid_modes)}"
+            )
+
+        self.enable_cpu_kv_store = bool(
+            dsa_sparse_attention_config.get("enable_cpu_kv_store", False)
+        )
+        default_selection_topk_block_size = 1 if self.mode == "fused_overlap" else 64
+        self.selection_topk_block_size = int(
+            dsa_sparse_attention_config.get(
+                "selection_topk_block_size", default_selection_topk_block_size
+            )
+        )
+        if self.selection_topk_block_size <= 0:
+            raise ValueError(
+                "dsa_sparse_attention_config.selection_topk_block_size must be greater than 0"
+            )
+        if self.mode == "fused_overlap" and self.selection_topk_block_size != 1:
+            raise ValueError(
+                "dsa_sparse_attention_config.selection_topk_block_size must be 1 "
+                "when mode is fused_overlap"
+            )
+
+        self.sparse_count = dsa_sparse_attention_config.get("sparse_count")
+        if self.sparse_count is None:
+            self.sparse_count = self._get_model_sparse_count(vllm_config)
+        self.sparse_count = int(self.sparse_count)
+        if self.sparse_count <= 0:
+            raise ValueError("dsa_sparse_attention_config.sparse_count must be greater than 0")
+
+        if self.mode == "baseline" and self.enable_cpu_kv_store:
+            logger.warning(
+                "DSA CPU KV store is ignored when dsa_sparse_attention_config.mode is baseline."
+            )
+
+    @staticmethod
+    def _get_model_sparse_count(vllm_config: VllmConfig) -> int:
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        return int(getattr(hf_text_config, "index_topk", 2048))
+
+    @classmethod
+    def from_additional_config(
+        cls, vllm_config: VllmConfig, user_config: Any
+    ) -> "DSASparseAttentionConfig":
+        return cls(user_config, vllm_config)
+
+
 @config
 class SparseKVOffloadConfig:
     """
@@ -1886,9 +1951,16 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         )
         kwargs = {k: v for k, v in kwargs.items() if k not in unknown_keys}
 
+    # The dsa section may also arrive via the pydantic-config path (kwargs);
+    # drop it so the explicit from_additional_config value below is the only one.
+    kwargs.pop("dsa_sparse_attention_config", None)
+
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
+        dsa_sparse_attention_config=DSASparseAttentionConfig.from_additional_config(
+            vllm_config, (vllm_config.additional_config or {}).get("dsa_sparse_attention_config", {})
+        ),
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
         runtime_config_path=runtime_boot.path,
