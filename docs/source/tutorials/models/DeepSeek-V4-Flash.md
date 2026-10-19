@@ -662,6 +662,8 @@ Before you start, please:
 
     PCP requires Model Runner V2. Both DSpark nodes below enable Model Runner V2 with `export VLLM_USE_V2_MODEL_RUNNER=1`, as shown below. Model Runner V2 does not support DSA-CP, so do not set `enable_dsa_cp` in `--additional-config`.
 
+    This PCP8/TP1 configuration leaves FlashComm1 disabled because its MoE sequence-parallel path requires TP greater than 1.
+
     1. Prefill node
 
         ```shell
@@ -684,6 +686,7 @@ Before you start, please:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_USE_V2_MODEL_RUNNER=1
+        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -699,7 +702,7 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 16500 \
+            --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
@@ -713,7 +716,6 @@ Before you start, please:
             --reasoning-parser deepseek_v4 \
             --gpu-memory-utilization 0.94 \
             --quantization ascend \
-            --no-enable-prefix-caching \
             --enforce-eager \
             --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
             --kv-transfer-config \
@@ -771,7 +773,7 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 360 \
+            --max-num-batched-tokens 480 \
             --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
