@@ -29,7 +29,7 @@ from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tu
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import logger
 
@@ -80,13 +80,8 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     ]
 
 
-def _configure_backend(
-    config: Any,
-    ascend_compilation_config: AscendCompilationConfig,
-    vllm_config: VllmConfig,
-    process_kwargs_options: Callable | None = None,
-) -> None:
-    if ascend_compilation_config.enable_static_kernel and "LOCAL_WORLD_SIZE" not in os.environ:
+def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
+    if "LOCAL_WORLD_SIZE" not in os.environ:
         # External DP config counts one replica; runtime topology includes all local ranks.
         # shortcut: uniform workers and contiguous node ranks; revisit for other layouts.
         parallel_config = vllm_config.parallel_config
@@ -114,6 +109,28 @@ def _configure_backend(
             scope="global",
         )
 
+    # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
+    incompatible_ops = [
+        "TopKV2",  # minimax-m3 910C
+        "GenericBlockSparseAttn",  # minimax-m3 910C
+        "QuantBatchMatmulV3",  # glm5.2 910C
+        "TransposeQuantBatchMatMul",  # dsv4 950
+        "QuantLightningIndexer",  # glm5.2 950
+    ]
+    logger.info_once(
+        "Skipping static kernel compilation for incompatible ops: %s.",
+        ",".join(incompatible_ops),
+        scope="global",
+    )
+    _set_static_kernel_blacklist(incompatible_ops)
+
+
+def _configure_backend(
+    config: Any,
+    ascend_compilation_config: AscendCompilationConfig,
+    vllm_config: VllmConfig,
+    process_kwargs_options: Callable | None = None,
+) -> None:
     if process_kwargs_options is not None:
         # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.
         # It maps flat option names to nested config paths for old versions,
@@ -131,21 +148,6 @@ def _configure_backend(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
                 scope="global",
             )
-
-            # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
-            incompatible_ops = [
-                "TopKV2",  # minimax-m3 910C
-                "GenericBlockSparseAttn",  # minimax-m3 910C
-                "QuantBatchMatmulV3",  # glm5.2 910C
-                "TransposeQuantBatchMatMul",  # dsv4 950
-                "QuantLightningIndexer",  # glm5.2 950
-            ]
-            logger.info_once(
-                "Skipping static kernel compilation for incompatible ops: %s.",
-                ",".join(incompatible_ops),
-                scope="global",
-            )
-            _set_static_kernel_blacklist(incompatible_ops)
 
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
@@ -277,9 +279,13 @@ class AscendCompiler(CompilerInterface):
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
-    def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
+        """Initialize cache settings and runtime state before compiling or loading a graph."""
         self.cache_dir = cache_dir
         self.disable_cache = disable_cache
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
+            _initialize_static_kernel_runtime(get_current_vllm_config())
 
     def compile(
         self,
