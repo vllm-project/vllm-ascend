@@ -2,37 +2,26 @@
 set -x
 set -euo pipefail
 
-# Install daily packages in Dockerfiles.
-# DAILY_DEPS_MODE: "full" (all packages) or "torch_npu_only" (310p)
-# Required env vars per mode:
-#   full:            MEMFABRIC_VERSION/DATE, MEMCACHE_VERSION/DATE,
-#                    TRITON_ASCEND_VERSION/PACKAGE_VERSION, TORCH_NPU_VERSION/DATE
-#   torch_npu_only:  TORCH_NPU_VERSION/DATE
+# Install the packages that are not available from the official PyPI index.
+# Used by every full-variant Dockerfile (A2/A3/A5, Ubuntu/openEuler), and
+# installed for both release and nightly builds. Versions come from the pinned
+# ARGs in the Dockerfile (the single source of truth).
+#
+# Required env vars:
+#   MEMFABRIC_VERSION/DATE, MEMCACHE_VERSION/DATE,
+#   TRITON_ASCEND_VERSION/PACKAGE_VERSION, TORCH_NPU_VERSION/DATE
 
-if [ "$BUILD_TYPE" != "daily" ]; then
-    echo "Building release version without daily packages"
-    exit 0
-fi
+: "${MEMFABRIC_VERSION:?MEMFABRIC_VERSION is required}"
+: "${MEMFABRIC_DATE:?MEMFABRIC_DATE is required}"
+: "${MEMCACHE_VERSION:?MEMCACHE_VERSION is required}"
+: "${MEMCACHE_DATE:?MEMCACHE_DATE is required}"
+: "${TRITON_ASCEND_VERSION:?TRITON_ASCEND_VERSION is required}"
+: "${TRITON_ASCEND_PACKAGE_VERSION:?TRITON_ASCEND_PACKAGE_VERSION is required}"
+: "${TORCH_NPU_VERSION:?TORCH_NPU_VERSION is required}"
+: "${TORCH_NPU_DATE:?TORCH_NPU_DATE is required}"
 
-echo "Building daily version with extra packages..."
 ARCH=$(uname -m)
 
-if [ "$DAILY_DEPS_MODE" = "torch_npu_only" ]; then
-    # ---- torch-npu only ----
-    echo "Download, extract and install torch-npu..."
-    mkdir -p /tmp/torch_npu
-    wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
-        -O /tmp/torch_npu/torch_npu.tar.gz \
-        "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz"
-    tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
-    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --extra-index-url https://download.pytorch.org/whl/cpu/
-    echo "Clean up temporary files..."
-    rm -rf /tmp/torch_npu
-    echo "Daily packages installation complete (torch_npu_only)."
-    exit 0
-fi
-
-# ---- full mode ----
 # ---- memfabric_hybrid ----
 echo "Install memfabric_hybrid based on architecture..."
 if [ "$ARCH" = "x86_64" ]; then
@@ -52,7 +41,7 @@ fi
 python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
 
 # ---- mfcli kernel install ----
-# Install the memfabric kernel for the target SoC. Only A5 and A3 require it;
+# Install the memfabric kernel for the target SoC. Only A5 and A3 require it.
 # Disable torch device backend autoload so `import torch` does not pull in
 # torch_npu (unusable on the CPU build host), which breaks mfcli's torch ABI
 # check on A3/A5.
@@ -72,8 +61,6 @@ case "${SOC_VERSION:-}" in
 esac
 
 # ---- triton-ascend ----
-# Controlled by INSTALL_TRITON_ASCEND env var (default: false).
-# Set INSTALL_TRITON_ASCEND=true to enable triton-ascend daily installation.
 echo "Install triton-ascend..."
 TRITON_ASCEND_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/triton-ascend/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
 python3 -m pip install "$TRITON_ASCEND_URL"
@@ -89,4 +76,4 @@ python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --extra-in
 echo "Clean up temporary files..."
 rm -rf /tmp/torch_npu
 
-echo "Daily packages installation complete."
+echo "Pinned package installation complete."
