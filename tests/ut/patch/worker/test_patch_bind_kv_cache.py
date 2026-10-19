@@ -181,3 +181,4 @@ def test_bind_kv_cache_rejects_invalid_materialized_mamba_states(
             {layer_name: states},
             {layer_name: layer},
             [],
+        )
