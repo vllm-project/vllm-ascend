@@ -32,7 +32,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import fill_logprob_token_ids_npu
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 MAX_LOGPROB_TOKEN_IDS = 128
@@ -114,7 +114,7 @@ class TestFillLogprobTokenIdsKernel:
         out_token_ids = torch.zeros(batch_size, 1 + PADDED_COLS, dtype=torch.int64, device=device)
         out_valid_mask = torch.zeros(batch_size, 1 + PADDED_COLS, dtype=torch.bool, device=device)
 
-        _fill_logprob_token_ids_kernel[(batch_size,)](
+        fill_logprob_token_ids_npu(
             out_token_ids,
             out_token_ids.stride(0),
             out_valid_mask,
@@ -171,7 +171,7 @@ class TestFillLogprobTokenIdsKernel:
         out_token_ids = torch.zeros(batch_size, 1 + PADDED_COLS, dtype=torch.int64, device=device)
         out_valid_mask = torch.zeros(batch_size, 1 + PADDED_COLS, dtype=torch.bool, device=device)
 
-        _fill_logprob_token_ids_kernel[(batch_size,)](
+        fill_logprob_token_ids_npu(
             out_token_ids,
             out_token_ids.stride(0),
             out_valid_mask,

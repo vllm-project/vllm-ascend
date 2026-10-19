@@ -6,7 +6,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_npu
 
 NUM_LAYERS = 2
 CONV_WIDTH = 4
@@ -110,8 +110,7 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slot
     )
     block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.int64, device=device)
     idx_mapping = torch.tensor(request_slots, dtype=torch.int32, device=device)
-    grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
-    precopy_mamba_align_fused_kernel[grid](
+    precopy_mamba_align_fused_npu(
         dst_col,
         src_col,
         bias,
