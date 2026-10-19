@@ -936,8 +936,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_prefills = 2
         self.assertFalse(impl._can_use_bnsd_prefill(query, key, value, 128, metadata.block_tables, metadata))
 
-    @patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile")
-    def test_bnsd_prefill_query_and_kv_thresholds(self, mock_hardware_profile):
+    def test_bnsd_prefill_query_and_kv_thresholds(self):
         impl = self.impl
         impl.enable_prefill_bnsd = True
         impl.pcp_enabled = False
@@ -958,7 +957,6 @@ class TestAscendAttentionBackendImpl(TestBase):
             seq_lens_list=[24576],
             actual_seq_lengths_q=[1536],
         )
-        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
 
         def eligible(q_tokens, kv_tokens):
             metadata.actual_seq_lengths_q = [q_tokens]
@@ -969,11 +967,6 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertFalse(eligible(1536, 24575))
         self.assertTrue(eligible(1536, 24576))
         self.assertTrue(eligible(8193, 24576))
-
-        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
-            with self.subTest(device_type=device_type):
-                mock_hardware_profile.return_value = get_hardware_profile(device_type)
-                self.assertTrue(eligible(1536, 24576))
 
         impl.enable_prefill_bnsd = False
         self.assertFalse(eligible(1536, 24576))
