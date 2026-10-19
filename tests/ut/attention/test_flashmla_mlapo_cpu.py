@@ -314,6 +314,7 @@ def test_no_rope_workspace_caps_capacity_uses_kernel_blocks_and_keeps_addresses(
     bind(impl, scope(), "_prepare_flashmla_writer_buffers", "_prolog_v3_writer_workspace")
     impl._prepare_flashmla_writer_buffers()
     buffers = impl._flashmla_writer_buffers
+    assert buffers is not None
     assert buffers[0].shape == (8, 128, 1, 512)
     assert buffers[1].shape == (8, 128, 1, 64)
     torch.testing.assert_close(buffers[2], torch.arange(1024))
