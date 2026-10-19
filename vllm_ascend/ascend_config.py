@@ -576,6 +576,8 @@ class AscendConfig:
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
+    # Fixed private FP32 compressor tails and invocation-local workspace.
+    enable_dsv4_shared_compressor_workspace: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
@@ -687,6 +689,16 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if self.enable_dsv4_shared_compressor_workspace:
+            if vc.model_config is None or vc.model_config.hf_text_config.model_type != "deepseek_v4":
+                raise ValueError("Shared compressor workspace requires DeepSeek-V4.")
+            if vc.cache_config.enable_prefix_caching or vc.speculative_config is not None:
+                raise ValueError("Shared compressor workspace requires prefix caching and speculative decoding off.")
+            if (
+                vc.parallel_config.decode_context_parallel_size != 1
+                or vc.parallel_config.prefill_context_parallel_size != 1
+            ):
+                raise ValueError("Shared compressor workspace requires PCP/DCP size one.")
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
