@@ -41,6 +41,7 @@ def test_topk_boundary_combines_indexshare_and_indexcache(indexer_type, use_inde
         ("eagle3", "MiniMaxM3SparseForCausalLM", True),
         ("eagle3", "MiniMaxM3SparseForConditionalGeneration", True),
         ("dspark", "DeepseekV4ForCausalLM", True),
+        ("dspark", "DeepseekV41ForCausalLM", True),
         ("dspark", "GlmMoeDsaForCausalLM", True),
     ],
 )

@@ -49,7 +49,9 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1))
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=getattr(request, "param", 1), pipeline_parallel_size=1
+        )
     )
     return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
@@ -183,7 +185,8 @@ def test_replay_metadata_follows_local_segments_and_preserves_global_history(sta
     assert state.lookback_token_ids.shape == (4, 3)
 
 
-def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkeypatch):
+@pytest.mark.parametrize("needs_pp_input_ids", [False, True])
+def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkeypatch, needs_pp_input_ids):
     """FULL graph metadata must cover padded rows and skip inactive replay."""
 
     class Buffer:
@@ -202,6 +205,7 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
 
     monkeypatch.setattr(AscendModelState, "prepare_attn", fake_prepare_attn)
     state = object.__new__(deepseek_v41.EngramModelState)
+    state._needs_pp_input_ids = needs_pp_input_ids
     state.decoder_replay = None
     state._replay_groups = (128, torch.empty(0, dtype=torch.int32))
     state._replay_start_np = np.zeros(4, dtype=np.int32)
@@ -212,6 +216,7 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
         num_reqs_after_padding=8,
         is_prefilling_np=np.array([True]),
         idx_mapping_np=np.array([0], dtype=np.int32),
+        input_ids=torch.arange(8, dtype=torch.int32),
     )
     state.prepare_attn(
         batch,
@@ -225,3 +230,40 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
     assert state._replay_start.gpu.shape == (8,)
     assert torch.count_nonzero(state._replay_start.gpu) == 0
     assert captured["model_specific_attn_metadata"] is None
+    if needs_pp_input_ids:
+        assert state._pp_input_ids is batch.input_ids
+
+
+@pytest.mark.parametrize("depth", [0, 3])
+def test_later_pp_stage_restores_local_token_view_without_engram_dependency(state, monkeypatch, depth):
+    """Old MRV2 clears IDs after preparation; capture must retain their buffer."""
+    monkeypatch.setattr(deepseek_v41, "get_pp_group", lambda: SimpleNamespace(is_first_rank=False))
+    model = EngramModel()
+    model.token_lookback_depth = depth
+    config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2, prefill_context_parallel_size=1))
+    pp_state = deepseek_v41.EngramModelState(config, model, None, torch.device("cpu"))
+    pp_state.kvpp_is_dummy_run = True
+    inputs = batch()
+    buffer = inputs.input_ids
+    prepared = pp_state.prepare_inputs(inputs, None)
+    result = model(input_ids=None, positions=torch.arange(3), **prepared)
+    torch.testing.assert_close(result["input_ids"], buffer[:3])
+    assert result["input_ids"].data_ptr() == buffer.data_ptr()
+    buffer[0] = 42
+    assert result["input_ids"][0] == 42
+    # A runner that already implements #61016 supplies its own view unchanged.
+    supplied = torch.tensor([7, 8], dtype=torch.int32)
+    assert model(input_ids=supplied, positions=torch.arange(2))["input_ids"] is supplied
+
+
+@pytest.mark.parametrize("pp_size,is_first_rank", [(1, True), (2, True)])
+def test_first_pp_stage_keeps_existing_input_contract(state, monkeypatch, pp_size, is_first_rank):
+    monkeypatch.setattr(deepseek_v41, "get_pp_group", lambda: SimpleNamespace(is_first_rank=is_first_rank))
+    model = EngramModel()
+    model.token_lookback_depth = 0
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, prefill_context_parallel_size=1)
+    )
+    pp_state = deepseek_v41.EngramModelState(config, model, None, torch.device("cpu"))
+    assert not pp_state._needs_pp_input_ids
+    assert model(input_ids=None, positions=torch.arange(2))["input_ids"] is None

@@ -251,6 +251,58 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
                 assert scale.shape == (blocks, storage_block_size, 1, 1)
 
 
+@pytest.mark.parametrize("pp_rank", [0, 1])
+@pytest.mark.parametrize("draft_layers", [0, 3])
+def test_pp_projection_preserves_all_caches_and_distinct_live_group_pages(runtime, pp_rank, draft_layers):
+    full_config = make_cache_config(16, head_size=8, index_size=4, draft_layers=draft_layers)
+    global_groups = full_config.kv_cache_groups
+    global_specs = {name: spec for group in global_groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
+    local_specs = {
+        name: spec
+        for name, spec in global_specs.items()
+        if (name.startswith("mtp.") and pp_rank == 1)
+        or (".layers." in name and int(name.split(".layers.")[1].split(".")[0]) // 20 == pp_rank)
+    }
+    local_groups = make_cache_groups(group_cache_specs(local_specs))
+    assert {name for group in local_groups for name in group.layer_names} == set(local_specs)
+
+    groups = kv_cache_utils._project_kv_cache_groups_to_worker(global_groups, local_specs)
+    assert any(not group.layer_names for group in groups)
+    blocks = len(groups) + 1
+    page_bytes = get_deepseek_v41_pool_bytes_per_block(groups)
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, page_bytes * blocks)
+    backings, views = allocate_cache_views(planned)
+    assert planned.num_blocks == blocks
+    assert set(views) == set(local_specs)
+    assert sum(backing.numel() for backing in backings) == page_bytes * blocks
+
+    expected = []
+    for group_index, group in enumerate(groups):
+        block_id = group_index + 1
+        for layer_index, name in enumerate(group.layer_names):
+            planes = views[name] if isinstance(views[name], tuple) else (views[name],)
+            for plane in planes:
+                value = layer_index + 1
+                plane[block_id].fill_(value)
+                expected.append((plane[block_id], value))
+    for page, value in expected:
+        torch.testing.assert_close(page, torch.full_like(page, value))
+
+
+@pytest.mark.parametrize("draft_layers", [0, 3])
+def test_unprojected_cache_keeps_original_physical_layout(runtime, draft_layers):
+    config = make_cache_config(16, head_size=8, index_size=4, draft_layers=draft_layers)
+    groups = config.kv_cache_groups
+    specs = {name: group.kv_cache_spec.kv_cache_specs[name] for group in groups for name in group.layer_names}
+    sizes, tuples = get_layer_tuples(specs)
+    budget = sum(sizes) * 2
+    assert get_deepseek_v41_pool_bytes_per_block(groups) == sum(sizes)
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, budget)
+    assert planned.num_blocks == 2
+    assert [tuple(tensor.layers) for tensor in planned.kv_cache_tensors] == tuples
+    assert [tensor.block_stride for tensor in planned.kv_cache_tensors] == sizes
+
+
 def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     specs = collect_specs(runtime)
     name = "model.layers.20.self_attn.indexer.k_cache_folded"

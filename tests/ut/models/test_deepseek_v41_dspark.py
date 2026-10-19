@@ -91,6 +91,8 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
 
     model = SimpleNamespace(
         hc_mult=4,
+        start_layer=0,
+        end_layer=3,
         decoder_replay_layers=None,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
@@ -134,6 +136,11 @@ def test_v41_draft_routes_to_v41(cp):
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
         patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
+        patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_pcp", return_value=False),
+        patch(
+            "vllm_ascend.attention.dsa_v41.get_ascend_config",
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+        ),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,
             "get_dsv41_packed_cache_ops",

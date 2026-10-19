@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pp_group
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -80,6 +81,8 @@ class EngramModelState(AscendModelState):
 
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
+    _needs_pp_input_ids: bool = False
+    _pp_input_ids: torch.Tensor | None = None
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
@@ -94,10 +97,14 @@ class EngramModelState(AscendModelState):
         layers = getattr(model, "decoder_replay_layers", None)
         self.decoder_replay = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
         depth = model.token_lookback_depth
+        self._needs_pp_input_ids = (
+            vllm_config.parallel_config.pipeline_parallel_size > 1 and not get_pp_group().is_first_rank
+        )
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
-        if depth > 0:
+        if depth > 0 or self._needs_pp_input_ids:
             model.register_forward_pre_hook(self._prepare_engram_before_forward, with_kwargs=True)
+        if depth > 0:
             # Persistent so a captured graph can read it on replay.
             self.lookback_token_ids = torch.full((self.max_num_reqs, depth), -1, dtype=torch.int32, device=device)
             if getattr(model, "supports_engram_graph_producer", False):
@@ -139,6 +146,10 @@ class EngramModelState(AscendModelState):
         # prepare_inputs runs before any forward context, so the graph mode of
         # this step is only known here; engram overlap dispatch keys off it.
         self._cg_mode = cudagraph_mode
+        if self._needs_pp_input_ids:
+            # MRV2 before vLLM #61016 clears input_ids on later PP stages.
+            # Keep the local batch view for eager execution and graph capture.
+            self._pp_input_ids = input_batch.input_ids
         if self._replay_groups is None:
             from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -208,6 +219,8 @@ class EngramModelState(AscendModelState):
 
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
         model_inputs: dict[str, Any] = {}
+        if self._needs_pp_input_ids:
+            self._pp_input_ids = input_batch.input_ids
         window = self.lookback_token_ids
         if window is None:
             return model_inputs
@@ -286,6 +299,9 @@ class EngramModelState(AscendModelState):
         return model_inputs
 
     def _prepare_engram_before_forward(self, model, args, kwargs) -> None:
+        if self._needs_pp_input_ids and not args and kwargs.get("input_ids") is None:
+            assert self._pp_input_ids is not None
+            kwargs["input_ids"] = self._pp_input_ids[: kwargs["positions"].shape[0]]
         kwargs.update(self.prepare_engram())
 
     def prepare_engram(self) -> dict[str, Any]:

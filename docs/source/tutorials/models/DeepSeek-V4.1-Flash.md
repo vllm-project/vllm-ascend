@@ -43,8 +43,8 @@ The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
 The single-node colocated configuration uses DP4/TP4. The PD configuration
 uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
 speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
-DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+A3 scripts below use model runner V1 explicitly. For model runner V2 with
+pipeline parallelism, see [MRV2 pipeline parallelism](#511-mrv2-pipeline-parallelism).
 
 ## 3 Prerequisites
 
@@ -252,9 +252,8 @@ and use the `main` branch with the matching vLLM revision recorded in
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
         processes to finish initialization, including weight loading and graph
         preparation.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this
-        value at `0` because DeepSeek-V4.1-Flash currently does not support model
-        runner V2 on Ascend.
+    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Use the MRV2
+        pipeline-parallel configuration below to select model runner V2.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
         Engram table in host memory and lets local DP ranks share the host-memory
         allocation. This is required on A3 because the model's 24 Engram heads
@@ -269,6 +268,23 @@ and use the `main` branch with the matching vLLM revision recorded in
         `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
+
+#### 5.1.1 MRV2 Pipeline Parallelism
+
+For single-node A3 W8A8 serving with model runner V2, use the command in
+Section 5.1 with these changes:
+
+- Set `VLLM_USE_V2_MODEL_RUNNER=1`.
+- Use `--data-parallel-size 2 --tensor-parallel-size 4 --pipeline-parallel-size 2`.
+- Remove `enable_dsa_cp` from `--additional-config`.
+- Optionally add `--speculative-config '{"method":"dspark","num_speculative_tokens":5}'`
+    to enable DSpark with PP.
+
+This configuration uses all 16 logical devices, the default 20/20 layer split,
+asynchronous scheduling, and `FULL_DECODE_ONLY` ACL Graph. Custom layer splits
+must keep shared KV-cache source dependencies within each stage; unsupported
+splits raise an error. The checkpoint's `mtp.*` weights are DSpark stages and
+do not support classic MTP.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 

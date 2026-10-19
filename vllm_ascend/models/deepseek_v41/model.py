@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from itertools import islice
 from typing import Any
 
 import torch
@@ -74,6 +75,14 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
+)
+from vllm_ascend.worker.v2.pp_transport import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_transport import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
 from .cache_config import (
@@ -934,6 +943,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     """V4.1 backbone with delayed HC collapse and shared attention state."""
 
     decoder_layer_cls = DeepseekV41DecoderLayer
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
@@ -975,6 +986,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             lambda prefix: self.decoder_layer_cls(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        self.engram_layer_ids = tuple(
+            layer_id for layer_id in config.engram_layer_ids if self.start_layer <= layer_id < self.end_layer
+        )
+        self.has_engram = self.has_engram and bool(self.engram_layer_ids)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -996,9 +1011,21 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if get_pp_group().is_last_rank and needs_mtp_hidden_states
             else None
         )
-        self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
+            self, self._make_empty_intermediate_tensors
+        )
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
+        for role in topology.layers[self.start_layer : self.end_layer]:
+            sources = (role.kv_source_layer, role.index_source_layer)
+            if role.uses_candidate_filter:
+                sources += (topology.candidate_source_layer_id,)
+            if any(source is not None and source < self.start_layer for source in sources):
+                raise ValueError(
+                    f"DeepSeek V4.1 PP stage [{self.start_layer}, {self.end_layer}) splits a shared "
+                    f"attention source required by layer {role.layer_idx}. Use source-aligned partitions "
+                    "(for the 40-layer checkpoint, PP2 uses 20,20)."
+                )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
             (max_tokens, 1, topology.candidate_topk_blocks),
@@ -1043,10 +1070,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # it first.  `dummy` reads no checkpoint at all.
             if vllm_config.load_config.load_format != "dummy":
                 preflight_engram_checkpoint(
-                    self.engram_weight_root, config.engram_layer_ids, AscendParallelEngramEmbedding
+                    self.engram_weight_root, self.engram_layer_ids, AscendParallelEngramEmbedding
                 )
             native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
             for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
+                if layer_id not in self.engram_layer_ids:
+                    continue
                 head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
                 storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
                 if vllm_config.load_config.load_format != "dummy":
@@ -1090,7 +1119,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 self.engram_rotation.copy_(block)
             # Upstream owns the n-gram history; the adapter only hands it the
             # Ascend SWA slot metadata (see engram/hash_state.py).
-            swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
+            swa_cache_layer = self.layers[self.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
 
         self.decoder_replay_start = self.end_layer
@@ -1099,9 +1128,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
             {
-                "hidden_states": torch.empty(
+                "hidden_states": torch.zeros(
                     (batch_size, self.hc_mult, self.config.hidden_size), dtype=dtype, device=device
-                )
+                ),
+                "pre_mix": torch.zeros((batch_size, self.hc_mult), dtype=torch.float32, device=device),
             }
         )
 
@@ -1211,12 +1241,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         else:
             publish_mask()
         lookups = {}
-        tables = [self.layers[layer_id].engram.embed_tokens for layer_id in config.engram_layer_ids]
+        tables = [self.layers[layer_id].engram.embed_tokens for layer_id in self.engram_layer_ids]
         if participates:
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
             gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
-            for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
+            for layer_id, table in zip(self.engram_layer_ids, tables):
+                slot = config.engram_layer_ids.index(layer_id)
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
                 if direct:
                     target = output_buffers[layer_id]
@@ -1238,7 +1269,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     # Rows include DP AllToAll, TP head gather and padding.
                     ready_events[layer_id].record(torch.npu.current_stream())
         else:
-            for layer_id, table in zip(config.engram_layer_ids, tables):
+            for layer_id, table in zip(self.engram_layer_ids, tables):
                 if output_buffers is None:
                     lookups[layer_id] = torch.empty(
                         (0, table.n_hash_cols * table.dim),
@@ -1276,7 +1307,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             and all(
                 self.layers[layer].engram.embed_tokens.dp_size == 1
                 and self.layers[layer].engram.embed_tokens.tp_size == 1
-                for layer in self.config.engram_layer_ids
+                for layer in self.engram_layer_ids
             )
         )
 
@@ -1297,7 +1328,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self._engram_capture_stream = torch.npu.Stream(device=positions.device)
             self._engram_capture_events = (
                 torch.npu.Event(),
-                {layer: torch.npu.Event() for layer in self.config.engram_layer_ids},
+                {layer: torch.npu.Event() for layer in self.engram_layer_ids},
             )
         stream = self._engram_capture_stream
         assert self._engram_capture_events is not None
@@ -1358,7 +1389,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         dtype=torch.bfloat16,
                         device=device,
                     )
-                    for layer in self.config.engram_layer_ids
+                    for layer in self.engram_layer_ids
                 },
                 torch.zeros(capacity, dtype=torch.bool, device=device),
             )
@@ -1375,7 +1406,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if events is None:
             events = (
                 torch.npu.ExternalEvent(),
-                {layer: torch.npu.ExternalEvent() for layer in self.config.engram_layer_ids},
+                {layer: torch.npu.ExternalEvent() for layer in self.engram_layer_ids},
             )
             self._engram_graph_events[key] = events
         if prime:
@@ -1449,7 +1480,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
         if overlap and "engram_pending" not in graph_inputs:
             graph_inputs.update(
-                engram_pending={layer: torch.npu.Event() for layer in self.config.engram_layer_ids},
+                engram_pending={layer: torch.npu.Event() for layer in self.engram_layer_ids},
                 engram_mask_ready_event=torch.npu.Event(),
             )
         prepare = partial(
@@ -1529,7 +1560,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         engram_mask_ready_event=None,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
-        hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+            hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
+            pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
+            pre_mix[:, 0] = 1.0
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            pre_mix = intermediate_tensors["pre_mix"]
         if engram_lookups is None:
             lookups, token_mask = self.prepare_engram(input_ids, positions, lookback_token_ids=lookback_token_ids)
         else:
@@ -1559,14 +1599,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)
+            pre_mix = sp_shard(pre_mix)
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
             token_mask = sp_shard(token_mask)
-        hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
-        pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
-        pre_mix[:, 0] = 1.0
         last_layer = None
-        aux_hidden_states = []
-        for layer in self.layers:
+        aux_hidden_states = get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                     hidden_states, pre_mix, positions, input_ids
@@ -1610,6 +1649,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.engram_rotation if self.engram_rotated else None,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+        if not pp_group.is_last_rank:
+            if use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
+            return add_pp_transport_tensors(
+                IntermediateTensors({"hidden_states": hidden_states, "pre_mix": pre_mix}),
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
+            )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
