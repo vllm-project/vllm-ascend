@@ -21,6 +21,7 @@ must not trigger ``adapt_patch`` so the table is validated in isolation.
 """
 
 import importlib
+from typing import Any
 
 import pytest
 
@@ -134,6 +135,11 @@ class Mount:
     segment in a key's module part as a class name, so an underscore
     prefix would be misparsed as a submodule path and fail to import.
     """
+
+    # Type-checkers only: the tripwire below installs a KernelOverride
+    # here at runtime, and a bare annotation declares the shape without
+    # creating a runtime attribute.
+    from_logits: Any
 
 
 def test_class_mount_receives_no_implicit_cls():
