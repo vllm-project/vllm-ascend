@@ -726,8 +726,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            use_fla_gdn_prefill = get_pcp_group().world_size == 1 and get_current_hardware_profile().supports(
-                HardwareCapability.FLA_GDN_PREFILL
+            # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
+            # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
+            # Gate on the model dtype so fp16 models (e.g. ColQwen3.5) fall back
+            # to the Triton pipeline instead of hitting an aclnn dtype error.
+            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16
+            use_fla_gdn_prefill = (
+                supports_fused_dtype
+                and get_pcp_group().world_size == 1
+                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
@@ -735,6 +742,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # probe was cached globally.
             use_fused_chunk = (
                 fla_gdn_prefill_op is None
+                and supports_fused_dtype
                 and query_non_spec.device.type != "cpu"
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
                 and get_pcp_group().world_size == 1

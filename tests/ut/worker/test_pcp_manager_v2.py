@@ -32,7 +32,6 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -87,17 +86,7 @@ def _make_pcp_config(
 
 
 def _partition_batch(manager, batch, *, padded_num_tokens=None, batch_desc=None):
-    """Call AscendPCPManager.partition_batch across the v0.30.0/main API split.
-
-    vLLM main (#57980) replaced the ``padded_num_tokens``/``padded_num_reqs``
-    keyword arguments with a ``BatchExecutionDescriptor``. Passing a descriptor
-    with ``cg_mode=CUDAGraphMode.NONE`` reproduces the v0.30.0 defaults (no
-    token/request padding), so callers that previously passed no overrides keep
-    the same behavior.
-    """
-    if vllm_version_is("0.30.0"):
-        kwargs = {} if padded_num_tokens is None else {"padded_num_tokens": padded_num_tokens}
-        return manager.partition_batch(batch, **kwargs)
+    """Use the 0.31 descriptor API, without token/request padding by default."""
     if batch_desc is None:
         batch_desc = BatchExecutionDescriptor(
             CUDAGraphMode.NONE,
@@ -498,10 +487,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     ):
         result = _partition_batch(manager, global_batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    if vllm_version_is("0.30.0"):
-        upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4, padded_num_reqs=None)
-    else:
-        upstream_partition.assert_called_once_with(global_batch, batch_desc)
+    upstream_partition.assert_called_once_with(global_batch, batch_desc)
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -549,10 +535,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     ):
         result = _partition_batch(manager, batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    if vllm_version_is("0.30.0"):
-        upstream_partition.assert_called_once_with(batch, padded_num_tokens=4, padded_num_reqs=None)
-    else:
-        upstream_partition.assert_called_once_with(batch, batch_desc)
+    upstream_partition.assert_called_once_with(batch, batch_desc)
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -835,11 +818,11 @@ def test_sampling_restore_exposes_unpadded_global_view() -> None:
     manager._sampling_hidden_restored = True
     hidden_states = torch.arange(32).reshape(16, 2)
     with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
-        if vllm_version_is("0.30.0"):
-            restored_hidden, restored_batch = manager.restore_for_sampling(hidden_states)
-        else:
-            # vLLM main (#57980) threads aux_hidden_states through this hook.
-            restored_hidden, _, restored_batch = manager.restore_for_sampling(hidden_states, None)
+        # vLLM #57980 threads aux_hidden_states through this hook.
+        restored_hidden, restored_aux, restored_batch = manager.restore_for_sampling(hidden_states, [hidden_states])
+    assert len(restored_aux) == 1
+    assert restored_aux[0].shape == (12, 2)
+    assert restored_aux[0].data_ptr() == hidden_states.data_ptr()
     assert restored_batch is not batch
     assert restored_batch.num_tokens_after_padding == 12
     assert restored_batch.query_start_loc.tolist() == [0, 12]
@@ -1115,8 +1098,6 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     state_kwargs: dict = {}
     state_kwargs["dp_sync"] = None
     state_kwargs["cudagraph_stats"] = None
-    if vllm_version_is("0.30.0"):
-        state_kwargs["routed_experts"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
@@ -1261,14 +1242,12 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
 
     assert result is local_batch
     stage.assert_not_called()
-    if vllm_version_is("0.30.0"):
-        partition.assert_called_once_with(dummy)
-    else:
-        partition.assert_called_once()
-        args = partition.call_args.args
-        assert args[0] is dummy
-        assert args[1].cg_mode == CUDAGraphMode.NONE
-        assert args[1].num_tokens == dummy.num_tokens
+    partition.assert_called_once()
+    args = partition.call_args.args
+    assert len(args) == 2
+    assert args[0] is dummy
+    assert args[1].cg_mode == CUDAGraphMode.NONE
+    assert args[1].num_tokens == dummy.num_tokens
 
 
 def test_capture_input_without_cpp_marker_uses_staging_path():

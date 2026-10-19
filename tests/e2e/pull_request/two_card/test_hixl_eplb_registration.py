@@ -33,6 +33,69 @@ def _migrate(communicator, buffers, rank: int) -> None:
     communicator.execute()
 
 
+def _async_buffer_reuse_worker(rank: int, port: int, binding: str) -> None:
+    torch.npu.set_device(rank)
+    if binding == "ctypes":
+        eplb_communicator._resolve_hixl_module = lambda: hixl_compat
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2, timeout=timedelta(seconds=300)
+    )
+    weights = [[torch.full((2, 1024), rank + offset, dtype=torch.float32).npu()] for offset in (1, 11)]
+    buffers = [torch.empty_like(weights[0][0])]
+    communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, weights, buffers)
+    session = eplb_communicator._HixlSession(dist.group.WORLD)
+    session.initialize({"model": communicator})
+    background = torch.npu.Stream()
+    consumer = torch.npu.Stream()
+    communicator.set_stream(background)
+
+    # Keep the foreground copy queued long enough for a private HIXL stream
+    # to overwrite its source unless execute honors the consumed-event wait.
+    left = torch.randn(4096, 4096, dtype=torch.float16, device=f"npu:{rank}")
+    right = torch.randn_like(left)
+    scratch = torch.empty_like(left)
+    torch.mm(left, right, out=scratch)
+    torch.npu.synchronize()
+    delay = torch.npu.NPUGraph()
+    with torch.npu.graph(delay):
+        for _ in range(256):
+            torch.mm(left, right, out=scratch)
+
+    def read_layer(layer: int) -> None:
+        communicator.set_transfer_context(np.arange(4), layer_idx=layer)
+        communicator.add_recv([buffers[0][0]], src_rank=1 - rank, expert_id=3 - 2 * rank)
+        communicator.execute()
+
+    with torch.npu.stream(background):
+        read_layer(0)
+    torch.npu.synchronize()
+    assert torch.all(buffers[0][0].cpu() == 2 - rank)
+    consumed = torch.empty_like(buffers[0][0])
+    consumed_event = torch.npu.Event()
+    with torch.npu.stream(consumer):
+        delay.replay()
+        consumed.copy_(buffers[0][0], non_blocking=True)
+        consumed_event.record(consumer)
+    consumed_event.wait(background)
+    with torch.npu.stream(background):
+        read_layer(1)
+    torch.npu.synchronize()
+    assert torch.all(consumed.cpu() == 2 - rank)
+    assert torch.all(buffers[0][0].cpu() == 12 - rank)
+    session.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("binding", ["ctypes", "official"])
+def test_async_read_waits_for_previous_layer_buffer_consumption(monkeypatch, binding):
+    if torch.npu.device_count() < 2:
+        pytest.skip("requires two NPU devices")
+    if binding == "official" and importlib.util.find_spec("hixl") is None:
+        pytest.skip("CANN does not provide the official Python binding")
+    monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    mp.spawn(_async_buffer_reuse_worker, args=(get_open_port(), binding), nprocs=2, join=True)
+
+
 def _registration_worker(rank: int, port: int, binding: str) -> None:
     torch.npu.set_device(rank)
     if binding == "ctypes":

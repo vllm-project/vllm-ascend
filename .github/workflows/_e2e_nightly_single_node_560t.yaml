@@ -223,8 +223,16 @@ jobs:
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -r requirements-nightly.txt
+          # Keep the daily-built packages shipped by the image (torch/torch-npu/
+          # torchvision/torchaudio, triton-ascend, memfabric/memcache) while still
+          # installing the other runtime dependencies declared by requirements.txt.
+          # `|| true` matters: grep returns 1 when every line is filtered out while
+          # GitHub's bash runs with `-e -o pipefail`.
+          grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+            requirements.txt > /tmp/requirements-runtime.txt || true
+          uv pip install -r /tmp/requirements-runtime.txt
+          uv pip install -e . --no-deps
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}

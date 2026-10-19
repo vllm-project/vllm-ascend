@@ -11,7 +11,6 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -149,10 +148,8 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert desc.cg_mode == CUDAGraphMode.PIECEWISE
         assert desc.num_tokens == capture_size
         batch = AscendInputBatch.make_dummy(1, desc.num_tokens, buffers, desc.max_query_len)
-        # vLLM main renamed the helper arg from has_prefill to decode_graph_eligible.
-        eligibility = batch.has_prefill if vllm_version_is("0.30.0") else batch.decode_graph_eligible
         actual_uniform = get_uniform_decode_token_count(
-            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), eligibility
+            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
         )
         assert actual_uniform == uniform
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(
@@ -367,12 +364,9 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, i
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )
-    # vLLM main (#58149) made max_model_len a read-only property backed by
-    # model_config; v0.30.0 keeps the plain instance attribute.
-    if vllm_version_is("0.30.0"):
-        state.max_model_len = 128
-    else:
-        state.model_config = SimpleNamespace(max_model_len=128)
+    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # model_config.
+    state.model_config = SimpleNamespace(max_model_len=128)
     state.pcp_manager = None
     state.kvpp_runtime = None
     state.kvpp_is_dummy_run = False

@@ -27,8 +27,10 @@ guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
-upstream vLLM revision dated September 11, 2026 or later. vLLM v0.30.0 is
-recommended.
+upstream vLLM revision dated September 11, 2026 or later. Development builds
+use the verified main revision recorded in `.github/vllm-main-verified.commit`.
+Release builds use the tag recorded in `.github/vllm-release-tag.commit`
+(currently v0.31.0). These are separate supported upstream revisions.
 
 ## 2 Supported Features
 

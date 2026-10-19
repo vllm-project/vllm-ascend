@@ -31,9 +31,9 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | Platform                       | Deployment                                 | Topology                  |
 | ------------------------------ | ------------------------------------------ | ------------------------- |
 | 4 × 950DT Products (8 devices) | Mixed Prefill/Decode deployment            | DP4/TP8/EP32              |
-| 8 × 950DT Products (8 devices) | Four Prefill nodes and four Decode nodes   | DP4/TP8/PP1 on each side  |
+| 8 × 950DT Products (8 devices) | Four Prefill nodes and four Decode nodes   | DP4/TP8 on each side      |
 | 4 × Atlas 800 A3 (64G × 16)    | Mixed Prefill/Decode deployment            | DP4/TP16/EP64             |
-| 8 × Atlas 800 A3 (64G × 16)    | Four Prefill nodes and four Decode nodes   | DP4/TP16/PP1 on each side |
+| 8 × Atlas 800 A3 (64G × 16)    | Four Prefill nodes and four Decode nodes   | DP4/TP16 on each side     |
 | 8 × Atlas 800 A2 (64G × 8)     | Mixed Prefill/Decode deployment            | DP8/TP8/EP64              |
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
@@ -315,7 +315,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
         SPECULATIVE_CONFIG="$(
           printf \
-          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"draft_sample_method":"greedy","enforce_eager":true}' \
           "$DRAFT_MODEL_PATH"
         )"
 
@@ -371,7 +371,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
         SPECULATIVE_CONFIG="$(
           printf \
-          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"draft_sample_method":"greedy","enforce_eager":true}' \
           "$DRAFT_MODEL_PATH"
         )"
 
@@ -475,6 +475,8 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     On Atlas 800 A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
+    Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+
     Before starting the service:
 
     - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
@@ -499,10 +501,11 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
-          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":true}' \
           "$DRAFT_MODEL_PATH"
         )"
 
@@ -520,7 +523,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --enable-expert-parallel \
             --max-num-seqs 16 \
             --max-model-len 131072 \
-            --max-num-batched-tokens 24576 \
+            --max-num-batched-tokens 8192 \
             --gpu-memory-utilization 0.9 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -555,10 +558,11 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
-          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":true}' \
           "$DRAFT_MODEL_PATH"
         )"
 
@@ -578,7 +582,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --enable-expert-parallel \
             --max-num-seqs 16 \
             --max-model-len 131072 \
-            --max-num-batched-tokens 24576 \
+            --max-num-batched-tokens 8192 \
             --gpu-memory-utilization 0.9 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -614,7 +618,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
     | `--enable-expert-parallel`                  | Enables expert parallelism for the MoE layers.                   |
     | `--max-model-len 131072`                    | Sets the maximum combined input and output length.               |
     | `--max-num-seqs 16`                         | Sets the maximum active sequences for each DP group.             |
-    | `--max-num-batched-tokens 24576`            | Controls the scheduler token budget.                             |
+    | `--max-num-batched-tokens 8192`             | Controls the scheduler token budget.                             |
     | `--enable-prefix-caching`                   | Enables automatic prefix caching.                                |
     | `--compilation-config`                      | Uses `FULL_DECODE_ONLY` ACL Graph replay.                        |
     | `--tokenizer-mode kimi_k3`                  | Uses the Kimi K3 tokenizer mode.                                 |
@@ -628,7 +632,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
         | -------------------------- | ----------------- | ----------------------- |
         | `--data-parallel-size`     | `4`               | `8`                     |
         | `--max-model-len`          | `131072`          | `1048576`               |
-        | `--max-num-batched-tokens` | `24576`           | `8192`                  |
+        | `--max-num-batched-tokens` | `8192`            | `8192`                  |
 
         Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
 
@@ -803,7 +807,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
 ### 5.2 Eight-Node PD Separation Deployment
 
-The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. 950DT Products uses DP4/TP8/PP1 on each side, while A3 uses DP4/TP16/PP1 on each side.
+The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. 950DT Products uses DP4/TP8 on each side, while A3 uses DP4/TP16 on each side.
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
@@ -813,18 +817,20 @@ On 950DT Products and Atlas 800 A3, Prefill uses AICPU by default, so leave `HCC
 
 This deployment supports DSpark speculative decoding. Configure the same `RadixArk/Kimi-K3-DSpark` GQA draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP8 on 950DT Products or draft TP16 on A3, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `8` for 950DT Products and `16` for A3.
 
+Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+
+The Prefill and Decode templates below assume equal tensor-parallel sizes on both sides. Both `prefill.tp_size` and `decode.tp_size` are taken from the seventh template argument (`$7`) and must match the engine TP: `8` for 950DT Products or `16` for A3.
+
 #### 5.2.1 Create the engine templates
 
 === "Prefill"
 
     ```shell
-    KV_PORT=36000
-    LOOKUP_RPC_PORT=0
+    KV_PORT=<PREFILL_KV_PORT>
 
     unset ftp_proxy FTP_PROXY
     unset https_proxy HTTPS_PROXY
     unset http_proxy HTTP_PROXY
-
     nic_name=<PREFILL_NIC_NAME>
     local_ip=<PREFILL_LOCAL_IP>
 
@@ -834,15 +840,16 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
     export HCCL_IF_IP=${local_ip}
     export HCCL_SOCKET_IFNAME=${nic_name}
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
     export PYTHONHASHSEED=0
+    export VLLM_SERVER_DEV_MODE=1
 
     SPECULATIVE_CONFIG="$(
       printf \
-      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"draft_sample_method":"greedy","enforce_eager":true}' \
       "$DRAFT_MODEL_PATH"
     )"
 
@@ -863,50 +870,31 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
         --served-model-name kimi-k3 \
         --max-model-len 133120 \
         --max-num-batched-tokens 8192 \
-        --max-num-seqs 16 \
+        --max-num-seqs 32 \
         --enforce-eager \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --speculative-config "$SPECULATIVE_CONFIG" \
-        --quantization ascend \
         --mm-encoder-tp-mode data \
+        --mm-processor-cache-gb 1 \
         --skip-mm-profiling \
-        --safetensors_load_strategy prefetch \
-        --mamba-cache-mode align \
         --enable-prefix-caching \
-        --additional-config '{"recompute_scheduler_enable":false,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk": 2}' \
         --kv-transfer-config \
         '{
-          "kv_connector": "MultiConnector",
+          "kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
-          "kv_load_failure_policy": "recompute",
+          "kv_port": "'"$KV_PORT"'",
           "kv_connector_extra_config": {
-            "connectors": [
-              {
-                "kv_connector": "MooncakeConnectorV1",
-                "kv_role": "kv_producer",
-                "kv_port": "'"$KV_PORT"'",
-                "kv_connector_extra_config": {
-                  "prefill": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
-                  },
-                  "decode": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
-                  }
-                }
-              },
-              {
-                "kv_connector": "AscendStoreConnector",
-                "kv_role": "kv_producer",
-                "kv_connector_extra_config": {
-                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
-                  "backend": "mooncake"
-                }
-              }
-            ]
+            "prefill": {
+              "dp_size": 4,
+              "tp_size": '"$7"'
+            },
+            "decode": {
+              "dp_size": 4,
+              "tp_size": '"$7"'
+            }
           }
         }'
     ```
@@ -914,9 +902,7 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
 === "Decode"
 
     ```shell
-    KV_PORT=36200
-    LOOKUP_RPC_PORT=1
-
+    KV_PORT=<DECODE_KV_PORT>
     unset ftp_proxy FTP_PROXY
     unset https_proxy HTTPS_PROXY
     unset http_proxy HTTP_PROXY
@@ -931,14 +917,15 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=${nic_name}
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
+    export VLLM_SERVER_DEV_MODE=1
 
     SPECULATIVE_CONFIG="$(
       printf \
-      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"draft_sample_method":"greedy","enforce_eager":true}' \
       "$DRAFT_MODEL_PATH"
     )"
 
@@ -959,51 +946,31 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
         --served-model-name kimi-k3 \
         --max-model-len 133120 \
         --max-num-batched-tokens 8192 \
-        --max-num-seqs 16 \
+        --max-num-seqs 32 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --speculative-config "$SPECULATIVE_CONFIG" \
-        --quantization ascend \
         --mm-encoder-tp-mode data \
+        --mm-processor-cache-gb 1 \
         --skip-mm-profiling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --safetensors_load_strategy prefetch \
-        --mamba-cache-mode align \
         --enable-prefix-caching \
-        --additional-config '{"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
-          "kv_connector": "MultiConnector",
+          "kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
-          "kv_load_failure_policy": "recompute",
+          "kv_port": "'"$KV_PORT"'",
           "kv_connector_extra_config": {
-            "connectors": [
-              {
-                "kv_connector": "MooncakeConnectorV1",
-                "kv_role": "kv_consumer",
-                "kv_port": "'"$KV_PORT"'",
-                "kv_connector_extra_config": {
-                  "prefill": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
-                  },
-                  "decode": {
-                    "dp_size": 4,
-                    "tp_size": '"$7"'
-                  }
-                }
-              },
-              {
-                "kv_connector": "AscendStoreConnector",
-                "kv_role": "kv_consumer",
-                "kv_connector_extra_config": {
-                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
-                  "load_async": true,
-                  "backend": "mooncake"
-                }
-              }
-            ]
+            "prefill": {
+              "dp_size": 4,
+              "tp_size": '"$7"'
+            },
+            "decode": {
+              "dp_size": 4,
+              "tp_size": '"$7"'
+            }
           }
         }'
     ```
@@ -1018,7 +985,6 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
     python launch_online_dp.py \
         --dp-size 4 \
         --tp-size 8 \
-        --pp-size 1 \
         --dp-size-local 1 \
         --dp-rank-start <LOCAL_DP_RANK> \
         --dp-address <PD_MASTER_IP> \
@@ -1050,10 +1016,345 @@ Key PD settings:
 | Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
 | `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
 | `--tp-size`                  | `8` on 950DT Products; `16` on A3 | Uses all devices in a node.                           |
-| `--pp-size`                  | `1`                          | One pipeline stage per engine.                          |
 | `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
-| `KV_PORT`                    | `36000` for P, `36200` for D | Separates producer and consumer KV traffic.             |
-| `recompute_scheduler_enable` | `false`                      | Matches the validated Prefill and Decode configuration. |
+| `KV_PORT`                    | `<PREFILL_KV_PORT>` for P, `<DECODE_KV_PORT>` for D | Separates producer and consumer KV traffic.             |
+| `--max-num-seqs`             | `32`                         | Sets the maximum active sequences for each DP rank.      |
+| `--mm-processor-cache-gb`    | `1`                          | Allocates 1 GiB per process for multimodal caching.      |
+| `recompute_scheduler_enable` | Omitted (defaults to `false`) | Scheduler recomputation is disabled in these templates. |
+
+### 5.3 Pooled PD Separation Deployment
+
+This deployment extends the A3 4P4D configuration in [Section 5.2](#52-eight-node-pd-separation-deployment) with MemCache-backed KV Cache Pool.
+
+#### 5.3.1 Install MF
+
+The vLLM Ascend image already includes `memcache_hybrid` and `memfabric_hybrid`.
+
+```shell
+pip show memcache_hybrid
+```
+
+The `memcache_hybrid/config` directory under the reported `Location` is represented below by `<MEMCACHE_CONFIG_DIR>`. It contains `mmc-meta.conf` and `mmc-local.conf`.
+
+To install another version, run:
+
+```shell
+pip install memfabric_hybrid==<VERSION>
+pip install memcache_hybrid==<VERSION>
+```
+
+If online installation is unavailable, download the packages from [PyPI · The Python Package Index](https://link.gitcode.com/?target=https%3A%2F%2Fpypi.org%2F&from=https%3A%2F%2Fgitcode.com%2FAscend%2Fmemcache%2Fwiki%2FMMC%25E6%259C%2580%25E4%25BD%25B3%25E5%25AE%259E%25E8%25B7%25B5%25E2%2580%2594GLM-5.1%2BA3-4%25E6%259C%25BAPD%25E5%2588%2586%25E7%25A6%25BB.md&lang=zh&theme=white) and install them offline. To install an unreleased version, build it from source by following the [official installation guide](https://gitcode.com/Ascend/memcache/blob/master/doc/install_run.md).
+
+#### 5.3.2 Prepare the MemCache configuration files
+
+Select one node to run MetaService. On that node, replace the IP addresses in `<MEMCACHE_CONFIG_DIR>/mmc-meta.conf` with its service IP:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:8000
+```
+
+On every Prefill and Decode node, replace the IP addresses in `<MEMCACHE_CONFIG_DIR>/mmc-local.conf` with the same MetaService IP and confirm the following values:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 0GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+Use [`mem_scan.py`](https://gitcode.com/Ascend/memfabric_hybrid/blob/master/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py) to determine the available memory on every node. Assuming the scan reports at least 600 GB of available memory, manually create `<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf` on every node with the following content. Replace `<META_SERVICE_IP>` with the MetaService node IP and change the DRAM capacity to values validated for that node:
+
+```ini
+# MetaService node IP
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+
+# MetaService node IP
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+
+# Log level: debug, info, warn, error
+ock.mmc.log_level = info
+
+# The maximum supported rank count; once ranks are connected, further changes require a MetaService restart
+ock.mmc.local_service.world_size = 256
+
+# device_sdma is the typical A3 intra-SuperPod transport
+ock.mmc.local_service.protocol = device_sdma
+
+# The standalone LocalService provides 600 GB of DRAM
+ock.mmc.local_service.dram.size = 600GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+#### 5.3.3 Start MetaService
+
+On the selected MetaService node, export the absolute path of `mmc-meta.conf` and start the metadata service:
+
+```shell
+export MMC_META_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-meta.conf
+python3 -c "from memcache_hybrid import MetaService; MetaService.main()"
+```
+
+Keep this process running and ensure TCP ports `5000` and `6000` are reachable from every Prefill and Decode node. If the metrics endpoint is enabled, also make port `8000` reachable where required.
+
+#### 5.3.4 Start the standalone MemCache processes
+
+Create `memcache_standalone.py` on every Prefill and Decode node:
+
+```python
+import time
+
+from memcache_hybrid import DistributedObjectStore
+
+
+if __name__ == "__main__":
+    store = DistributedObjectStore()
+    result = store.init(0)
+    if result != 0:
+        print(f"Failed to initialize MemCache, result = {result}", flush=True)
+        raise SystemExit(1)
+    print("Successfully initialized MemCache.", flush=True)
+
+    while True:
+        time.sleep(1)
+```
+
+Start one standalone process on every node with the standalone configuration:
+
+```shell
+export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf
+python3 memcache_standalone.py
+```
+
+Wait until every node prints `Successfully initialized MemCache.` before starting the vLLM engines.
+
+#### 5.3.5 Create the pooled vLLM engine templates
+
+As in Section 5.2, the pooled Prefill and Decode templates require equal TP on both sides. Their connector TP sizes are taken from `$7`; the A3 pooled deployment below uses TP16.
+
+Reuse `launch_online_dp.py` from Section 5.2 and create one engine template for each role. The fourth template argument is the global DP rank. The examples map Prefill ranks `0` through `3` to MemCache lookup RPC ports `0` through `3`, and Decode ranks `0` through `3` to lookup RPC ports `4` through `7`.
+
+=== "Prefill"
+
+    ```shell
+    KV_PORT=<PREFILL_KV_PORT>
+    LOOKUP_RPC_PORT=$4
+
+    unset ftp_proxy FTP_PROXY
+    unset https_proxy HTTPS_PROXY
+    unset http_proxy HTTP_PROXY
+
+    nic_name=<PREFILL_NIC_NAME>
+    local_ip=<PREFILL_LOCAL_IP>
+
+    export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=${local_ip}
+    export HCCL_SOCKET_IFNAME=${nic_name}
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export GLOO_SOCKET_IFNAME=${nic_name}
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
+    export VLLM_SERVER_DEV_MODE=1
+    export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
+    export PYTHONHASHSEED=0
+
+    SPECULATIVE_CONFIG="$(
+      printf \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"draft_sample_method":"greedy","enforce_eager":true}' \
+      "$DRAFT_MODEL_PATH"
+    )"
+
+    vllm serve <YOUR_MODEL_PATH> \
+        --host 0.0.0.0 \
+        --port $2 \
+        --enable-auto-tool-choice \
+        --reasoning-parser kimi_k3 \
+        --tool-call-parser kimi_k3 \
+        --tokenizer-mode kimi_k3 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name kimi-k3 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 32 \
+        --enforce-eager \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config "$SPECULATIVE_CONFIG" \
+        --mm-encoder-tp-mode data \
+        --mm-processor-cache-gb 1 \
+        --skip-mm-profiling \
+        --enable-prefix-caching \
+        --additional-config '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
+        --limit-mm-per-prompt '{"vision_chunk":2}' \
+        --kv-transfer-config \
+        '{
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_producer",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "'"$KV_PORT"'",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                  "backend": "memcache",
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'"
+                }
+              }
+            ]
+          }
+        }'
+    ```
+
+=== "Decode"
+
+    ```shell
+    KV_PORT=<DECODE_KV_PORT>
+    LOOKUP_RPC_PORT=$(($4 + 4))
+
+    unset ftp_proxy FTP_PROXY
+    unset https_proxy HTTPS_PROXY
+    unset http_proxy HTTP_PROXY
+
+    nic_name=<DECODE_NIC_NAME>
+    local_ip=<DECODE_LOCAL_IP>
+
+    export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=${local_ip}
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=${nic_name}
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export GLOO_SOCKET_IFNAME=${nic_name}
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
+    export VLLM_SERVER_DEV_MODE=1
+    export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
+    export PYTHONHASHSEED=0
+
+    SPECULATIVE_CONFIG="$(
+      printf \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"draft_sample_method":"greedy","enforce_eager":true}' \
+      "$DRAFT_MODEL_PATH"
+    )"
+
+    vllm serve <YOUR_MODEL_PATH> \
+        --host 0.0.0.0 \
+        --port $2 \
+        --enable-auto-tool-choice \
+        --reasoning-parser kimi_k3 \
+        --tool-call-parser kimi_k3 \
+        --tokenizer-mode kimi_k3 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name kimi-k3 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 32 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config "$SPECULATIVE_CONFIG" \
+        --mm-encoder-tp-mode data \
+        --mm-processor-cache-gb 1 \
+        --skip-mm-profiling \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --enable-prefix-caching \
+        --additional-config '{"multistream_overlap_shared_expert":true}' \
+        --limit-mm-per-prompt '{"vision_chunk":2}' \
+        --kv-transfer-config \
+        '{
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_consumer",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "'"$KV_PORT"'",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                  "backend": "memcache",
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'"
+                }
+              }
+            ]
+          }
+        }'
+    ```
+
+#### 5.3.6 Start the pooled vLLM engines
+
+Start MetaService first, then start and verify the standalone MemCache process on every node. After all standalone processes are ready, deploy `launch_online_dp.py` and save the corresponding Prefill or Decode engine template as `run_dp_template.sh` on each node.
+
+Use the same launcher command for both groups. Replace the placeholders with the values for the local Prefill or Decode node:
+
+```shell
+python launch_online_dp.py \
+    --dp-size 4 \
+    --tp-size 16 \
+    --dp-size-local 1 \
+    --dp-rank-start <LOCAL_DP_RANK> \
+    --dp-address <PD_MASTER_IP> \
+    --dp-rpc-port <DP_RPC_PORT> \
+    --vllm-start-port <VLLM_START_PORT>
+```
+
+| Placeholder | Prefill group | Decode group |
+| --- | --- | --- |
+| `<LOCAL_DP_RANK>` | Local rank from `0` through `3` | Local rank from `0` through `3` |
+| `<PD_MASTER_IP>` | Prefill master IP | Decode master IP |
+| `<DP_RPC_PORT>` | Prefill DP RPC port | Decode DP RPC port |
+| `<VLLM_START_PORT>` | Prefill node's starting service port | Decode node's starting service port |
+
+The command above is the A3 TP16 pooled example described in this section. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups. Use the same TP on both sides; the launcher passes it to the engine template as `$7`.
+
+After all engines are ready, start the load-balancing proxy as described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service).
 
 ## 6 Functional Verification
 

@@ -29,19 +29,10 @@ from tests.ut.kv_offload.utils import (
     create_scheduler,
     create_vllm_config,
 )
-from vllm_ascend.utils import vllm_version_is
-
-
-def _skipped_waiting_queue(scheduler):
-    # Upstream main (#58947) replaced `skipped_waiting` with
-    # `kv_holding_waiting` (block holders) + `deferred_waiting` (a set).
-    if vllm_version_is("0.30.0"):
-        return scheduler.skipped_waiting
-    return scheduler.kv_holding_waiting
 
 
 def _num_waiting_requests(scheduler) -> int:
-    return len(scheduler.waiting) + len(_skipped_waiting_queue(scheduler))
+    return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
 
 def test_basic_lifecycle():
@@ -71,7 +62,7 @@ def test_basic_lifecycle():
     assert scheduler_output.total_num_scheduled_tokens == 0
 
     assert _num_waiting_requests(scheduler) == 1
-    assert request in _skipped_waiting_queue(scheduler)
+    assert request in scheduler.kv_holding_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == NUM_TOKENS
 
