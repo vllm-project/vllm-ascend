@@ -2161,7 +2161,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=kv_cache[0].shape[1],
+            # PROLOG quantization tiles are independent of KV cache page size.
+            tile_size=128,
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer
