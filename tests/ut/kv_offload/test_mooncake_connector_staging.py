@@ -38,6 +38,8 @@ def _make_fake_recv_thread(staging_chunk_bytes: int) -> KVCacheRecvingThread:
     thread._dsa_pd_mooncake_staging_bytes = 0
     thread._dsa_pd_mooncake_staging_lock = threading.Lock()
     thread._landing_stream = MagicMock()
+    thread._landing_streams = [thread._landing_stream, MagicMock()]
+    thread._pipeline_banks = 2
     thread._async_landing_enabled = False
     thread._pipeline_landing_enabled = False
     return thread
@@ -148,6 +150,81 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
     def test_staging_window_uses_central_ascend_env(self):
         with patch.dict(os.environ, {"VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": "3"}):
             self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 3)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
+    def test_pipeline_four_banks_round_robin(
+        self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
+    ):
+        # BANKS=4 with WINDOW=4 -> one slot per bank; 6 chunks become six
+        # single-chunk reads round-robining over banks 0,1,2,3,0,1. Wrapping
+        # back to a bank (read 5 -> bank 0) reclaims its slot just-in-time;
+        # each bank's event is recorded on that bank's own stream.
+        offloaded_kv = torch.empty((6 * self.staging_chunk_bytes,), dtype=torch.int8)
+        register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
+        staging = torch.empty((4 * self.staging_chunk_bytes,), dtype=torch.int8)
+
+        self.thread._dsa_pd_mooncake_staging_tensor = staging
+        self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
+        self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
+        self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
+        self.thread._pipeline_landing_enabled = True
+        self.thread._pipeline_banks = 4
+        streams = [MagicMock() for _ in range(4)]
+        self.thread._landing_streams = streams
+
+        order: list[str] = []
+
+        def make_event(name: str):
+            event = MagicMock()
+            event.record.side_effect = lambda *a, **k: order.append(f"rec{name}")
+            event.synchronize.side_effect = lambda: order.append(f"wait{name}")
+            return event
+
+        events = [make_event(str(i)) for i in range(6)]
+        mock_event_cls.side_effect = events
+        self.thread.engine.batch_transfer_sync_read.side_effect = lambda *a, **k: (
+            order.append("read"),
+            0,
+        )[1]
+
+        ret = self.thread._batch_transfer_sync_read_with_optional_staging(
+            "remote:7777",
+            [offloaded_kv.data_ptr()],
+            [0xA00000],
+            [offloaded_kv.numel()],
+            "req-banks4",
+        )
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(
+            order,
+            [
+                # banks 0,1,2,3: fresh banks, no waits
+                "read", "rec0",
+                "read", "rec1",
+                "read", "rec2",
+                "read", "rec3",
+                # read 5 wraps back to bank 0: reclaim slot 0 first
+                "wait0", "read", "rec4",
+                # read 6 wraps back to bank 1: reclaim slot 1 first
+                "wait1", "read", "rec5",
+                # final drain in slot order: 0,1,2,3
+                "wait4", "wait5", "wait2", "wait3",
+            ],
+        )
+        self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 6)
+        # bank of chunk i = i % 4 -> stream index 0,1,2,3,0,1
+        for i, event in enumerate(events):
+            event.record.assert_called_once_with(streams[i % 4])
+        self.assertEqual(
+            mock_stream.call_args_list,
+            [unittest.mock.call(s) for s in [streams[0], streams[1], streams[2], streams[3], streams[0], streams[1]]],
+        )
+        mock_sync.assert_not_called()
+        mock_register_buffer.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
@@ -312,11 +389,19 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         )
         self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 3)
         self.assertEqual(mock_event_cls.call_count, 6)
-        for event in events:
-            event.record.assert_called_once_with(self.thread._landing_stream)
+        # Each bank's copies are submitted and recorded on that bank's own
+        # stream: bank 0 (slots 0,1) on stream 0, bank 1 (slots 2,3) on
+        # stream 1, so the two banks' landings can execute in parallel.
+        stream0, stream1 = self.thread._landing_streams
+        expected_stream_per_event = [stream0, stream0, stream1, stream1, stream0, stream0]
+        for event, expected_stream in zip(events, expected_stream_per_event):
+            event.record.assert_called_once_with(expected_stream)
             event.synchronize.assert_called_once()
         mock_sync.assert_not_called()
-        mock_stream.assert_called_with(self.thread._landing_stream)
+        self.assertEqual(
+            mock_stream.call_args_list,
+            [unittest.mock.call(stream0), unittest.mock.call(stream1), unittest.mock.call(stream0)],
+        )
         mock_register_buffer.assert_not_called()
         chunk = self.staging_chunk_bytes
         self.assertEqual(

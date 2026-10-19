@@ -462,12 +462,19 @@ class KVCacheRecvingThread(threading.Thread):
         self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
         self._dsa_pd_mooncake_staging_bytes = 0
         self._dsa_pd_mooncake_staging_lock = threading.Lock()
-        # Async landing: staged copies are submitted to a dedicated NPU stream
-        # and awaited with a per-window event, so the device-wide
+        # Async landing: staged copies are submitted to dedicated NPU stream(s)
+        # and awaited with per-slot events, so the device-wide
         # torch.npu.synchronize() in the landing loop no longer stalls unrelated
-        # streams. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING=0
+        # streams. Pipeline mode splits the staging window into BANKS banks
+        # (VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS, default 2) that round-robin, each
+        # landing on its own stream, so one bank's landing can execute in
+        # parallel with the others instead of queueing behind them.
+        # _landing_stream (stream 0) stays the single stream of the
+        # non-pipeline modes. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING=0
         # restores the legacy synchronous landing path.
-        self._landing_stream = torch.npu.Stream()
+        self._pipeline_banks = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
+        self._landing_streams = [torch.npu.Stream() for _ in range(max(1, self._pipeline_banks))]
+        self._landing_stream = self._landing_streams[0]
         self._async_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING
         self._pipeline_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE
         # Host-only offloaded KV leaves the ADXL engine with no device
@@ -970,14 +977,14 @@ class KVCacheRecvingThread(threading.Thread):
         staging_ptr = int(staging.data_ptr())
         staging_window = self._get_dsa_pd_mooncake_staging_window()
         # Pipeline mode: WINDOW keeps meaning the total staging capacity and
-        # the buffer is split into two banks of half a window that
-        # consecutive reads alternate between (the network batch halves
+        # the buffer is split into BANKS banks of window/BANKS slots that
+        # consecutive reads round-robin between (the network batch shrinks
         # accordingly; the staging footprint is identical with the pipeline
-        # on or off). Flipping banks needs no wait at all, so one read's
-        # landing hides under the next read; coming back to a bank two reads
-        # later is guarded by a just-in-time per-slot wait. The final drain
-        # keeps the external contract: returning 0 means every window has
-        # landed and is visible.
+        # on or off). Flipping to a fresh bank needs no wait at all, so one
+        # read's landing hides under the next reads; coming back to a bank
+        # BANKS reads later is guarded by a just-in-time per-slot wait. The
+        # final drain keeps the external contract: returning 0 means every
+        # window has landed and is visible.
         pipeline_active = self._pipeline_landing_enabled and staging_window >= 2
         if self._pipeline_landing_enabled and not pipeline_active:
             logger.warning(
@@ -985,9 +992,21 @@ class KVCacheRecvingThread(threading.Thread):
                 "(got %s); falling back to per-window async landing.",
                 staging_window,
             )
-        bank_window = max(1, staging_window // 2) if pipeline_active else staging_window
+        banks = self._pipeline_banks if pipeline_active else 1
+        if pipeline_active and banks > staging_window:
+            logger.warning(
+                "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS=%s exceeds the staging window "
+                "(%s); clamping banks to %s.",
+                banks,
+                staging_window,
+                staging_window,
+            )
+            banks = staging_window
+        # Trailing slots stay idle when the window is not divisible by the
+        # bank count; every bank keeps bank_window contiguous slots.
+        bank_window = (staging_window // banks) if pipeline_active else staging_window
         pending_slot_events: list[torch.npu.Event | None] = [None] * (
-            2 * bank_window if pipeline_active else staging_window
+            banks * bank_window if pipeline_active else staging_window
         )
         # Per-receive timing (one INFO line per request): read_s is the
         # network stage, land_exposed_s the landing time spent on the
@@ -1002,7 +1021,9 @@ class KVCacheRecvingThread(threading.Thread):
         timing_batches = 0
         for batch_start in range(0, len(staged_transfers), bank_window):
             batch = staged_transfers[batch_start : batch_start + bank_window]
-            bank_slot_base = ((batch_start // bank_window) % 2) * bank_window if pipeline_active else 0
+            bank_index = (batch_start // bank_window) % banks if pipeline_active else 0
+            bank_slot_base = bank_index * bank_window if pipeline_active else 0
+            landing_stream = self._landing_streams[bank_index] if pipeline_active else self._landing_stream
             local_staging_ptrs = []
             remote_src_ptrs = []
             transfer_lengths = []
@@ -1042,12 +1063,12 @@ class KVCacheRecvingThread(threading.Thread):
                     self._drain_dsa_pd_mooncake_slot_events(pending_slot_events)
                 return ret
             if pipeline_active:
-                with torch.npu.stream(self._landing_stream):
+                with torch.npu.stream(landing_stream):
                     for local_dst, length, staging_offset in copy_plan:
                         self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
                     for slot in range(bank_slot_base, bank_slot_base + len(batch)):
                         landing_event = torch.npu.Event()
-                        landing_event.record(self._landing_stream)
+                        landing_event.record(landing_stream)
                         pending_slot_events[slot] = landing_event
                 timing_batches += 1
             elif self._async_landing_enabled:

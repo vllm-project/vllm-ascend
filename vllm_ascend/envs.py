@@ -104,8 +104,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Three-stage pipelining of DSA PD Mooncake staged reads. 1 = the staging
     # window (VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW, unchanged total
     # capacity) is split into two half-window banks that consecutive network
-    # reads alternate between, so the next read needs no wait while the
-    # current read's landing runs on the dedicated stream; a bank is only
+    # reads alternate between, and each bank lands on its own dedicated NPU
+    # stream so the two banks' copies can execute in parallel. The next read
+    # needs no wait while the current read's landing runs; a bank is only
     # reclaimed, via its per-slot Events, when the pipeline wraps back to it
     # two reads later, plus a final drain before the receive completes. The
     # network batch halves accordingly and the staging footprint is identical
@@ -113,6 +114,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # the async-landing mode. Valid values: 0 or 1. Not sensitive.
     "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE": lambda: _strict_binary_env(
         "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE"
+    ),
+    # Number of staging banks (and landing streams) used by the pipeline mode
+    # above. The window is split into this many banks that consecutive reads
+    # round-robin between; each bank's copies land on its own stream. Default
+    # 2 (classic ping-pong) is enough for full pipelining when landing is not
+    # slower than the network; higher values buy deeper overlap against
+    # landing jitter at the cost of smaller network batches (window/K chunks
+    # per engine call). Any value >= 1 works; banks larger than the window are
+    # clamped. This setting is not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "2"))
     ),
 }
 
