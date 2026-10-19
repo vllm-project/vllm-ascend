@@ -111,6 +111,7 @@ templates:
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
       - "--no-enable-prefix-caching"
+      - "--async-scheduling"
       - "--seed"
       - "1024"
       - "--max-model-len"
@@ -122,7 +123,6 @@ templates:
       - "64"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--async-scheduling"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
@@ -170,6 +170,7 @@ templates:
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
       - "--no-enable-prefix-caching"
+      - "--async-scheduling"
       - "--seed"
       - "1024"
       - "--max-model-len"
@@ -181,7 +182,6 @@ templates:
       - "64"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--async-scheduling"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
@@ -325,14 +325,14 @@ benchmarks:
     request_rate: 1.4
     baseline: 877.3186
     threshold: 0.97
-#  acc_aime2025:
-#    case_type: accuracy
-#    dataset_path: vllm-ascend/aime2025
-#    request_conf: vllm_api_general_chat
-#    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-#    max_out_len: 131072
-#    batch_size: 32
-#    baseline: 95
-#    threshold: 10
-#    temperature: 1.0
-#    top_p: 0.95
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 131072
+    batch_size: 32
+    baseline: 95
+    threshold: 10
+    temperature: 1.0
+    top_p: 0.95
