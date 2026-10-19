@@ -1967,9 +1967,10 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
 )
 @pytest.mark.parametrize(
     "blocker",
-    [None, "other_model", "draft_fia", "pp", "pcp", "dcp", "adaptive", "offload", "kvpp", "target_fia"],
+    [None, "other_model", "draft_fia", "pp", "pcp", "adaptive", "offload", "kvpp", "target_fia"],
 )
-def test_spec_cpu_length_sync_bypass_requires_all_audited_conditions(architecture, blocker):
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+def test_spec_cpu_length_sync_bypass_requires_all_audited_conditions(architecture, blocker, dcp_size):
     runner = _make_runner()
     runner.model_config.architecture = "OtherModel" if blocker == "other_model" else architecture
     runner.model = torch.nn.Module()
@@ -1977,7 +1978,7 @@ def test_spec_cpu_length_sync_bypass_requires_all_audited_conditions(architectur
     runner.vllm_config.parallel_config = SimpleNamespace(
         pipeline_parallel_size=2 if blocker == "pp" else 1,
         prefill_context_parallel_size=2 if blocker == "pcp" else 1,
-        decode_context_parallel_size=2 if blocker == "dcp" else 1,
+        decode_context_parallel_size=dcp_size,
     )
     runner.adaptive_verification = object() if blocker == "adaptive" else None
     runner.ascend_config.sparse_kv_offload_config.enabled = blocker == "offload"
@@ -2020,3 +2021,51 @@ def test_flashmla_cpu_lengths_keep_upper_bounds_without_event_wait():
     for i, req_id in enumerate(batch.req_ids):
         index = runner.req_states.req_id_to_index[req_id]
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("num_rejected", [0, 1, 3])
+def test_flashmla_dcp_bypass_preserves_device_postprocess_and_prefill_lengths(dcp_size, num_rejected):
+    runner = _make_runner()
+    runner.model_config.architecture = "KimiK3ForCausalLM"
+    runner.model = torch.nn.Module()
+    runner.speculator = SimpleNamespace(_draft_mla_uses_device_lengths=True)
+    runner.vllm_config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=dcp_size
+    )
+    runner.ascend_config.kvpp_config = SimpleNamespace(size=1)
+    with patch("vllm_ascend.worker.v2.model_runner.all_mla_use_flashmla", return_value=True):
+        runner._skip_spec_cpu_length_sync = runner._can_skip_spec_cpu_length_sync()
+    assert runner._skip_spec_cpu_length_sync
+
+    # Decode's host count is optimistic; a prefill request has no rejected
+    # draft tokens and must retain its scheduler-provided exact CPU length.
+    host_counts = torch.tensor([768, 32], dtype=torch.int32)
+    device_counts = torch.tensor([768 - num_rejected, 32], dtype=torch.int32)
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"decode": 0, "prefill": 1},
+        num_computed_tokens_cpu=host_counts.clone(),
+        num_computed_tokens=SimpleNamespace(gpu=device_counts),
+    )
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(2, dtype=torch.int32))
+    runner.num_computed_tokens_cpu = MagicMock()
+    runner.num_computed_tokens_event = MagicMock()
+    output = SimpleNamespace(
+        num_scheduled_tokens={"decode": 4, "prefill": 3},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["decode", "prefill"]),
+    )
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled") as parent,
+        patch("vllm_ascend.worker.v2.model_runner.torch.cuda.current_stream") as current_stream,
+    ):
+        runner.postprocess_sampled("idx", "tokens", "accepted", num_rejected, "query_start")
+        runner._update_seq_lens_cpu(output, ["decode", "prefill"])
+
+    parent.assert_called_once_with("idx", "tokens", "accepted", num_rejected, "query_start")
+    current_stream.assert_not_called()
+    runner.num_computed_tokens_cpu.copy_.assert_not_called()
+    runner.num_computed_tokens_event.record.assert_not_called()
+    runner.num_computed_tokens_event.synchronize.assert_not_called()
+    torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, host_counts)
+    assert runner.input_buffers.seq_lens_cpu.tolist() == [772, 35]
+    assert runner.req_states.num_computed_tokens.gpu.tolist() == [768 - num_rejected, 32]
