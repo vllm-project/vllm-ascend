@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.platforms import Platform
+from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend import utils
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
@@ -83,8 +83,10 @@ def test_m3_fp8_keeps_upstream_alignment_at_128(architecture, dtype, user_specif
         [AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3SparseBackend],
         [AscendMiniMaxM3SparseBackend, AscendMiniMaxM3IndexerBackend],
         [AscendAttentionBackend, AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3SparseBackend],
+        [AscendMiniMaxM3IndexerBackend],
+        [AscendMiniMaxM3SparseBackend],
     ],
-    ids=["indexer-first-pp-stage", "sparse-first-pp-stage", "dense-first-pp-stage"],
+    ids=["indexer-first-pp-stage", "sparse-first-pp-stage", "dense-first-pp-stage", "indexer-only", "sparse-only"],
 )
 def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, user_specified, backends):
     config = make_config(architecture, dtype)
@@ -95,6 +97,7 @@ def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, use
             utils, "get_current_hardware_profile", return_value=get_hardware_profile(utils.AscendDeviceType.A5)
         ),
         patch("vllm_ascend.attention.attention_v1.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config_or_none", return_value=config, create=True),
         patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
         _non_ssm_backend_patch(backends),
     ):
@@ -104,9 +107,12 @@ def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, use
             NPUPlatform.update_block_size_for_backend(config)
             assert config.cache_config.block_size == 128
             assert config.cache_config.skip_page_size_padded == 32768
-        # Page alignment must not claim that sparse/indexer kernels support 64.
-        assert AscendMiniMaxM3IndexerBackend.get_supported_kernel_block_sizes() == [128]
-        assert AscendMiniMaxM3SparseBackend.get_supported_kernel_block_sizes() == [128]
+        for backend in backends:
+            assert backend.get_supported_kernel_block_sizes() == [64, 128]
+            # The alignment minimum must not switch FP8 execution to 64-token
+            # sparse/indexer kernels. Exercise the real kernel-size selector.
+            assert select_common_block_size(config.cache_config.block_size, [backend]) == 128
+        assert select_common_block_size(config.cache_config.block_size, backends) == 128
 
 
 @pytest.mark.parametrize(
@@ -115,32 +121,43 @@ def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, use
         ("OtherForCausalLM", "fp8", "A5"),
         ("MiniMaxM3SparseForCausalLM", "auto", "A5"),
         ("MiniMaxM3SparseForCausalLM", "bfloat16", "A5"),
+        ("MiniMaxM3SparseForCausalLM", "fp8_e5m2", "A5"),
         ("MiniMaxM3SparseForCausalLM", "fp8", "A3"),
         ("MiniMaxM3SparseForCausalLM", "fp8", "A2"),
     ],
 )
-def test_other_layouts_keep_kernel_block_sizes(architecture, dtype, hardware):
+@pytest.mark.parametrize(
+    "backend", [AscendAttentionBackend, AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3SparseBackend]
+)
+def test_other_layouts_keep_kernel_block_sizes(architecture, dtype, hardware, backend):
     config = make_config(architecture, dtype)
     with (
         patch.object(
             utils, "get_current_hardware_profile", return_value=get_hardware_profile(utils.AscendDeviceType[hardware])
         ),
         patch("vllm_ascend.attention.attention_v1.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config_or_none", return_value=config, create=True),
     ):
         utils.refresh_block_size(config)
         assert config.cache_config.block_size == 128
-        assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
-        with patch.object(Platform, "_align_heterogeneous_kv_block_size") as align:
-            NPUPlatform._align_heterogeneous_kv_block_size(config, AscendMiniMaxM3IndexerBackend)
-            align.assert_called_once_with(config, AscendMiniMaxM3IndexerBackend)
+        assert backend.get_supported_kernel_block_sizes() == [128]
 
 
-def test_no_engine_context_keeps_default_backend():
-    with patch("vllm_ascend.attention.attention_v1.get_current_vllm_config_or_none", return_value=None):
-        assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
+@pytest.mark.parametrize(
+    "backend", [AscendAttentionBackend, AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3SparseBackend]
+)
+def test_no_engine_context_keeps_default_backend(backend):
+    with (
+        patch("vllm_ascend.attention.attention_v1.get_current_vllm_config_or_none", return_value=None),
+        patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config_or_none", return_value=None, create=True),
+    ):
+        assert backend.get_supported_kernel_block_sizes() == [128]
 
 
-def test_without_skip_layers_keeps_128_for_indexer():
+@pytest.mark.parametrize(
+    "backend", [AscendAttentionBackend, AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3SparseBackend]
+)
+def test_without_skip_layers_keeps_128_for_indexer(backend):
     config = make_config("MiniMaxM3SparseForCausalLM", "fp8")
     config.cache_config.kv_cache_dtype_skip_layers = []
     with (
@@ -148,11 +165,12 @@ def test_without_skip_layers_keeps_128_for_indexer():
             utils, "get_current_hardware_profile", return_value=get_hardware_profile(utils.AscendDeviceType.A5)
         ),
         patch("vllm_ascend.attention.attention_v1.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config_or_none", return_value=config, create=True),
         patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
-        _non_ssm_backend_patch(),
+        _non_ssm_backend_patch([backend]),
     ):
         NPUPlatform.update_block_size_for_backend(config)
-        assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
+        assert backend.get_supported_kernel_block_sizes() == [128]
         assert config.cache_config.block_size == 128
         assert config.cache_config.skip_page_size_padded is None
 
