@@ -313,12 +313,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.use_expert_weight_list:
             # EPLB expert scale lists use the packed byte representation.
-            layer.w13_weight_scale.data = (
-                layer.w13_weight_scale.data.view(torch.uint8)
-            )
-            layer.w2_weight_scale.data = (
-                layer.w2_weight_scale.data.view(torch.uint8)
-            )
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(torch.uint8)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(torch.uint8)
 
             is_situ = getattr(layer, "activation", None) in (
                 MoEActivation.SITU,
