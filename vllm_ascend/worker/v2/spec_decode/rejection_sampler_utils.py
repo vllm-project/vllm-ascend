@@ -103,7 +103,7 @@ def _probabilistic_rejection_kernel(
     seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
-    rejected_step = 0
+    rejected_step = tl.full((), 0, tl.int64)
     target_lse = 0.0
     draft_lse = 0.0
     accepted = True
