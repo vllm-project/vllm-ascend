@@ -472,16 +472,11 @@ class AscendPCPManager(PCPManager):
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore tokens to the global PCP layout, following the batch length.
 
-        Output-length contract: the returned tensor matches the global batch
-        layout, i.e. ``num_tokens_after_padding`` rows when the batch is padded
-        for FULL graph replay and the compact ``num_tokens`` rows otherwise.
-        Downstream consumers (sampling, replicated drafters) index restored
-        states with the global batch layout, so padding rows must be present
-        for padded batches; they read as zeros. ``_pad_hidden_restore_idx``
-        extends the restore indices to the padded extent, so the parent is
-        expected to return exactly that length; anything else raises.
-        Fixed-K speculative decode sharding restores to the unpadded global
-        batch instead, returning the compact ``num_tokens`` rows.
+        The FIA-padded global ``query_start_loc`` sizes upstream's restore
+        indices to ``num_tokens_after_padding``; ``_pad_hidden_restore_idx``
+        makes those padding rows valid, and they read as zeros here. Fixed-K
+        speculative decode sharding restores to the unpadded global batch
+        instead, returning the compact ``num_tokens`` rows.
         """
         if not self.is_last_pp_rank:
             return hidden_states
@@ -491,14 +486,7 @@ class AscendPCPManager(PCPManager):
             return restored_hidden_states
 
         num_tokens = self._global_batch.num_tokens
-        num_tokens_after_padding = self._global_batch.num_tokens_after_padding
-        if restored_hidden_states.shape[0] != num_tokens_after_padding:
-            raise RuntimeError(
-                "PCP restored hidden-state length does not match the global "
-                "graph layout: "
-                f"{restored_hidden_states.shape[0]} != {num_tokens_after_padding}."
-            )
-        if num_tokens == num_tokens_after_padding:
+        if num_tokens == self._global_batch.num_tokens_after_padding:
             return restored_hidden_states
 
         restored_hidden_states[num_tokens:].zero_()

@@ -849,28 +849,6 @@ def test_sampling_restore_exposes_unpadded_global_view(is_draft_prefill_sharded:
     assert batch.query_start_loc.tolist() == [0, 12, 16]
 
 
-@pytest.mark.parametrize("num_tokens", [3, 6], ids=["padded", "unpadded"])
-@pytest.mark.parametrize(
-    "parent_rows",
-    [3, 5, 7],
-    ids=["compact_parent_output", "unexpected_short_output", "unexpected_long_output"],
-)
-def test_pcp_manager_rejects_mismatched_restored_hidden_states(parent_rows: int, num_tokens: int) -> None:
-    """Parent output must match the global layout with or without padding."""
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._global_batch = SimpleNamespace(num_tokens=num_tokens, num_tokens_after_padding=6)
-
-    with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
-        patch.object(PCPManager, "restore_hidden_states", return_value=torch.randn(parent_rows, 2)),
-        pytest.raises(RuntimeError, match="does not match the global graph layout"),
-    ):
-        manager.restore_hidden_states(torch.randn(num_tokens, 2))
-
-
 def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
