@@ -312,7 +312,7 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
-        cache_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     runner.model_config = SimpleNamespace(
