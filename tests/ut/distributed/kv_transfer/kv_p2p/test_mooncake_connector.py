@@ -3953,6 +3953,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                         remote_port=30000,
                         remote_block_ids=([3], [4]),
                         local_block_ids=local_blocks,
+                        local_full_block_ids=tuple(),
                         num_external_tokens=0,
                         num_prompt_blocks=1,
                         num_computed_tokens=0,
@@ -4956,6 +4957,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     local_block_ids=([20], [30]),
                     local_full_block_ids=([20], [30]),
                     remote_block_ids=([100, 101], [200, 201]),
+                    num_external_tokens=32,
                     num_prompt_blocks=2,
                     num_computed_tokens=0,
                 )
@@ -4996,6 +4998,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 num_prompt_blocks=prompt_blocks,
                                 remote_block_ids=(list(range(100, 100 + prompt_blocks)), [200]),
                                 local_block_ids=([20, 21, 22], [30]),
+                                num_external_tokens=prompt_blocks * worker.block_size,
                                 # State uses its transfer IDs, not the attention prefix-cache view.
                                 local_full_block_ids=([20, 21, 22], [99]),
                             )
