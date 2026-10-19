@@ -307,7 +307,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     !!! note "Version compatibility"
 
-        This A3 series MTP configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later.
+        This A3 series MTP configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later because the official DeepSeek-V4-Pro checkpoint provides DSpark speculative decoding weights rather than MTP weights.
 
     **Node0**
 
@@ -429,7 +429,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     !!! note "Version compatibility and deployment requirements"
 
-        This A3 series with DSpark configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later.
+        This A3 series with DSpark configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later because release validation covered only PD-Disaggregated; PD Co-located configuration was not tested.
 
         Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The example keeps the existing DP2/TP16 topology and changes only the DSpark-related and required runtime parameters.
 
@@ -1265,7 +1265,7 @@ Key Parameter Descriptions:
 - `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).
 - `scheduler_config.recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the Decode node is insufficient, requests are sent to Prefill for KV Cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key is deprecated.
 - `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value. Use the value declared by the checkpoint; this example uses `5`. The nested `enforce_eager` applies to DSpark draft execution, while the top-level `--enforce-eager` keeps the Prefill target model in eager mode.
-- `MooncakeConnectorV2`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
+- `MooncakeConnectorV2`: required for KV cache transfer when pipeline parallelism (PP) is enabled in this deployment. The A3 example enables PP on Prefill (`--pipeline-parallel-size 2`), so it uses `MooncakeConnectorV2` instead of the previously used `MooncakeHybridConnector`.
 
 Deployment Verification:
 
