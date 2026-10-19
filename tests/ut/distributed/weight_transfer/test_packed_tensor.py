@@ -1131,8 +1131,9 @@ def test_packed_hccl_consumer_rejects_negative_shape_before_broadcast():
 
 
 @pytest.mark.parametrize("producer", [False, True])
-@pytest.mark.parametrize("logging_error", [RuntimeError("logging failed"), KeyboardInterrupt(), SystemExit(2)])
-def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging_error):
+@pytest.mark.parametrize("logging_error", [None, RuntimeError("logging failed"), KeyboardInterrupt(), SystemExit(2)])
+@pytest.mark.parametrize("num_buffers", [1, 2])
+def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging_error, num_buffers):
     import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
 
     class FailedStream(_FakeNpuStream):
@@ -1150,24 +1151,30 @@ def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging
         stream.failed = True
         raise original_error
 
-    expected_type = ValueError if isinstance(logging_error, Exception) else type(logging_error)
+    expected_type = ValueError if logging_error is None or isinstance(logging_error, Exception) else type(logging_error)
     with (
         patch.object(torch.npu, "Stream", return_value=stream),
         patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
-        patch.object(packed_module.logger, "warning", side_effect=logging_error),
+        patch.object(packed_module.logger, "error", side_effect=logging_error) as log_error,
         pytest.raises(expected_type) as error,
     ):
         group = types.SimpleNamespace(broadcast=broadcast)
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, 1)
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, num_buffers)
         else:
-            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, MagicMock(), 4, 1)
-    if isinstance(logging_error, Exception):
+            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, MagicMock(), 4, num_buffers)
+    if logging_error is None or isinstance(logging_error, Exception):
         assert error.value is original_error
     else:
         assert error.value is logging_error
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
+    log_error.assert_called_once()
+    message, retained_slots, cleanup_error = log_error.call_args.args
+    assert "(slot, bytes)" in message
+    assert retained_slots == [(0, 4)]
+    assert str(cleanup_error) == "drain failed"
+    assert not log_error.call_args.kwargs
 
 
 def test_packed_ipc_consumer_rejects_payload_larger_than_rebuilt_buffer():

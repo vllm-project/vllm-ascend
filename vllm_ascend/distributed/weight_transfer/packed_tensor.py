@@ -121,6 +121,7 @@ def packed_broadcast_producer(
         raise
     finally:
         cleanup_error: BaseException | None = None
+        retained_slots: list[tuple[int, int]] = []
         for index, stream in enumerate(streams):
             try:
                 stream.synchronize()
@@ -128,15 +129,17 @@ def packed_broadcast_producer(
                 # Empty placeholders have no payload storage to protect.
                 if packed_tensors[index].numel():
                     _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                    retained_slots.append((index, packed_tensors[index].numel() * packed_tensors[index].element_size()))
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None and body_error is None:
             raise cleanup_error
         if cleanup_error is not None and body_error is not None:
             with suppress(Exception):
-                logger.warning(
+                logger.error(
                     "Failed to drain a packed HCCL stream while handling another exception; "
-                    "retaining its buffer until process exit: %s",
+                    "retaining buffers until process exit (slot, bytes): %s; cleanup error: %s",
+                    retained_slots,
                     cleanup_error,
                 )
 
@@ -259,6 +262,7 @@ def packed_broadcast_consumer(
         raise
     finally:
         cleanup_error: BaseException | None = None
+        retained_slots: list[tuple[int, int]] = []
         for index, stream in enumerate(streams):
             try:
                 stream.synchronize()
@@ -266,15 +270,17 @@ def packed_broadcast_consumer(
                 # Empty placeholders have no payload storage to protect.
                 if packed_tensors[index].numel():
                     _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                    retained_slots.append((index, packed_tensors[index].numel() * packed_tensors[index].element_size()))
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None and body_error is None:
             raise cleanup_error
         if cleanup_error is not None and body_error is not None:
             with suppress(Exception):
-                logger.warning(
+                logger.error(
                     "Failed to drain a packed HCCL stream while handling another exception; "
-                    "retaining its buffer until process exit: %s",
+                    "retaining buffers until process exit (slot, bytes): %s; cleanup error: %s",
+                    retained_slots,
                     cleanup_error,
                 )
 
