@@ -419,6 +419,12 @@ For detailed configuration, refer to [2.2.1](#step-221-configure-mooncakejson) a
 
 With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
 
+Only worker clients own local SSD storage. Each worker uses a subdirectory named `rank_<global_rank>/` under `ssd_offload_path`; the global rank includes the DP offset as well as TP/PP/CP ranks. Scheduler clients do not enable local SSD offload, but can still query SSD-backed keys and trigger remote prefetch when configured.
+
+In a single-node DP=2 deployment, both DP replicas can use the same `mooncake.json`: their workers use distinct rank subdirectories and their schedulers do not claim the shared root directory. Separate vLLM service instances must use different `ssd_offload_path` roots if their global ranks overlap.
+
+The error `storage_path already held by another live client` is emitted by Mooncake's client-side bucket backend when it cannot acquire the local directory lock. Check the Mooncake package and native libraries loaded by the vLLM process, and any other live clients using that directory. The `mooncake_master` version alone does not identify the client's locking implementation. See the [Mooncake SSD ownership contract](https://kvcache-ai.github.io/Mooncake/design/store/ssd-offload.html#bucketstoragebackend-default).
+
 #### Step 2.5.2: SSD Disk Usage Control
 
 The following environment variables control disk space usage for SSD offload (bucket backend):
@@ -432,7 +438,7 @@ The following environment variables control disk space usage for SSD offload (bu
 
 **`MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` risk:** If left at the 2 TB default, master shows a total SSD quota far larger than the physical disk (e.g. 16 ranks → ~32 TB displayed on a 1 TB NVMe). Offload still fails when the disk fills, while monitoring looks healthy. Set this to your actual per-rank budget before production use.
 
-Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
+Since each worker rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
 
 ```shell
 # 800 GB total disk, 8 ranks, ~100 GB per rank
@@ -441,6 +447,24 @@ export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
 export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 ```
+
+#### Step 2.5.3: SSD Prefetch Configuration
+
+SSD offload and SSD prefetch are configured separately. After `enable_ssd_offload` is enabled as above, add the following fields to the same `mooncake.json` if you also want SSD-to-DRAM prefetch:
+
+```json
+{
+    "enable_ssd_prefetch": true,
+    "ssd_prefetch_cooldown_sec": 5,
+    "ssd_prefetch_dedup_ttl_sec": 30
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_ssd_prefetch` | Optional. Set to `true` to enable SSD-to-DRAM prefetch on exist queries. When enabled, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so that Mooncake promotes SSD-only objects back into DRAM proactively during cache probe. This hides SSD read latency behind ongoing compute thanks to vLLM's asynchronous scheduling. **Requires `enable_ssd_offload` to be `true` and a Mooncake version that implements [RFC #2213](https://github.com/kvcache-ai/Mooncake/issues/2213) (post-v0.3.11).** If the installed Mooncake does not support `ExistOptions`, a warning is logged and the option is silently ignored. Default: `false`. |
+| `ssd_prefetch_cooldown_sec` | Optional. Memory-pressure backoff for SSD prefetch, in seconds. When a promotion fails because DRAM is saturated (`NO_AVAILABLE_HANDLE`), prefetch is suppressed for this many seconds so that eviction/offload can reclaim DRAM instead of competing with promotion. Prevents the "prefetch keeps trying to add to a full DRAM while offload can't drain it" thrash that pins memory and spins eviction. Set `0` to disable the backoff. Tune it to roughly the time it takes eviction/offload to drain DRAM from the high watermark back down (observe `[EVICT-TRIGGER] memory_ratio=...` in the master log). Only relevant when `enable_ssd_prefetch` is `true`. vLLM-Ascend does not impose its own default: if this field is omitted from `mooncake.json`, it is not passed to `setup()` and Mooncake's built-in default (currently `5`) applies. |
+| `ssd_prefetch_dedup_ttl_sec` | Optional. Per-key de-duplication / rate-limit TTL for SSD prefetch, in seconds. The same key is prefetched at most once per this period, suppressing duplicate triggers from concurrent exist/get probes across TP ranks (and, for cross-node prefetch, repeated delegations to the same holder). Cuts the RPC/thread storm that can starve offload. Set `0` to disable rate-limiting. Only relevant when `enable_ssd_prefetch` is `true`. vLLM-Ascend does not impose its own default: if this field is omitted from `mooncake.json`, it is not passed to `setup()` and Mooncake's built-in default (currently `30`) applies. |
 
 ## 3. Example of using Memcache as a KV Pool backend
 

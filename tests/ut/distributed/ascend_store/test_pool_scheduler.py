@@ -249,6 +249,77 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_unconsumed_load_spec_finished_request_leaks(self, mock_client_cls):
+        """Reproduce the load-spec leak: a request whose load spec is created
+        but never consumed, then finishes.
+
+        This is the real leak window (not the normal max_tokens=0 path,
+        which closes via _process_new_request in the same step):
+
+        1. Async KV transfer: the request sits in WAITING_FOR_REMOTE_KVS
+           (vLLM puts it there without entering scheduled_new_reqs) and is
+           aborted mid-transfer. The finished cleanup in build_connector_meta
+           pops _unfinished_requests, so _process_async_load_request never
+           sees the request again -> its load spec is stranded.
+        2. Aborted while queued with a spec already created (token budget
+           break / allocate_slots returned None, then the client disconnects).
+
+        build_connector_meta's finished cleanup pops five per-request dicts
+        (_request_trackers / _unfinished_requests / _unfinished_request_ids /
+        _preempted_req_ids / _loading_req_ids) but never load_specs, and
+        load_specs has no other cleanup path, so each such request
+        permanently grows the dict. Observing the dict length after each
+        finished request gives a deterministic, O(1) leak signal instead of
+        waiting for RSS to creep up.
+
+        Once the fix lands (pop load_specs for finished requests), flip the
+        final assertion to expect 0 and drop the per-iteration accumulation
+        check.
+        """
+        config = self._make_config(block_size=16)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = 32
+
+        num_requests = 1000
+        for i in range(num_requests):
+            req_id = f"r{i}"
+            request = MagicMock()
+            request.prompt_token_ids = list(range(64))
+            request.num_tokens = 64
+            request.request_id = req_id
+            request.block_hashes = [b"h"] * 4
+
+            need, _ = scheduler.get_num_new_matched_tokens(request, 0)
+            self.assertEqual(need, 32)
+
+            # Spec created but the request is aborted before any scheduling
+            # step consumes it (async-transfer abort / queue-time abort).
+            blocks = MagicMock()
+            blocks.get_block_ids.return_value = [[0, 1]]
+            scheduler.update_state_after_alloc(request, blocks, 32)
+
+            sched_output = MagicMock()
+            sched_output.finished_req_ids = {req_id}
+            sched_output.preempted_req_ids = set()
+            sched_output.scheduled_new_reqs = []
+            sched_output.num_scheduled_tokens = {}
+            sched_output.scheduled_cached_reqs = MagicMock()
+            sched_output.scheduled_cached_reqs.req_ids = []
+            scheduler.build_connector_meta(sched_output)
+
+            self.assertEqual(len(scheduler.load_specs), i + 1)
+
+        self.assertEqual(len(scheduler._unfinished_requests), 0)
+        self.assertEqual(len(scheduler._unfinished_request_ids), 0)
+        self.assertEqual(len(scheduler._request_trackers), 0)
+        self.assertEqual(
+            len(scheduler.load_specs),
+            num_requests,
+            f"{len(scheduler.load_specs)} load specs retained after "
+            f"{num_requests} requests finished before consuming their load spec",
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_request_finished_consumer_no_put(self, mock_client_cls):
         config = self._make_config(kv_role="kv_consumer")
         scheduler = KVPoolScheduler(config, use_layerwise=False)
