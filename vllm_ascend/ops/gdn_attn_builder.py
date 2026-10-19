@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import is_gdn_recover_enabled
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -46,6 +47,14 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+
+
+@dataclass
+class AscendGDNRecoverMetadata(GDNAttentionMetadata):
+    # Snapshots owned by one forward, shared across layers of its KV group.
+    recover_state_indices: torch.Tensor | None = None
+    recover_query_offsets: torch.Tensor | None = None
+    recover_request_rows: torch.Tensor | None = None
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -928,7 +937,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        attn_metadata = GDNAttentionMetadata(
+        use_recover = is_gdn_recover_enabled()
+        metadata_cls = AscendGDNRecoverMetadata if use_recover else GDNAttentionMetadata
+        attn_metadata = metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
@@ -966,6 +977,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         ):
             self._pad_decode_metadata(attn_metadata, graph_request_count)
             non_spec_conv1d_cache_indices = attn_metadata.non_spec_state_indices_tensor
+        if use_recover and num_spec_decodes:
+            assert spec_sequence_indices is not None
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            attn_metadata.recover_state_indices = spec_state_indices_tensor[:, 0].contiguous().clone()
+            attn_metadata.recover_query_offsets = spec_query_start_loc.contiguous().clone()
+            attn_metadata.recover_request_rows = spec_sequence_indices.to(dtype=torch.int64).clone()
+            # Conv always starts at the already-committed checkpoint, not at
+            # a previous accepted position in a per-draft history window.
+            attn_metadata.num_accepted_tokens = torch.ones_like(attn_metadata.recover_state_indices)
         # Attach once, using the final graph-stable Tensor references.
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices

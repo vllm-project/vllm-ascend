@@ -423,6 +423,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.gdn_recover_context = None
+        if getattr(self.ascend_config, "enable_gdn_recover", False) is True:
+            from vllm_ascend.ops.gdn_recover import GDNRecoverContext
+
+            self.gdn_recover_context = GDNRecoverContext()
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         self.kvpp = KVPPRuntime()
@@ -1016,7 +1021,11 @@ class NPUModelRunner(GPUModelRunner):
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
         if not self.use_async_scheduling:
-            return super()._update_states_after_model_execute(output_token_ids, scheduler_output)
+            recovery_context = getattr(self, "gdn_recover_context", None)
+            if recovery_context is not None:
+                recovery_context.commit(output_token_ids)
+            super()._update_states_after_model_execute(output_token_ids, scheduler_output)
+            return
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
@@ -1049,6 +1058,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs,
                 )
         assert self.num_accepted_tokens_event is not None
+        recovery_context = getattr(self, "gdn_recover_context", None)
+        if recovery_context is not None:
+            recovery_context.commit(output_token_ids)
+        # Publish completion only after both recovery writes, so cache reuse
+        # and the next iteration cannot race a deferred commit stream.
         self.num_accepted_tokens_event.record()
 
     def _get_ascend_mamba_state_copy_funcs(self):
@@ -2332,6 +2346,9 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+        recovery_context = getattr(self, "gdn_recover_context", None)
+        if recovery_context is not None:
+            recovery_context.begin()
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -4703,6 +4720,9 @@ class NPUModelRunner(GPUModelRunner):
             KV backing allocations.
         """
         kv_cache_config = deepcopy(kv_cache_config)
+        recovery_context = getattr(self, "gdn_recover_context", None)
+        if recovery_context is not None:
+            recovery_context.reset()
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
@@ -4807,6 +4827,19 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             kv_caches=kv_caches,
         )
+        if getattr(self, "gdn_recover_context", None) is not None:
+            from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+
+            layers = 0
+            for layer in self.compilation_config.static_forward_context.values():
+                if isinstance(layer, GatedDeltaNetAttention):
+                    if len(layer.kv_cache) != 4:
+                        raise ValueError("GDN recovery requires conv/checkpoint/record/saved-history fields")
+                    layer._gdn_recover_context = self.gdn_recover_context
+                    layers += 1
+            if layers == 0:
+                raise ValueError("enable_gdn_recover found no GDN target layers")
+            logger.info("Enabled GDN checkpoint/replay for %d layers; per-draft state reservations removed", layers)
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
