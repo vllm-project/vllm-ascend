@@ -415,6 +415,8 @@ class AscendQSAImpl:
         attn_metadata: QSAForwardMetadataProtocol,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
+        logical_positions: torch.Tensor,
+        seq_lens: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -443,7 +445,8 @@ class AscendQSAImpl:
             compact_indices,
             attn_metadata.block_table,
             token_to_req[:num_tokens],
-            attn_metadata.seq_lens,
+            logical_positions[:num_tokens],
+            seq_lens,
             output[:num_tokens],
         )
 
@@ -615,6 +618,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
+            logical_positions=side_metadata.logical_positions,
+            seq_lens=side_metadata.seq_lens,
         )
 
 

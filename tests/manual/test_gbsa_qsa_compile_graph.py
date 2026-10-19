@@ -53,6 +53,7 @@ def main() -> None:
     block_table = torch.tensor([[2], [3]], dtype=torch.int32, device="npu")
     token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="npu")
     seq_lens = torch.tensor([9, 11], dtype=torch.int32, device="npu")
+    logical_positions = seq_lens - 1
     output = torch.empty_like(query)
 
     def call() -> torch.Tensor:
@@ -63,6 +64,7 @@ def main() -> None:
             logical_indices,
             block_table,
             token_to_req,
+            logical_positions,
             seq_lens,
             output,
         )

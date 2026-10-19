@@ -69,6 +69,8 @@ def _make_impl() -> ascend_qsa.AscendQSAImpl:
 def test_forward_qsa_always_uses_cann_gbsa(monkeypatch) -> None:
     sentinel = torch.zeros(1, 2, 2)
     calls: list[tuple] = []
+    logical_positions = torch.zeros(1, dtype=torch.int64)
+    seq_lens = torch.ones(1, dtype=torch.int32)
 
     def gbsa(*args):
         calls.append(args)
@@ -87,11 +89,14 @@ def test_forward_qsa_always_uses_cann_gbsa(monkeypatch) -> None:
         attn_metadata=SimpleNamespace(
             num_actual_tokens=1,
             block_table=torch.zeros(1, 1, dtype=torch.int32),
-            seq_lens=torch.ones(1, dtype=torch.int32),
         ),
         output=torch.zeros(1, 2, 2),
         token_to_req=torch.zeros(1, dtype=torch.int64),
+        logical_positions=logical_positions,
+        seq_lens=seq_lens,
     )
 
     assert result is sentinel
     assert len(calls) == 1
+    torch.testing.assert_close(calls[0][6], logical_positions)
+    assert calls[0][7] is seq_lens
