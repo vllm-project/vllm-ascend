@@ -71,7 +71,7 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
-# ====== 替换MOONCAKE安装：根据架构下载OBS上对应的whl本地安装 ======
+# ====== Install Mooncake ======
 ARG TARGETPLATFORM
 RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
