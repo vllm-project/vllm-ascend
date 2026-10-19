@@ -12,13 +12,14 @@ _envs: &envs
   HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
 #  OMP_NUM_THREADS: "100"
 #  OMP_PROC_BIND: "false"
-  HCCL_BUFFSIZE: "1024"
+  HCCL_BUFFSIZE: "400"
   HCCL_OP_EXPANSION_MODE: "AIV"
 #  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
 #  HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "1"
   ASCEND_LAUNCH_BLOCKING: "0"
+  DYNAMIC_EPLB: "true"
 
 _server_cmd: &server_cmd
   - "--port"
@@ -26,9 +27,7 @@ _server_cmd: &server_cmd
   - "--distributed-executor-backend"
   - "mp"
   - "--tensor-parallel-size"
-  - "2"
-  - "--prefill-context-parallel-size"
-  - "4"
+  - "8"
   - "--data-parallel-size"
   - "1"
   - "--seed"
@@ -50,7 +49,7 @@ _server_cmd: &server_cmd
   - "--reasoning-parser"
   - "glm45"
   - "--gpu-memory-utilization"
-  - "0.90"
+  - "0.95"
   - "--kv-cache-dtype"
   - "fp8"
   - "--attention_config.indexer_kv_dtype"
@@ -62,11 +61,8 @@ _server_cmd: &server_cmd
   - '{"use_index_cache": true,"index_topk_frep":4}'
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
-  - "--enable-eplb"
-  - "--eplb-config"
-  - '{"window_size":50,"step_interval":50,"num_redundant_experts":0,"use_async":true}'
   - "--additional-config"
-  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","eplb_config":{"load_collection_phase":"all"}}'
+  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True", "enable_dsa_cp":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
 
 # ==========================================
 # ACTUAL TEST CASES

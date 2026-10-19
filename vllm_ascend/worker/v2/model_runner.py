@@ -44,6 +44,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm.v1.worker.gpu.model_runner import (
     BatchReqState,
     ExecuteModelState,
@@ -116,6 +117,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -141,6 +143,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_connector: KVConnector
     max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -492,6 +495,14 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.static_forward_context,
             self.vllm_config.scheduler_config.max_num_seqs,
         )
+
+        copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
+        if (
+            callable(copy_mamba_state)
+            and has_kv_transfer_group()
+            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+        ):
+            self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
