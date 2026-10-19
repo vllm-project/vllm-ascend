@@ -1396,6 +1396,20 @@ def test_prefill_builds_only_consumed_kernel_metadata(builder_cls, mixed_spec):
         assert metadata.non_spec_prefill_metadata.chunk is not None
 
 
+@pytest.mark.parametrize("padding_query_len", [0, 2])
+def test_spec_graph_padding_updates_device_boundaries_without_host_transfer(padding_query_len):
+    common = create_common_attn_metadata(BatchSpec([4096, 0], [6, padding_query_len]), 128, torch.device("cpu"))
+    original_boundaries = common.query_start_loc.clone()
+    with patch.object(torch.Tensor, "to", side_effect=AssertionError("unexpected host transfer")):
+        local = ascend_gdn_attn_builder._remove_spec_graph_padding_queries(common, torch.tensor([5, -1]))
+
+    assert local.query_start_loc.tolist() == [0, 6, 6]
+    assert local.query_start_loc_cpu.tolist() == [0, 6, 6]
+    assert local.num_actual_tokens == 6
+    torch.testing.assert_close(common.query_start_loc, original_boundaries)
+    torch.testing.assert_close(common.query_start_loc_cpu, original_boundaries)
+
+
 @pytest.mark.parametrize("live_requests", [1, 2])
 @pytest.mark.parametrize("explicit_request_count", [False, True])
 def test_spec_graph_fia_padding_refreshes_captured_buffers(live_requests, explicit_request_count):

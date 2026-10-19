@@ -1055,6 +1055,85 @@ class TestDrafterMaxModelLen(unittest.TestCase):
 
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
+    def test_async_align_defers_host_snapshot_until_preprocessing(self):
+        for asynchronous, cache_mode, deferred in (
+            (True, "align", True),
+            (False, "align", False),
+            (True, "none", False),
+        ):
+            with self.subTest(asynchronous=asynchronous, cache_mode=cache_mode):
+                runner = self._build_runner()
+                runner.use_async_scheduling = asynchronous
+                runner.cache_config.mamba_cache_mode = cache_mode
+                runner.num_accepted_tokens.np[:3] = [2, 3, 4]
+                runner._sync_num_accepted_tokens = MagicMock()
+                runner.num_accepted_tokens.copy_to_gpu = MagicMock()
+                stream = MagicMock()
+                with patch("vllm_ascend.worker.model_runner_v1.current_stream", return_value=stream):
+                    runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
+                if deferred:
+                    stream.wait_event.assert_called_once_with(runner.num_accepted_tokens_event)
+                    runner.num_accepted_tokens_event.synchronize.assert_not_called()
+                    runner._sync_num_accepted_tokens.assert_not_called()
+                    runner.num_accepted_tokens.copy_to_gpu.assert_not_called()
+                    np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], [2, 3, 4])
+                else:
+                    stream.wait_event.assert_not_called()
+                    runner.num_accepted_tokens_event.synchronize.assert_called_once_with()
+                    runner._sync_num_accepted_tokens.assert_called_once_with(3, True)
+                    runner.num_accepted_tokens.copy_to_gpu.assert_called_once_with()
+
+    def test_async_state_update_is_submitted_before_mtp_drafting(self):
+        runner = MagicMock()
+        runner.kv_connector_output = None
+        runner.need_accepted_tokens = True
+        runner.use_async_scheduling = True
+        runner.dynamic_eplb = False
+        runner.input_batch.vocab_size = 128
+        runner.speculative_config.disable_padded_drafter_batch = False
+        runner._input_fits_in_drafter.return_value = True
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=6)
+        common_metadata = object()
+        hidden_states = torch.zeros(6, 4)
+        positions = torch.arange(6)
+        runner.execute_model_state = (
+            scheduler_output,
+            None,
+            object(),
+            common_metadata,
+            hidden_states,
+            None,
+            None,
+            {},
+            positions,
+            None,
+            None,
+            None,
+        )
+        sampled_token_ids = torch.tensor([[11, 12, 13, -1, -1, -1]])
+        runner._sample.return_value = SimpleNamespace(sampled_token_ids=sampled_token_ids, logprobs_tensors=None)
+        runner._bookkeeping_sync.return_value = ({}, None, None, [], {}, ["request-0"], {"request-0": 0}, [])
+        stream = MagicMock()
+
+        def propose(*args):
+            runner.sampling_done_event.record.assert_called_once_with()
+            stream.wait_event.assert_called_once_with(runner.sampling_done_event)
+            runner._update_states_after_model_execute.assert_called_once_with(sampled_token_ids, scheduler_output)
+            return torch.zeros(1, 5, dtype=torch.int32)
+
+        runner.propose_draft_token_ids.side_effect = propose
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(world_size=1)),
+            patch("vllm_ascend.worker.model_runner_v1.global_stream", return_value=stream),
+            patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext", return_value=nullcontext()),
+            patch("torch.npu.stream", return_value=nullcontext()),
+            patch("vllm_ascend.worker.model_runner_v1.AsyncGPUModelRunnerOutput"),
+        ):
+            NPUModelRunner.sample_tokens(runner, None)
+
+        runner.propose_draft_token_ids.assert_called_once()
+        runner._update_states_after_model_execute.assert_called_once_with(sampled_token_ids, scheduler_output)
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.use_async_scheduling = True
@@ -2292,6 +2371,16 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {tuple(group.layer_names) for group in runner.attn_groups[0]},
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        runner.attn_backend = AscendAttentionBackend
+        target_attn.get_attn_backend.return_value = FakeCacheBackend
+        draft_attn.get_attn_backend.return_value = FakeCacheBackend
+        for use_compress in (False, True):
+            runner.attn_groups = []
+            runner.use_compress = use_compress
+            runner.initialize_attn_backend(kv_cache_config)
+            self.assertEqual(runner._needs_seq_lens_cpu_sync, use_compress)
 
     def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
         cases = (

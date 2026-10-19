@@ -82,9 +82,14 @@ def _remove_spec_graph_padding_queries(
         raise ValueError("GDN speculative graph padding must be a request suffix")
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.clone()
     query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
+    # Update the device mirror without a blocking host-to-device transfer.
+    query_start_loc = common_attn_metadata.query_start_loc.clone()
+    query_start_loc[first_inactive + 1 :].copy_(
+        common_attn_metadata.query_start_loc[first_inactive : first_inactive + 1], non_blocking=True
+    )
     return common_attn_metadata.replace(
         query_start_loc_cpu=query_start_loc_cpu,
-        query_start_loc=query_start_loc_cpu.to(common_attn_metadata.query_start_loc.device),
+        query_start_loc=query_start_loc,
         num_actual_tokens=int(query_start_loc_cpu[-1]),
     )
 
