@@ -301,9 +301,135 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       }'
     ```
 
+=== "A3 series"
+
+    !!! note "Version compatibility"
+
+        This A3 series MTP configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later.
+
+    **Node0**
+
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=2048
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export TASK_QUEUE_ENABLE=1
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13399 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --served-model-name dsv4 \
+      --max-model-len 135000  \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 32 \
+      --gpu-memory-utilization 0.9 \
+      --block-size 128 \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
+      --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+      --quantization ascend \
+      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "enable_flashcomm1": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
+
+    **Node1**
+
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=2048
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export TASK_QUEUE_ENABLE=1
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --headless \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13399 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 1 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --served-model-name dsv4 \
+      --max-model-len 135000  \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 32 \
+      --gpu-memory-utilization 0.9 \
+      --block-size 128 \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
+      --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+      --quantization ascend \
+      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "enable_flashcomm1": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
+
 === "A3 series with DSpark"
 
-    Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The example keeps the existing DP2/TP16 topology and changes only the DSpark-related and required runtime parameters.
+    !!! note "Version compatibility and deployment requirements"
+
+        This A3 series with DSpark configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later.
+
+        Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The example keeps the existing DP2/TP16 topology and changes only the DSpark-related and required runtime parameters.
 
     **Node0**
 
