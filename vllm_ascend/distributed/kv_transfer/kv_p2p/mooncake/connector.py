@@ -85,6 +85,10 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler: MooncakeBaseConnectorScheduler | None = None
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
 
+    def shutdown(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """Use HND to avoid reformatting KV cache before D2D transfer."""

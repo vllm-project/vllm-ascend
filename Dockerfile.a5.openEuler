@@ -141,6 +141,18 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     rm -f /tmp/${FLA_WHL} && \
     python3 -m pip cache purge
 
+# Install cannbot wheels (only aarch64)
+RUN ARCH=$(uname -m); \
+    if [ "$ARCH" = "aarch64" ]; then \
+        wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbotdsl-0.6.0+g91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl" -P /tmp && \
+        wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbot_arena_net_ops-0.1.0-cp312-cp312-linux_aarch64.whl" -P /tmp && \
+        python3 -m pip install /tmp/cannbot*.whl && \
+        rm -f /tmp/cannbot*.whl && \
+        python3 -m pip cache purge; \
+    else \
+        echo "x86_64, skip cannbot wheels"; \
+    fi
+
 # Install _rust_tool_parser for the Rust frontend.
 # The default toolchain is read from vllm's rust-toolchain.toml (falling back
 # to stable).

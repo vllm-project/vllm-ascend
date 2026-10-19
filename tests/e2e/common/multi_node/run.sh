@@ -170,8 +170,16 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    pip install -e "$WORKSPACE/vllm-ascend"
+    pip install -r "$WORKSPACE/vllm-ascend/requirements-nightly.txt"
+    # Keep the daily-built packages shipped by the image (torch/torch-npu/
+    # torchvision/torchaudio, triton-ascend, memfabric/memcache) while still
+    # installing the other runtime dependencies declared by requirements.txt.
+    # `|| true` matters: grep returns 1 when every line is filtered out while
+    # this script runs with `set -euo pipefail`.
+    grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+        "$WORKSPACE/vllm-ascend/requirements.txt" > /tmp/requirements-runtime.txt || true
+    pip install -r /tmp/requirements-runtime.txt
+    pip install -e "$WORKSPACE/vllm-ascend" --no-deps
 }
 
 install_aisbench() {
