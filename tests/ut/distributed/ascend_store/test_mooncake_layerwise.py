@@ -184,9 +184,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.backend_name = "mooncake"
         worker.layerwise_protocol = mooncake_layerwise
         worker.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
-            vllm_config=SimpleNamespace(
-                parallel_config=SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=1)
-            ),
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1)),
             kv_cache_config=None,
             model_name=worker.model_name,
             use_hybrid=False,

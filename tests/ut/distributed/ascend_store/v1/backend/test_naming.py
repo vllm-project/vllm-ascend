@@ -61,6 +61,43 @@ def test_resolved_codec_matches_legacy_and_snapshots_all_inputs(backend, legacy,
                 )
 
 
+@pytest.mark.parametrize("backend,legacy", ((memcache, memcache_backend), (mooncake, mooncake_layerwise)))
+@pytest.mark.parametrize("pp_size,group_count", ((1, 1), (1, 2), (2, 1), (2, 2)))
+def test_runtime_only_joins_precompiled_parts(backend, legacy, pp_size, group_count, monkeypatch):
+    config = legacy_cases.TestBoundLayerwiseKeys.make_config(pp_size)
+    cache = legacy_cases.TestBoundLayerwiseKeys.make_cache_config(group_count)
+    sizes = tuple(16 * (group + 1) for group in range(group_count))
+    expected = legacy.bind_layerwise_keys(
+        vllm_config=config,
+        kv_cache_config=cache,
+        model_name="model",
+        use_hybrid=group_count > 1,
+        grouped_block_size=list(sizes),
+    )
+    facts = resolve_key_naming_config(
+        config,
+        cache,
+        model_name="model",
+        use_hybrid=group_count > 1,
+        group_block_sizes=sizes,
+        requires_layout_identity=backend is mooncake,
+    )
+    group, stage = group_count - 1, pp_size - 1
+    key = expected.make_full_key(group, "61", 1, stage)
+    lookup = tuple((key,) for key in expected.make_hit_check_keys(group, "61", 2))
+    builder = backend.create_key_builder(facts)
+    fail = Mock(side_effect=AssertionError("runtime wire recompilation"))
+    prefixes = ("_full_key_prefix",) if backend is memcache else ("_block_key_prefix", "_hybrid_key_prefix")
+    for name in prefixes:
+        monkeypatch.setattr(backend, name, fail)
+    monkeypatch.setattr(backend, "create_key_builder", fail)
+    monkeypatch.setattr(legacy, "bind_layerwise_keys", fail)
+    bound = builder.bind(group, (ObjectCoordinate(stage, 0, 1),), lookup_head_count=2)
+    assert bound.keys((b"a", "61")) == ((key, key),)
+    assert bound.lookup_keys((b"a",)) == lookup
+    fail.assert_not_called()
+
+
 def test_mooncake_identity_normalizes_cache_size_and_group_representation():
     class CacheConfig(SimpleNamespace):
         def compute_hash(self):

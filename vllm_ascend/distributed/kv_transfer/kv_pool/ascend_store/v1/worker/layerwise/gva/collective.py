@@ -1,4 +1,4 @@
-"""An isolated CPU collective channel for serial background Store tasks.
+"""The GVA Worker's isolated CPU channel for serial background Store tasks.
 
 Never reuse the model's process group: background Store and foreground model
 collectives can otherwise enter the same group in different rank orders.

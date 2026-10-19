@@ -53,16 +53,25 @@ def bind_layerwise_keys(
         )
     if use_hybrid:
         layout = hybrid_layout_id(kv_cache_config, parallel.tensor_parallel_size, namespace=namespace)
-        prefixes = tuple(
-            tuple(
-                _hybrid_key_prefix(model_name, layout, group, size, stage if pp_size > 1 else None)
-                for stage in range(pp_size)
+        block_sizes = tuple(grouped_block_size)
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return hybrid_block_key(
+                model_name,
+                layout,
+                group,
+                block_sizes[group],
+                block_hash,
+                head,
+                pp_rank=stage if pp_size > 1 else None,
             )
-            for group, size in enumerate(grouped_block_size)
-        )
-    else:
-        prefixes = (tuple(_block_key_prefix(model_name, namespace, stage) for stage in range(pp_size)),)
-    return LayerwiseKeyBuilder(prefixes, tuple(f"@{head}" for head in range(parallel.tensor_parallel_size)))
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
+    def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
+
+    return LayerwiseKeyBuilder(make_single_group_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -75,15 +84,11 @@ def make_block_key(
     model_name: str, block_hash_or_tail: str, head_or_tp_rank: int, *, namespace: str = "", pp_rank: int = 0
 ) -> str:
     """One object per stage-local layer stack; retain the PP=1 protocol."""
-    return _block_key_prefix(model_name, namespace, pp_rank) + block_hash_or_tail + f"@{head_or_tp_rank}"
-
-
-def _block_key_prefix(model_name: str, namespace: str, pp_rank: int) -> str:
     if namespace:
-        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@"
+        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@{block_hash_or_tail}@{head_or_tp_rank}"
     if pp_rank:
         raise ValueError("Mooncake PP keys require a layout namespace")
-    return f"{model_name}@"
+    return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
 
 
 def make_hit_check_keys(
@@ -238,12 +243,8 @@ def hybrid_layout_id(kv_cache_config, tp_size: int = 1, *, namespace: str = "") 
 def hybrid_block_key(
     model: str, layout: str, group: int, block_size: int, block_hash: str, head: int, *, pp_rank: int | None = None
 ) -> str:
-    return _hybrid_key_prefix(model, layout, group, block_size, pp_rank) + block_hash + f"@{head}"
-
-
-def _hybrid_key_prefix(model: str, layout: str, group: int, block_size: int, pp_rank: int | None) -> str:
     stage = "" if pp_rank is None else f"@pp_rank:{pp_rank}"
-    return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@"
+    return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@{block_hash}@{head}"
 
 
 def fence_drains_recv() -> bool:

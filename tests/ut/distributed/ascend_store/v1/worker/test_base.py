@@ -116,6 +116,8 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     backend.put_result = RuntimeError("put failed after address handoff")
     backend_spec = make_backend_spec(layerwise_access=None)
     resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
+    cleanup = Mock()
+    resources.bind_execution_cleanup(cleanup)
     worker = BulkWorker(
         topology,
         resources,
@@ -135,6 +137,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     assert resources.kv_caches is caches
     assert "unregister_region" not in [call[0] for call in backend.calls]
     assert "backend_close" not in [call[0] for call in backend.calls]
+    cleanup.assert_not_called()
 
 
 class _BlockingStoreBackend(FakeBackend):

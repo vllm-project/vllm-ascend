@@ -9,11 +9,11 @@ import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import BoundLayerwiseKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import layout as memcache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.layout import (
     build_memcache_object_layouts,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import BoundLayerwiseKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
     CPPartitionSpec,
     PPPartitionSpec,

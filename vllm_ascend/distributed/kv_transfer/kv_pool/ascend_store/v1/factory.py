@@ -13,7 +13,6 @@ from .backend import LayerwiseAccessKind, resolve_backend_spec
 from .infrastructure.configuration.naming import resolve_key_naming_config
 from .infrastructure.configuration.resolve import resolve_kv_pool_config, resolve_worker_topology
 from .infrastructure.configuration.topology import KVPoolTopology
-from .infrastructure.execution.collective import StoreCollective
 from .infrastructure.protocol.rpc import LookupClient
 from .infrastructure.reachability import HybridReachability, UnitaryReachability
 from .infrastructure.resources import KVPoolResources
@@ -27,6 +26,7 @@ from .scheduler import (
 from .worker.base import KVPoolWorker
 from .worker.bulk import BulkWorker
 from .worker.layerwise import GVALayerwiseWorker, KeyRangeLayerwiseWorker
+from .worker.layerwise.gva.collective import StoreCollective
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -126,7 +126,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                 collective = None
                 if config.store_enabled and topology.cp_partition.object_shard_count > 1:
                     collective = StoreCollective(topology.tp_global_ranks)
-                    resources.bind_store_collective(collective)
+                    resources.bind_execution_cleanup(collective.close)
                 return GVALayerwiseWorker(
                     topology,
                     resources,

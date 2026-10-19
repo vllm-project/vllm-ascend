@@ -6,7 +6,7 @@ import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import make_topology
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import make_gva_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.shared_store import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.gva.shared_store import (
     GVAWriteOutcome,
     SharedGVAWrites,
 )

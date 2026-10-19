@@ -95,13 +95,10 @@ def bind_layerwise_keys(
     num_groups = len(grouped_block_size)
     pp_size = vllm_config.parallel_config.pipeline_parallel_size
 
-    return LayerwiseKeyBuilder(
-        tuple(
-            tuple(_full_key_prefix(model_name, group, num_groups, stage, pp_size) for stage in range(pp_size))
-            for group in range(num_groups)
-        ),
-        tuple(f"@{head}" for head in range(vllm_config.parallel_config.tensor_parallel_size)),
-    )
+    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+    return LayerwiseKeyBuilder(make_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -132,13 +129,10 @@ def make_full_key(
     backward compatibility. Multi-group models include group_id
     (model@group_id@hash@rank) to distinguish groups.
     """
-    return _full_key_prefix(model_name, group_id, num_groups, pp_rank, pp_size) + block_hash_hex + f"@{head_or_tp_rank}"
-
-
-def _full_key_prefix(model_name: str, group_id: int, num_groups: int, pp_rank: int, pp_size: int) -> str:
     pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
-    group_tag = f"@{group_id}" if num_groups > 1 else ""
-    return f"{model_name}{group_tag}{pp_tag}@"
+    if num_groups > 1:
+        return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
+    return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
 
 
 def make_partial_key(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...infrastructure.execution.collective import StoreCollective
+from .collective import StoreCollective
 
 
 @dataclass(frozen=True, slots=True)
