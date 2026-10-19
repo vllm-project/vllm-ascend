@@ -19,6 +19,11 @@ import importlib.util
 import sys
 from types import ModuleType
 
+from vllm_ascend.patch.patch_fla_shared_mem import install_fla_shared_mem_patch
+
+# Platform patches and model discovery can import FLA before workers exist.
+install_fla_shared_mem_patch()
+
 _triton_available = importlib.util.find_spec("triton") is not None
 
 try:
