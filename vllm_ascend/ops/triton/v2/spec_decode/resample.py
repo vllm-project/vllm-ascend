@@ -96,7 +96,6 @@ def _resample_kernel(
             ).to(tl.float32)
 
             if is_bonus or not is_valid_rejected_draft:
-                # Bonus and placeholder tokens both use the target distribution.
                 block_max, block_argmax = tl.max(target_block_logits, axis=0, return_indices=True)
                 has_mass = block_max > float("-inf")
                 safe_block_max = tl.where(has_mass, block_max, 0.0)
@@ -110,7 +109,7 @@ def _resample_kernel(
                 target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
                 target_log_probs = target_block_logits - target_lse
                 if USE_BLOCK_VERIFICATION and HAS_DRAFT_LOGITS:
-                    # Upstream block residual: max(p_tau * M_b - M_s, 0).
+                    # block residual: max(p_tau * M_b - M_s, 0).
                     log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1, mask=resample_idx > 0, other=0.0)
                     target_log_probs += log_p_tau
                 target_prob = tl.exp(target_log_probs)
