@@ -28,6 +28,16 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * Early bootstrap patch: patch_fla_shared_mem.py
+#   Target: vllm.third_party.flash_linear_attention.ops.utils.check_shared_mem
+#   Why: FLA import-time shared-memory checks initialize an otherwise CPU-only
+#        API process through Triton Ascend's device property query.
+#   How: Install a one-shot import hook from vllm_ascend/__init__.py, before
+#        platform patches run. Replace only the NPU check with its existing
+#        false result; preserve non-NPU behavior and operator registrations.
+#   Related PR: No upstream fix is currently part of the tested dependency.
+#   Future plan: Remove once FLA/Triton provide context-free capability checks.
+#
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
