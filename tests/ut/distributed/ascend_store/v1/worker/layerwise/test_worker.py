@@ -1023,7 +1023,7 @@ def test_all_present_store_exits_before_materialization_or_backend_sessions(use_
         command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)
         candidates = worker._build_store_candidates((command,))
         for group in candidates.groups:
-            object_size = worker._mappings[group.group_id].local_group_block_bytes
+            object_size = worker._mappings[group.group_id].local.local_group_block_bytes
             for axis in group.key_axes:
                 for key in axis:
                     backend.objects[key] = (10000, object_size, True)

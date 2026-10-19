@@ -7,11 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import ParallelConfig
 
-from ...backend.layerwise_keys import LayerwiseKeyBuilder
 from .interfaces import GVABackend, GVAObjectSessions, GVARegion, KeyRangeBackend, KVStoreBackend, ObjectSessions
 from .registration import (
     BufferRegion,
@@ -21,6 +20,12 @@ from .registration import (
     Registration,
     rollback_buffer_registration,
 )
+
+if TYPE_CHECKING:
+    from ..infrastructure.configuration.naming import KeyNamingConfig
+    from ..infrastructure.configuration.topology import KVPoolTopology
+    from ..infrastructure.mapping.object_layout import ObjectLayoutFactory
+    from ..infrastructure.mapping.object_naming import KeyBuilder
 
 BackendFactory = Callable[..., KVStoreBackend]
 
@@ -37,9 +42,22 @@ class LayerwiseAccessKind(Enum):
     GVA = "gva"
 
 
-class LayerwiseObjectLayoutKind(Enum):
-    STAGE_LOCAL = "stage_local"
-    GLOBAL_GVA = "global_gva"
+@dataclass(frozen=True, slots=True)
+class LayerwiseObjectFormat:
+    """Wire-format requirements, available before importing a native adapter."""
+
+    global_layer_span: bool = False
+    shared_context_shards: bool = False
+    context_alignment_bytes: int = 1
+
+
+GVA_SHARD_ALIGNMENT_BYTES = 2 * 1024 * 1024
+LAYERWISE_OBJECT_FORMATS = MappingProxyType(
+    {
+        "mooncake": LayerwiseObjectFormat(),
+        "memcache": LayerwiseObjectFormat(True, True, GVA_SHARD_ALIGNMENT_BYTES),
+    }
+)
 
 
 LAYERWISE_ACCESS = MappingProxyType(
@@ -58,8 +76,10 @@ class BackendSpec:
     backend_factory: BackendFactory
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
-    layerwise_key_factory: Callable[..., LayerwiseKeyBuilder] | None = None
-    layerwise_object_layout: LayerwiseObjectLayoutKind = LayerwiseObjectLayoutKind.STAGE_LOCAL
+    layerwise_key_factory: Callable[[KeyNamingConfig], KeyBuilder] | None = None
+    layerwise_object_format: LayerwiseObjectFormat = LayerwiseObjectFormat()
+    layerwise_layout_factory: Callable[[KVPoolTopology], ObjectLayoutFactory] | None = None
+    key_requires_layout_identity: bool = False
 
     def create(
         self,
@@ -82,8 +102,10 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
         backend_factory,
         LAYERWISE_ACCESS.get(backend_name),
         bool(getattr(backend_factory, "requires_exists_before_put", True)),
-        getattr(module, "bind_layerwise_keys", None),
-        getattr(module, "LAYERWISE_OBJECT_LAYOUT", LayerwiseObjectLayoutKind.STAGE_LOCAL),
+        getattr(module, "create_key_builder", None),
+        LAYERWISE_OBJECT_FORMATS[backend_name],
+        getattr(module, "create_object_layout", None),
+        bool(getattr(module, "KEY_REQUIRES_LAYOUT_IDENTITY", False)),
     )
 
 

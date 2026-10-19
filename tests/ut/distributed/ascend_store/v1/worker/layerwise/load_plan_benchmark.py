@@ -95,8 +95,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
             for group in topology.groups
         ),
     )
-    bulk = mapping.BulkMapping(
-        topology,
+    registration_arrays = (
         {0: [0x100000000 * (index + 1) for index in range(2 * _LAYERS)]},
         {0: [_SEGMENT_BYTES] * (2 * _LAYERS)},
         {0: [_SEGMENT_BYTES] * (2 * _LAYERS)},
@@ -126,9 +125,19 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         layerwise = importlib.import_module(package + ".worker.layerwise")
         worker_type = layerwise.GVALayerwiseWorker if route == "gva" else layerwise.KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=make_reachability(topology), store_enabled=False)
-    worker._mappings = {0: bulk}
-    if route != "bulk":
-        worker._layer_mappings = {0: mapping.LayerwiseMapping(bulk)}
+    if package == _PACKAGE:
+        mapping_type = mapping.BulkMapping if route == "bulk" else mapping.LayerwiseMapping
+        worker._mappings = {0: mapping_type(topology, *registration_arrays)}
+    else:
+        # Historical snapshots bind their Bulk view first. This compatibility
+        # belongs to the paired benchmark, never to the production Mapping API.
+        bind = getattr(mapping, "bind_mapping", mapping.BulkMapping)
+        binding = bind(topology, *registration_arrays)
+        worker._mappings = {0: binding}
+        if route != "bulk":
+            worker._layer_mappings = {0: mapping.LayerwiseMapping(binding)}
+        elif hasattr(mapping, "bind_mapping"):
+            worker._bulk_mappings = {0: mapping.BulkMapping(binding)}
     if route == "gva":
         # Lease synthetic addresses once; no tensor or native memory is read.
         assert isinstance(backend, ConstantGVABackend) and backend.native_store is not None

@@ -19,6 +19,37 @@ class TPPartitionSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PPPartitionSpec:
+    """Target key layer spans and optional global layer reservation inside each object."""
+
+    target_layer_counts: tuple[int, ...] | None = None
+    global_layer_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CPPartitionSpec:
+    """Context topology and object slots; local tensors are already DCP-sharded.
+
+    Reserved slots are not writer counts. The current wire format reserves DCP
+    slots only for shared objects; PCP does not multiply that reservation.
+    """
+
+    pcp_size: int = 1
+    dcp_size: int = 1
+    object_shard_count: int = 1
+    shard_alignment_bytes: int = 1
+
+
+def context_replica_groups(tp_rank: int, put_step: int, dcp_size: int) -> tuple[tuple[int, ...], ...]:
+    """TP-local ranks sharing a head, grouped by context coordinate, without electing writers."""
+    first_rank = (tp_rank // put_step) * put_step
+    groups: dict[int, list[int]] = {}
+    for rank in range(first_rank, first_rank + put_step):
+        groups.setdefault(rank % dcp_size, []).append(rank)
+    return tuple(tuple(ranks) for ranks in groups.values())
+
+
+@dataclass(frozen=True, slots=True)
 class KVPoolLayerTopology:
     """Cache entries owned by one physical model layer inside one group."""
 
@@ -57,15 +88,31 @@ class KVPoolTopology:
     tp_size: int
     pp_size: int
     pcp_rank: int
-    pcp_size: int
-    dcp_size: int
     put_step: int
     cache_transfer_granularity: int
     hash_block_size: int
     tp_partition: TPPartitionSpec
+    pp_partition: PPPartitionSpec
+    cp_partition: CPPartitionSpec
     groups: tuple[KVPoolGroupTopology, ...]
     transfer_group_ids: tuple[int, ...]
-    consumer_pipeline_partitions: tuple[int, ...] | None
+    stage_layer_start: int
+    stage_layer_count: int
+    object_shard_index: int
+    tp_global_ranks: tuple[int, ...]
+    context_replica_groups: tuple[tuple[int, ...], ...]
+
+    @property
+    def consumer_pipeline_partitions(self) -> tuple[int, ...] | None:
+        return self.pp_partition.target_layer_counts
+
+    @property
+    def pcp_size(self) -> int:
+        return self.cp_partition.pcp_size
+
+    @property
+    def dcp_size(self) -> int:
+        return self.cp_partition.dcp_size
 
     @property
     def transfer_groups(self) -> tuple[KVPoolGroupTopology, ...]:

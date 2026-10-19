@@ -1,7 +1,7 @@
 """Generate one layer's transfers from bound local segments and object geometry.
 
     Binding: once                         Batch: each prepare() call
-    BulkMapping                           keys + block_ids + mask
+    registration + topology               keys + block_ids + mask
          | LayerwiseMapping(...)                  | prepare(...)
          v                                        v
     cached layer_layouts                  LayerwiseSelection
@@ -11,16 +11,15 @@
           +-----------------------------------------+
           | arguments(selection, layer_id=...)      |
           |   choose layer_layouts[layer_id]        |
-          |   join by key_prefix_index              |
+          |   join by object_index                  |
           +-----------------------------------------+
                              |
                              v
               keys, local addresses, lengths, object offsets
 
-Default object offsets match Bulk. An optional GVA layout reserves global-layer
-and context-shard regions instead. Neither layout rebases offsets per layer or
-call order. Local layouts share Bulk's read-only arrays; readiness, allocation
-and transfer execution remain caller-owned. Key naming is injected separately.
+The selected object-layout function runs once. Layer arrays share this Mapping's
+local sources, not a separately constructed Bulk view. Readiness, remote
+allocation and transfer execution remain caller-owned.
 """
 
 from __future__ import annotations
@@ -29,19 +28,26 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .bulk import BulkMapping
-from .gva_layout import GVAObjectLayout
-from .types import LayerTransferArguments, LocalMemorySegments, UInt64Array
+from .local_layout import LocalMemorySegments, bind_local_layout
+from .object_layout import ObjectLayoutFactory, build_default_object_layouts
+from .object_naming import KeyBuilder, KeyNamer, bind_canonical_keys
+from .types import KeysByObject, LayerTransferArguments, UInt64Array
+
+if TYPE_CHECKING:
+    import torch
+
+    from ..configuration.topology import KVPoolTopology
 
 
 @dataclass(frozen=True, slots=True)
 class LayerTransferLayout:
-    """Fixed memory layout for one layer and key prefix, built with LayerwiseMapping.
+    """Fixed memory layout for one layer and local object, built with LayerwiseMapping.
 
-    Example: one prefix, two layers, one segment per layer. Addresses, strides,
+    Example: one object, two layers, one segment per layer. Addresses, strides,
     lengths and object offsets below are in bytes.
 
         complete object:  0 [--- L0: 32 ---] 32 [-- L1: 16 --] 48
@@ -52,18 +58,18 @@ class LayerTransferLayout:
 
     Base, stride and length come from local_memory_segments; actual addresses
     require a Selection's block IDs. No concrete keys/IDs are stored in the layout.
-    The enclosing layer_layouts dictionary supplies layer ID; key_prefix_index
+    The enclosing layer_layouts dictionary supplies layer ID; object_index
     joins this layout to Selection rows. Object size includes ALL assigned layers.
     """
 
-    key_prefix_index: int
+    object_index: int
     local_memory_segments: LocalMemorySegments
     object_offsets_bytes: UInt64Array
     object_size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
-class _PrefixSelection:
+class _ObjectSelection:
     """Each position pairs a complete object key with its local cache block ID."""
 
     keys: tuple[str, ...]
@@ -74,64 +80,79 @@ class _PrefixSelection:
 class LayerwiseSelection:
     """One prepare() call's selected object keys and local cache block IDs.
 
-    Example with simplified key prefixes P0: and P1: in bulk.key_prefixes order:
+    Example with simplified names P0: and P1: in bound local object order:
 
-        by_key_prefix[0]     object key       local block ID
-          row 0              P0:A <---------> 3
-          row 1              P0:B <---------> 7
-        by_key_prefix[1] = None               no selected rows
+        by_object[0]     object key       local block ID
+          row 0             P0:A <---------> 3
+          row 1             P0:B <---------> 7
+        by_object[1] = None                no selected rows
 
     This selects block rows, NOT layers: reuse it across layer_id calls without
     filtering again. It snapshots keys/IDs, not transfer addresses. selected_row_count
-    totals rows across prefixes (2 above), including duplicates. bulk requires the
-    exact same Bulk instance when consuming the selection.
+    totals rows across objects (2 above), including duplicates. The caller keeps
+    these object axes aligned with the group's bound layer layouts.
     """
 
-    bulk: BulkMapping
-    by_key_prefix: tuple[_PrefixSelection | None, ...]
+    by_object: tuple[_ObjectSelection | None, ...]
     selected_row_count: int
 
 
 class LayerwiseMapping:
-    """Reuse local segments and cache each layer's byte positions in the selected object layout."""
+    """Bind local sources, naming and object placement, then cache per-layer access layouts."""
 
-    def __init__(self, bulk: BulkMapping, object_layout: GVAObjectLayout | None = None) -> None:
-        self.bulk = bulk
-        self.object_size_bytes = bulk.local_group_block_bytes
-        layers: dict[int, list[LayerTransferLayout]] = defaultdict(list)
-        segment_offsets_bytes_by_layout: dict[tuple[int, int], UInt64Array] = {}
-        for key_prefix_index, (layer_ids, boundaries, segments, object_size) in enumerate(
-            zip(
-                bulk.physical_layer_ids_by_key_prefix,
-                bulk.layer_segment_boundaries_by_key_prefix,
-                bulk.local_memory_segments_by_key_prefix,
-                bulk.object_sizes_bytes_by_key_prefix,
-                strict=True,
+    def __init__(
+        self,
+        topology: KVPoolTopology,
+        entry_addresses_by_group: Mapping[int, Sequence[int]],
+        entry_block_payload_bytes_by_group: Mapping[int, Sequence[int]],
+        entry_block_strides_bytes_by_group: Mapping[int, Sequence[int]],
+        layer_entry_boundaries_by_group: Mapping[int, Sequence[int]],
+        *,
+        group_id: int | None = None,
+        kv_cache_layout: str = "NHD",
+        kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None,
+        key_builder: KeyBuilder | None = None,
+        object_layout_factory: ObjectLayoutFactory | None = None,
+    ) -> None:
+        # ========================================
+        # Bind local sources and wire identity
+        # ========================================
+
+        self.local = bind_local_layout(
+            topology,
+            entry_addresses_by_group,
+            entry_block_payload_bytes_by_group,
+            entry_block_strides_bytes_by_group,
+            layer_entry_boundaries_by_group,
+            group_id=group_id,
+            kv_cache_layout=kv_cache_layout,
+            kv_caches=kv_caches,
+        )
+        coordinates = tuple(source.coordinate for source in self.local.objects)
+        self.naming: KeyNamer = (
+            bind_canonical_keys(topology, self.local.group_id, coordinates)
+            if key_builder is None
+            else key_builder.bind(
+                self.local.group_id, coordinates, lookup_head_count=topology.tp_partition.key_rank_count
             )
+        )
+        bind_objects = build_default_object_layouts if object_layout_factory is None else object_layout_factory
+        self.object_layouts = bind_objects(self.local)
+
+        # ========================================
+        # Compile layer access over bound objects
+        # ========================================
+        #
+        # Slice the existing arrays; this does not rebuild local geometry or
+        # change the source/object order selected by the binding functions.
+
+        layers: dict[int, list[LayerTransferLayout]] = defaultdict(list)
+        for object_index, (local_object, remote_object) in enumerate(
+            zip(self.local.objects, self.object_layouts, strict=True)
         ):
-            segment_count = len(segments.block_zero_addresses)
-            if not segment_count:
-                continue
-            # Head slices share lengths; never scan the same length array per head.
-            layout_key = (id(segments.segment_lengths_bytes), segment_count)
-            offsets = segment_offsets_bytes_by_layout.get(layout_key)
-            if offsets is None:
-                offsets = np.empty(segment_count + 1, dtype=np.uint64)
-                offsets[0] = 0
-                np.cumsum(np.broadcast_to(segments.segment_lengths_bytes, (segment_count,)), out=offsets[1:])
-                offsets.flags.writeable = False
-                segment_offsets_bytes_by_layout[layout_key] = offsets
-            if int(offsets[-1]) != object_size:
-                raise ValueError("Bulk segments must cover the complete object size")
-            if object_layout is not None:
-                layer_lengths = [int(offsets[end] - offsets[start]) for start, end in zip(boundaries, boundaries[1:])]
-                if len(set(layer_lengths)) != 1:
-                    raise ValueError("Production GVA layout requires uniform per-layer payloads")
-                object_size, base_offset = object_layout.bind(object_size, len(layer_ids))
-                offsets = offsets + np.uint64(base_offset)
-                offsets.flags.writeable = False
-                self.object_size_bytes = object_size
-            for layer_index, layer_id in enumerate(layer_ids):
+            segments = local_object.memory_segments
+            boundaries = local_object.layer_segment_boundaries
+            for layer_index, layer_id in enumerate(local_object.physical_layer_ids):
                 start, end = boundaries[layer_index], boundaries[layer_index + 1]
                 if start == end:
                     continue
@@ -142,11 +163,22 @@ class LayerwiseMapping:
                     lengths if len(lengths) == 1 else lengths[start:end],
                 )
                 layers[layer_id].append(
-                    LayerTransferLayout(key_prefix_index, layer_segments, offsets[start:end], object_size)
+                    LayerTransferLayout(
+                        object_index,
+                        layer_segments,
+                        remote_object.segment_offsets_bytes[start:end],
+                        remote_object.size_bytes,
+                    )
                 )
         self.layer_layouts: Mapping[int, tuple[LayerTransferLayout, ...]] = MappingProxyType(
             {layer_id: tuple(layouts) for layer_id, layouts in layers.items()}
         )
+
+    def keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
+        return self.naming.keys(hashes)
+
+    def lookup_keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
+        return self.naming.lookup_keys(hashes)
 
     def prepare(
         self,
@@ -155,9 +187,9 @@ class LayerwiseMapping:
         *,
         selected_keys: Sequence[bool] | None = None,
     ) -> LayerwiseSelection:
-        """Snapshot rows for reuse across layers; mask order is key prefix, then input row.
+        """Snapshot rows for reuse across layers; mask order is local object, then input row.
 
-        Keys come from bulk.keys(). Selection is caller-owned, including
+        Keys come from this mapping's bound identity. Selection is caller-owned, including
         admission and duplicate writers. Repeated input rows remain repeated here.
         No local address matrix or per-layer Backend list is allocated yet.
         """
@@ -165,54 +197,52 @@ class LayerwiseMapping:
         if ids.ndim != 1:
             raise ValueError("Block IDs must be one-dimensional rows")
         row_count = len(ids)
-        key_prefix_count = len(self.bulk.key_prefixes)
-        if len(keys) != key_prefix_count or any(len(prefix_keys) != row_count for prefix_keys in keys):
-            raise ValueError("Keys must align local key prefixes and Block ID rows")
+        object_count = len(self.local.objects)
+        if len(keys) != object_count or any(len(object_keys) != row_count for object_keys in keys):
+            raise ValueError("Keys must align local objects and Block ID rows")
         selections = None
         if selected_keys is not None:
             selections = np.asarray(selected_keys, dtype=np.bool_)
-            if selections.ndim != 1 or selections.size != key_prefix_count * row_count:
-                raise ValueError("Key selection must be a flat key-prefix-major row mask")
-            selections = selections.reshape(key_prefix_count, row_count)
+            if selections.ndim != 1 or selections.size != object_count * row_count:
+                raise ValueError("Key selection must be a flat object-major row mask")
+            selections = selections.reshape(object_count, row_count)
         if not row_count:
-            return LayerwiseSelection(self.bulk, (None,) * key_prefix_count, 0)
+            return LayerwiseSelection((None,) * object_count, 0)
 
-        selections_by_prefix: list[_PrefixSelection | None] = []
+        selections_by_object: list[_ObjectSelection | None] = []
         shared_ids = None
         selected_row_count = 0
-        for key_prefix_index, prefix_keys in enumerate(keys):
+        for object_index, object_keys in enumerate(keys):
             selected_rows = None
             if selections is not None:
-                selected_count = np.count_nonzero(selections[key_prefix_index])
+                selected_count = np.count_nonzero(selections[object_index])
                 if not selected_count:
-                    selections_by_prefix.append(None)
+                    selections_by_object.append(None)
                     continue
                 if selected_count != row_count:
-                    selected_rows = np.flatnonzero(selections[key_prefix_index])
+                    selected_rows = np.flatnonzero(selections[object_index])
             if selected_rows is None:
                 if shared_ids is None:
                     shared_ids = ids.copy()
                     shared_ids.flags.writeable = False
                 selected_block_ids = shared_ids
-                selected_prefix_keys = tuple(prefix_keys)
+                selected_object_keys = tuple(object_keys)
             else:
                 selected_block_ids = ids[selected_rows]
                 selected_block_ids.flags.writeable = False
-                selected_prefix_keys = tuple(prefix_keys[row] for row in selected_rows)
-            selections_by_prefix.append(_PrefixSelection(selected_prefix_keys, selected_block_ids))
+                selected_object_keys = tuple(object_keys[row] for row in selected_rows)
+            selections_by_object.append(_ObjectSelection(selected_object_keys, selected_block_ids))
             selected_row_count += len(selected_block_ids)
-        return LayerwiseSelection(self.bulk, tuple(selections_by_prefix), selected_row_count)
+        return LayerwiseSelection(tuple(selections_by_object), selected_row_count)
 
     def arguments(self, selection: LayerwiseSelection, *, layer_id: int) -> LayerTransferArguments:
         """Combine selected keys/block IDs with this layer's cached transfer layouts.
 
-        The selection must belong to the same Bulk mapping instance.
+        The caller supplies the selection prepared for this group's key axes.
         Absent or empty layers and unselected objects produce no arguments.
         Each returned Python row is independently mutable; cached layouts and
         prepared selections remain unchanged across Load/Store and repeated calls.
         """
-        if selection.bulk is not self.bulk:
-            raise ValueError("Prepared selections belong to a different Bulk mapping")
         layer = self.layer_layouts.get(layer_id)
         if not selection.selected_row_count or layer is None:
             return [], [], [], []
@@ -221,7 +251,7 @@ class LayerwiseMapping:
         lengths: list[list[int]] = []
         offsets: list[list[int]] = []
         for layout in layer:
-            selected = selection.by_key_prefix[layout.key_prefix_index]
+            selected = selection.by_object[layout.object_index]
             if selected is None:
                 continue
             segments = layout.local_memory_segments

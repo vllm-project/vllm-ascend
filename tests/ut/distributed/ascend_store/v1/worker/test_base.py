@@ -6,6 +6,7 @@ import logging
 import threading
 from concurrent.futures import BrokenExecutor, wait
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -52,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import KeyRangeLayerwiseWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
     TransferSource,
 )
@@ -64,7 +66,9 @@ def test_worker_mapping_failure_precedes_registration_and_closes_backend(monkeyp
     backend = RecordingBackend()
     topology, resources = make_resources(backend, physical_layers=(0,))
     caches = make_caches(topology)
-    monkeypatch.setattr(worker_base, "BulkMapping", MagicMock(side_effect=RuntimeError("mapping binding failed")))
+    monkeypatch.setattr(
+        worker_base.BulkMapping, "__init__", MagicMock(side_effect=RuntimeError("mapping binding failed"))
+    )
     worker = BulkWorker(topology, resources, reachability=make_reachability(topology))
     with pytest.raises(RuntimeError, match="mapping binding failed"):
         worker.bind_kv_caches(caches)
@@ -83,6 +87,27 @@ def test_invalid_tp_tensor_geometry_fails_before_native_registration() -> None:
         worker.bind_kv_caches(make_caches(topology))
     assert backend.calls == [("backend_close",)]
     assert resources.kv_caches is None
+
+
+@pytest.mark.parametrize("phase", ("naming", "object_layout"))
+def test_layerwise_capability_binding_failure_precedes_registration_and_closes_backend(phase):
+    backend = RecordingBackend()
+    topology = make_topology(physical_layers=(0,))
+    resources = KVPoolResources(backend, make_backend_spec(), 8, topology.groups)
+    fail = Mock(side_effect=RuntimeError("capability binding failed"))
+    worker = KeyRangeLayerwiseWorker(
+        topology,
+        resources,
+        reachability=make_reachability(topology),
+        key_builder=SimpleNamespace(bind=fail) if phase == "naming" else None,
+        object_layout_factory=fail if phase == "object_layout" else None,
+    )
+    with pytest.raises(RuntimeError, match="capability binding failed"):
+        worker.bind_kv_caches(make_caches(topology))
+    fail.assert_called_once()
+    assert backend.calls == [("validate_layerwise_support",), ("backend_close",)]
+    assert resources.kv_caches is None
+    assert not worker._execution_started
 
 
 def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None:

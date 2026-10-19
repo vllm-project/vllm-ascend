@@ -19,8 +19,8 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import mapping
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
-    bulk,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import bulk
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.local_layout import (
     head_slicing,
     layer_partitioning,
 )
@@ -33,16 +33,21 @@ class MappingTests(unittest.TestCase):
                 case = make_case(head_slices=head_slices, pp_layer_counts=(2, 2) if pp else None, tp_rank=1)
                 bound = case.bind()
                 heads = head_slices or 1
-                self.assertEqual(len(bound.key_prefixes), heads * (2 if pp else 1))
+                self.assertEqual(len(bound.naming.key_prefixes), heads * (2 if pp else 1))
 
                 if pp:
-                    self.assertEqual(bound.physical_layer_ids_by_key_prefix, ((0, 1),) * heads + ((2, 3),) * heads)
+                    self.assertEqual(
+                        tuple(obj.physical_layer_ids for obj in bound.local.objects),
+                        ((0, 1),) * heads + ((2, 3),) * heads,
+                    )
                 else:
-                    self.assertEqual(bound.physical_layer_ids_by_key_prefix, ((0, 1, 2, 3),) * heads)
+                    self.assertEqual(
+                        tuple(obj.physical_layer_ids for obj in bound.local.objects), ((0, 1, 2, 3),) * heads
+                    )
                 self.assertEqual(len(bound.lookup_keys(["hash"])), case.topology.pp_size * 4)
                 for pp_rank in range(2 if pp else 1):
                     for head in range(heads):
-                        prefix = bound.key_prefixes[pp_rank * heads + head]
+                        prefix = bound.naming.key_prefixes[pp_rank * heads + head]
                         self.assertIn(f"@pp_rank:{pp_rank}@", prefix)
                         self.assertIn(f"@head_or_tp_rank:{heads + head}@", prefix)
 
@@ -53,16 +58,16 @@ class MappingTests(unittest.TestCase):
         combined = case.bind()
         self.assertEqual(len(original.lookup_keys(["a"])), 4)
         self.assertEqual(len(combined.lookup_keys(["a"])), 8)
-        self.assertEqual(combined.physical_layer_ids_by_key_prefix, ((0, 1),) * 2 + ((2, 3),) * 2)
+        self.assertEqual(tuple(obj.physical_layer_ids for obj in combined.local.objects), ((0, 1),) * 2 + ((2, 3),) * 2)
         for key, layers, size in zip(
-            combined.key_prefixes,
-            combined.physical_layer_ids_by_key_prefix,
-            combined.object_sizes_bytes_by_key_prefix,
+            combined.naming.key_prefixes,
+            tuple(obj.physical_layer_ids for obj in combined.local.objects),
+            tuple(obj.payload_bytes for obj in combined.local.objects),
             strict=True,
         ):
             pp_rank = 0 if layers == (0, 1) else 1
             self.assertIn(f"@pp_rank:{pp_rank}@", key)
-            self.assertEqual(size, original.object_sizes_bytes_by_key_prefix[0] // 2)
+            self.assertEqual(size, tuple(obj.payload_bytes for obj in original.local.objects)[0] // 2)
         required = [prefix_keys[0] for prefix_keys in combined.lookup_keys(["a"])]
         present = set(prefix_keys[0] for prefix_keys in original.lookup_keys(["a"]))
         self.assertFalse(all(key in present for key in required))  # Missing PP1 cannot be a complete hit.
@@ -80,7 +85,7 @@ class MappingTests(unittest.TestCase):
             left, right = (case.bind() for case in cases)
             self.assertEqual(left.keys(["hash"]), right.keys(["hash"]))
             expected_first_head = head_slices or 1
-            self.assertIn(f"@head_or_tp_rank:{expected_first_head}@", left.key_prefixes[0])
+            self.assertIn(f"@head_or_tp_rank:{expected_first_head}@", left.naming.key_prefixes[0])
             self.assertNotEqual(left.arguments(left.keys(["h"]), [0])[1], right.arguments(right.keys(["h"]), [0])[1])
             lookup = left.lookup_keys(["h"])
             self.assertEqual(len(lookup), 8)
@@ -93,13 +98,13 @@ class MappingTests(unittest.TestCase):
             case.topology.transfer_groups[0].key_metadata.dcp_rank = 1
             with patch.object(PoolKey, "to_string", autospec=True, side_effect=PoolKey.to_string) as encode:
                 bound = case.bind()
-            self.assertEqual(encode.call_count, len(bound.lookup_key_prefixes))
-            for index, prefix in enumerate(bound.key_prefixes):
+            self.assertEqual(encode.call_count, len(bound.naming.lookup_key_prefixes))
+            for index, prefix in enumerate(bound.naming.key_prefixes):
                 pp_rank = index // (head_slices or 1) if pp_layer_counts else 1
                 self.assertIn(f"@pp_rank:{pp_rank}@", prefix)
                 self.assertIn("@dcp:1@", prefix)
                 self.assertIn(f"@head_or_tp_rank:{(head_slices or 1) + index % (head_slices or 1)}@", prefix)
-                canonical = next(value for value in bound.lookup_key_prefixes if value == prefix)
+                canonical = next(value for value in bound.naming.lookup_key_prefixes if value == prefix)
                 self.assertIs(prefix, canonical)
 
     def test_producer_and_consumer_store_the_same_object_bytes_with_replicas(self):
@@ -183,7 +188,9 @@ class MappingTests(unittest.TestCase):
                     )
                     actual_keys, addresses, lengths = transfer.arguments(keys, ids, selected_keys=mask)
                     expected_keys, expected_bytes = [], []
-                    for prefix_index, layers in enumerate(transfer.physical_layer_ids_by_key_prefix):
+                    for prefix_index, layers in enumerate(
+                        tuple(obj.physical_layer_ids for obj in transfer.local.objects)
+                    ):
                         for row, block_id in enumerate(ids):
                             if mask is not None and not mask[prefix_index * 9 + row]:
                                 continue
@@ -197,7 +204,7 @@ class MappingTests(unittest.TestCase):
                     )
                     comparisons += 1
                 full = transfer.arguments(transfer.keys(["full"]), [0])
-                self.assertEqual(tuple(map(sum, full[2])), transfer.object_sizes_bytes_by_key_prefix)
+                self.assertEqual(tuple(map(sum, full[2])), tuple(obj.payload_bytes for obj in transfer.local.objects))
         self.assertEqual(comparisons, 288)
 
     def test_pp_store_load_round_trip_both_directions(self):
@@ -303,7 +310,9 @@ class MappingTests(unittest.TestCase):
                     _, addresses, lengths = transfer.arguments(keys, ids, selected_keys=mask)
                     expected = [
                         expected_head_bytes(case, layers, prefix_index % 2, block_id)
-                        for prefix_index, layers in enumerate(transfer.physical_layer_ids_by_key_prefix)
+                        for prefix_index, layers in enumerate(
+                            tuple(obj.physical_layer_ids for obj in transfer.local.objects)
+                        )
                         for row, block_id in enumerate(ids)
                         if mask is None or mask[prefix_index * len(ids) + row]
                     ]
@@ -317,7 +326,7 @@ class MappingTests(unittest.TestCase):
         for transfer in (bound, bound):
             keys = transfer.keys(["a", "b", "c"])
             _, addresses, lengths = transfer.arguments(keys, [0, 2, 1])
-            for prefix_index, layers in enumerate(transfer.physical_layer_ids_by_key_prefix):
+            for prefix_index, layers in enumerate(tuple(obj.physical_layer_ids for obj in transfer.local.objects)):
                 entries = [2 * layer + kind for layer in layers for kind in range(2)]
                 for row, block_id in enumerate((0, 2, 1)):
                     index = prefix_index * 3 + row
@@ -336,13 +345,13 @@ class MappingTests(unittest.TestCase):
             bound = case.bind()
         self.assertEqual(len(geometry.call_args.args[-1]), 9)  # Layer boundaries also need Entry -> segment boundaries.
 
-        self.assertEqual(bound.physical_layer_ids_by_key_prefix, ((4, 5, 6, 7),) * 2)
+        self.assertEqual(tuple(obj.physical_layer_ids for obj in bound.local.objects), ((4, 5, 6, 7),) * 2)
         case.topology.groups[0].key_metadata.pp_rank = 0
         bound = case.bind()
 
-        self.assertTrue(all("@pp_rank:2@" in prefix for prefix in bound.key_prefixes))
+        self.assertTrue(all("@pp_rank:2@" in prefix for prefix in bound.naming.key_prefixes))
         case = make_case(layers=(1, 3, 5, 7), pp_layer_counts=(4, 4))
-        self.assertEqual(case.bind().physical_layer_ids_by_key_prefix, ((1, 3), (5, 7)))
+        self.assertEqual(tuple(obj.physical_layer_ids for obj in case.bind().local.objects), ((1, 3), (5, 7)))
 
     def test_pp_partitioning_does_not_rescan_layers_per_rank(self):
         class CountedLayers(tuple):
@@ -387,13 +396,17 @@ class MappingTests(unittest.TestCase):
             ):
                 bound = case.bind()
             self.assertEqual(
-                sum(len(segments.block_zero_addresses) for segments in bound.local_memory_segments_by_key_prefix), 8
+                sum(
+                    len(segments.block_zero_addresses)
+                    for segments in tuple(obj.memory_segments for obj in bound.local.objects)
+                ),
+                8,
             )
             self.assertEqual(
                 bound.arguments(bound.keys(["h"]), [0])[2],
                 [
                     [case.registration_arrays[1][3][2 * layer + kind] for layer in layers for kind in range(2)]
-                    for layers in bound.physical_layer_ids_by_key_prefix
+                    for layers in tuple(obj.physical_layer_ids for obj in bound.local.objects)
                 ],
             )
 
@@ -416,7 +429,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(adds.call_count, 64)
         self.assertEqual(uniques.call_count, 0)  # No logical-coverage metadata is built.
         self.assertTrue(all("out" in call.kwargs for call in adds.call_args_list))
-        for index, segments in enumerate(bound.local_memory_segments_by_key_prefix):
+        for index, segments in enumerate(tuple(obj.memory_segments for obj in bound.local.objects)):
             self.assertTrue(
                 np.shares_memory(
                     segments.block_zero_addresses,
@@ -425,11 +438,11 @@ class MappingTests(unittest.TestCase):
             )
             self.assertIs(
                 segments.group_block_strides_bytes,
-                bound.local_memory_segments_by_key_prefix[index // 4 * 4].group_block_strides_bytes,
+                tuple(obj.memory_segments for obj in bound.local.objects)[index // 4 * 4].group_block_strides_bytes,
             )
             self.assertIs(
                 segments.segment_lengths_bytes,
-                bound.local_memory_segments_by_key_prefix[index // 4 * 4].segment_lengths_bytes,
+                tuple(obj.memory_segments for obj in bound.local.objects)[index // 4 * 4].segment_lengths_bytes,
             )
             for field in fields(segments):
                 value = getattr(segments, field.name)
@@ -473,7 +486,9 @@ class MappingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 transfer.arguments(transfer.keys(["a"]), [[0]])
             with self.assertRaises(ValueError):
-                transfer.arguments(transfer.keys(["a"]), [0], selected_keys=[True] * (len(transfer.key_prefixes) + 1))
+                transfer.arguments(
+                    transfer.keys(["a"]), [0], selected_keys=[True] * (len(transfer.naming.key_prefixes) + 1)
+                )
             with self.assertRaises(ValueError):
                 transfer.arguments(transfer.keys(["a", "b"]), [0])
 
@@ -503,8 +518,8 @@ class MappingTests(unittest.TestCase):
         for group_id, (hashes, ids, mask) in inputs.items():
             with patch.object(head_slicing, "inspect_entries", side_effect=AssertionError("unused TP binding")):
                 bound = case.bind(group_id=group_id)
-            self.assertEqual(bound.group_id, group_id)
-            self.assertEqual(bound.hash_block_size, 8)
+            self.assertEqual(bound.local.group_id, group_id)
+            self.assertEqual(bound.local.hash_block_size, 8)
 
             transfer = bound
             keys = transfer.keys(hashes)
@@ -520,13 +535,17 @@ class MappingTests(unittest.TestCase):
                 [read_bytes(address, length) for address, length in zip(addresses, lengths, strict=True)],
                 [
                     expected_group_bytes(
-                        case, group_id, transfer.physical_layer_ids_by_key_prefix[prefix_index], ids[row]
+                        case,
+                        group_id,
+                        tuple(obj.physical_layer_ids for obj in transfer.local.objects)[prefix_index],
+                        ids[row],
                     )
                     for prefix_index, row in selected
                 ],
             )
             self.assertEqual(
-                list(map(sum, lengths)), [transfer.object_sizes_bytes_by_key_prefix[p] for p, _ in selected]
+                list(map(sum, lengths)),
+                [tuple(obj.payload_bytes for obj in transfer.local.objects)[p] for p, _ in selected],
             )
             self.assertEqual(transfer.arguments(transfer.keys([]), []), ([], [], []))
             self.assertEqual(transfer.arguments(keys, ids, selected_keys=[False] * len(mask)), ([], [], []))
@@ -544,11 +563,11 @@ class MappingTests(unittest.TestCase):
                     [read_bytes(address, length) for address, length in zip(addresses, lengths, strict=True)],
                     [
                         expected_group_bytes(case, group_id, layers, block_id)
-                        for layers in transfer.physical_layer_ids_by_key_prefix
+                        for layers in tuple(obj.physical_layer_ids for obj in transfer.local.objects)
                         for block_id in ids
                     ],
                 )
-                for segments in transfer.local_memory_segments_by_key_prefix:
+                for segments in tuple(obj.memory_segments for obj in transfer.local.objects):
                     for field in fields(segments):
                         value = getattr(segments, field.name)
                         if isinstance(value, np.ndarray):
@@ -571,19 +590,19 @@ class MappingTests(unittest.TestCase):
             self.assertEqual(left.keys(["h"]) == right.keys(["h"]), group_id == 3)
             for bound, rank in ((left, 2), (right, 3)):
                 key_rank = rank // 2 if group_id == 3 else rank
-                for prefix in bound.key_prefixes:
+                for prefix in bound.naming.key_prefixes:
                     self.assertIn(f"@group:{group_id}@", prefix)
                     self.assertIn(f"@cache_family:{family}@", prefix)
                     self.assertIn(f"@head_or_tp_rank:{key_rank}@", prefix)
-                    self.assertIn(prefix, bound.lookup_key_prefixes)
+                    self.assertIn(prefix, bound.naming.lookup_key_prefixes)
 
     def test_single_align_group_uses_whole_objects_and_raw_tp_ranks(self):
         case = make_hybrid_case(tp_rank=3)
         case.topology.transfer_groups = (case.topology.transfer_groups[0],)
         bound = case.bind()
-        self.assertEqual(bound.group_id, 9)
+        self.assertEqual(bound.local.group_id, 9)
         self.assertEqual(len(bound.lookup_keys(["h"])), 8)
-        self.assertIn("@head_or_tp_rank:3@", bound.key_prefixes[0])
+        self.assertIn("@head_or_tp_rank:3@", bound.naming.key_prefixes[0])
         _, addresses, lengths = bound.arguments(bound.keys(["h"]), [1])
         self.assertEqual(read_bytes(addresses[0], lengths[0]), expected_group_bytes(case, 9, (1, 3), 1))
 
@@ -596,10 +615,11 @@ class MappingTests(unittest.TestCase):
         for group_id in (3, 9):
             bound = case.bind(group_id=group_id)
             self.assertEqual(len(bound.lookup_keys(["h"])), 4)
-            self.assertIn("@head_or_tp_rank:1@", bound.key_prefixes[0])
+            self.assertIn("@head_or_tp_rank:1@", bound.naming.key_prefixes[0])
             _, addresses, lengths = bound.arguments(bound.keys(["h"]), [2])
             self.assertEqual(
-                read_bytes(addresses[0], lengths[0]), expected_group_bytes(case, group_id, bound.physical_layer_ids, 2)
+                read_bytes(addresses[0], lengths[0]),
+                expected_group_bytes(case, group_id, bound.local.physical_layer_ids, 2),
             )
 
     def test_hybrid_pp_round_trip_preserves_group_objects_in_both_directions(self):

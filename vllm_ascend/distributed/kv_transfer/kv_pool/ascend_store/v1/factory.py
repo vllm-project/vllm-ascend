@@ -9,11 +9,11 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import uses_hybrid_kv_cache
 
-from .backend import LayerwiseAccessKind, LayerwiseObjectLayoutKind, resolve_backend_spec
+from .backend import LayerwiseAccessKind, resolve_backend_spec
+from .infrastructure.configuration.naming import resolve_key_naming_config
 from .infrastructure.configuration.resolve import resolve_kv_pool_config, resolve_worker_topology
 from .infrastructure.configuration.topology import KVPoolTopology
 from .infrastructure.execution.collective import StoreCollective
-from .infrastructure.mapping.gva_layout import GVAObjectLayout
 from .infrastructure.protocol.rpc import LookupClient
 from .infrastructure.reachability import HybridReachability, UnitaryReachability
 from .infrastructure.resources import KVPoolResources
@@ -27,7 +27,6 @@ from .scheduler import (
 from .worker.base import KVPoolWorker
 from .worker.bulk import BulkWorker
 from .worker.layerwise import GVALayerwiseWorker, KeyRangeLayerwiseWorker
-from .worker.layerwise.shared_store import SharedGVAWrites
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -88,31 +87,21 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
     if config.use_layerwise and backend_spec.layerwise_access is None:
         raise TypeError("Layerwise route requires a concrete Backend data plane")
     key_builder = None
-    object_layout = None
-    if config.use_layerwise:
-        if backend_spec.layerwise_key_factory is not None:
-            key_builder = backend_spec.layerwise_key_factory(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                model_name=topology.transfer_groups[0].key_metadata.model_name,
-                use_hybrid=uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups)
-                or len(kv_cache_config.kv_cache_groups) > 1,
-                grouped_block_size=[spec.block_size for spec in config.group_specs],
-            )
-        if backend_spec.layerwise_object_layout is LayerwiseObjectLayoutKind.GLOBAL_GVA:
-            model = vllm_config.model_config
-            stage_start, _ = model.get_layers_start_end_indices(vllm_config.parallel_config)
-            shared_shards = topology.dcp_size > 1 and topology.put_step > 1
-            object_layout = GVAObjectLayout(
-                model.get_total_num_hidden_layers(),
-                max(
-                    model.get_num_layers(vllm_config.parallel_config),
-                    len({layer.physical_layer_id for group in topology.transfer_groups for layer in group.layers}),
-                ),
-                stage_start if topology.pp_size > 1 else 0,
-                topology.dcp_size if shared_shards else 1,
-                topology.transfer_groups[0].key_metadata.dcp_rank if shared_shards else 0,
-            )
+    if config.use_layerwise and backend_spec.layerwise_key_factory is not None:
+        naming_config = resolve_key_naming_config(
+            vllm_config,
+            kv_cache_config,
+            model_name=topology.transfer_groups[0].key_metadata.model_name,
+            use_hybrid=uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups)
+            or len(kv_cache_config.kv_cache_groups) > 1,
+            group_block_sizes=tuple(spec.block_size for spec in config.group_specs),
+            requires_layout_identity=backend_spec.key_requires_layout_identity,
+        )
+        key_builder = backend_spec.layerwise_key_factory(naming_config)
+    object_layout_factory = None
+    layout_factory = backend_spec.layerwise_layout_factory
+    if config.use_layerwise and layout_factory is not None:
+        object_layout_factory = layout_factory(topology)
     align_shared_storage = (
         config.use_layerwise
         and backend_spec.layerwise_access is LayerwiseAccessKind.GVA
@@ -134,11 +123,10 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
         )
         if config.use_layerwise:
             if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
-                shared_writes = None
-                if config.store_enabled and object_layout is not None and object_layout.shard_count > 1:
-                    collective = StoreCollective()
+                collective = None
+                if config.store_enabled and topology.cp_partition.object_shard_count > 1:
+                    collective = StoreCollective(topology.tp_global_ranks)
                     resources.bind_store_collective(collective)
-                    shared_writes = SharedGVAWrites(topology, collective)
                 return GVALayerwiseWorker(
                     topology,
                     resources,
@@ -147,8 +135,8 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                     kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                     layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                     key_builder=key_builder,
-                    object_layout=object_layout,
-                    shared_writes=shared_writes,
+                    object_layout_factory=object_layout_factory,
+                    store_collective=collective,
                 )
             return KeyRangeLayerwiseWorker(
                 topology,
@@ -158,6 +146,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                 kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                 layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                 key_builder=key_builder,
+                object_layout_factory=object_layout_factory,
             )
         return BulkWorker(
             topology,

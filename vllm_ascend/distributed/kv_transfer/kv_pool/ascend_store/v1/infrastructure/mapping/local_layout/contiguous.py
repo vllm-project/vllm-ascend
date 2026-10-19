@@ -2,7 +2,8 @@
 
 import numpy as np
 
-from .types import LocalMemorySegments, UInt64Array
+from ..types import UInt64Array
+from .types import LocalMemorySegments
 
 
 def bind_segments(

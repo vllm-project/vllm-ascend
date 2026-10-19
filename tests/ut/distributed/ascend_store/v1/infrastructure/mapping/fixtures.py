@@ -20,8 +20,33 @@ class MappingCase:
 
     def bind(self, module=mapping, *, group_id=None):
         options = {} if group_id is None else {"group_id": group_id}
-        return module.BulkMapping(
+        # Snapshot compatibility belongs only to the paired benchmark fixture.
+        bind = getattr(module, "bind_mapping", module.BulkMapping)
+        binding = bind(
             self.topology, *self.registration_arrays, kv_cache_layout=self.layout, kv_caches=self.caches, **options
+        )
+        return module.BulkMapping(binding) if hasattr(module, "bind_mapping") else binding
+
+    def bind_layers(self, module=mapping, *, group_id=None, **options):
+        if module is not mapping:
+            # Compare complete initialization, including the historical local
+            # binding, instead of timing only the old Layerwise view constructor.
+            bind = getattr(module, "bind_mapping", module.BulkMapping)
+            bound = bind(
+                self.topology,
+                *self.registration_arrays,
+                group_id=group_id,
+                kv_cache_layout=self.layout,
+                kv_caches=self.caches,
+            )
+            return module.LayerwiseMapping(bound, **options)
+        return module.LayerwiseMapping(
+            self.topology,
+            *self.registration_arrays,
+            group_id=group_id,
+            kv_cache_layout=self.layout,
+            kv_caches=self.caches,
+            **options,
         )
 
 

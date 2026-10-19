@@ -35,12 +35,13 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from .types import LocalMemorySegments, UInt64Array
+from ..types import UInt64Array
+from .types import LocalMemorySegments
 
 if TYPE_CHECKING:
     import torch
 
-    from ..configuration.topology import KVPoolGroupTopology
+    from ...configuration.topology import KVPoolGroupTopology
 
 
 @dataclass(frozen=True, slots=True)

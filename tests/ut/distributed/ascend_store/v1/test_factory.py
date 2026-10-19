@@ -42,7 +42,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
     resolve as configuration,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BulkMapping
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
+    BulkMapping,
+    LayerwiseMapping,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.object_layout import (
+    build_default_object_layouts,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
     LookupRequest,
@@ -107,6 +113,76 @@ def test_missing_layerwise_data_plane_is_rejected_before_backend_creation(monkey
     )
     with pytest.raises(TypeError, match="concrete Backend data plane"):
         factory_module.create_kv_pool_worker(config, SimpleNamespace(num_blocks=8))
+    create_backend.assert_not_called()
+
+
+def test_backend_supplied_binders_are_resolved_before_registration_and_applied_once(configuration_case, monkeypatch):
+    config, cache = configuration_case
+    topology = make_topology(physical_layers=(0,))
+    backend = FakeBackend()
+    names = SimpleNamespace(
+        keys=lambda _hashes: (("custom-wire-key",),), lookup_keys=lambda _hashes: (("custom-wire-key",),)
+    )
+    bind_names = Mock(return_value=names)
+    make_names = Mock(return_value=SimpleNamespace(bind=bind_names))
+    bind_objects = Mock(wraps=build_default_object_layouts)
+    make_objects = Mock(return_value=bind_objects)
+    spec = BackendSpec(
+        "custom",
+        lambda *_args, **_kwargs: backend,
+        LayerwiseAccessKind.KEY_RANGE,
+        False,
+        layerwise_key_factory=make_names,
+        layerwise_layout_factory=make_objects,
+    )
+    pool = make_pool_config(topology, "custom", use_layerwise=True)
+    monkeypatch.setattr(factory_module, "resolve_kv_pool_config", lambda *_: pool)
+    monkeypatch.setattr(factory_module, "resolve_worker_topology", lambda *_: topology)
+    monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _: spec)
+    worker = factory_module.create_kv_pool_worker(config, cache)
+    try:
+        make_names.assert_called_once()
+        make_objects.assert_called_once_with(topology)
+        bind_names.assert_not_called()
+        bind_objects.assert_not_called()
+        caches = {
+            layer.layer_names[0]: (torch.zeros(8, 4), torch.zeros(8, 4)) for layer in topology.transfer_groups[0].layers
+        }
+        worker.bind_kv_caches(caches)
+        local = worker._mappings[0].local
+        bind_names.assert_called_once_with(
+            0,
+            tuple(source.coordinate for source in local.objects),
+            lookup_head_count=topology.tp_partition.key_rank_count,
+        )
+        bind_objects.assert_called_once_with(local)
+        assert worker._mappings[0].naming is names
+        assert worker._mappings[0].naming.keys((b"a",)) == (("custom-wire-key",),)
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("phase", ("naming", "object_layout"))
+def test_binding_policy_resolution_failure_does_not_create_backend(configuration_case, monkeypatch, phase):
+    config, cache = configuration_case
+    topology = make_topology(physical_layers=(0,))
+    pool = make_pool_config(topology, "custom", use_layerwise=True)
+    create_backend = Mock(side_effect=AssertionError("Backend must not be acquired"))
+    fail_policy = Mock(side_effect=RuntimeError("wire policy resolution failed"))
+    spec = BackendSpec(
+        "custom",
+        create_backend,
+        LayerwiseAccessKind.KEY_RANGE,
+        False,
+        layerwise_key_factory=fail_policy if phase == "naming" else None,
+        layerwise_layout_factory=fail_policy if phase == "object_layout" else None,
+    )
+    monkeypatch.setattr(factory_module, "resolve_kv_pool_config", lambda *_: pool)
+    monkeypatch.setattr(factory_module, "resolve_worker_topology", lambda *_: topology)
+    monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _: spec)
+    with pytest.raises(RuntimeError, match="wire policy resolution failed"):
+        factory_module.create_kv_pool_worker(config, cache)
+    fail_policy.assert_called_once()
     create_backend.assert_not_called()
 
 
@@ -176,7 +252,9 @@ def test_factory_selects_source_protection_by_route(
                 **extra,
             },
         ),
-        parallel_config=SimpleNamespace(world_size=2, tensor_parallel_size=2),
+        parallel_config=SimpleNamespace(
+            world_size=2, tensor_parallel_size=2, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
         model_config=SimpleNamespace(
             use_mla=spec_kind == "mla",
             get_total_num_kv_heads=lambda: 2,
@@ -379,7 +457,10 @@ def factory_worker(monkeypatch, name, layerwise, topology, objects):
                 (torch.arange(8 * 5, dtype=torch.int16).reshape(8, 5) + layer.physical_layer_id * 100)[:, :2],
             )
     worker.bind_kv_caches(caches)
-    assert all(isinstance(mapping, BulkMapping) for mapping in worker._mappings.values())
+    assert all(
+        isinstance(mapping, LayerwiseMapping if layerwise else BulkMapping) for mapping in worker._mappings.values()
+    )
+    assert not hasattr(worker, "_layer_mappings") and not hasattr(worker, "_bulk_mappings")
     return worker, caches, sdk
 
 
@@ -427,7 +508,7 @@ def test_factory_default_keys_share_complete_objects(
         assert all(completion.evidence.succeeded for completion in completions)
         assert writer.take_released_store_job_ids() == {17}
         writer.end_step()
-        keys = {mapping.keys((b"a",))[0][0] for mapping in writer._mappings.values()}
+        keys = {mapping.naming.keys((b"a",))[0][0] for mapping in writer._mappings.values()}
         assert set(objects) == keys
         assert all(ctypes.sizeof(value) == 40 for value in objects.values())
         assert all(f"@pp_rank:{pp_rank}@" in key for key in keys)
@@ -438,7 +519,7 @@ def test_factory_default_keys_share_complete_objects(
                 for layer in topology.groups[group_id].layers
                 for tensor in source[layer.layer_names[0]]
             )
-            assert objects[mapping.keys((b"a",))[0][0]].raw == expected_bytes
+            assert objects[mapping.naming.keys((b"a",))[0][0]].raw == expected_bytes
     finally:
         writer.close()
     assert write_sdk.closed
@@ -448,7 +529,7 @@ def test_factory_default_keys_share_complete_objects(
         for tensors in destination.values():
             for tensor in tensors:
                 tensor.fill_(-1)
-        assert {mapping.keys((b"a",))[0][0] for mapping in reader._mappings.values()} == keys
+        assert {mapping.naming.keys((b"a",))[0][0] for mapping in reader._mappings.values()} == keys
         if pp_rank == 0:
             assert reader.lookup(LookupRequest(0, 4, (0, 3), (b"a",))).available_end_token == 4
         target_ids = tuple((6,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
@@ -485,7 +566,7 @@ def test_speculative_factories_follow_upstream_eagle_policy(
     spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _: spec)
     for name in ("get_tp_group", "get_pp_group"):
-        monkeypatch.setattr(configuration, name, lambda: SimpleNamespace(rank_in_group=0))
+        monkeypatch.setattr(configuration, name, lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
     monkeypatch.setattr(factory_module, "LookupClient", lambda *_args, **_kwargs: FakeLookupClient(8))
     scheduler = factory_module.create_kv_pool_scheduler(config, cache, "unused")
     worker = factory_module.create_kv_pool_worker(config, cache)
@@ -508,7 +589,7 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: object())
     monkeypatch.setattr(configuration.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(configuration, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
-    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
     monkeypatch.setattr(configuration, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(factory_module, "LookupClient", lambda _address, **_kwargs: SimpleNamespace(close=lambda: None))
 
@@ -564,7 +645,12 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
             SimpleNamespace(kv_cache_spec=window_spec, layer_names=["model.layers.1"], is_eagle_group=False)
         )
     tracked = {}
-    for name in ("resolve_dcp_kv_cache_spec", "_resolve_tp_partition", "resolve_consumer_pipeline_partitions"):
+    for name in (
+        "resolve_dcp_kv_cache_spec",
+        "_resolve_tp_partition",
+        "resolve_consumer_pipeline_partitions",
+        "resolve_object_partitions",
+    ):
         tracked[name] = Mock(wraps=getattr(configuration, name))
         monkeypatch.setattr(configuration, name, tracked[name])
     block_sizes = Mock(wraps=configuration.kv_cache_utils.resolve_kv_cache_block_sizes)
@@ -577,7 +663,7 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
         return result
 
     monkeypatch.setattr(factory_module, "resolve_kv_pool_config", resolve_once)
-    rank = Mock(return_value=SimpleNamespace(rank_in_group=0))
+    rank = Mock(return_value=SimpleNamespace(rank_in_group=0, ranks=[0]))
     for name in ("get_tp_group", "get_pp_group", "get_dcp_group"):
         monkeypatch.setattr(configuration, name, rank)
     backend = FakeBackend()
@@ -595,6 +681,7 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
         assert tracked["resolve_dcp_kv_cache_spec"].call_count == group_count
         tracked["_resolve_tp_partition"].assert_called_once()
         tracked["resolve_consumer_pipeline_partitions"].assert_called_once()
+        tracked["resolve_object_partitions"].assert_called_once()
         block_sizes.assert_called_once()
         config.model_config.get_total_num_kv_heads.assert_called_once()
         if side == "scheduler":
@@ -603,6 +690,8 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
         else:
             assert all(group.kv_cache_spec is admitted.group_specs[group.group_id] for group in owner._topology.groups)
             assert owner._topology.tp_partition is admitted.tp_partition
+            assert owner._topology.pp_partition is admitted.pp_partition
+            assert owner._topology.cp_partition is admitted.cp_partition
     finally:
         owner.close()
 

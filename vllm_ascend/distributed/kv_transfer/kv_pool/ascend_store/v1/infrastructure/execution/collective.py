@@ -11,17 +11,15 @@ from datetime import timedelta
 from typing import Any
 
 import torch.distributed as dist
-from vllm.distributed import get_tp_group
 
 STORE_COLLECTIVE_TIMEOUT_SECONDS = 60
 
 
 class StoreCollective:
-    def __init__(self) -> None:
-        ranks = get_tp_group().ranks
+    def __init__(self, ranks: tuple[int, ...]) -> None:
         self._size = len(ranks)
         self._group = dist.new_group(
-            ranks=ranks,
+            ranks=list(ranks),
             backend="gloo",
             timeout=timedelta(seconds=STORE_COLLECTIVE_TIMEOUT_SECONDS),
             use_local_synchronization=True,

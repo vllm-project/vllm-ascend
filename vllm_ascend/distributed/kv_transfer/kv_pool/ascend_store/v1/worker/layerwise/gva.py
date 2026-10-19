@@ -9,11 +9,12 @@ import numpy as np
 from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
-from ....backend.layerwise_keys import LayerwiseKeyBuilder
 from ...backend import GVABackend, GVAObjectSessions, GVARegion
 from ...infrastructure.configuration.topology import KVPoolTopology
-from ...infrastructure.mapping import BulkMapping, LayerwiseMapping, LayerwiseSelection
-from ...infrastructure.mapping.gva_layout import GVAObjectLayout
+from ...infrastructure.execution.collective import StoreCollective
+from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
+from ...infrastructure.mapping.object_layout import ObjectLayoutFactory
+from ...infrastructure.mapping.object_naming import KeyBuilder
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..transfer.batch import KVGroupBatch, KVTransferBatch
@@ -43,12 +44,10 @@ class GVALayerwiseWorker(LayerwiseWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
-        key_builder: LayerwiseKeyBuilder | None = None,
-        object_layout: GVAObjectLayout | None = None,
-        shared_writes: SharedGVAWrites | None = None,
+        key_builder: KeyBuilder | None = None,
+        object_layout_factory: ObjectLayoutFactory | None = None,
+        store_collective: StoreCollective | None = None,
     ) -> None:
-        self._shared_writes = shared_writes
-        self._object_layout = object_layout
         backend = cast(GVABackend, resources.backend)
         sessions = backend.create_sessions()
         self._gva_backend = backend
@@ -63,20 +62,22 @@ class GVALayerwiseWorker(LayerwiseWorker):
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
             key_builder=key_builder,
+            object_layout_factory=object_layout_factory,
         )
 
-    def _create_layer_mapping(self, mapping: BulkMapping) -> LayerwiseMapping:
-        return LayerwiseMapping(mapping, self._object_layout)
+        self._shared_writes = (
+            SharedGVAWrites(self._store_writers, store_collective) if store_collective is not None else None
+        )
 
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
 
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._load_plan = prepare_layer_load(batch, self._layer_mappings, self._resolve_load_bases)
+        self._load_plan = prepare_layer_load(batch, self._mappings, self._resolve_load_bases)
         return self._load_plan.keys_by_layer
 
     def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._store_plan = prepare_layer_store(batch, self._layer_mappings, self._resolve_store_bases)
+        self._store_plan = prepare_layer_store(batch, self._mappings, self._resolve_store_bases)
         return self._store_plan.keys_by_layer
 
     def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
@@ -84,7 +85,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
         if not plan.groups:
             return _layer_load_completions(plan, layer_id, 0)
         try:
-            remote, local, sizes = materialize_layer_gva(self._layer_mappings, plan, layer_id)
+            remote, local, sizes = materialize_layer_gva(self._mappings, plan, layer_id)
             result_code = self._gva_backend.copy_from_gva(remote, local, sizes)
         except Exception as error:
             logger.error(
@@ -102,7 +103,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
         source_handed_off = False
         plan = self._prepared_store_plan()
         try:
-            remote_addresses, local_addresses, sizes = materialize_layer_gva(self._layer_mappings, plan, layer_id)
+            remote_addresses, local_addresses, sizes = materialize_layer_gva(self._mappings, plan, layer_id)
             source_ready_event.synchronize()
             source_handed_off = True
             result_code = self._gva_backend.copy_to_gva(remote_addresses, local_addresses, sizes)
