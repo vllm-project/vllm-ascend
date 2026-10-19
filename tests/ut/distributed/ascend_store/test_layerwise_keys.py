@@ -151,27 +151,6 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[16, 32],
             )
 
-    def test_runtime_only_joins_precompiled_parts(self):
-        for protocol in (mooncake_layerwise, memcache_backend):
-            builder = protocol.bind_layerwise_keys(
-                vllm_config=self.make_config(2),
-                kv_cache_config=self.make_cache_config(2),
-                model_name="model",
-                use_hybrid=True,
-                grouped_block_size=[16, 32],
-            )
-            bound = builder.bind_group(1, 1, 1, 2)
-            expected = builder.make_full_key(1, "61", 1, 1)
-            expected_lookup = tuple((key,) for key in builder.make_hit_check_keys(1, "61", 2))
-            with (
-                patch.object(mooncake_layerwise, "_hybrid_key_prefix", side_effect=AssertionError("reformat")),
-                patch.object(memcache_backend, "_full_key_prefix", side_effect=AssertionError("reformat")),
-                patch.object(mooncake_layerwise, "hybrid_layout_id", side_effect=AssertionError("rehash")),
-            ):
-                self.assertEqual(bound.keys([b"a", "61"]), ((expected, expected),))
-                self.assertEqual(bound.lookup_keys([b"a"]), expected_lookup)
-                self.assertEqual(builder.make_full_key(1, "61", 1, 1), expected)
-
     def test_mooncake_distinguishes_layouts_and_groups(self):
         config = self.make_config()
         cache = self.make_cache_config(2)

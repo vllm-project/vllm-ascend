@@ -273,6 +273,57 @@ def test_session_binding_cannot_discard_an_owned_session():
     replacement.close.assert_not_called()
 
 
+def test_execution_cleanup_waits_for_drain_and_sessions_and_retains_failure_for_retry():
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    executor = create_autospec(Executor, instance=True, spec_set=True)
+    executor.stopped = False
+    resources.bind_executors((executor,))
+    sessions = Mock()
+    sessions.close.side_effect = [RuntimeError("session cleanup failed"), None, None]
+    resources.bind_backend_sessions(sessions)
+    cleanup = Mock(side_effect=[RuntimeError("route cleanup failed"), None])
+    resources.bind_execution_cleanup(cleanup)
+    caches = make_caches(topology)
+    register_caches(resources, caches)
+
+    with pytest.raises(RuntimeError, match="Executors must stop"):
+        resources.close()
+    sessions.close.assert_not_called()
+    cleanup.assert_not_called()
+    executor.stopped = True
+    with pytest.raises(RuntimeError, match="session cleanup failed"):
+        resources.close()
+    cleanup.assert_not_called()
+    with pytest.raises(RuntimeError, match="route cleanup failed"):
+        resources.close()
+    assert resources.kv_caches is caches and not backend.closed
+    assert [call[0] for call in backend.calls] == ["register_region"]
+    resources.close()
+    resources.close()
+    assert cleanup.call_count == 2
+    assert resources.kv_caches is None and backend.closed
+    assert [call[0] for call in backend.calls] == ["register_region", "unregister_region", "backend_close"]
+
+
+@pytest.mark.parametrize("state", ("already_bound", "caches_bound", "closed"))
+def test_execution_cleanup_binding_cannot_replace_or_acquire_late(state):
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend)
+    owned, replacement = Mock(), Mock()
+    if state == "already_bound":
+        resources.bind_execution_cleanup(owned)
+    elif state == "caches_bound":
+        register_caches(resources, make_caches(topology))
+    else:
+        resources.close()
+    with pytest.raises(RuntimeError, match="bound once before KV caches"):
+        resources.bind_execution_cleanup(replacement)
+    resources.close()
+    replacement.assert_not_called()
+    assert owned.call_count == (1 if state == "already_bound" else 0)
+
+
 @pytest.mark.parametrize("layerwise", (False, True), ids=("bulk", "layerwise"))
 def test_worker_binds_real_executors_and_preserves_start_and_cleanup_order(layerwise, monkeypatch):
     worker, resources, _ = make_worker(layerwise=layerwise, async_load=True, bind=False)

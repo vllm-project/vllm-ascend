@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import BoundLayerwiseKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import BoundLayerwiseKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
     BulkMapping,
     LayerwiseMapping,

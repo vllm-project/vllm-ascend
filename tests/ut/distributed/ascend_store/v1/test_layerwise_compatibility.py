@@ -21,7 +21,6 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 )
 from tests.ut.distributed.ascend_store.v1.worker.native_copy_fixtures import ByteCopySDK, native_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -133,7 +132,6 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
     # Traffic consumes bound names and coordinates; no model/configuration rebinding is allowed.
     for owner, method in (
         (WireKeyBuilder, "bind"),
-        (LayerwiseKeyBuilder, "bind_group"),
         (protocol, "bind_layerwise_keys"),
         (memcache_layout, "bind_layer_object_span"),
         (memcache_layout, "bind_context_object_span"),

@@ -52,9 +52,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import gva as gva_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import key_range as key_range_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import transfer as layer_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.gva import worker as gva_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
     LayerStoreResult,
 )

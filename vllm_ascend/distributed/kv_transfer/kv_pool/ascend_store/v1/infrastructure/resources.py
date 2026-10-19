@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -13,7 +13,6 @@ from ..backend import (
     ObjectSessions,
     Registration,
 )
-from .execution.collective import StoreCollective
 from .execution.executor import Executor
 
 if TYPE_CHECKING:
@@ -53,12 +52,17 @@ class KVPoolResources:
         self._binding_started = False
         self._closed = False
         self._executors: tuple[Executor, ...] | None = None
-        self._store_collective: StoreCollective | None = None
+        self._execution_cleanup: Callable[[], None] | None = None
 
-    def bind_store_collective(self, collective: StoreCollective) -> None:
-        if self._closed or self._binding_started or self._store_collective is not None:
-            raise RuntimeError("Store collective must be bound once before KV caches")
-        self._store_collective = collective
+    def bind_execution_cleanup(self, close: Callable[[], None]) -> None:
+        """Retain a route-owned, retryable and idempotent close operation before work starts.
+
+        Run it only after executor drain and session cleanup, before releasing
+        registrations or the client. Retain it on failure for a later close retry.
+        """
+        if self._closed or self._binding_started or self._execution_cleanup is not None:
+            raise RuntimeError("Execution cleanup must be bound once before KV caches")
+        self._execution_cleanup = close
 
     def bind_backend_sessions(self, sessions: ObjectSessions) -> None:
         if self._closed or self._binding_started or self._backend_sessions is not None:
@@ -129,8 +133,8 @@ class KVPoolResources:
             raise RuntimeError("Executors must stop before KV resources are released")
         if self._backend_sessions is not None:
             self._backend_sessions.close()
-        if self._store_collective is not None:
-            self._store_collective.close()
+        if self._execution_cleanup is not None:
+            self._execution_cleanup()
         if self._buffer_registration is not None:
             self._buffer_registration.close()
         self.backend.close()

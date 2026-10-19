@@ -3,7 +3,6 @@
 import hashlib
 import json
 
-from ....backend.mooncake_layerwise import _block_key_prefix, _hybrid_key_prefix
 from ...infrastructure.configuration.naming import KeyNamingConfig
 from ..naming import WireKeyBuilder
 from .backend import MooncakeBackend
@@ -56,6 +55,19 @@ def create_key_builder(config: KeyNamingConfig) -> WireKeyBuilder:
     else:
         prefixes = (tuple(_block_key_prefix(config.model_name, namespace, stage) for stage in range(config.pp_size)),)
     return WireKeyBuilder(prefixes, tuple(f"@{head}" for head in range(config.tp_size)))
+
+
+def _block_key_prefix(model_name: str, namespace: str, pp_rank: int) -> str:
+    if namespace:
+        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@"
+    if pp_rank:
+        raise ValueError("Mooncake PP keys require a layout namespace")
+    return f"{model_name}@"
+
+
+def _hybrid_key_prefix(model: str, layout: str, group: int, block_size: int, pp_rank: int | None) -> str:
+    stage = "" if pp_rank is None else f"@pp_rank:{pp_rank}"
+    return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@"
 
 
 __all__ = ["MooncakeBackend", "create_key_builder"]
