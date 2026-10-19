@@ -67,10 +67,11 @@ test_cases:
     max_tokens: 16
     temperature: 0.0
   benchmarks:
-    # Shared-prefix workload reused from the GLM-5.3-Flash PD nightly.
+    # Reuse the registered DS3.2 2048-input dataset for A5 performance.
+    # Token lengths depend on the GLM tokenizer; the DS3.2 prefix ratio is not asserted.
     perf_warmup:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 8
@@ -81,7 +82,7 @@ test_cases:
       threshold: 0.97
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 512
