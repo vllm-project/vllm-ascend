@@ -1,4 +1,6 @@
+from contextlib import ExitStack
 from types import SimpleNamespace
+from typing import Any
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -41,6 +43,9 @@ class FakeBuilder:
 
 class TestDSparkPCPMetadata(TestCase):
     def setUp(self):
+        super().setUp()
+        stack = ExitStack()
+        self.addCleanup(stack.close)
         self.builder = FakeBuilder()
         self.plan = metadata_module.PCPMetadataPlan([self.builder], {id(self.builder): metadata_module.MetadataUse.SWA})
         self.plan._limits = lambda scope: (2, 6)
@@ -57,11 +62,11 @@ class TestDSparkPCPMetadata(TestCase):
         )
         self.scope = metadata_module.BatchScope(self.common, 1, 1, 0, 2, 0, sas={}, op_cache={})
         self.indices = torch.full((2, 1, 8), 7, dtype=torch.int32)
-        self.index_op = self.enterContext(
+        self.index_op = stack.enter_context(
             patch.object(metadata_module, "build_dspark_swa_indices", return_value=(self.indices, None))
         )
-        self.turboquant = self.enterContext(patch.object(metadata_module, "is_turboquant", return_value=False))
-        self.enterContext(
+        self.turboquant = stack.enter_context(patch.object(metadata_module, "is_turboquant", return_value=False))
+        stack.enter_context(
             patch.object(
                 metadata_module,
                 "DeviceOperator",
@@ -158,7 +163,7 @@ class TestDSparkPCPMetadata(TestCase):
         )
         plan._scope = Mock(side_effect=[self.scope, object()])
         plan._build_one = Mock()
-        shared = {}
+        shared: dict[tuple[str, int], Any] = {}
         plan.build_draft(self.builder, self.common, 1, shared, False)
         other_common = SimpleNamespace(causal=True)
         plan.build_draft(self.builder, other_common, 1, shared, False)
