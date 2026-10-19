@@ -114,8 +114,9 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         assert (state[1] == 17).all()
 
 
-@pytest.mark.parametrize("compact", [False, True])
-def test_chunk_pads_each_sequence_with_neutral_state_updates(monkeypatch, compact):
+@pytest.mark.parametrize("case", ["ragged", "compact", "single"])
+def test_chunk_pads_each_sequence_with_neutral_state_updates(monkeypatch, case):
+    compact = case == "compact"
     q = torch.arange(68, dtype=torch.float32).reshape(1, 68, 1, 1).expand(-1, -1, -1, 128).bfloat16()
     beta = torch.zeros(1, 68, 1)
     state = torch.zeros(5, 1, 128, 128)
@@ -131,11 +132,19 @@ def test_chunk_pads_each_sequence_with_neutral_state_updates(monkeypatch, compac
     if compact:
         q, beta = q[:, :4], beta[:, :4]
     lengths = (1, 3) if compact else (1, 64, 3)
+    if case == "single":
+        lengths = (63,)
+        q = q[:, :63].repeat_interleave(2, dim=-1)[..., ::2]
+        beta = beta[:, :63]
+        indices, has_initial = indices[:1], has_initial[:1]
+        metadata.cu_seqlens_host = (0, 63)
+        metadata.chunk_indices_chunk64_host = (0, 0)
+    backend_outputs = []
 
     def chunk(q_arg, k_arg, v_arg, gate, beta_arg, scale, chunk_size, **kwargs):
         assert chunk_size == 64
         assert kwargs["cu_seqlens"] == list(range(0, 64 * (len(lengths) + 1), 64))
-        assert kwargs["chunk_indices"] == [index for sequence in range(len(lengths)) for index in (sequence, 0)]
+        assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         logical_start = 0
         for sequence, length in enumerate(lengths):
             start = sequence * 64
@@ -151,6 +160,7 @@ def test_chunk_pads_each_sequence_with_neutral_state_updates(monkeypatch, compac
         torch.testing.assert_close(kwargs["initial_state"][0], state[4])
         assert torch.count_nonzero(kwargs["initial_state"][1:]) == 0
         final = torch.arange(len(lengths), dtype=torch.float32)[:, None, None, None].expand(-1, 1, 128, 128) + 10
+        backend_outputs.append(v_arg)
         return v_arg, final
 
     monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
@@ -158,6 +168,10 @@ def test_chunk_pads_each_sequence_with_neutral_state_updates(monkeypatch, compac
     out = kda.chunk_kda(q, q, q, q, beta, state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4)
     torch.testing.assert_close(out, q)
     assert (state[4] == 10).all()
-    assert (state[3] == (11 if compact else 12)).all()
-    assert (state[1] == (0 if compact else 11)).all()
+    if case == "single":
+        assert out.data_ptr() == backend_outputs[0].data_ptr()
+        assert torch.count_nonzero(state[[1, 3]]) == 0
+    else:
+        assert (state[3] == (11 if compact else 12)).all()
+        assert (state[1] == (0 if compact else 11)).all()
     assert torch.count_nonzero(state[[0, 2]]) == 0
