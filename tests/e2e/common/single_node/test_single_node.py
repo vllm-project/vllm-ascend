@@ -565,7 +565,10 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
     benchmark_keys = [k for k, v in config.benchmarks.items() if v]
-    aisbench_cases = [config.benchmarks[k] for k in benchmark_keys]
+    aisbench_cases = [
+        {**config.benchmarks[k], "benchmark_name": k, "benchmark_artifact_name": f"{config.name}__{k}"}
+        for k in benchmark_keys
+    ]
     if not aisbench_cases:
         return
 
