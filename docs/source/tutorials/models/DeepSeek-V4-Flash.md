@@ -660,8 +660,6 @@ Before you start, please:
 
     The DSpark Prefill node uses PCP8, DP2, and TP1 across 16 NPU devices. The Decode node uses DP16 and TP1.
 
-    PCP requires Model Runner V2. Both DSpark nodes below enable Model Runner V2 with `export VLLM_USE_V2_MODEL_RUNNER=1`, as shown below. Model Runner V2 does not support DSA-CP, so do not set `enable_dsa_cp` in `--additional-config`.
-
     This PCP8/TP1 configuration leaves FlashComm1 disabled because its MoE sequence-parallel path requires TP greater than 1.
 
     1. Prefill node
@@ -1113,6 +1111,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--kv-cache-dtype turboquant_4bit_nc` is not currently supported in P/D disaggregated deployments.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
+- `VLLM_USE_V2_MODEL_RUNNER=1`: Enables Model Runner V2. Set it with `export VLLM_USE_V2_MODEL_RUNNER=1` on both DSpark nodes in the A3 example. PCP requires Model Runner V2; DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
