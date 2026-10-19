@@ -52,6 +52,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    is_minimax_m3_fp8_kv_cache,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -449,6 +450,18 @@ class NPUPlatform(Platform):
             return
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
+
+    @classmethod
+    def _align_heterogeneous_kv_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        if is_minimax_m3_fp8_kv_cache(vllm_config):
+            # A later PP stage can start with the sparse indexer, which only
+            # supports 128-token kernels. Use the dense backend's mixed-KV page
+            # alignment policy on every stage without advertising 64-token
+            # support for the sparse/indexer kernels.
+            from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+            backend_cls = AscendAttentionBackend
+        super()._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
