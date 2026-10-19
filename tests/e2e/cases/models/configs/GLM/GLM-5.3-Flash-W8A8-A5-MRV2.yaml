@@ -67,11 +67,13 @@ test_cases:
     max_tokens: 16
     temperature: 0.0
   benchmarks:
-    # Reuse the registered DS3.2 2048-input dataset for A5 performance.
+    # Read DS3.2 data directly from the CI shared cache, matching the local-data benchmark flow.
+    # The runner must already contain the dataset files at this path.
     # Token lengths depend on the GLM tokenizer; the DS3.2 prefix ratio is not asserted.
     perf_warmup:
       case_type: performance
       dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in2048-bs4000-ds3.2
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 8
@@ -83,6 +85,7 @@ test_cases:
     perf:
       case_type: performance
       dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in2048-bs4000-ds3.2
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 512
