@@ -112,6 +112,7 @@ def qsa_gbsa_attention(
     compact_indices: torch.Tensor,
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
 ) -> torch.Tensor:
@@ -172,12 +173,24 @@ def qsa_gbsa_attention(
         raise ValueError("QSA GBSA requires query heads divisible by KV heads")
     if seq_lens.shape != (block_table.shape[0],):
         raise ValueError("QSA GBSA sequence lengths must match block table rows")
+    if token_to_req.shape != (query.shape[0],):
+        raise ValueError("QSA GBSA request mapping must match query rows")
+    if logical_positions.shape != (query.shape[0],):
+        raise ValueError("QSA GBSA logical positions must match query rows")
 
     sparse_width = compact_indices.shape[1] - GBSA_RESIDUAL_TOKENS
     row_requests = token_to_req.long()
-    row_seq_lens = seq_lens[row_requests].to(torch.int32)
+    row_request_lens = seq_lens[row_requests].to(torch.int32)
+    row_visible_lens = torch.minimum(
+        logical_positions.to(torch.int32).add(1).clamp_min(0),
+        row_request_lens,
+    )
     sparse_idx = compact_indices[:, :sparse_width].to(torch.int32)
-    full_blocks = torch.div(row_seq_lens, GBSA_COMPRESS_RATIO, rounding_mode="floor")
+    full_blocks = torch.div(
+        row_visible_lens,
+        GBSA_COMPRESS_RATIO,
+        rounding_mode="floor",
+    )
     valid = (sparse_idx >= 0) & (sparse_idx < full_blocks.unsqueeze(1))
     order = torch.argsort((~valid).to(torch.int32), dim=1, stable=True)
     sparse_idx = sparse_idx.gather(1, order)
@@ -189,7 +202,7 @@ def qsa_gbsa_attention(
     row_block_table = block_table[row_requests].contiguous()
     common = dict(
         cu_seqlens_q=cu_q,
-        seqused_kv=row_seq_lens,
+        seqused_kv=row_visible_lens,
         layout_q="TND",
         layout_kv="PA_BBND",
         layout_sparse_pattern=4,
