@@ -1663,3 +1663,17 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: worker/patch_eagle_multimodal_embeddings.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. Llama 4 and Mistral Large 3 EAGLE drafter embed_input_ids
+#    Why:
+#       Supported vLLM refs still borrow SupportsMultiModal.embed_input_ids
+#       without inheriting its helpers, failing at draft prefill.
+#    How:
+#       Replace only that exact alias with text embedding followed by the
+#       upstream multimodal merge. Preserve explicit upstream implementations.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57633
+#    Future Plan:
+#       Remove when all supported vLLM refs include #57633 or its equivalent.
