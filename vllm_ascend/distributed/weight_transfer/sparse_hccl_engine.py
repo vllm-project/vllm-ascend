@@ -12,10 +12,11 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from math import prod
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
+from typing_extensions import Self
 from vllm.distributed.weight_transfer.base import VLLMWeightSyncClient, WeightSource
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
@@ -34,6 +35,9 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferInitInfo,
 )
 from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import apply_sparse_hf_patches_with_loader
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
 __all__ = [
     "SparseWeightPatch",
@@ -92,6 +96,8 @@ class SparseHCCLTrainerInitInfo(SparseNCCLTrainerInitInfo):
 
 class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
     """Receive HCCL patches and use the upstream checkpoint loader."""
+
+    model_update_group: "PyHcclCommunicator | None"
 
     init_info_cls = SparseHCCLWeightTransferInitInfo
     update_info_cls = SparseHCCLWeightTransferUpdateInfo
@@ -310,6 +316,8 @@ class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
 class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngine):
     """Inherit one-shot/chunk lifecycle and patch validation; transmit on NPU."""
 
+    model_update_group: "PyHcclCommunicator | None"
+
     init_info_cls = SparseHCCLTrainerInitInfo
 
     @classmethod
@@ -400,7 +408,7 @@ class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngin
     def _broadcast_packed_patches(self, patches: list[SparseWeightPatch]) -> None:
         # Keep inherited send_weights/send_weight_chunk usable with this wire
         # protocol too. Consecutive dtype runs preserve ordered overwrites.
-        runs = []
+        runs: list[list[SparseWeightPatch]] = []
         for patch in patches:
             if not runs or runs[-1][0].values.dtype != patch.values.dtype:
                 runs.append([])

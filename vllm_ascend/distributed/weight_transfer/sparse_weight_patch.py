@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.checkpoint_weight_patch import (
 def _validate_sparse_hf_patches(patches):
     """Validate before any write, batching equal bounds to avoid tiny kernels."""
     invalid = []
-    groups = {}
+    groups: dict[tuple[torch.device, int], tuple[list[torch.Tensor], int]] = {}
 
     def check(parts, bound):
         indices = torch.cat(parts) if len(parts) > 1 else parts[0]
@@ -172,7 +172,10 @@ def _apply_direct_moe_patches(
         AscendUnquantizedFusedMoEMethod,
     )
 
-    fallback, grouped = [], {}
+    fallback = []
+    grouped: dict[
+        int, tuple[torch.Tensor, list[tuple[SparseWeightPatch, int, str]], tuple[int, ...], int, int, bool]
+    ] = {}
     for patch, shape in patches:
         match = re.fullmatch(r"(.+\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight", patch.name)
         if match is None or len(shape) != 2:
