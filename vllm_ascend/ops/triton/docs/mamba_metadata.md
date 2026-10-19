@@ -1,7 +1,8 @@
 # Aligned Mamba metadata
 
-`aligned_mamba_block_table` gathers the recurrent state window used by the
-common GDN/KDA metadata builder in `mamba_cache_mode=align`. It combines the
+`aligned_mamba_block_table` in `models/glm5next/ops/metadata.py` gathers the
+recurrent state window used by the GLM-5.3-Flash KDA metadata builder in
+`mamba_cache_mode=align`. It combines the
 sequence-length arithmetic and gather into one Triton launch on NPU, avoiding
 the seven small PyTorch kernels before decode graph execution.
 
@@ -18,12 +19,18 @@ device. Row, column and sequence strides are supported. The result has shape
 batches do not launch a kernel. Callers must provide nonnegative sequence
 lengths and enough table columns for every selected window.
 
-The common builder selects the fused path on NPU. CPU and 310P builders keep
-their existing metadata path. Pure speculative batches also reuse their
-existing request order instead of transferring identity indices and gathering
-state pages and accepted-token counts again. Mixed batches retain their
-request partitioning, and full graph inputs still use the existing persistent
-padding buffers.
+Only `Glm5NextLinearAttention` selects `Glm5NextKDABackend` and its dedicated
+`Glm5NextKDAMetadataBuilder`. This builder selects the fused lookup on NPU;
+its CPU lookup retains the reference path. Its pure speculative batches also
+reuse their existing request order instead of transferring identity indices
+and gathering state pages and accepted-token counts again. Mixed batches
+retain their request partitioning, and full graph inputs still use the
+existing persistent padding buffers.
+
+Shared GDN builders default to the original lookup, index staging and gather
+path. Qwen, Kimi and 310P do not select the GLM builder or import its fused
+lookup through the shared metadata builder. Regression tests check both GLM
+selection and the original calls for the other builders.
 
 Run correctness, graph replay and host-submission benchmarks on Ascend with:
 

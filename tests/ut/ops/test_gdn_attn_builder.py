@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.models.glm5next.kda_metadata import Glm5NextKDABackend, Glm5NextKDAMetadataBuilder
 from vllm_ascend.ops import gdn as ascend_gdn
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -341,7 +342,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is Glm5NextKDABackend
+    assert Glm5NextKDABackend.get_builder_cls() is Glm5NextKDAMetadataBuilder
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
@@ -662,10 +664,18 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
     )
 
 
-@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+@pytest.mark.parametrize(
+    "builder_cls",
+    [
+        AscendGDNAttentionMetadataBuilder,
+        AscendGDNHostMetadataBuilder,
+        GDNAttentionMetadataBuilder310,
+        Glm5NextKDAMetadataBuilder,
+    ],
+)
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
 @pytest.mark.parametrize("num_requests", [1, 3])
-def test_all_spec_batch_skips_identity_sequence_gathers(builder_cls, graph_mode, num_requests):
+def test_only_glm_kda_skips_identity_sequence_gathers(builder_cls, graph_mode, num_requests):
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=[8] * num_requests, query_lens=[4] * num_requests),
         block_size=16,
@@ -683,8 +693,10 @@ def test_all_spec_batch_skips_identity_sequence_gathers(builder_cls, graph_mode,
         common.block_table_tensor.add_(10)
         accepted = torch.full((num_requests,), step + 1, dtype=torch.int32)
         with (
-            patch.object(builder, "_copy_sequence_indices_to_device", side_effect=AssertionError("identity H2D copy")),
-            patch.object(torch, "index_select", side_effect=AssertionError("identity gather")),
+            patch.object(
+                builder, "_copy_sequence_indices_to_device", wraps=builder._copy_sequence_indices_to_device
+            ) as copy,
+            patch.object(torch, "index_select", wraps=torch.index_select) as gather,
         ):
             metadata = builder.build(
                 0,
@@ -698,6 +710,12 @@ def test_all_spec_batch_skips_identity_sequence_gathers(builder_cls, graph_mode,
         torch.testing.assert_close(conv.query_start_loc, common.query_start_loc)
         assert metadata.num_spec_decodes == num_requests
         assert metadata.spec_token_indx.tolist() == list(range(num_requests * 4))
+        if builder_cls is Glm5NextKDAMetadataBuilder:
+            copy.assert_not_called()
+            gather.assert_not_called()
+        else:
+            copy.assert_called_once()
+            assert gather.call_count == 2
 
 
 def test_full_graph_spec_conv1d_args_keep_request_granularity():

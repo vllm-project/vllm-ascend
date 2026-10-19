@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.mamba import metadata as mamba_metadata
-from vllm_ascend.ops.triton.mamba.metadata import aligned_mamba_block_table
+from vllm_ascend.models.glm5next.ops import metadata as mamba_metadata
+from vllm_ascend.models.glm5next.ops.metadata import aligned_mamba_block_table
 
 
 @pytest.mark.parametrize("num_requests", [0, 1, 7])

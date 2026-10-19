@@ -38,7 +38,6 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.mamba.metadata import aligned_mamba_block_table
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -338,6 +337,17 @@ def _build_non_spec_chunked_prefill_metadata(
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
+    # Subclasses may opt in when request-order views are supported. Keep
+    # shared GDN builders on their existing staging and gather path.
+    _USE_SPEC_SEQUENCE_VIEWS = False
+
+    def _get_mamba_block_table_tensor(self, common_attn_metadata: CommonAttentionMetadata) -> torch.Tensor:
+        return mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
 
     def __init__(
         self,
@@ -704,26 +714,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        if (
-            self._USE_COMMON_KERNEL_METADATA
-            and m.block_table_tensor.device.type == "npu"
-            and self.vllm_config.cache_config.mamba_cache_mode == "align"
-        ):
-            # The upstream torch fallback launches seven small kernels on NPU.
-            # Keep the live device sequence lengths, including async corrections.
-            block_table_tensor = aligned_mamba_block_table(
-                m.block_table_tensor,
-                m.seq_lens,
-                self.kv_cache_spec.block_size,
-                self.kv_cache_spec.num_speculative_blocks,
-            )
-        else:
-            block_table_tensor = mamba_get_block_table_tensor(
-                m.block_table_tensor,
-                m.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
-            )
+        block_table_tensor = self._get_mamba_block_table_tensor(m)
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
@@ -752,7 +743,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
-                all_spec_decodes = num_spec_decodes == num_reqs
+                all_spec_decodes = self._USE_SPEC_SEQUENCE_VIEWS and num_spec_decodes == num_reqs
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
                 spec_sequence_masks.copy_(spec_sequence_masks_cpu, non_blocking=True)
                 if not all_spec_decodes:
@@ -778,6 +769,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
+            if not all_spec_decodes:
+                query_lens = query_start_loc[1:] - query_start_loc[:-1]
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             assert spec_sequence_masks_cpu is not None
             if not all_spec_decodes:
@@ -828,7 +821,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
-                query_lens = query_start_loc[1:] - query_start_loc[:-1]
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
                     query_lens,

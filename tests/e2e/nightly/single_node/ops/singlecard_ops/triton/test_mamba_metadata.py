@@ -5,7 +5,7 @@ import time
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.mamba.metadata import aligned_mamba_block_table
+from vllm_ascend.models.glm5next.ops.metadata import aligned_mamba_block_table
 
 pytestmark = pytest.mark.skipif(
     not hasattr(torch, "npu") or not torch.npu.is_available(),

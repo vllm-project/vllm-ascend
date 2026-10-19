@@ -33,9 +33,9 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
+from vllm_ascend.models.glm5next.kda_metadata import Glm5NextKDABackend
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -269,7 +269,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def get_attn_backend(self):
-        return AscendGDNHostMetadataBackend
+        return Glm5NextKDABackend
 
     def forward(
         self,
