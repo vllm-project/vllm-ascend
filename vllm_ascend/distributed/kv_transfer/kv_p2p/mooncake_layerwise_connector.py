@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import extract_layer_index
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -72,6 +73,11 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
+from vllm_ascend.kv_offload.dsa_pd_mooncake import (
+    get_dsa_pd_mooncake_kv_register_location,
+    get_dsa_pd_mooncake_offloaded_kv_tensor,
+    is_dsa_pd_mooncake_offloaded_kv_buffer,
+)
 from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     kv_cache_spec_uses_packed_sfa_main_cache,
@@ -90,6 +96,26 @@ if TYPE_CHECKING:
 DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
 LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
+STAGING_COPY_MSG = b"staging_copy_msg"
+STAGING_ACQUIRE_MSG = b"staging_acquire_msg"
+STAGING_RELEASE_MSG = b"staging_release_msg"
+STAGING_BUSY = b"BUSY"
+
+
+def _is_dsa_pd_mooncake_remote_offloaded_range(
+    ptr: int,
+    size: int,
+    ranges: list[list[int]] | None,
+) -> bool:
+    if not ranges:
+        return False
+    ptr = int(ptr)
+    end = ptr + int(size)
+    for start, length in ranges:
+        start = int(start)
+        if ptr >= start and end <= start + int(length):
+            return True
+    return False
 
 
 @dataclass
@@ -103,6 +129,10 @@ class LayerMetadata:
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     layer_metadata: dict[str, LayerMetadata]
+    staging_base_addr: int = 0
+    staging_chunk_bytes: int = 0
+    staging_window: int = 0
+    offloaded_kv_cache_ranges: list[list[int]] = msgspec.field(default_factory=list)
 
 
 @dataclass
@@ -128,6 +158,11 @@ class ReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    transfer_request_id: str | None = None
+    remote_staging_base_addr: int = 0
+    remote_staging_chunk_bytes: int = 0
+    remote_staging_window: int = 0
+    remote_offloaded_kv_cache_ranges: list[list[int]] = field(default_factory=list)
 
 
 @dataclass
@@ -159,7 +194,20 @@ class TransferMeta:
     src: list[int]
     dst: list[int]
     length: list[int]
+    # Local worker request IDs used as keys in SendTask.send_request.
     req_ids: list[str]
+    layer_idx: int = -1
+    layer_name: str = ""
+    layer_group_idx: int = -1
+    # Stable request IDs shared across Prefill, Decode, and the proxy.
+    transfer_req_ids: list[str] = field(default_factory=list)
+    remote_tp_size: int | None = None
+    control_host: str | None = None
+    control_port: int | None = None
+    staging_base_addr: int = 0
+    staging_chunk_bytes: int = 0
+    staging_window: int = 0
+    offloaded_kv_cache_ranges: list[list[int]] = field(default_factory=list)
 
 
 @dataclass
@@ -274,6 +322,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        self.timeout = get_transfer_timeout_value()
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -497,6 +546,328 @@ class KVCacheSendingLayerThread(threading.Thread):
                         length_list.append(block_len)
         return (src_list, dst_list, length_list)
 
+    def _send_staging_owner_msg(
+        self,
+        control_host: str | None,
+        control_port: int | None,
+        msg_type: bytes,
+        owner_id: str,
+    ) -> bytes:
+        if not control_host or control_port is None:
+            raise RuntimeError("Missing remote control endpoint for layerwise staging ownership.")
+        path = make_zmq_path("tcp", control_host, control_port)
+        encoded_data = msgspec.msgpack.Encoder().encode((msg_type, owner_id))
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
+                    sock.setsockopt(zmq.SNDTIMEO, int(self.timeout * 1000))
+                    ensure_zmq_send(sock, encoded_data, f"{control_host}:{control_port}")
+                    if not sock.poll(int(self.timeout * 1000), zmq.POLLIN):  # type: ignore[attr-defined]
+                        raise TimeoutError(
+                            f"Timed out waiting for staging ownership response from {control_host}:{control_port}"
+                        )
+                    return sock.recv()
+            except Exception:
+                if attempt == max_retries:
+                    raise
+                time.sleep(0.1)
+        raise AssertionError("unreachable")
+
+    def _acquire_staging_ownership(
+        self,
+        control_host: str | None,
+        control_port: int | None,
+        owner_id: str,
+    ) -> None:
+        deadline = time.monotonic() + self.timeout
+        while True:
+            response = self._send_staging_owner_msg(
+                control_host, control_port, STAGING_ACQUIRE_MSG, owner_id
+            )
+            if response == b"ACK":
+                return
+            if response != STAGING_BUSY:
+                raise RuntimeError(f"Unexpected staging ownership response: {response}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for layerwise staging ownership: owner={owner_id}")
+            time.sleep(min(0.01, remaining))
+
+    def _release_staging_ownership(
+        self,
+        control_host: str | None,
+        control_port: int | None,
+        owner_id: str,
+    ) -> None:
+        response = self._send_staging_owner_msg(
+            control_host, control_port, STAGING_RELEASE_MSG, owner_id
+        )
+        if response != b"ACK":
+            raise RuntimeError(f"Failed to release layerwise staging ownership: owner={owner_id} response={response}")
+
+    def _send_staging_copy_msg(
+        self,
+        control_host: str | None,
+        control_port: int | None,
+        req_ids: list[str],
+        copy_plan: list[list[int]],
+        owner_id: str,
+    ) -> None:
+        if not control_host or control_port is None:
+            raise RuntimeError("Missing remote control endpoint for layerwise staging copy.")
+        path = make_zmq_path("tcp", control_host, control_port)
+        encoded_data = msgspec.msgpack.Encoder().encode((STAGING_COPY_MSG, req_ids, copy_plan, owner_id))
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
+                    sock.setsockopt(zmq.SNDTIMEO, int(self.timeout * 1000))
+                    ensure_zmq_send(sock, encoded_data, f"{control_host}:{control_port}")
+                    if not sock.poll(int(self.timeout * 1000), zmq.POLLIN):  # type: ignore[attr-defined]
+                        raise TimeoutError(f"Timed out waiting for staging copy ACK from {control_host}:{control_port}")
+                    ack = sock.recv()
+                    if ack != b"ACK":
+                        raise ValueError(f"Unexpected staging copy ACK response: {ack}")
+                    return
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        "Failed to send layerwise staging copy message. req_ids=%s destination=%s:%s "
+                        "attempt=%d/%d error=%s",
+                        req_ids,
+                        control_host,
+                        control_port,
+                        attempt,
+                        max_retries,
+                        e,
+                    )
+                    time.sleep(0.1)
+                else:
+                    raise
+
+    def _get_staging_slot_indices(self, staging_window: int, remote_tp_size: int | None) -> list[int]:
+        """Return this sender's disjoint slots in the remote staging window."""
+        if (
+            remote_tp_size is None
+            or remote_tp_size <= 0
+            or self.tp_size < remote_tp_size
+            or self.tp_size % remote_tp_size != 0
+        ):
+            return []
+        lane_count = self.tp_size // remote_tp_size
+        if staging_window < lane_count:
+            return []
+        lane = self.tp_rank % lane_count
+        return list(range(lane, staging_window, lane_count))
+
+    def _batch_transfer_sync_write_with_optional_staging(
+        self,
+        session_id: str,
+        transfer_meta: TransferMeta,
+    ) -> int:
+        if not transfer_meta.offloaded_kv_cache_ranges:
+            return self.engine.batch_transfer_sync_write(
+                session_id,
+                transfer_meta.src,
+                transfer_meta.dst,
+                transfer_meta.length,
+            )
+
+        requires_staging = any(
+            _is_dsa_pd_mooncake_remote_offloaded_range(dst, length, transfer_meta.offloaded_kv_cache_ranges)
+            for dst, length in zip(transfer_meta.dst, transfer_meta.length)
+        )
+        if not requires_staging:
+            return self.engine.batch_transfer_sync_write(
+                session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
+            )
+        if (
+            transfer_meta.staging_base_addr <= 0
+            or transfer_meta.staging_chunk_bytes <= 0
+            or not transfer_meta.control_host
+            or transfer_meta.control_port is None
+        ):
+            logger.error(
+                "Layerwise offloaded KV transfer requires complete remote staging metadata. "
+                "session_id=%s req_ids=%s",
+                session_id,
+                transfer_meta.req_ids,
+            )
+            return -1
+
+        owner_id = f"{session_id}:{os.getpid()}:{threading.get_ident()}:{time.monotonic_ns()}"
+        acquired = False
+        result = -1
+        try:
+            self._acquire_staging_ownership(
+                transfer_meta.control_host, transfer_meta.control_port, owner_id
+            )
+            acquired = True
+            result = self._batch_transfer_sync_write_with_optional_staging_owned(
+                session_id, transfer_meta, owner_id
+            )
+        except Exception as e:
+            logger.error(
+                "Layerwise staging ownership failed. session_id=%s req_ids=%s owner=%s error=%s",
+                session_id,
+                transfer_meta.req_ids,
+                owner_id,
+                e,
+            )
+        finally:
+            if acquired:
+                try:
+                    self._release_staging_ownership(
+                        transfer_meta.control_host, transfer_meta.control_port, owner_id
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to release layerwise staging ownership. "
+                        "session_id=%s req_ids=%s owner=%s error=%s",
+                        session_id,
+                        transfer_meta.req_ids,
+                        owner_id,
+                        e,
+                    )
+                    result = -1
+        return result
+
+    def _batch_transfer_sync_write_with_optional_staging_owned(
+        self,
+        session_id: str,
+        transfer_meta: TransferMeta,
+        owner_id: str,
+    ) -> int:
+        if not transfer_meta.offloaded_kv_cache_ranges:
+            return self.engine.batch_transfer_sync_write(
+                session_id,
+                transfer_meta.src,
+                transfer_meta.dst,
+                transfer_meta.length,
+            )
+        if transfer_meta.staging_base_addr <= 0 or transfer_meta.staging_chunk_bytes <= 0:
+            logger.error(
+                "Layerwise offloaded KV transfer requires remote NPU staging metadata. session_id=%s req_ids=%s",
+                session_id,
+                transfer_meta.transfer_req_ids,
+            )
+            return -1
+
+        direct_src: list[int] = []
+        direct_dst: list[int] = []
+        direct_length: list[int] = []
+        staged_transfers: list[tuple[int, int, int]] = []
+        alignment = 2 * 1024 * 1024
+        staging_chunk_bytes = int(transfer_meta.staging_chunk_bytes)
+        if staging_chunk_bytes < alignment:
+            logger.error("Invalid layerwise staging chunk size: %s", staging_chunk_bytes)
+            return -1
+
+        for src, dst, length in zip(transfer_meta.src, transfer_meta.dst, transfer_meta.length):
+            if not _is_dsa_pd_mooncake_remote_offloaded_range(
+                dst,
+                length,
+                transfer_meta.offloaded_kv_cache_ranges,
+            ):
+                direct_src.append(src)
+                direct_dst.append(dst)
+                direct_length.append(length)
+                continue
+
+            remaining = int(length)
+            offset = 0
+            while remaining > 0:
+                src_piece = int(src) + offset
+                dst_piece = int(dst) + offset
+                page_offset = src_piece % alignment
+                piece_capacity = staging_chunk_bytes - page_offset
+                if piece_capacity <= 0:
+                    logger.error(
+                        "Invalid layerwise staging capacity. src=%s chunk_bytes=%s page_offset=%s",
+                        src_piece,
+                        staging_chunk_bytes,
+                        page_offset,
+                    )
+                    return -1
+                piece_len = min(remaining, piece_capacity)
+                staged_transfers.append((src_piece, dst_piece, piece_len))
+                offset += piece_len
+                remaining -= piece_len
+
+        if direct_src:
+            ret = self.engine.batch_transfer_sync_write(session_id, direct_src, direct_dst, direct_length)
+            if ret < 0:
+                return ret
+
+        if not staged_transfers:
+            return 0
+
+        staging_window = max(1, int(transfer_meta.staging_window or 1))
+        if owner_id:
+            staging_slots = list(range(staging_window))
+        else:
+            staging_slots = self._get_staging_slot_indices(staging_window, transfer_meta.remote_tp_size)
+        if not staging_slots:
+            logger.error(
+                "Cannot isolate layerwise staging slots. window=%s local_tp_size=%s remote_tp_size=%s "
+                "tp_rank=%s req_ids=%s",
+                staging_window,
+                self.tp_size,
+                transfer_meta.remote_tp_size,
+                self.tp_rank,
+                transfer_meta.transfer_req_ids,
+            )
+            return -1
+        staging_base_addr = int(transfer_meta.staging_base_addr)
+        for batch_start in range(0, len(staged_transfers), len(staging_slots)):
+            batch = staged_transfers[batch_start : batch_start + len(staging_slots)]
+            staged_src: list[int] = []
+            staged_dst: list[int] = []
+            staged_length: list[int] = []
+            copy_plan: list[list[int]] = []
+            for batch_slot, (src, dst, length) in enumerate(batch):
+                slot = staging_slots[batch_slot]
+                staging_offset = slot * staging_chunk_bytes + (int(src) % alignment)
+                staged_src.append(src)
+                staged_dst.append(staging_base_addr + staging_offset)
+                staged_length.append(length)
+                copy_plan.append([dst, length, staging_offset])
+
+            ret = self.engine.batch_transfer_sync_write(session_id, staged_src, staged_dst, staged_length)
+            if ret < 0:
+                logger.error(
+                    "Layerwise staged Mooncake write failed. session_id=%s req_ids=%s batch_start=%s "
+                    "batch_size=%s first_src=%s first_staging_dst=%s first_len=%s ret=%s",
+                    session_id,
+                    transfer_meta.transfer_req_ids,
+                    batch_start,
+                    len(batch),
+                    staged_src[0] if staged_src else None,
+                    staged_dst[0] if staged_dst else None,
+                    staged_length[0] if staged_length else None,
+                    ret,
+                )
+                return ret
+            try:
+                self._send_staging_copy_msg(
+                    transfer_meta.control_host,
+                    transfer_meta.control_port,
+                    transfer_meta.transfer_req_ids,
+                    copy_plan,
+                    owner_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "Layerwise staged KV copy notification failed. session_id=%s req_ids=%s error=%s",
+                    session_id,
+                    transfer_meta.transfer_req_ids,
+                    e,
+                )
+                return -1
+
+        return 0
+
     def _transfer_kv_cache(self, send_task: SendTask) -> str | None:
         key = send_task.k_cache
         value = send_task.v_cache
@@ -522,7 +893,23 @@ class KVCacheSendingLayerThread(threading.Thread):
         for req_id, req_meta in send_task.send_request.items():
             session_id = f"{req_meta.remote_host}:{req_meta.remote_te_rpc_port}"
             if session_id not in session_meta:
-                session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
+                session_meta[session_id] = TransferMeta(
+                    src=[],
+                    dst=[],
+                    length=[],
+                    req_ids=[],
+                    layer_idx=send_task.layer_idx,
+                    layer_name=send_task.layer_name,
+                    layer_group_idx=layer_group_idx,
+                    transfer_req_ids=[],
+                    remote_tp_size=req_meta.remote_tp_size,
+                    control_host=req_meta.remote_host,
+                    control_port=req_meta.remote_port,
+                    staging_base_addr=req_meta.remote_staging_base_addr,
+                    staging_chunk_bytes=req_meta.remote_staging_chunk_bytes,
+                    staging_window=req_meta.remote_staging_window,
+                    offloaded_kv_cache_ranges=req_meta.remote_offloaded_kv_cache_ranges,
+                )
 
             for layer_name in layer_names:
                 src_list, dst_list, length_list = self.get_transfer_meta(
@@ -536,6 +923,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 session_meta[session_id].dst.extend(dst_list)
                 session_meta[session_id].length.extend(length_list)
             session_meta[session_id].req_ids.append(req_id)
+            session_meta[session_id].transfer_req_ids.append(get_transfer_request_id(req_id, req_meta))
 
         if send_task.k_quant_cache is not None:
             self.resharding_stream.synchronize()
@@ -554,9 +942,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
                 req_start_time = time.perf_counter()
-                ret = self.engine.batch_transfer_sync_write(
-                    session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
-                )
+                ret = self._batch_transfer_sync_write_with_optional_staging(session_id, transfer_meta)
                 if ret < 0:
                     self.failed_reqs.update(transfer_meta.req_ids)
                     transfer_errors.append(
@@ -587,6 +973,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         local_engine_id: str,
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
+        staging_tensor: torch.Tensor | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingLayerThread")
         self.tp_rank = tp_rank
@@ -601,6 +988,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.task_tracker = dict[str, int]()
         self.ready_event = ready_event
         self.metadata = metadata
+        self.staging_tensor = staging_tensor
 
     def get_and_clear_done_requests(self) -> set[str]:
         """
@@ -650,6 +1038,30 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
 
+    def _copy_staging_to_offloaded_kv(self, copy_plan: list[list[int]], req_ids: list[str] | None = None) -> None:
+        if not copy_plan:
+            return
+        if self.staging_tensor is None:
+            raise RuntimeError("Missing layerwise NPU staging tensor for offloaded KV copy.")
+        local_rank = get_world_group().local_rank
+        torch.npu.set_device(torch.device(f"npu:{local_rank}"))
+        staging_bytes = self.staging_tensor.view(torch.int8).reshape(-1)
+        for entry in copy_plan:
+            dst, length, staging_offset = entry[:3]
+            dst = int(dst)
+            length = int(length)
+            staging_offset = int(staging_offset)
+            resolved = get_dsa_pd_mooncake_offloaded_kv_tensor(dst, length)
+            if resolved is None:
+                raise RuntimeError(f"Missing offloaded KV tensor for dst={dst} length={length}.")
+            target_tensor, target_offset = resolved
+            target_bytes = target_tensor.view(torch.int8).reshape(-1)
+            target_bytes.narrow(0, int(target_offset), length).copy_(
+                staging_bytes.narrow(0, staging_offset, length),
+                non_blocking=False,
+            )
+        torch.npu.synchronize()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         handshake_port = self.side_channel_port + self.tp_rank
@@ -660,6 +1072,9 @@ class KVCacheRecvingLayerThread(threading.Thread):
         with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
+            staging_owner: str | None = None
+            staging_owner_updated = 0.0
+            staging_lease_timeout = get_transfer_timeout_value()
             while True:
                 try:
                     frames = sock.recv_multipart()
@@ -686,6 +1101,56 @@ class KVCacheRecvingLayerThread(threading.Thread):
                         side_channel_path = msg[3]
                         self.update_done_task(request_id, trans_count, side_channel_path)
                         sock.send_multipart((identity, b"", b"ACK"))
+                    elif msg[0] == STAGING_ACQUIRE_MSG:
+                        owner_id = msg[1]
+                        now = time.monotonic()
+                        if staging_owner is not None and now - staging_owner_updated > staging_lease_timeout:
+                            logger.warning("Expiring stale layerwise staging owner: %s", staging_owner)
+                            staging_owner = None
+                        if staging_owner is None or staging_owner == owner_id:
+                            staging_owner = owner_id
+                            staging_owner_updated = now
+                            sock.send_multipart((identity, b"", b"ACK"))
+                        else:
+                            sock.send_multipart((identity, b"", STAGING_BUSY))
+                    elif msg[0] == STAGING_RELEASE_MSG:
+                        owner_id = msg[1]
+                        if staging_owner is None or staging_owner == owner_id:
+                            staging_owner = None
+                            staging_owner_updated = 0.0
+                            sock.send_multipart((identity, b"", b"ACK"))
+                        else:
+                            sock.send_multipart((identity, b"", b"FAILED"))
+                    elif msg[0] == STAGING_COPY_MSG:
+                        req_ids = msg[1]
+                        copy_plan = msg[2]
+                        owner_id = msg[3]
+                        if staging_owner != owner_id:
+                            logger.error(
+                                "Rejected layerwise staging copy from non-owner. req_ids=%s owner=%s active_owner=%s",
+                                req_ids,
+                                owner_id,
+                                staging_owner,
+                            )
+                            for request_id in req_ids:
+                                self.update_failed_task(request_id)
+                            sock.send_multipart((identity, b"", b"FAILED"))
+                            continue
+                        staging_owner_updated = time.monotonic()
+                        try:
+                            self._copy_staging_to_offloaded_kv(copy_plan, req_ids=req_ids)
+                            sock.send_multipart((identity, b"", b"ACK"))
+                        except Exception as e:
+                            staging_owner = None
+                            staging_owner_updated = 0.0
+                            logger.error(
+                                "Failed to copy layerwise staging KV to offloaded buffers. req_ids=%s error=%s",
+                                req_ids,
+                                e,
+                            )
+                            for request_id in req_ids:
+                                self.update_failed_task(request_id)
+                            sock.send_multipart((identity, b"", b"FAILED"))
                     elif msg[0] == FAILED_SENDING_MSG:
                         request_id = msg[1]
                         logger.error("Got FAILED_SENDING_MSG for request. request_id=%s. ", msg[1])
@@ -741,6 +1206,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             prompt_len=prompt_len,
             local_transed_tokens=local_transed_tokens,
             trans_count=[],
+            transfer_request_id=kv_transfer_params.get("request_id"),
         )
 
 
@@ -1287,6 +1753,13 @@ class MooncakeLayerwiseConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
         self.current_layer = 0
+        self.remote_staging_metadata: dict[str, dict[int, dict[str, object]]] = SizedDict()
+        self._dsa_pd_mooncake_staging_storage: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_bytes = 0
+        self._dsa_pd_mooncake_staging_chunk_bytes = 0
+        self._dsa_pd_mooncake_staging_window = 0
+        self._dsa_pd_mooncake_source_kv_tensors: list[tuple[int, int, torch.Tensor]] = []
 
     def _init_layerwise_reuse_state(self) -> None:
         slot_by_addr: dict[int, int] = {}
@@ -1370,6 +1843,61 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info("Register memory buffer for transfer, buffer size:%s", tensor.numel() * tensor.element_size())
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory registration failed. ")
+
+    def _get_dsa_pd_mooncake_staging_device(self) -> torch.device | str:
+        for kv_cache_tuple in self.kv_caches.values():
+            if isinstance(kv_cache_tuple, torch.Tensor):
+                tensors = [kv_cache_tuple]
+            else:
+                tensors = [tensor for tensor in kv_cache_tuple if isinstance(tensor, torch.Tensor)]
+            for tensor in tensors:
+                if tensor.device.type != "cpu":
+                    return tensor.device
+        return "npu"
+
+    def _get_dsa_pd_mooncake_staging_window(self) -> int:
+        return envs.VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW
+
+    def _get_dsa_pd_mooncake_staging_chunk_bytes(self) -> int:
+        alignment = 2 * 1024 * 1024
+        block_bytes = [
+            int(block_len)
+            for layer_meta in self.layer_metadata.values()
+            for block_len in layer_meta.block_len
+            if int(block_len) > 0
+        ]
+        chunk_bytes = max(max(block_bytes, default=alignment), alignment)
+        return ((chunk_bytes + alignment - 1) // alignment) * alignment
+
+    def _ensure_dsa_pd_mooncake_staging_tensor(self) -> torch.Tensor:
+        chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
+        staging_window = self._get_dsa_pd_mooncake_staging_window()
+        required_bytes = chunk_bytes * staging_window
+        if self._dsa_pd_mooncake_staging_tensor is not None and self._dsa_pd_mooncake_staging_bytes >= required_bytes:
+            return self._dsa_pd_mooncake_staging_tensor
+
+        alignment = 2 * 1024 * 1024
+        device = self._get_dsa_pd_mooncake_staging_device()
+        storage = torch.empty((required_bytes + alignment,), dtype=torch.int8, device=device)
+        offset = (-int(storage.data_ptr())) % alignment
+        staging = storage[offset : offset + required_bytes]
+        if staging.data_ptr() % alignment != 0:
+            raise RuntimeError("Layerwise DSA PD Mooncake NPU staging tensor is not 2MB aligned.")
+
+        global_te.register_buffer([int(staging.data_ptr())], [required_bytes], locations=[None])
+        self._dsa_pd_mooncake_staging_storage = storage
+        self._dsa_pd_mooncake_staging_tensor = staging
+        self._dsa_pd_mooncake_staging_bytes = required_bytes
+        self._dsa_pd_mooncake_staging_chunk_bytes = chunk_bytes
+        self._dsa_pd_mooncake_staging_window = staging_window
+        logger.info(
+            "Allocated layerwise Mooncake NPU staging buffer: bytes=%s chunk_bytes=%s window=%s device=%s",
+            required_bytes,
+            chunk_bytes,
+            staging_window,
+            staging.device,
+        )
+        return staging
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1469,8 +1997,40 @@ class MooncakeLayerwiseConnectorWorker:
             # ranges while keeping layer metadata at logical tensor addresses.
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
+        register_ptrs: list[int] = []
+        register_lengths: list[int] = []
+        offloaded_kv_cache_ranges: list[list[int]] = []
+        for ptr, length in zip(register_regions.ptrs, register_regions.lengths):
+            if is_dsa_pd_mooncake_offloaded_kv_buffer(ptr, length):
+                offloaded_kv_cache_ranges.append([int(ptr), int(length)])
+                continue
+            register_ptrs.append(ptr)
+            register_lengths.append(length)
+
+        register_regions = RegisterRegions(
+            ptrs=register_ptrs,
+            lengths=register_lengths,
+            logical_tensor_count=register_regions.logical_tensor_count,
+            logical_total_bytes=register_regions.logical_total_bytes,
+        )
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        locations = [
+            get_dsa_pd_mooncake_kv_register_location(ptr, length)
+            for ptr, length in zip(register_regions.ptrs, register_regions.lengths)
+        ]
+        if register_regions.ptrs:
+            if any(location is not None for location in locations):
+                global_te.register_buffer(register_regions.ptrs, register_regions.lengths, locations=locations)
+            else:
+                global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        if offloaded_kv_cache_ranges:
+            self._ensure_dsa_pd_mooncake_staging_tensor()
+        logger.info(
+            "Mooncake layerwise register kv caches with locations=%s buffers=%s skipped_offloaded_buffers=%s",
+            {location: locations.count(location) for location in set(locations)},
+            len(register_regions.ptrs),
+            len(offloaded_kv_cache_ranges),
+        )
 
         if kv_buffer is not None:
             self.create_kv_buffer(kv_buffer)
@@ -1501,6 +2061,14 @@ class MooncakeLayerwiseConnectorWorker:
         metadata = MooncakeAgentMetadata(
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
+            staging_base_addr=(
+                int(self._dsa_pd_mooncake_staging_tensor.data_ptr())
+                if self._dsa_pd_mooncake_staging_tensor is not None
+                else 0
+            ),
+            staging_chunk_bytes=self._dsa_pd_mooncake_staging_chunk_bytes,
+            staging_window=self._dsa_pd_mooncake_staging_window,
+            offloaded_kv_cache_ranges=offloaded_kv_cache_ranges,
         )
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
@@ -1540,6 +2108,7 @@ class MooncakeLayerwiseConnectorWorker:
                 self.engine_id,
                 metadata,
                 ready_event,
+                staging_tensor=self._dsa_pd_mooncake_staging_tensor,
             )
             self.kv_recv_layer_thread.start()
             ready_event.wait()
@@ -1565,9 +2134,10 @@ class MooncakeLayerwiseConnectorWorker:
             if meta := self._recving_metadata.get(req_id):
                 self._invalid_block_ids.update(block_id for group in meta.local_block_ids for block_id in group)
         for req_id in done_recving.union(failed_recving):
-            org_req_id = req_id[:-9]
-            self.request_map.pop(org_req_id, None)
-            self._recving_metadata.pop(req_id, None)
+            meta = self._recving_metadata.pop(req_id, None)
+            if meta is not None and meta.transfer_request_id:
+                self.request_map.pop(meta.transfer_request_id, None)
+            self.request_map.pop(get_external_request_id(req_id), None)
         if len(done_recving) > 0:
             logger.info(
                 "Number of completed KV cache recv requests: %s, receive requests: %s", len(done_recving), done_recving
@@ -1756,7 +2326,7 @@ class MooncakeLayerwiseConnectorWorker:
                 if meta.do_virtual:
                     self.virtual_request.add(req_id)
                     continue
-                external_req_id = get_external_request_id(req_id)
+                external_req_id = meta.transfer_request_id or get_external_request_id(req_id)
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
@@ -1808,36 +2378,36 @@ class MooncakeLayerwiseConnectorWorker:
 
         # update send task trans block info
         if self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant:
-                send_task = metadata.send_task
-                send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
-                send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
-                send_task.group_num_tokens = [0 for _ in range(self.num_kv_cache_groups)]
-                send_task.group_block_table = [None for _ in range(self.num_kv_cache_groups)]
-                send_task.group_block_len_tensor = [None for _ in range(self.num_kv_cache_groups)]
-                send_task.group_seq_start_tensor = [None for _ in range(self.num_kv_cache_groups)]
-                device = self.k_buffer.device  # type: ignore
-                for i in self.attn_resharding_group_idx:
-                    send_task.group_rearrange_block_ids[i].extend(
-                        sorted(
-                            {
-                                block_id
-                                for req_id in metadata.requests
-                                for block_id in metadata.requests[req_id].local_block_ids[i]
-                            }
-                        )
+            send_task = metadata.send_task
+            send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
+            send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
+            send_task.group_num_tokens = [0 for _ in range(self.num_kv_cache_groups)]
+            send_task.group_block_table = [None for _ in range(self.num_kv_cache_groups)]
+            send_task.group_block_len_tensor = [None for _ in range(self.num_kv_cache_groups)]
+            send_task.group_seq_start_tensor = [None for _ in range(self.num_kv_cache_groups)]
+            device = self.k_buffer.device  # type: ignore
+            for i in self.attn_resharding_group_idx:
+                send_task.group_rearrange_block_ids[i].extend(
+                    sorted(
+                        {
+                            block_id
+                            for req_id in metadata.requests
+                            for block_id in metadata.requests[req_id].local_block_ids[i]
+                        }
                     )
-                    flat_block_ids = send_task.group_rearrange_block_ids[i]
-                    block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
-                    send_task.group_num_blocks[i] = len(flat_block_ids)
-                    send_task.group_num_tokens[i] = send_task.group_num_blocks[i] * (
-                        self.block_size[i] // self.kernel_block_size_scale[i]
-                    )
+                )
+                flat_block_ids = send_task.group_rearrange_block_ids[i]
+                block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
+                send_task.group_num_blocks[i] = len(flat_block_ids)
+                send_task.group_num_tokens[i] = send_task.group_num_blocks[i] * (
+                    self.block_size[i] // self.kernel_block_size_scale[i]
+                )
 
-                    send_task.group_block_table[i] = block_ids_tensor.view(1, -1)
-                    send_task.group_block_len_tensor[i] = torch.tensor(
-                        [send_task.group_num_tokens[i]], dtype=torch.int32, device=device
-                    )
-                    send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
+                send_task.group_block_table[i] = block_ids_tensor.view(1, -1)
+                send_task.group_block_len_tensor[i] = torch.tensor(
+                    [send_task.group_num_tokens[i]], dtype=torch.int32, device=device
+                )
+                send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
 
     def on_kv_cache_written(self, layer_name: str) -> None:
         if self.current_layer >= self.total_layers:
@@ -2057,12 +2627,13 @@ class MooncakeLayerwiseConnectorWorker:
             return sock
 
     def update_decoder_info(self, req_id, req_meta: ReqMeta):
+        transfer_req_id = get_transfer_request_id(req_id, req_meta)
         if (
             req_meta.remote_engine_id not in self.remote_layer_metadata
             or req_meta.remote_port not in self.remote_layer_metadata[req_meta.remote_engine_id]
         ):
             try:
-                encoded_data = self.encoder.encode((GET_META_MSG, req_id))
+                encoded_data = self.encoder.encode((GET_META_MSG, transfer_req_id))
                 sock = self._get_remote_socket(req_meta.remote_host, req_meta.remote_port)
                 path = f"{req_meta.remote_host}:{req_meta.remote_port}"
                 ensure_zmq_send(sock, encoded_data, path)
@@ -2082,6 +2653,12 @@ class MooncakeLayerwiseConnectorWorker:
             )
             self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.layer_metadata
             self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.te_rpc_port
+            self.remote_staging_metadata[req_meta.remote_engine_id][req_meta.remote_port] = {
+                "staging_base_addr": agent_meta.staging_base_addr,
+                "staging_chunk_bytes": agent_meta.staging_chunk_bytes,
+                "staging_window": agent_meta.staging_window,
+                "offloaded_kv_cache_ranges": agent_meta.offloaded_kv_cache_ranges,
+            }
             logger.debug(
                 "Query to port and kv base addr for request %s from %s:%s success "
                 "agent_meta.layer_metadata=%r agent_meta.te_rpc_port=%r",
@@ -2095,20 +2672,32 @@ class MooncakeLayerwiseConnectorWorker:
                 # for tp inequal, pre-create link to prevent alltoall out of memory
                 session_id = f"{req_meta.remote_host}:{agent_meta.te_rpc_port}"
                 first_layer_name = next(iter(self.layer_metadata.keys()))
+                precreate_dst = agent_meta.layer_metadata[first_layer_name].kv_caches_base_addr[0]
+                if _is_dsa_pd_mooncake_remote_offloaded_range(
+                    precreate_dst,
+                    128,
+                    agent_meta.offloaded_kv_cache_ranges,
+                ):
+                    precreate_dst = agent_meta.staging_base_addr
                 ret = self.engine.batch_transfer_sync_write(
                     session_id,
                     [self.layer_metadata[first_layer_name].kv_caches_base_addr[0]],
-                    [agent_meta.layer_metadata[first_layer_name].kv_caches_base_addr[0]],
+                    [precreate_dst],
                     [128],
                 )
                 if ret < 0:
                     logger.error("Mooncake transfer failed to create link. session_id=%s, ret=%d. ", session_id, ret)
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
+        staging_meta = self.remote_staging_metadata[req_meta.remote_engine_id].get(req_meta.remote_port, {})
+        req_meta.remote_staging_base_addr = int(staging_meta.get("staging_base_addr", 0) or 0)
+        req_meta.remote_staging_chunk_bytes = int(staging_meta.get("staging_chunk_bytes", 0) or 0)
+        req_meta.remote_staging_window = int(staging_meta.get("staging_window", 0) or 0)
+        req_meta.remote_offloaded_kv_cache_ranges = staging_meta.get("offloaded_kv_cache_ranges", []) or []
         return req_meta
 
     def send_done_send_signal(self, req_id, req_meta, group_idx, trans_flag: bool = True):
-        external_req_id = get_external_request_id(req_id)
+        external_req_id = get_transfer_request_id(req_id, req_meta)
         send_msg_type = DONE_SENDING_MSG if trans_flag else FAILED_SENDING_MSG
         logger.info(
             "Sending transmitting signal %s for request %s to %s:%d",
@@ -2274,7 +2863,11 @@ def ensure_zmq_recv(
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
 
 
-def get_external_request_id(request_id: str):
+def get_external_request_id(request_id: str) -> str:
     # NOTE(zxr): vLLM PR #27987 add additional suffix
     # to EngineCore request_id with len(suffix) == 9
-    return request_id[:-9]
+    return request_id[:-9] if len(request_id) > 9 else request_id
+
+
+def get_transfer_request_id(req_id: str, req_meta: ReqMeta) -> str:
+    return req_meta.transfer_request_id or get_external_request_id(req_id)
