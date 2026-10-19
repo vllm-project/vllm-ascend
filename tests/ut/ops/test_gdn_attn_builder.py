@@ -662,6 +662,44 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
     )
 
 
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+@pytest.mark.parametrize("num_requests", [1, 3])
+def test_all_spec_batch_skips_identity_sequence_gathers(builder_cls, graph_mode, num_requests):
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[8] * num_requests, query_lens=[4] * num_requests),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common.block_table_tensor = torch.arange(num_requests * 4, dtype=torch.int32).reshape(num_requests, 4)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        builder_cls=builder_cls,
+        cudagraph_mode=graph_mode,
+    )
+    for step in range(2):
+        common.block_table_tensor.add_(10)
+        accepted = torch.full((num_requests,), step + 1, dtype=torch.int32)
+        with (
+            patch.object(builder, "_copy_sequence_indices_to_device", side_effect=AssertionError("identity H2D copy")),
+            patch.object(torch, "index_select", side_effect=AssertionError("identity gather")),
+        ):
+            metadata = builder.build(
+                0,
+                common,
+                num_accepted_tokens=accepted,
+                num_decode_draft_tokens_cpu=torch.full((num_requests,), 3, dtype=torch.int32),
+            )
+        conv = metadata.spec_decode_metadata.spec_causal_conv1d
+        torch.testing.assert_close(conv.cache_indices, common.block_table_tensor)
+        torch.testing.assert_close(conv.num_accepted_tokens, accepted)
+        torch.testing.assert_close(conv.query_start_loc, common.query_start_loc)
+        assert metadata.num_spec_decodes == num_requests
+        assert metadata.spec_token_indx.tolist() == list(range(num_requests * 4))
+
+
 def test_full_graph_spec_conv1d_args_keep_request_granularity():
     batch_spec = BatchSpec(
         seq_lens=[4, 4, 4],
