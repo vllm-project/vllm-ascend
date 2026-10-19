@@ -989,6 +989,17 @@ class KVCacheRecvingThread(threading.Thread):
         pending_slot_events: list[torch.npu.Event | None] = [None] * (
             2 * bank_window if pipeline_active else staging_window
         )
+        # Per-receive timing (one INFO line per request): read_s is the
+        # network stage, land_exposed_s the landing time spent on the
+        # critical path (waits plus, in sync modes, the copies themselves).
+        # Device-side landing duration is deliberately NOT measured with
+        # enable_timing events: elapsed_time() can block for a long time on
+        # a busy device (observed ~75s stalls), which would poison the very
+        # receive it instruments.
+        timing_total_start = time.perf_counter()
+        timing_read_secs = 0.0
+        timing_land_exposed_secs = 0.0
+        timing_batches = 0
         for batch_start in range(0, len(staged_transfers), bank_window):
             batch = staged_transfers[batch_start : batch_start + bank_window]
             bank_slot_base = ((batch_start // bank_window) % 2) * bank_window if pipeline_active else 0
@@ -1005,12 +1016,16 @@ class KVCacheRecvingThread(threading.Thread):
                 transfer_lengths.append(length)
                 copy_plan.append((local_dst, length, staging_offset))
             if pipeline_active:
+                reclaim_started = time.perf_counter()
                 for slot in range(bank_slot_base, bank_slot_base + len(batch)):
                     pending_event = pending_slot_events[slot]
                     if pending_event is not None:
                         pending_event.synchronize()
                         pending_slot_events[slot] = None
+                timing_land_exposed_secs += time.perf_counter() - reclaim_started
+            read_started = time.perf_counter()
             ret = self.engine.batch_transfer_sync_read(session_id, local_staging_ptrs, remote_src_ptrs, transfer_lengths)
+            timing_read_secs += time.perf_counter() - read_started
             if ret < 0:
                 logger.error(
                     "Staged Mooncake batch read failed: request=%s "
@@ -1034,23 +1049,43 @@ class KVCacheRecvingThread(threading.Thread):
                         landing_event = torch.npu.Event()
                         landing_event.record(self._landing_stream)
                         pending_slot_events[slot] = landing_event
+                timing_batches += 1
             elif self._async_landing_enabled:
                 # The event wait must stay inside the window loop: the next
                 # window's batch_transfer_sync_read overwrites the same staging
                 # slots, so landing of this window must complete first.
+                land_started = time.perf_counter()
                 with torch.npu.stream(self._landing_stream):
                     for local_dst, length, staging_offset in copy_plan:
                         self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
                 landing_done = torch.npu.Event()
                 landing_done.record(self._landing_stream)
                 landing_done.synchronize()
+                timing_land_exposed_secs += time.perf_counter() - land_started
+                timing_batches += 1
             else:
+                land_started = time.perf_counter()
                 for local_dst, length, staging_offset in copy_plan:
                     self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
                 torch.npu.synchronize()
+                timing_land_exposed_secs += time.perf_counter() - land_started
+                timing_batches += 1
 
         if pipeline_active:
+            drain_started = time.perf_counter()
             self._drain_dsa_pd_mooncake_slot_events(pending_slot_events)
+            timing_land_exposed_secs += time.perf_counter() - drain_started
+        logger.info(
+            "Staged DSA PD mooncake receive timing: request=%s mode=%s batches=%s chunks=%s "
+            "total_s=%.3f read_s=%.3f land_exposed_s=%.3f",
+            remote_request_id,
+            "pipeline" if pipeline_active else ("async" if self._async_landing_enabled else "sync"),
+            timing_batches,
+            len(staged_transfers),
+            time.perf_counter() - timing_total_start,
+            timing_read_secs,
+            timing_land_exposed_secs,
+        )
         return 0
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):

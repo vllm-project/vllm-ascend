@@ -119,6 +119,11 @@ def _make_fake_recv_thread(transfer_engine: Any, staging_bytes: int) -> Any:
     thread._dsa_pd_mooncake_staging_tensor = None
     thread._dsa_pd_mooncake_staging_bytes = 0
     thread._dsa_pd_mooncake_staging_lock = threading.Lock()
+    # Mirror the async-landing attributes normally created in __init__
+    # (object.__new__ skips it); read the knobs the same way envs.py does.
+    thread._landing_stream = torch.npu.Stream()
+    thread._async_landing_enabled = os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_ASYNC_LANDING", "0") == "1"
+    thread._pipeline_landing_enabled = os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE", "0") == "1"
     thread.vllm_config = SimpleNamespace()
     return thread
 
