@@ -23,12 +23,13 @@ def outcome(keys=(), address=1000):
         (outcome(), set()),
         (outcome(("other",)), set()),
         (outcome(("key",), address=2000), set()),
+        (GVAWriteOutcome(frozenset({"key"}), {}), set()),
     ),
 )
 def test_completion_requires_every_shard_and_one_allocation(peer, expected):
     local = outcome(("key",))
-    channel = Mock(all_gather=Mock(return_value=(local, peer)))
-    gate = SharedGVAWrites((0, 1), channel)
+    channel = Mock(all_gather=Mock(return_value={8: local, 11: peer}))
+    gate = SharedGVAWrites((8, 11), channel)
     assert gate.complete_keys(local) == expected
     channel.all_gather.assert_called_once_with(local)
 
@@ -37,11 +38,16 @@ def test_replica_nonleaders_and_other_heads_do_not_supply_missing_shards():
     local, empty = outcome(("key",)), outcome()
     # head 1 spans TP ranks 4..7; only ranks 4 and 5 own its two DCP shards.
     outcomes = (local, local, local, local, local, empty, local, local)
-    channel = Mock(all_gather=Mock(return_value=outcomes))
+    channel = Mock(all_gather=Mock(return_value=dict(enumerate(outcomes))))
     gate = SharedGVAWrites((4, 5), channel)
     assert gate.complete_keys(local) == set()
-    channel.all_gather.return_value = (*outcomes[:5], local, empty, empty)
+    channel.all_gather.return_value = dict(enumerate((*outcomes[:5], local, empty, empty)))
     assert gate.complete_keys(local) == {"key"}
+
+
+def test_shared_publication_requires_at_least_one_writer():
+    with pytest.raises(ValueError, match="writers"):
+        SharedGVAWrites((), Mock())
 
 
 @pytest.mark.parametrize("rank", range(8))

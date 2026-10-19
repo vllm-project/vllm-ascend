@@ -14,7 +14,7 @@ import numpy as np
 
 from .local_layout import bind_local_layout
 from .object_naming import KeyBuilder, KeyNamer, bind_canonical_keys
-from .types import BulkTransferArguments, KeysByObject, UInt64Array
+from .types import BulkTransferArguments, UInt64Array
 
 if TYPE_CHECKING:
     import torch
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 
 class BulkMapping:
+    """Expose bound local/naming capabilities; evaluate complete-object byte arguments."""
+
     def __init__(
         self,
         topology: KVPoolTopology,
@@ -54,12 +56,6 @@ class BulkMapping:
                 self.local.group_id, coordinates, lookup_head_count=topology.tp_partition.key_rank_count
             )
         )
-
-    def keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
-        return self.naming.keys(hashes)
-
-    def lookup_keys(self, hashes: Sequence[bytes | str]) -> KeysByObject:
-        return self.naming.lookup_keys(hashes)
 
     def arguments(
         self,

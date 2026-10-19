@@ -68,7 +68,7 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
 def test_runtime_reuses_layout_and_does_not_mutate_bulk():
     case = make_case(layers=(3, 4), heads=1, head_slices=1)
     bulk = case.bind()
-    keys = bulk.keys(["hash"])
+    keys = bulk.naming.keys(["hash"])
     before = bulk.arguments(keys, [1])
     mapping = case.bind_layers(
         object_layout_factory=partial(
@@ -128,9 +128,9 @@ def test_head_then_stage_then_context_changes_only_remote_coordinates(layout, he
             object_shard_index=shard_index,
         ),
     )
-    keys = partitioned.keys((b"a", b"b"))
-    assert keys == local.keys((b"a", b"b"))
-    assert partitioned.lookup_keys((b"a",)) == bulk.lookup_keys((b"a",))
+    keys = partitioned.naming.keys((b"a", b"b"))
+    assert keys == local.naming.keys((b"a", b"b"))
+    assert partitioned.naming.lookup_keys((b"a",)) == bulk.naming.lookup_keys((b"a",))
     before = local.prepare(keys, (2, 0))
     after = partitioned.prepare(keys, (2, 0))
     layer_bytes = tuple(obj.payload_bytes for obj in bulk.local.objects)[0] // 2
@@ -173,8 +173,8 @@ def test_bound_names_share_the_geometry_axis():
     parts = (("head0@", "@stage1"), ("head1@", "@stage1"))
     bound = BoundLayerwiseKeys(parts, parts + (("head2@", "@stage0"),))
     mapping = case.bind_layers(key_builder=SimpleNamespace(bind=lambda *_args, **_kwargs: bound))
-    assert mapping.keys((b"a",)) == (("head0@61@stage1",), ("head1@61@stage1",))
-    assert len(mapping.lookup_keys((b"a",))) == 3
+    assert mapping.naming.keys((b"a",)) == (("head0@61@stage1",), ("head1@61@stage1",))
+    assert len(mapping.naming.lookup_keys((b"a",))) == 3
 
 
 def test_extra_registered_layer_cannot_overrun_the_global_layer_span():

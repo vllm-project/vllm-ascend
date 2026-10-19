@@ -40,13 +40,23 @@ class CPPartitionSpec:
     shard_alignment_bytes: int = 1
 
 
-def context_replica_groups(tp_rank: int, put_step: int, dcp_size: int) -> tuple[tuple[int, ...], ...]:
-    """TP-local ranks sharing a head, grouped by context coordinate, without electing writers."""
-    first_rank = (tp_rank // put_step) * put_step
+@dataclass(frozen=True, slots=True)
+class ContextRank:
+    """One process's global identity and actual model-group coordinates."""
+
+    global_rank: int
+    tp_rank: int
+    dcp_rank: int
+
+
+def context_replica_groups(ranks: tuple[ContextRank, ...], tp_rank: int, put_step: int) -> tuple[tuple[int, ...], ...]:
+    """Global ranks sharing a head, grouped by actual DCP coordinate; no writer election."""
+    head = tp_rank // put_step
     groups: dict[int, list[int]] = {}
-    for rank in range(first_rank, first_rank + put_step):
-        groups.setdefault(rank % dcp_size, []).append(rank)
-    return tuple(tuple(ranks) for ranks in groups.values())
+    for rank in ranks:
+        if rank.tp_rank // put_step == head:
+            groups.setdefault(rank.dcp_rank, []).append(rank.global_rank)
+    return tuple(tuple(sorted(groups[coordinate])) for coordinate in sorted(groups))
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +109,8 @@ class KVPoolTopology:
     stage_layer_start: int
     stage_layer_count: int
     object_shard_index: int
-    tp_global_ranks: tuple[int, ...]
+    global_rank: int
+    context_global_ranks: tuple[int, ...]
     context_replica_groups: tuple[tuple[int, ...], ...]
 
     @property

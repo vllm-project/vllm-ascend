@@ -49,7 +49,7 @@ def test_factory_retains_cleanup_before_worker_initialization(configuration_case
         assert not events
         worker.close()
         worker.close()
-    acquire.assert_called_once_with(topology.tp_global_ranks)
+    acquire.assert_called_once_with(topology.context_global_ranks)
     expected = ["backend"] if failure == "channel" else ["channel", "backend"]
     if failure in (None, "worker"):
         expected.insert(0, "sessions")

@@ -17,12 +17,14 @@ class GVAWriteOutcome:
 class SharedGVAWrites:
     """Worker policy over opaque object keys, separate from byte geometry and leases.
 
-    Every TP rank participates once per Store, even a non-writer or failed opener.
+    Every participating TP/PCP rank enters once per Store, even a non-writer or failed opener.
     Only the elected ranks for this head contribute required shards. Failure or a
     missing shard prevents publication; no majority or first-writer rule is valid.
     """
 
     def __init__(self, writers: tuple[int, ...], collective: StoreCollective) -> None:
+        if not writers:
+            raise ValueError("Shared GVA publication requires context-shard writers")
         self._collective = collective
         self._writers = writers
 
@@ -37,5 +39,8 @@ class SharedGVAWrites:
         # GVA is globally addressed: matching keys alone cannot prove that an
         # expired/reallocated object received every writer's bytes.
         return {
-            key for key in complete if len({writer.regions[key] for writer in writers if key in writer.regions}) == 1
+            key
+            for key in complete
+            if all(key in writer.regions for writer in writers)
+            and len({writer.regions[key] for writer in writers}) == 1
         }

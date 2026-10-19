@@ -11,7 +11,7 @@ from vllm.logger import logger
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
 from ...infrastructure.configuration.topology import KVPoolTopology
-from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
+from ...infrastructure.mapping import LayerwiseMapping
 from ...infrastructure.mapping.object_layout import ObjectLayoutFactory
 from ...infrastructure.mapping.object_naming import KeyBuilder
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
@@ -140,9 +140,7 @@ def materialize_store_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in groups:
-        _, local, group_sizes, group_offsets = mappings[group.group_id].arguments(
-            cast(LayerwiseSelection, group.selection), layer_id=layer_id
-        )
+        _, local, group_sizes, group_offsets = mappings[group.group_id].arguments(group.selection, layer_id=layer_id)
         addresses.extend(local)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
@@ -161,7 +159,7 @@ def materialize_load_layer_ranges(
     offsets: list[list[int]] = []
     for group in plan.groups_by_layer[layer_id]:
         _, group_addresses, group_sizes, group_offsets = mappings[group.group_id].arguments(
-            cast(LayerwiseSelection, group.selection), layer_id=layer_id
+            group.selection, layer_id=layer_id
         )
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)

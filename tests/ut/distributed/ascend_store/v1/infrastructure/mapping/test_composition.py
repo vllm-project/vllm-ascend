@@ -40,9 +40,9 @@ def test_custom_names_bind_once_to_coordinates_without_encoding_default_prefixes
         patch.object(other_type, "__init__", side_effect=AssertionError("unused access mode")),
     ):
         mapping = mapping_type(case.topology, *case.registration_arrays, kv_caches=case.caches, key_builder=builder)
-        keys = mapping.keys((b"a", "b"))
+        keys = mapping.naming.keys((b"a", "b"))
         for _ in range(2):
-            assert mapping.lookup_keys((b"a", "b")) == keys
+            assert mapping.naming.lookup_keys((b"a", "b")) == keys
             if mapping_type is LayerwiseMapping:
                 selection = mapping.prepare(keys, (0, 2))
                 for layer_id in mapping.local.physical_layer_ids:
@@ -54,6 +54,7 @@ def test_custom_names_bind_once_to_coordinates_without_encoding_default_prefixes
     bind_local.assert_called_once()
     builder.bind.assert_called_once()
     assert not hasattr(mapping, "binding")
+    assert not hasattr(mapping, "keys") and not hasattr(mapping, "lookup_keys")
     if mapping_type is LayerwiseMapping:
         for layouts in mapping.layer_layouts.values():
             for layout in layouts:
@@ -80,7 +81,7 @@ def test_custom_object_layout_replaces_default_and_is_not_rebound_during_traffic
         local = layers.local.objects[0]
         offsets = layers.object_layouts[0].segment_offsets_bytes
         lengths = local.memory_segments.segment_lengths_bytes
-        selection = layers.prepare(layers.keys(("a",)), (2,))
+        selection = layers.prepare(layers.naming.keys(("a",)), (2,))
         for _ in range(2):
             for index, layer_id in enumerate(local.physical_layer_ids):
                 _, addresses, sizes, positions = layers.arguments(selection, layer_id=layer_id)
@@ -119,4 +120,4 @@ def test_bulk_does_not_initialize_layerwise_object_offsets():
     case = make_case()
     with patch.object(np, "cumsum", side_effect=AssertionError("unused layer offsets")):
         mapping = case.bind()
-        mapping.arguments(mapping.keys(("a",)), (1,))
+        mapping.arguments(mapping.naming.keys(("a",)), (1,))

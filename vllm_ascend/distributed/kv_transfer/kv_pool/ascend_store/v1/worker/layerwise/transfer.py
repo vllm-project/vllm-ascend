@@ -18,12 +18,10 @@ class LayerTransferGroup:
 
     batch: KVGroupBatch
     keys: tuple[str, ...]
-    block_ids: ByteArray
-    token_counts: ByteArray
-    object_indices: range | IndexArray
+    selection: LayerwiseSelection
     # Load resolves ownership after session admission; Store does not need this lowering.
+    object_indices: range | IndexArray | None = None
     request_indices: tuple[int, ...] | None = None
-    selection: LayerwiseSelection | None = None
 
     @property
     def group_id(self) -> int:
@@ -87,12 +85,15 @@ def _prepare_layer_plan(
     groups = []
     object_bases_by_group: dict[int, ByteArray] | None = {} if resolve_object_bases is not None else None
     for batch_group in batch.groups:
+        keys = batch_group.selected_keys()
+        if not keys:
+            continue
         selection = mappings[batch_group.group_id].prepare(
             batch_group.key_axes, batch_group.block_ids, selected_keys=batch_group.selected_objects
         )
-        group = make_layer_transfer_group(batch_group, selection=selection, resolve_requests=resolve_requests)
+        group = make_layer_transfer_group(batch_group, keys, selection, resolve_requests=resolve_requests)
         groups.append(group)
-        if resolve_object_bases is not None and group.keys:
+        if resolve_object_bases is not None:
             assert object_bases_by_group is not None
             object_bases_by_group[group.group_id] = resolve_object_bases(batch_group, group.keys)
     return make_layer_transfer_plan(batch, tuple(groups), object_bases_by_group)
@@ -100,41 +101,35 @@ def _prepare_layer_plan(
 
 def make_layer_transfer_group(
     group: KVGroupBatch,
-    selected_object_indices: IndexArray | None = None,
+    keys: tuple[str, ...],
+    selection: LayerwiseSelection,
     *,
-    selection: LayerwiseSelection | None = None,
     resolve_requests: bool = False,
 ) -> LayerTransferGroup:
-    """Align one materialized Group's dynamic rows with its selected objects."""
-
-    keys = group.selected_keys()
-    if not keys:
-        return LayerTransferGroup(
-            group,
-            (),
-            group.block_ids[:0],
-            group.token_counts[:0],
-            range(0),
-            () if resolve_requests else None,
-            selection,
-        )
-    if selected_object_indices is None and group.selected_objects is not None:
-        selected_object_indices = np.flatnonzero(group.selected_objects)
-    if selected_object_indices is None:
-        axis_count = len(group.key_axes)
-        object_indices: range | IndexArray = range(group.object_count)
-        block_ids = group.block_ids if axis_count == 1 else np.tile(group.block_ids, axis_count)
-        token_counts = group.token_counts if axis_count == 1 else np.tile(group.token_counts, axis_count)
+    """Retain Mapping's selected rows; lower request ownership only for Load."""
+    if not resolve_requests:
+        return LayerTransferGroup(group, keys, selection)
+    object_indices: range | IndexArray
+    if selection.selected_row_count == group.object_count:
+        object_indices = range(group.object_count)
+    elif len(selection.by_object) == 1:
+        selected = selection.by_object[0]
+        assert selected is not None
+        object_indices = selected.row_indices
     else:
-        row_indices = selected_object_indices % group.row_count
-        block_ids = group.block_ids[row_indices]
-        token_counts = group.token_counts[row_indices]
-        selected_object_indices.flags.writeable = False
-        object_indices = selected_object_indices
-    block_ids.flags.writeable = False
-    token_counts.flags.writeable = False
-    request_indices = tuple(group.request_index(int(index)) for index in object_indices) if resolve_requests else None
-    return LayerTransferGroup(group, keys, block_ids, token_counts, object_indices, request_indices, selection)
+        object_indices = np.fromiter(
+            (
+                axis * group.row_count + row
+                for axis, selected in enumerate(selection.by_object)
+                if selected is not None
+                for row in selected.row_indices
+            ),
+            dtype=np.intp,
+            count=selection.selected_row_count,
+        )
+        object_indices.flags.writeable = False
+    request_indices = tuple(group.request_index(int(index)) for index in object_indices)
+    return LayerTransferGroup(group, keys, selection, object_indices, request_indices)
 
 
 def make_layer_transfer_plan(
@@ -144,12 +139,8 @@ def make_layer_transfer_plan(
 ) -> LayerTransferPlan:
     """Compile reusable group membership and key axes without touching object rows."""
 
-    active_groups = []
     mutable_groups_by_layer: dict[int, list[LayerTransferGroup]] = {}
     for group in groups:
-        if not group.keys:
-            continue
-        active_groups.append(group)
         for layer_id in group.physical_layer_ids:
             mutable_groups_by_layer.setdefault(layer_id, []).append(group)
 
@@ -162,12 +153,7 @@ def make_layer_transfer_plan(
         if membership not in keys_by_membership:
             keys_by_membership[membership] = [key for group in layer_groups for key in group.keys]
         keys_by_layer[layer_id] = keys_by_membership[membership]
-    return LayerTransferPlan(batch, tuple(active_groups), groups_by_layer, keys_by_layer, object_bases_by_group)
-
-
-def make_layer_load_plan(batch: KVTransferBatch) -> LayerTransferPlan:
-    groups = tuple(make_layer_transfer_group(group, resolve_requests=True) for group in batch.groups)
-    return make_layer_transfer_plan(batch, groups)
+    return LayerTransferPlan(batch, groups, groups_by_layer, keys_by_layer, object_bases_by_group)
 
 
 def _layer_load_completions(
@@ -187,6 +173,7 @@ def _layer_load_completions(
     failures = []
     for group in plan.groups_by_layer[layer_id]:
         assert group.request_indices is not None
+        assert group.object_indices is not None
         for index, request_index, key in zip(group.object_indices, group.request_indices, group.keys, strict=True):
             code = failed_codes.get(key, 0) if isinstance(failed_codes, dict) else failed_codes
             if code != 0:

@@ -125,7 +125,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
             if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
                 collective = None
                 if config.store_enabled and topology.cp_partition.object_shard_count > 1:
-                    collective = StoreCollective(topology.tp_global_ranks)
+                    collective = StoreCollective(topology.context_global_ranks)
                     resources.bind_execution_cleanup(collective.close)
                 return GVALayerwiseWorker(
                     topology,

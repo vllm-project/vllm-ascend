@@ -77,7 +77,6 @@ class BackendSpec:
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
     layerwise_key_factory: Callable[[KeyNamingConfig], KeyBuilder] | None = None
-    layerwise_object_format: LayerwiseObjectFormat = LayerwiseObjectFormat()
     layerwise_layout_factory: Callable[[KVPoolTopology], ObjectLayoutFactory] | None = None
     key_requires_layout_identity: bool = False
 
@@ -103,7 +102,6 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
         LAYERWISE_ACCESS.get(backend_name),
         bool(getattr(backend_factory, "requires_exists_before_put", True)),
         getattr(module, "create_key_builder", None),
-        LAYERWISE_OBJECT_FORMATS[backend_name],
         getattr(module, "create_object_layout", None),
         bool(getattr(module, "KEY_REQUIRES_LAYOUT_IDENTITY", False)),
     )
