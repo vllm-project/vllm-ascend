@@ -636,7 +636,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -712,7 +711,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -897,7 +895,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -975,7 +972,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1247,19 +1243,34 @@ Mount the host HCCN config into every container that participates in pooling:
 
 On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3.1 for Ascend direct KV transfer.
 
-Use a local SSD directory on each Prefill and Decode host. The examples use `/nvme/mooncake_offload`; replace it with a directory on the actual SSD mount. Create it before starting the container:
+Use a local SSD directory on each Prefill and Decode host to store KV cache data offloaded from the memory pool. `/nvme/mooncake_offload` is an example directory inside the container, not a required SSD mount point or a directory that already exists on every host.
+
+On each host, first identify the local SSD and its mount point:
 
 ```bash
-mkdir -p /nvme/mooncake_offload
+lsblk -o NAME,TYPE,SIZE,ROTA,FSTYPE,MOUNTPOINTS,MODEL
+df -hT
 ```
 
-Add the corresponding bind mount to every model container:
+Use `MODEL` to identify the SSD and `MOUNTPOINTS` to find its mounted filesystem. `ROTA=0` indicates a non-rotational device; confirm the storage type with the machine's disk information, especially for RAID or virtual disks. Choose an existing local SSD filesystem with enough free space. A shared network filesystem is not the local SSD tier.
+
+For example, if the SSD is mounted at `/data/nvme`, create the offload directory there before starting the container. Replace `/data/nvme` below with the actual SSD mount point:
 
 ```bash
--v /nvme/mooncake_offload:/nvme/mooncake_offload
+mkdir -p /data/nvme/mooncake_offload
+findmnt -T /data/nvme/mooncake_offload
+df -hT /data/nvme/mooncake_offload
 ```
 
-Set `ssd_offload_path` to the absolute directory visible inside the container and make it writable by the vLLM process. The same path refers to separate local SSD storage on each host. The backend creates per-rank subdirectories beneath it. The installed Mooncake package must support the `enable_ssd_offload` and `ssd_offload_path` arguments in `MooncakeDistributedStore.setup()`; use the dependencies in the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+Confirm that `findmnt` reports the selected SSD filesystem and that `df` shows enough available space. Creating a directory named `/nvme` alone does not mount an SSD or ensure that data is stored on one.
+
+Add this bind mount when creating each model container:
+
+```bash
+-v /data/nvme/mooncake_offload:/nvme/mooncake_offload
+```
+
+The left side is the directory on that host's SSD; the right side is the directory visible inside the container. With this mapping, keep `"ssd_offload_path": "/nvme/mooncake_offload"` in `mooncake.json`. If the container path changes, update `ssd_offload_path` to match. Use an absolute path that exists and is writable by the vLLM process; do not use a symlink. Repeat this setup on P and every D host: identical path strings refer to separate local SSD storage on each host. The backend creates per-rank subdirectories beneath it. The installed Mooncake package must support the `enable_ssd_offload` and `ssd_offload_path` arguments in `MooncakeDistributedStore.setup()`; use the dependencies in the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
 Place `mooncake.json` next to `run_dp_template.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. `global_segment_size` is allocated per worker rank, not per node; a non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is already exported, update it to the intended size or unset it before startup because it overrides the JSON value.
 
@@ -1380,7 +1391,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
@@ -1479,7 +1489,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
@@ -1582,7 +1591,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1681,7 +1689,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1913,7 +1920,6 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
     export VLLM_PP_LAYER_PARTITION="15,15,15,15"
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="<NIC_NAME>"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     export GLOO_SOCKET_IFNAME="<NIC_NAME>"
@@ -1969,7 +1975,6 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=256
-        export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME="<NIC_NAME>"
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
         export GLOO_SOCKET_IFNAME="<NIC_NAME>"
@@ -2021,7 +2026,6 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=256
-        export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME="<NIC_NAME>"
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
         export GLOO_SOCKET_IFNAME="<NIC_NAME>"
