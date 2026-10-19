@@ -347,6 +347,9 @@ class ChunkedTokenDatabase:
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
+        # Per descriptor: physical-block index and count within a logical block.
+        # Compact contiguous descriptors cover the whole block as (0, 1).
+        self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
             "state": {},
@@ -453,6 +456,7 @@ class ChunkedTokenDatabase:
         group_cache_families: dict[int, str] | None = None,
         group_num_layers: dict[int, int] | None = None,
         group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
+        group_cache_entry_segments: dict[int, list[tuple[int, int]]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -463,6 +467,7 @@ class ChunkedTokenDatabase:
             self.group_block_len = group_block_len
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
+            self.group_cache_entry_segments = group_cache_entry_segments or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -520,17 +525,32 @@ class ChunkedTokenDatabase:
         size_list: list[int] = []
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
         num_layers = self.group_num_layers.get("kv", {}).get(0, 1)
-        entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
-        if layer_id >= num_layers or entries_per_layer == 0:
+        if layer_id < 0 or layer_id >= num_layers:
             return [], [], 0
-        start_idx = layer_id * entries_per_layer
-        for i in range(entries_per_layer):
-            idx = start_idx + i
+        layer_offsets = self.group_layer_cache_entry_offsets.get(0)
+        if layer_offsets is None:
+            entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
+            start_idx = layer_id * entries_per_layer
+            end_idx = start_idx + entries_per_layer
+        else:
+            start_idx, end_idx = layer_offsets[layer_id : layer_id + 2]
+        segments = self.group_cache_entry_segments.get(0)
+        start_in_block = start - block_idx * group_block_size
+        end_in_block = end - block_idx * group_block_size
+        for idx in range(start_idx, end_idx):
+            segment_index, segment_count = segments[idx] if segments else (0, 1)
+            segment_tokens = group_block_size // segment_count
+            segment_start = segment_index * segment_tokens
+            copy_start = max(start_in_block, segment_start)
+            copy_end = min(end_in_block, segment_start + segment_tokens)
+            if copy_start >= copy_end:
+                continue
             block_stride = group_block_stride[idx] if group_block_stride else group_block_len[idx]
-            addr = group_addrs[idx] + block_id * block_stride
-            size = int(group_block_len[idx] / group_block_size * (end - start))
+            byte_start = group_block_len[idx] * (copy_start - segment_start) // segment_tokens
+            byte_end = group_block_len[idx] * (copy_end - segment_start) // segment_tokens
+            addr = group_addrs[idx] + block_id * block_stride + byte_start
             addr_list.append(addr)
-            size_list.append(size)
+            size_list.append(byte_end - byte_start)
         return addr_list, size_list, block_id
 
     def _iter_token_chunks(
