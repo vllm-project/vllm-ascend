@@ -370,6 +370,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             num_replicated_tokens = get_pcp_num_replicated_tokens(
                 indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
+            if slot_mapping.numel() <= k_li.shape[0]:
+                # An unexpanded slot mapping (e.g. a replicated draft decode)
+                # means every rank holds the same tokens: write them locally.
+                num_replicated_tokens = indexer_metadata.num_actual_tokens
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
