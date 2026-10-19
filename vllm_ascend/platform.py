@@ -1230,7 +1230,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
     if (xlite_config := ascend_config.xlite_graph_config).enabled:
         spec_config = vllm_config.speculative_config
         mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
-        decode_mode = CUDAGraphMode.NONE if spec_config is None else compilation_config.cudagraph_mode.decode_mode()
+        # TODO(SijieFu): properly resolve cudagraph_mode when xlite is enabled
+        decode_mode = (
+            CUDAGraphMode.NONE
+            if spec_config is None or vllm_config.use_v2_model_runner
+            else compilation_config.cudagraph_mode.decode_mode()
+        )
         if not decode_mode or mixed_mode == decode_mode:
             compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
         else:
@@ -1239,7 +1244,7 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             spec_config.enforce_eager = enforce_eager
         enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
         model_config.enforce_eager = enforce_eager
-        logger.info(
+        logger.info_once(
             "Xlite graph enabled; falling back `compilation_config.cudagraph_mode` to %s (enforce_eager: %s)",
             compilation_config.cudagraph_mode,
             enforce_eager,
