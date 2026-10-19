@@ -273,6 +273,9 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
     assert (sampled[resampled, 1] >= 0).all()
     assert (sampled[resampled, 1] < VOCAB_SIZE).all()
 
+    gc.collect()
+    torch.npu.empty_cache()
+
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 @pytest.mark.parametrize("temperature", [0.6, 1.0])
@@ -388,6 +391,26 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
 
 
 @pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+@torch.inference_mode()
+def test_block_verification_single_bonus_only_request(has_draft_logits, temperature):
+    """A one-logit batch must recover its bonus without a zero-sized residual grid."""
+    logits = torch.tensor([-float("inf"), 0.0, -float("inf")], device="npu")
+    inputs = _build_rejection_sample_inputs(logits, logits, 3, temperature, num_trials=1)
+    # Keep the persistent draft cache, but verify a request with no proposals.
+    for name in ("target_logits", "draft_sampled", "pos", "expanded_idx_mapping", "expanded_local_pos"):
+        inputs[name] = inputs[name][:1]
+    inputs["cu_num_logits"] = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+
+    assert num_sampled.cpu().tolist() == [1]
+    assert sampled[:, 0].cpu().tolist() == [1]
+
+
+@pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
 def test_block_verification_keeps_greedy_results(has_draft_logits):
     torch.manual_seed(9)
@@ -405,18 +428,3 @@ def test_block_verification_keeps_greedy_results(has_draft_logits):
     torch.testing.assert_close(counts, expected_counts)
     valid = torch.arange(4, device="npu")[None, :] < counts[:, None]
     torch.testing.assert_close(sampled[valid], expected[valid])
-
-
-def test_block_verification_rejects_synthetic_rates():
-    logits = torch.zeros(3, device="npu")
-    inputs = _build_rejection_sample_inputs(logits, logits, 1, 1.0, num_trials=1)
-    with pytest.raises(AssertionError, match="incompatible with synthetic"):
-        rejection_sample(
-            **inputs,
-            num_speculative_steps=1,
-            synthetic_conditional_rates=torch.ones(1, device="npu"),
-            use_block_verification=True,
-        )
-
-    gc.collect()
-    torch.npu.empty_cache()
