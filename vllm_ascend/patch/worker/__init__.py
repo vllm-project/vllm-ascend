@@ -21,6 +21,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import vllm_version_is
 
 if HAS_TRITON:
+    import vllm_ascend.patch.worker.patch_mrope_vit_setup  # noqa
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
