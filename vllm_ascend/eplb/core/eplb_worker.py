@@ -33,6 +33,7 @@ class EplbWorker:
         policy_type,
         enable_d2d: bool = True,
         tp_size: int | None = None,
+        record_only: bool = False,
     ):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type)
@@ -42,6 +43,7 @@ class EplbWorker:
         self.tp_size = tp_size
         self.rank_id = get_ep_group().rank_in_group
         self.multi_stage = policy_type == 3
+        self.record_only = record_only
 
     def do_update(self):
         # put data in to queue
@@ -106,7 +108,8 @@ class EplbWorker:
         self.update_expert_map(new_expert_maps)
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
-        self.old_expert_maps = new_expert_maps
+        if not self.record_only:
+            self.old_expert_maps = new_expert_maps
         logger.debug("[eplb/worker] EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
@@ -341,12 +344,14 @@ class EplbProcess:
         policy_type: int = 0,
         enable_d2d: bool = True,
         tp_size: int | None = None,
+        record_only: bool = False,
     ):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
+            record_only: Whether EPLB only records its plan instead of applying it
         """
         self.shared_dict = shared_dict
         self.policy_type = policy_type
@@ -360,6 +365,7 @@ class EplbProcess:
             self.policy_type,
             self.enable_d2d,
             tp_size=tp_size,
+            record_only=record_only,
         )
 
     def worker_process(self, planner_q, block_update_q):
