@@ -19,11 +19,20 @@
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig
-from vllm.model_executor.layers.attention import CrossAttention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention, CrossAttention
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+
+def _has_encoder_only_layers(vllm_config: VllmConfig) -> bool:
+    """Whether the model has non-causal, KV-cache-less attention layers."""
+    return any(
+        layer.attn_type == AttentionType.ENCODER_ONLY
+        for layer in get_layers_from_vllm_config(vllm_config, Attention).values()
+    )
 
 
 def init_asecnd_model_state(
@@ -57,8 +66,17 @@ def init_asecnd_model_state(
 
     if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
         from vllm_ascend._310p.worker.v2.model_state import (
+            Ascend310PEncoderOnlyModelState,
             Ascend310PModelState,
         )
+
+        if _has_encoder_only_layers(vllm_config):
+            return Ascend310PEncoderOnlyModelState(
+                vllm_config,
+                model,
+                encoder_cache,
+                device,
+            )
 
         return Ascend310PModelState(
             vllm_config,
@@ -73,6 +91,20 @@ def init_asecnd_model_state(
         )
 
         return AscendEncoderDecoderModelState(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
+    # Encoder-only attention (BERT/BGE) is non-causal and keeps no KV cache, so
+    # it cannot use the KV-backed AscendModelState.
+    if _has_encoder_only_layers(vllm_config):
+        from vllm_ascend.worker.v2.model_states.encoder_only import (
+            AscendEncoderOnlyModelState,
+        )
+
+        return AscendEncoderOnlyModelState(
             vllm_config,
             model,
             encoder_cache,
