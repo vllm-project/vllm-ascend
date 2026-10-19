@@ -611,7 +611,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
@@ -687,7 +687,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         }'
     ```
 
-    2. Decode node
+    **2. Decode node**
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
@@ -765,7 +765,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     For short-input workloads, tune `--max-num-batched-tokens` using [Section 9.2](#92-tuning-guidelines).
     Once the preparation is done, start the server with the following command on each node:
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
@@ -788,7 +788,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     This starts one Prefill API server on port `31050`. Wait until it prints `Application startup complete`.
 
-    2. First Decode node (`DECODE0_IP`, global ranks 0–3)
+    **2. First Decode node (`DECODE0_IP`, global ranks 0–3)**
 
     ```bash
     export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
@@ -810,7 +810,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     ```
 
 
-    3. Second Decode node (`DECODE1_IP`, global ranks 4–7)
+    **3. Second Decode node (`DECODE1_IP`, global ranks 4–7)**
 
     ```bash
     export DECODE0_IP="<FIRST_DECODE_NODE_IP>"
@@ -867,7 +867,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     Set `PREFILL_IP` and `DECODE_IP` to the Prefill and Decode communication IPs. For the three-node variant, also set `DECODE0_IP` and `DECODE1_IP`. Set `LOCAL_IP` and `NIC_NAME` separately in each node's template.
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     unset ftp_proxy https_proxy http_proxy all_proxy
@@ -945,7 +945,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         }'
     ```
 
-    2. Decode node
+    **2. Decode node**
 
     ```bash
     unset ftp_proxy https_proxy http_proxy all_proxy
@@ -1024,7 +1024,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     Once the preparation is done, start the server with the following command on each node:
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
@@ -1047,7 +1047,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
 
-    2. Decode node
+    **2. Decode node**
 
     ```bash
     export DECODE_IP="<DECODE_NODE_IP>"
@@ -1368,7 +1368,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
 
     One Prefill node uses `DP1 × TP4 × PP4`; two Decode nodes form a global `DP8 × TP4 × PP1` group, with four local ranks per node. Copy the same Decode template to both D nodes and use the node-specific launch blocks below. Service settings match Section 5.3.1; `MultiConnector` adds the KV pool. The `--language-model-only` option remains in the existing optional guidance rather than the launch commands.
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
@@ -1467,7 +1467,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         }'
     ```
 
-    2. Decode node
+    **2. Decode node**
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
@@ -1570,7 +1570,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
 
     Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/`, `/etc/hccn.conf`, and the local SSD directory from Section 5.3.2.1. Place the Prefill / Decode `mooncake.json` from Section 5.3.2.1 next to `run_dp_template.sh` (`global_segment_size` is `64GB` on both roles, with SSD offload enabled). Set `master_server_address` to the same reachable Mooncake Master on both nodes.
 
-    1. Prefill node
+    **1. Prefill node**
 
     ```bash
     unset ftp_proxy https_proxy http_proxy all_proxy
@@ -1669,7 +1669,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
       }'
     ```
 
-    2. Decode node
+    **2. Decode node**
 
     ```bash
     unset ftp_proxy https_proxy http_proxy all_proxy
