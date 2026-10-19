@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
-from vllm_ascend.attention.utils import split_decodes_and_prefills
+from vllm_ascend.attention.utils import get_pcp_layout_flags, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -84,6 +84,11 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Whether this step's tokens use the PCP rank-local layout, and whether its
+    # decodes are sharded across PCP ranks. Set per step by the builder: a
+    # replicated draft decode runs without PCP even when built with PCP.
+    uses_pcp_kv_layout: bool = False
+    is_pcp_decode_sharded: bool = False
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
@@ -210,11 +215,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
 
         # Cache-write gathers for parallel layouts: PCP all-gathers every
-        # non-replicated token across the CP group, DSA-CP all-gathers the
-        # indexer k across the TP group. Both are no-ops in the base layout.
-        parallel_config = get_current_vllm_config().parallel_config
-        self._pcp_active = parallel_config.prefill_context_parallel_size > 1
-        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
+        # non-replicated token across the CP group when the metadata uses the
+        # PCP layout, DSA-CP all-gathers the indexer k across the TP group.
+        # Both are no-ops in the base layout.
         self._dsa_cp_active = enable_dsa_cp()
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
@@ -365,10 +368,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k across the TP group (its padded slot mapping already covers the
         gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
-        if self._pcp_active:
+        if indexer_metadata.uses_pcp_kv_layout:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
             num_replicated_tokens = get_pcp_num_replicated_tokens(
-                indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
+                indexer_metadata.num_decode_tokens, indexer_metadata.is_pcp_decode_sharded
             )
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
             k_li = gathered_tensors[0]
@@ -543,6 +546,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.use_dsa_cp = enable_dsa_cp()
         self._group_metadata_buffers: dict[
             object,
@@ -1027,6 +1031,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        uses_pcp_kv_layout, is_pcp_decode_sharded = get_pcp_layout_flags(
+            kwargs.get("pcp_context"), self.is_pcp_decode_sharded
+        )
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
@@ -1034,7 +1041,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 kwargs.get("pcp_cache_group_idx"),
                 buffer_key,
             )
-        elif self.use_pcp:
+        elif uses_pcp_kv_layout:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
@@ -1079,7 +1086,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if self.use_pcp:
+        if uses_pcp_kv_layout:
             # Preserve the decode boundary for PCP's cache-write gather.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
@@ -1101,4 +1108,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
+            uses_pcp_kv_layout=uses_pcp_kv_layout,
+            is_pcp_decode_sharded=is_pcp_decode_sharded,
         )

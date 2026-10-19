@@ -2,7 +2,7 @@ import ast
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -459,55 +459,29 @@ def test_adaptive_verification_pads_fia_query_boundaries(
     np.testing.assert_array_equal(actual[: len(expected)], expected)
 
 
-def test_sample_tokens_restores_replicated_draft_hidden_states():
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+def test_sample_tokens_hands_target_state_to_upstream_unchanged(is_last_pp_rank):
+    """PCP restoration and the draft handoff run inside upstream sample_tokens."""
     runner = _make_runner(need_timing=False)
-    runner.is_last_pp_rank = True
-    runner.speculator = SimpleNamespace(replicated_pcp=True)
-
-    hidden_states = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    aux_hidden_states = torch.ones(2, 3)
-    state = Mock(aux_hidden_states=[aux_hidden_states])
-    state.hidden_states = hidden_states
-    restored_state = object()
-    state._replace.return_value = restored_state
+    runner.is_last_pp_rank = is_last_pp_rank
+    runner.speculator = SimpleNamespace(draft_attn_layer_names={"mtp"})
+    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
+    state = Mock(hidden_states=torch.ones(2, 3), aux_hidden_states=None)
     runner.execute_model_state = state
+    runner.model = SimpleNamespace(get_mtp_target_hidden_states=Mock())
+    seen = {}
 
-    target_hidden_states = object()
-    restored_hidden_states = torch.ones(4, 3)
-    runner.pcp_manager = SimpleNamespace(
-        restore_hidden_state_buffer=Mock(),
-        restore_hidden_states=Mock(
-            return_value=restored_hidden_states,
-        ),
-    )
-    runner.model = SimpleNamespace(
-        get_mtp_target_hidden_states=lambda: target_hidden_states,
-    )
-    grammar_output = object()
-    expected_output = object()
+    def parent(self, grammar_output):
+        seen["state"] = self.execute_model_state
+        return "out"
 
-    with patch.object(
-        GPUModelRunner,
-        "sample_tokens",
-        return_value=expected_output,
-    ) as parent_sample_tokens:
-        actual = runner.sample_tokens(grammar_output)
-
-    assert actual is expected_output
-    parent_sample_tokens.assert_called_once_with(grammar_output)
-    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    # vLLM main (#57980) folded the aux restore into restore_for_sampling,
-    # which the replicated-PCP fast path bypasses; the pre-restore must
-    # cover aux too or the draft reads PCP-local rows.
-    assert runner.pcp_manager.restore_hidden_states.call_args_list == [
-        call(hidden_states),
-        call(aux_hidden_states),
-    ]
-    state._replace.assert_called_once_with(
-        hidden_states=restored_hidden_states,
-        aux_hidden_states=[restored_hidden_states],
-    )
-    assert runner.execute_model_state is restored_state
+    with patch.object(GPUModelRunner, "sample_tokens", parent):
+        assert runner.sample_tokens("grammar") == "out"
+    assert seen["state"] is state
+    state._replace.assert_not_called()
+    runner.pcp_manager.restore_hidden_states.assert_not_called()
+    runner.pcp_manager.restore_for_sampling.assert_not_called()
+    runner.model.get_mtp_target_hidden_states.assert_not_called()
 
 
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
@@ -1189,24 +1163,6 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.decode_query_len == 2
 
 
-def test_sample_tokens_non_last_pp_uses_global_batch():
-    runner = _make_runner()
-    runner.is_last_pp_rank = False
-    runner.speculator = None
-    global_batch = object()
-    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
-    runner.pcp_manager.global_batch = global_batch
-    state = Mock(aux_hidden_states=None)
-    replaced = object()
-    state._replace.return_value = replaced
-    runner.execute_model_state = state
-    with patch.object(GPUModelRunner, "sample_tokens", return_value="out") as parent:
-        assert runner.sample_tokens(None) == "out"
-    state._replace.assert_called_once_with(input_batch=global_batch)
-    assert runner.execute_model_state is replaced
-    parent.assert_called_once_with(None)
-
-
 def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     runner = _make_runner()
     runner.is_last_pp_rank = True
@@ -1233,7 +1189,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
-    runner.speculator = SimpleNamespace()
+    runner.speculator = None
     runner.model_config = SimpleNamespace(enable_return_routed_experts=True, architecture=architecture)
     runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
@@ -1284,9 +1240,9 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    runner.pcp_manager.set_runner_state.assert_called_once_with(runner.vllm_config, seen["cfg"], runner.input_buffers)
+    runner.pcp_manager.set_speculator.assert_not_called()
     assert runner.model_state.pcp_manager is runner.pcp_manager
-    assert runner.speculator.pcp_manager is runner.pcp_manager
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 

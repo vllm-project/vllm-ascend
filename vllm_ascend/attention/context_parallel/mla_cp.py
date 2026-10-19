@@ -109,7 +109,6 @@ class AscendMlaDCPMetadataBuilder(
     """Build MLA metadata for decode context parallelism."""
 
     decode_metadata_cls = AscendMLADCPDecodeMetadata
-    consumes_pcp_context = True
     # Non-causal block drafters (e.g. DSpark) attend to all DCP-local KV.
     # Causal multi-token queries still need history/current split attention.
     supports_non_causal_multi_token_dcp = True
@@ -519,7 +518,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
         """Use the global PCP request table for DCP prefill KV loading."""
-        if not self.pcp_enabled:
+        if not attn_metadata.uses_pcp_kv_layout:
             return super().get_context_block_table(attn_metadata)
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None

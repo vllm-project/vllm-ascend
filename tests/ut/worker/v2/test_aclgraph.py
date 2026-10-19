@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import Specul
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
+    get_draft_prefill_cudagraph_mode,
 )
 
 
@@ -27,6 +28,11 @@ def _parent_init(
 ):
     """Mock the parent graph manager initialization."""
     self._capture_descs = [object()]
+    self.cudagraph_mode = cudagraph_mode
+
+
+def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
 
 
 def test_init_draft_prefill_graph():
@@ -43,12 +49,54 @@ def test_init_draft_prefill_graph():
         ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_params") as set_decode,
     ):
-        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2)
+        manager = AutoRegressiveAclGraphManager(
+            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2
+        )
     assert manager.capture_sizes == [4, 8]
     assert manager.is_draft_model_prefill is True
+    assert manager.cudagraph_mode == CUDAGraphMode.FULL
     assert manager.speculator is None
     set_prefill.assert_called_once_with([4, 8])
     set_decode.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("pcp_size", "mode", "expected"),
+    [
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        (2, CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (1, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE),
+    ],
+)
+def test_get_draft_prefill_cudagraph_mode(pcp_size, mode, expected):
+    """A draft keeping the target's PCP size shards its prefill outside FULL graphs."""
+    assert get_draft_prefill_cudagraph_mode(_graph_config(pcp_size), mode) == expected
+
+
+@pytest.mark.parametrize(
+    ("decode_query_len", "mode", "expected"),
+    [
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        (2, CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (1, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+    ],
+)
+def test_sharded_pcp_draft_prefill_avoids_full_graphs(decode_query_len, mode, expected):
+    """Sharded draft prefill stages inputs and all-gathers outside the forward."""
+    with (
+        patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
+        patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[4],
+        ),
+    ):
+        manager = AutoRegressiveAclGraphManager(
+            _graph_config(pcp_size=2), torch.device("cpu"), mode, decode_query_len=decode_query_len
+        )
+    assert manager.cudagraph_mode == expected
 
 
 def test_init_draft_decode_graph():

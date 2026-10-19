@@ -324,6 +324,19 @@ def enable_pcp():
     return parallel_config.prefill_context_parallel_size > 1
 
 
+def get_pcp_layout_flags(pcp_context: Any | None, is_pcp_decode_sharding_enabled: bool) -> tuple[bool, bool]:
+    """Return this step's ``(uses_pcp_kv_layout, is_pcp_decode_sharded)``.
+
+    MRV2 passes a PCP context only for batches partitioned across PCP ranks:
+    target forwards and sharded draft prefill. Without one, the batch runs
+    replicated on every rank like a PCP=1 model, even when the attention
+    layer was built with PCP (e.g. a replicated draft decode). Builders copy
+    these flags into their metadata so impls decide per step from metadata.
+    """
+    uses_pcp_kv_layout = pcp_context is not None
+    return uses_pcp_kv_layout, uses_pcp_kv_layout and is_pcp_decode_sharding_enabled
+
+
 @dataclass
 class AscendDCPMetadata:
     """Per-batch metadata required by decode context parallelism."""

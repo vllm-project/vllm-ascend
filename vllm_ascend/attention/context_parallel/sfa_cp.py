@@ -315,7 +315,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         batch needs the PCP KV gather, they write this rank's slots, and the
         packed cache rows are then gathered into every rank's cache.
         """
-        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+        if not needs_pcp_kv_gather(attn_metadata):
             return preprocess(slot_mapping)
         local_slots = attn_metadata.pcp_prolog_local_slots
         global_slots = attn_metadata.pcp_prolog_global_slots
@@ -326,7 +326,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if not global_slots.numel():
             return result
         num_replicated_tokens = get_pcp_num_replicated_tokens(
-            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+            attn_metadata.num_decode_tokens or 0, attn_metadata.is_pcp_decode_sharded
         )
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.
@@ -364,10 +364,10 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+        if not needs_pcp_kv_gather(attn_metadata):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
         num_replicated_tokens = get_pcp_num_replicated_tokens(
-            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+            attn_metadata.num_decode_tokens or 0, attn_metadata.is_pcp_decode_sharded
         )
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
             (kv_no_split, cos, sin), slots, num_replicated_tokens

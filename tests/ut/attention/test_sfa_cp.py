@@ -32,6 +32,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     PreprocessType,
     SFAForwardContext,
+    needs_pcp_kv_gather,
 )
 from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
 from vllm_ascend.weight_switch import (
@@ -681,8 +682,9 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
-    attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1)
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=1, num_prefills=1, uses_pcp_kv_layout=True, is_pcp_decode_sharded=False
+    )
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
     sin = cos + 10
@@ -1341,7 +1343,6 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8, quantized_index
 )
 def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num_decode_tokens, num_tokens):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
     c8 = impl.enable_sparse_sfa_c8 = cache_dtype != torch.bfloat16
     width = 656 if c8 else 5
     cache_blocks = (pcp_size * num_tokens + 7) // 8
@@ -1370,6 +1371,8 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
         num_decode_tokens=num_decode_tokens,
         num_prefills=int(rows > 0),
         pcp_has_global_prefill=False,
+        uses_pcp_kv_layout=True,
+        is_pcp_decode_sharded=False,
         pcp_prolog_local_slots=expected_local_slots if rows else None,
         pcp_prolog_global_slots=slots[:, num_decode_tokens:].reshape(-1) if rows else None,
     )
@@ -1418,11 +1421,10 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
         torch.testing.assert_close(args["value"], gathered[:, 3:].unsqueeze(1))
 
 
-def _make_sfa_split_builder(use_pcp: bool, threshold: int = 1) -> AscendSFAMetadataBuilder:
+def _make_sfa_split_builder(threshold: int = 1, is_pcp_decode_sharded: bool = False) -> AscendSFAMetadataBuilder:
     builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
     builder.speculative_config = None
-    builder.use_pcp = use_pcp
-    builder.is_pcp_decode_sharded = False
+    builder.is_pcp_decode_sharded = is_pcp_decode_sharded
     builder.decode_threshold = threshold
     builder.nope = False
     builder.kernel_block_size = 128
@@ -1461,7 +1463,7 @@ def _make_sfa_split_common(query_lens, flags, actual, threshold, capture=False, 
     )
 
 
-@pytest.mark.parametrize("use_pcp", [False, True])
+@pytest.mark.parametrize("uses_pcp_kv_layout", [False, True])
 @pytest.mark.parametrize(
     "query_lens,flags,actual,threshold,capture,expected_without,expected_with",
     [
@@ -1474,26 +1476,55 @@ def _make_sfa_split_common(query_lens, flags, actual, threshold, capture=False, 
     ],
 )
 def test_sfa_split_counts_with_and_without_pcp(
-    use_pcp, query_lens, flags, actual, threshold, capture, expected_without, expected_with
+    uses_pcp_kv_layout, query_lens, flags, actual, threshold, capture, expected_without, expected_with
 ):
-    builder = _make_sfa_split_builder(use_pcp, threshold)
+    builder = _make_sfa_split_builder(threshold)
     common = _make_sfa_split_common(query_lens, flags, actual, threshold, capture)
+    # Only a PCP context selects the PCP layout; its absence means replicated.
+    context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(flags, dtype=torch.bool)))
+    kwargs = {"pcp_context": context} if uses_pcp_kv_layout else {}
     with (
         patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False),
         patch(
             "vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla",
             return_value=(torch.ones(common.num_input_tokens, 64), torch.zeros(common.num_input_tokens, 64)),
         ),
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+        ),
     ):
-        meta = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+        meta = builder.build_for_cudagraph_capture(common, **kwargs) if capture else builder.build(0, common, **kwargs)
+    assert meta.uses_pcp_kv_layout is uses_pcp_kv_layout
     assert (meta.num_decodes, meta.num_prefills, meta.num_decode_tokens) == (
-        expected_with if use_pcp else expected_without
+        expected_with if uses_pcp_kv_layout else expected_without
     )
+
+
+def test_sfa_builder_without_pcp_context_runs_replicated_under_sharded_pcp_config():
+    # A replicated draft decode reaches a PCP-built SFA builder without a PCP
+    # context. It must not prepare or request the sharded-decode KV gather.
+    builder = _make_sfa_split_builder(is_pcp_decode_sharded=True)
+    common = _make_sfa_split_common([1], [False], 1, 1)
+    context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    with (
+        patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla", return_value=(torch.ones(1, 64), torch.zeros(1, 64))),
+        patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
+    ):
+        replicated = builder.build(0, common)
+        sharded = builder.build(0, common, pcp_context=context)
+    assert not replicated.uses_pcp_kv_layout and not replicated.is_pcp_decode_sharded
+    assert replicated.pcp_prolog_local_slots is None
+    assert not needs_pcp_kv_gather(replicated)
+    assert sharded.uses_pcp_kv_layout and sharded.is_pcp_decode_sharded
+    assert sharded.pcp_prolog_local_slots is not None
+    assert needs_pcp_kv_gather(sharded)
 
 
 @pytest.mark.parametrize("global_has_prefill", [False, True])
 def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_has_prefill):
-    builder = _make_sfa_split_builder(use_pcp=True)
+    builder = _make_sfa_split_builder()
     common = _make_sfa_split_common([1], [False], 1, 1, padded_tokens=2)
     common.slot_mapping = torch.tensor([0, -1, -1, -1])
     context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([global_has_prefill])))
@@ -1519,7 +1550,7 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
 
 
 def test_sfa_pcp_builder_prepares_local_prolog_slots():
-    builder = _make_sfa_split_builder(use_pcp=True)
+    builder = _make_sfa_split_builder()
     common = _make_sfa_split_common([1, 2], [False, True], 3, 1, padded_tokens=4)
     common.slot_mapping = torch.tensor([0, 1, 2, -1, -1, -1, 3, -1])
     context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False, True])))
@@ -1539,13 +1570,14 @@ def test_sfa_pcp_builder_prepares_local_prolog_slots():
 
 def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
     impl.enable_sparse_sfa_c8 = False
     impl.enable_sparse_sfa_turboquant = False
     metadata = SimpleNamespace(
         num_decode_tokens=1,
         num_prefills=0,
         pcp_has_global_prefill=True,
+        uses_pcp_kv_layout=True,
+        is_pcp_decode_sharded=False,
         pcp_prolog_local_slots=torch.tensor([0, -1], dtype=torch.int64),
         pcp_prolog_global_slots=torch.tensor([1, -1], dtype=torch.int64),
     )
@@ -1584,7 +1616,6 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
 
 def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
     impl.enable_sparse_sfa_c8 = False
     impl.enable_sparse_sfa_turboquant = False
     hidden = torch.empty((0, 1))
@@ -1593,6 +1624,8 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
         num_decode_tokens=0,
         num_prefills=0,
         pcp_has_global_prefill=True,
+        uses_pcp_kv_layout=True,
+        is_pcp_decode_sharded=False,
         pcp_prolog_local_slots=slots,
         pcp_prolog_global_slots=slots,
     )
@@ -1613,15 +1646,25 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     write_cache.assert_not_called()
 
 
-def test_sfa_pcp_padded_decode_skips_kv_gather():
+@pytest.mark.parametrize(
+    ("uses_pcp_kv_layout", "is_pcp_decode_sharded"),
+    [(True, False), (False, False)],
+    ids=["pcp-replicated-decode", "no-pcp-layout"],
+)
+def test_sfa_pcp_padded_decode_skips_kv_gather(uses_pcp_kv_layout, is_pcp_decode_sharded):
     num_decode_tokens = 2
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
     num_input_tokens = num_decode_tokens * 2
     hidden = torch.zeros((num_input_tokens, 3))
     slots = torch.cat((torch.arange(num_decode_tokens), torch.full((num_decode_tokens,), -1)))
     cache = (torch.empty(0), torch.empty(0))
-    metadata = SimpleNamespace(num_decode_tokens=num_decode_tokens, num_prefills=0, pcp_has_global_prefill=False)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_prefills=0,
+        pcp_has_global_prefill=False,
+        uses_pcp_kv_layout=uses_pcp_kv_layout,
+        is_pcp_decode_sharded=is_pcp_decode_sharded,
+    )
     output = (hidden, hidden, hidden, None)
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,

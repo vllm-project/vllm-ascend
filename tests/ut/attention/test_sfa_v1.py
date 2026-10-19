@@ -664,7 +664,6 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
-        indexer._pcp_active = False
         indexer._dsa_cp_active = False
         indexer.write_cache = MagicMock()
 
@@ -677,6 +676,7 @@ class TestAscendSFAKPathFusion(TestBase):
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
             actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
             actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
+            uses_pcp_kv_layout=False,
         )
 
         k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
@@ -847,12 +847,13 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         assert builder.device == device
         assert builder.vllm_config == vllm_config
-        assert builder.use_pcp is False
+        assert builder.is_pcp_decode_sharded is False
         vllm_config.parallel_config.prefill_context_parallel_size = 2
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         pcp_builder = AscendSFAMetadataBuilder(
             kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
         )
-        assert pcp_builder.use_pcp is True
+        assert pcp_builder.is_pcp_decode_sharded is True
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")

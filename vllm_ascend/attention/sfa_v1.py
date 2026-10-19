@@ -35,6 +35,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
+    get_pcp_layout_flags,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     get_tq_packed_bytes,
@@ -422,6 +423,11 @@ class AscendSFAMetadata:
     pcp_prolog_global_slots: torch.Tensor | None = None
     # All PCP ranks must join prefill KV gathers even when a rank has only padding.
     pcp_has_global_prefill: bool = False
+    # Whether this step's tokens use the PCP rank-local layout, and whether its
+    # decodes are sharded across PCP ranks. Set per step by the builder: a
+    # replicated draft decode runs without PCP even when built with PCP.
+    uses_pcp_kv_layout: bool = False
+    is_pcp_decode_sharded: bool = False
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
@@ -449,14 +455,16 @@ class AscendSFAMetadata:
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-def needs_pcp_kv_gather(attn_metadata: AscendSFAMetadata, is_decode_sharded: bool) -> bool:
+def needs_pcp_kv_gather(attn_metadata: AscendSFAMetadata) -> bool:
     """Whether PCP ranks must exchange this step's KV.
 
-    Only replicated decode-only steps already hold identical KV on every
-    rank, including graph padding. Ranks without local prefill still join the
-    gather when another rank has one.
+    Steps without the PCP layout and replicated decode-only steps already hold
+    identical KV on every rank, including graph padding. Ranks without local
+    prefill still join the gather when another rank has one.
     """
-    return is_decode_sharded or attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
+    return attn_metadata.uses_pcp_kv_layout and (
+        attn_metadata.is_pcp_decode_sharded or attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
+    )
 
 
 def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
@@ -519,7 +527,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
 
-        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -593,17 +600,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             common_attn_metadata,
             lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
         )
-        if (
-            self.use_pcp
-            and kwargs.get("pcp_context") is not None
-            and needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded)
-        ):
+        if needs_pcp_kv_gather(metadata):
             assert metadata.pcp_slot_mapping is not None
             group = get_pcp_group()
             num_tokens = metadata.num_input_tokens
             rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
             num_replicated_tokens = get_pcp_num_replicated_tokens(
-                metadata.num_decode_tokens, self.is_pcp_decode_sharded
+                metadata.num_decode_tokens, metadata.is_pcp_decode_sharded
             )
             local_slots = rank_slots[group.rank_in_group].contiguous()
             if num_replicated_tokens and group.rank_in_group != 0:
@@ -677,6 +680,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
 
+        uses_pcp_kv_layout, is_pcp_decode_sharded = get_pcp_layout_flags(pcp_context, self.is_pcp_decode_sharded)
         cos, sin, slot_mapping, parallel_metadata = self._prepare_parallel_metadata(
             common_attn_metadata,
             cos,
@@ -696,6 +700,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
             pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
+            uses_pcp_kv_layout=uses_pcp_kv_layout,
+            is_pcp_decode_sharded=is_pcp_decode_sharded,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -717,7 +723,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         ) = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=not self.use_pcp,
+            treat_short_extends_as_decodes=not uses_pcp_kv_layout,
         )
         if self.nope:
             self._prepare_nope_metadata(metadata, draft_index)

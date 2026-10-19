@@ -187,6 +187,11 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert metadata.sin.data_ptr() == sin.data_ptr()
 
 
+def _make_decode_pcp_context() -> SimpleNamespace:
+    # Only the global-prefill flag is read when no request is prefilling.
+    return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+
+
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):
@@ -194,11 +199,16 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
 
     builder = _make_builder(pcp_size=2)
     common = _make_common_metadata()
-    metadata = builder.build(0, common)
+    metadata = builder.build(0, common, pcp_context=_make_decode_pcp_context())
+    replicated = builder.build(0, common)
 
     # Under PCP the commit writes the gathered prefill region too, so the
     # builder emits the full slot mapping instead of the input-token slice.
     assert metadata.slot_mapping is common.slot_mapping
+    assert metadata.uses_pcp_kv_layout and metadata.is_pcp_decode_sharded
+    # Without a PCP context (replicated draft decode) the batch is ordinary.
+    assert torch.equal(replicated.slot_mapping, common.slot_mapping[: common.num_input_tokens])
+    assert not replicated.uses_pcp_kv_layout and not replicated.is_pcp_decode_sharded
 
 
 @pytest.mark.parametrize("dcp_size,expected_decode_tokens", [(1, 1), (2, 1)])
@@ -214,7 +224,7 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
     common.max_query_len = 3
     common.is_prefilling = torch.tensor([False, True])
 
-    metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common)
+    metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common, pcp_context=_make_decode_pcp_context())
 
     # Preserve the leading-decode count for PCP with or without DCP.
     assert metadata.num_decode_tokens == expected_decode_tokens
@@ -242,7 +252,7 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
         "vllm_ascend.attention.indexer.is_pd_decode_recompute_scheduler_enabled",
         return_value=pd_decode_recompute,
     ):
-        metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common)
+        metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common, pcp_context=_make_decode_pcp_context())
 
     # Short rescheduled prefills remain prefills unless the PD decode
     # recompute scheduler intentionally treats them as decode requests.
@@ -448,9 +458,8 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     k = torch.zeros(2, 4)
     scale = torch.ones(2, 1) if quantized else None
     slots = torch.arange(2)
-    metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
+    metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots, uses_pcp_kv_layout=False)
     indexer = SimpleNamespace(
-        _pcp_active=False,
         _dsa_cp_active=True,
         enable_sparse_li_c8=quantized,
         enable_sparse_li_quant=quantized,

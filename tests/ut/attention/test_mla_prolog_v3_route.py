@@ -881,7 +881,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     (
         "dcp_enabled",
         "has_dcp_buffers",
-        "pcp_enabled",
+        "uses_pcp_kv_layout",
         "is_pcp_decode_sharded",
         "requires_current_kv",
         "expects_prolog",
@@ -893,13 +893,13 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
         (True, False, False, False, False, False),
         (False, False, False, False, True, False),
         (False, False, True, False, False, False),
-        (False, False, False, True, False, False),
+        (False, False, True, True, False, False),
     ],
 )
 def test_forward_routes_strided_cache_with_runtime_exclusions(
     dcp_enabled,
     has_dcp_buffers,
-    pcp_enabled,
+    uses_pcp_kv_layout,
     is_pcp_decode_sharded,
     requires_current_kv,
     expects_prolog,
@@ -914,8 +914,6 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
             torch.empty(1, BLOCK_SIZE, 1, ROPE_DIM),
             torch.arange(BLOCK_SIZE),
         )
-    impl.pcp_enabled = pcp_enabled
-    impl.is_pcp_decode_sharded = is_pcp_decode_sharded
     impl._decode_requires_current_kv = MagicMock(return_value=requires_current_kv)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
@@ -930,6 +928,8 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
         num_decodes=1,
         num_prefills=2,
         num_decode_tokens=1,
+        uses_pcp_kv_layout=uses_pcp_kv_layout,
+        is_pcp_decode_sharded=is_pcp_decode_sharded,
     )
 
     with (
@@ -952,8 +952,6 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     impl.use_output_gate = False
     impl.enable_mlapo = False
     impl.dcp_enabled = True
-    impl.pcp_enabled = False
-    impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),
         torch.empty(1, 1, 1, ROPE_DIM),
@@ -972,6 +970,8 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
         num_decodes=2,
         num_prefills=0,
         num_decode_tokens=2,
+        uses_pcp_kv_layout=False,
+        is_pcp_decode_sharded=False,
     )
 
     with (
@@ -989,8 +989,6 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
     impl.use_output_gate = False
     impl.enable_mlapo = False
     impl.dcp_enabled = True
-    impl.pcp_enabled = False
-    impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),
         torch.empty(1, 1, 1, ROPE_DIM),
@@ -1015,6 +1013,8 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
         num_decodes=0,
         num_prefills=1,
         num_decode_tokens=0,
+        uses_pcp_kv_layout=False,
+        is_pcp_decode_sharded=False,
     )
 
     with (

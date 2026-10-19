@@ -224,15 +224,44 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertFalse(result)
 
-    def test_pcp_mode_is_initialized_from_config(self):
-        self.assertFalse(self.builder.pcp_enabled)
-        self.assertIs(self.builder.metadata_cls, AscendMetadata)
-
+    def test_pcp_layout_follows_pcp_context(self):
+        # Under a PCP config, only a PCP context selects the rank-local layout.
+        # A replicated draft decode has no context and an odd token count.
+        self.assertTrue(AscendAttentionMetadataBuilder.consumes_pcp_context)
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-        self.assertTrue(pcp_builder.pcp_enabled)
-        self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
+        def common(num_tokens):
+            return AscendCommonAttentionMetadata(
+                query_start_loc=torch.tensor([0, 1]),
+                query_start_loc_cpu=torch.tensor([0, 1]),
+                seq_lens_cpu=torch.tensor([4]),
+                seq_lens=torch.tensor([4]),
+                num_reqs=1,
+                num_actual_tokens=1,
+                max_query_len=1,
+                block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+                slot_mapping=torch.arange(num_tokens),
+                positions=torch.arange(num_tokens),
+                attn_state=AscendAttentionState.DecodeOnly,
+                num_computed_tokens_cpu=None,
+                max_seq_len=4,
+                is_prefilling=torch.tensor([False]),
+            )
+
+        replicated = pcp_builder.build(0, common(1))
+        self.assertFalse(replicated.uses_pcp_kv_layout)
+        self.assertFalse(replicated.is_pcp_decode_sharded)
+        self.assertIsNone(replicated.pcp_local_num_input_tokens)
+
+        sharded = pcp_builder.build(0, common(4), pcp_context=object())
+        self.assertTrue(sharded.uses_pcp_kv_layout)
+        self.assertTrue(sharded.is_pcp_decode_sharded)
+        self.assertEqual(sharded.pcp_local_num_input_tokens, 2)
+
+        captured = pcp_builder.build_for_cudagraph_capture(common(4), pcp_context=object(), pcp_cache_group_idx=0)
+        self.assertTrue(captured.uses_pcp_kv_layout)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
@@ -308,7 +337,6 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 @pytest.mark.parametrize("cache_write_error", [False, True], ids=["success", "cache-write-error"])
 def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_error) -> None:
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
-    impl.is_pcp_decode_sharded = False
     impl.attn_type = attn_module.AttentionType.DECODER
     impl.key_cache = None
     impl.value_cache = None
@@ -375,10 +403,12 @@ def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_
         assert result[3] is output
 
 
-def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
+@pytest.mark.parametrize(
+    ("uses_pcp_kv_layout", "expected"), [(True, (0, 2, 0, 5)), (False, (1, 1, 1, 4))], ids=["pcp", "replicated"]
+)
+def test_pcp_builder_keeps_short_extend_in_prefill(uses_pcp_kv_layout, expected) -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
-    builder.pcp_enabled = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
@@ -388,7 +418,26 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
         is_prefilling=torch.tensor([True, True], dtype=torch.bool),
     )
 
-    assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
+    assert builder._split_decodes_and_prefills(common_metadata, uses_pcp_kv_layout) == expected
+
+
+@pytest.mark.parametrize("uses_pcp_kv_layout", [False, True], ids=["replicated", "pcp"])
+def test_pcp_impl_gathers_cache_inputs_only_for_pcp_layout(uses_pcp_kv_layout) -> None:
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.pcp_enabled = True
+    impl.key_cache = object()
+    metadata = AscendMetadata(uses_pcp_kv_layout=uses_pcp_kv_layout, model_runner_type="generate")
+    query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
+    written = (query, key, value, output)
+    with (
+        patch.object(impl, "_reshape_and_cache_pcp", return_value=written) as pcp_write,
+        patch.object(impl, "reshape_and_cache", return_value=written) as write,
+        patch.object(impl, "forward_impl", return_value=output),
+    ):
+        impl.forward(layer, query, key, value, (), metadata, output)
+    assert pcp_write.called is uses_pcp_kv_layout
+    assert write.called is not uses_pcp_kv_layout
 
 
 class TestAscendAttentionBackendImpl(TestBase):

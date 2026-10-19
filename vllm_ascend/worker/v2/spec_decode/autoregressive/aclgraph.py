@@ -38,6 +38,19 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
+def get_draft_prefill_cudagraph_mode(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphMode) -> CUDAGraphMode:
+    """Keep PCP-sharded draft prefill out of FULL graphs.
+
+    An autoregressive draft keeping the target's PCP size shards its prefill
+    through the upstream PCP hooks. Their rank-local input staging and the
+    all-gather in ``restore_draft_prefill`` run outside the model forward,
+    which a FULL graph would skip on replay.
+    """
+    if vllm_config.parallel_config.prefill_context_parallel_size <= 1:
+        return cudagraph_mode
+    return CUDAGraphMode.PIECEWISE if cudagraph_mode.has_piecewise_cudagraphs() else CUDAGraphMode.NONE
+
+
 class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     """ACL graph manager for autoregressive speculative decoding."""
 
@@ -49,6 +62,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
     ):
+        # Upstream uses num_speculative_steps + 1 as the draft-prefill query
+        # length and 1 for draft decode.
+        if decode_query_len > 1:
+            cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
         super().__init__(
             vllm_config,
             device,

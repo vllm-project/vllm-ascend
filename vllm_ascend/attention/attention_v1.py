@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     enable_dcp,
+    get_pcp_layout_flags,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -231,6 +232,12 @@ class AscendMetadata:
     # the metadata op executes inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
     pcp_local_num_input_tokens: int | None = None
+    # Whether this step's tokens use the PCP rank-local layout (expanded slot
+    # mapping, KV gathered across PCP ranks), and whether its decodes are
+    # sharded across PCP ranks. Set per step by the builder: a replicated
+    # draft decode runs without PCP even when its model was built with PCP.
+    uses_pcp_kv_layout: bool = False
+    is_pcp_decode_sharded: bool = False
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -246,6 +253,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
     metadata_cls: type[AscendMetadata] = AscendMetadata
+    # The PCP context decides the per-step PCP layout of the metadata.
+    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -257,7 +266,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_enabled = self.pcp_size > 1
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -295,14 +304,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ) -> AscendMetadata:
+        # Forward the PCP context: it selects the captured PCP layout.
+        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
+
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        uses_pcp_kv_layout: bool,
     ) -> tuple[int, int, int, int]:
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=not self.pcp_enabled,
+            treat_short_extends_as_decodes=not uses_pcp_kv_layout,
         )
 
     def _build_backend_metadata(
@@ -328,14 +346,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        pcp_context: Any | None = None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMetadata:
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        uses_pcp_kv_layout, is_pcp_decode_sharded = get_pcp_layout_flags(pcp_context, self.is_pcp_decode_sharded)
+        expanded_slot_mapping = common_attn_metadata.slot_mapping if uses_pcp_kv_layout else None
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
-            common_attn_metadata
+            common_attn_metadata, uses_pcp_kv_layout
         )
 
         block_table = common_attn_metadata.block_table_tensor
@@ -455,9 +477,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            uses_pcp_kv_layout=uses_pcp_kv_layout,
+            is_pcp_decode_sharded=is_pcp_decode_sharded,
             **backend_metadata,
         )
-        if self.pcp_enabled:
+        if uses_pcp_kv_layout:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
         return attn_metadata
@@ -576,7 +600,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1263,7 +1286,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value[:local_num_input_tokens],
             ),
             expanded_slot_mapping,
-            get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded),
+            get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens, attn_metadata.is_pcp_decode_sharded),
         )
         local_num_actual_tokens = attn_metadata.num_actual_tokens
         try:
@@ -1349,7 +1372,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            if self.pcp_enabled:
+            if self.pcp_enabled and attn_metadata.uses_pcp_kv_layout:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output
                 )

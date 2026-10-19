@@ -806,8 +806,10 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_np[1] == 23
 
 
-def test_sampling_restore_exposes_unpadded_global_view() -> None:
+@pytest.mark.parametrize("is_draft_prefill_sharded", [False, True], ids=["replicated", "sharded"])
+def test_sampling_restore_exposes_unpadded_global_view(is_draft_prefill_sharded: bool) -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._is_draft_prefill_sharded = is_draft_prefill_sharded
     batch = _make_global_pcp_batch()
     batch.is_dummy = False
     batch.num_tokens = 12
@@ -815,14 +817,28 @@ def test_sampling_restore_exposes_unpadded_global_view() -> None:
     batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
     batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
     manager._global_batch = batch
-    manager._sampling_hidden_restored = True
     hidden_states = torch.arange(32).reshape(16, 2)
-    with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
+    local_aux = [torch.zeros(8, 2)]
+
+    def parent_restore(self, hidden, aux):
+        restored_aux = None if aux is None else [hidden_states for _ in aux]
+        return hidden_states, restored_aux, batch
+
+    with (
+        patch.object(AscendPCPManager, "_should_expose_unpadded_global_batch", return_value=True),
+        patch.object(PCPManager, "restore_for_sampling", autospec=True, side_effect=parent_restore) as parent,
+    ):
         # vLLM #57980 threads aux_hidden_states through this hook.
-        restored_hidden, restored_aux, restored_batch = manager.restore_for_sampling(hidden_states, [hidden_states])
+        restored_hidden, restored_aux, restored_batch = manager.restore_for_sampling(torch.zeros(8, 2), local_aux)
     assert len(restored_aux) == 1
-    assert restored_aux[0].shape == (12, 2)
-    assert restored_aux[0].data_ptr() == hidden_states.data_ptr()
+    if is_draft_prefill_sharded:
+        # Sharded drafts consume aux states next to the local last hidden states.
+        assert parent.call_args.args[2] is None
+        assert restored_aux is local_aux
+    else:
+        assert restored_aux[0].shape == (12, 2)
+        assert restored_aux[0].data_ptr() == hidden_states.data_ptr()
+    assert manager._sampling_global_batch is restored_batch
     assert restored_batch is not batch
     assert restored_batch.num_tokens_after_padding == 12
     assert restored_batch.query_start_loc.tolist() == [0, 12]
@@ -831,45 +847,6 @@ def test_sampling_restore_exposes_unpadded_global_view() -> None:
     assert restored_hidden.data_ptr() == hidden_states.data_ptr()
     assert batch.num_tokens_after_padding == 16
     assert batch.query_start_loc.tolist() == [0, 12, 16]
-
-
-def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
-    hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0], [-1.0, -1.0], [-1.0, -1.0]])
-    restored = torch.tensor([[1.0, 2.0], [5.0, 6.0], [3.0, 4.0], [9.0, 9.0]])
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager.pcp_world_size = 2
-    manager._padded_gather_idx = torch.empty(6, dtype=torch.int64)
-    manager._global_batch = SimpleNamespace(
-        num_tokens=3,
-        num_tokens_after_padding=4,
-    )
-
-    captured_local_hidden_states = []
-
-    def parent_restore_hidden_states(value):
-        captured_local_hidden_states.append(value.clone())
-        return restored.clone()
-
-    with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
-        patch.object(
-            PCPManager,
-            "restore_hidden_states",
-            side_effect=parent_restore_hidden_states,
-        ) as restore_hidden_states_mock,
-    ):
-        manager.restore_hidden_state_buffer(hidden_states)
-
-    restore_hidden_states_mock.assert_called_once()
-    torch.testing.assert_close(
-        captured_local_hidden_states[0],
-        torch.tensor([[1.0, 2.0], [3.0, 4.0], [-1.0, -1.0]]),
-    )
-    torch.testing.assert_close(hidden_states[:3], restored[:3])
-    torch.testing.assert_close(hidden_states[3], torch.zeros(2))
 
 
 @pytest.mark.parametrize("num_tokens", [3, 6], ids=["padded", "unpadded"])
@@ -923,7 +900,6 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
         patch.object(PCPManager, "restore_hidden_states") as parent_restore,
     ):
         restored_hidden_states = manager.restore_hidden_states(hidden_states)
-        manager.restore_hidden_state_buffer(hidden_states)
 
     assert restored_hidden_states is hidden_states
     parent_restore.assert_not_called()
@@ -1079,7 +1055,7 @@ def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
 
 
 @pytest.mark.parametrize("is_last_pp_rank", [False, True])
-def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
+def test_sample_tokens_leaves_pcp_batch_selection_to_upstream(
     is_last_pp_rank: bool,
 ) -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -1118,8 +1094,9 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     ) as parent_sample_tokens:
         actual_output = runner.sample_tokens(grammar_output)
 
-    expected_batch = local_batch if is_last_pp_rank else global_batch
-    assert runner.execute_model_state.input_batch is expected_batch
+    # Upstream sample_tokens selects pcp_manager.global_batch on non-last PP
+    # ranks and restore_for_sampling's batch on the last one.
+    assert runner.execute_model_state.input_batch is local_batch
     assert actual_output is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
 
@@ -1368,3 +1345,189 @@ def test_short_prefill_leaves_empty_pcp_ranks_in_mixed_batch(num_prefill_tokens)
             expected.append((3, rank, 1))
         assert chunks == expected
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == 5
+
+
+def _hook_manager() -> AscendPCPManager:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=ParallelConfig(prefill_context_parallel_size=2),
+        speculative_config=SimpleNamespace(method="mtp"),
+    )
+    manager._staged_draft_inputs = None
+    manager._sampling_global_batch = None
+    manager.draft_prefill_batch = None
+    return manager
+
+
+def test_partition_batch_records_finalized_local_batch() -> None:
+    """Draft prefill must reuse the exact (Ascend-padded) batch the target ran."""
+    manager = _hook_manager()
+    upstream_local, finalized = _make_local_pcp_batch(), object()
+    manager._sampling_global_batch = object()
+    with (
+        patch.object(PCPManager, "partition_batch", return_value=upstream_local),
+        patch.object(AscendPCPManager, "_finalize_partition", return_value=finalized),
+    ):
+        result = manager.partition_batch(
+            object(), BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, num_tokens=8, num_reqs=None)
+        )
+    assert result is finalized
+    assert manager._local_batch is finalized
+    assert manager._sampling_global_batch is None
+
+
+@pytest.mark.parametrize("use_sampling_batch", [True, False])
+def test_prepare_draft_prefill_accepts_unpadded_sampling_batch(use_sampling_batch: bool) -> None:
+    manager = _hook_manager()
+    manager._global_batch = object()
+    manager._sampling_global_batch = object()
+    batch = manager._sampling_global_batch if use_sampling_batch else object()
+    input_ids = torch.arange(4)
+    with patch.object(PCPManager, "prepare_draft_prefill") as parent:
+        manager.prepare_draft_prefill(batch, input_ids)
+    expected = manager._global_batch if use_sampling_batch else batch
+    parent.assert_called_once_with(expected, input_ids)
+
+
+def test_draft_prefill_inputs_are_staged_at_captured_addresses() -> None:
+    """Graphs read the speculator's buffers; global rows return after prefill."""
+    manager = _hook_manager()
+    buffers = AscendInputBuffers(max_num_reqs=4, max_num_tokens=8, device=torch.device("cpu"))
+    buffers.input_ids.copy_(torch.arange(100, 108, dtype=buffers.input_ids.dtype))
+    buffers.positions.copy_(torch.arange(200, 208, dtype=buffers.positions.dtype))
+    buffers.is_padding.fill_(False)
+    global_ids, global_positions = buffers.input_ids.clone(), buffers.positions.clone()
+    manager.draft_prefill_batch = SimpleNamespace(
+        num_tokens_after_padding=3,
+        input_ids=torch.tensor([7, 8, 0], dtype=buffers.input_ids.dtype),
+        positions=torch.tensor([5, 6, 0], dtype=buffers.positions.dtype),
+        is_padding=torch.tensor([False, False, True]),
+    )
+    ids_ptr = buffers.input_ids.data_ptr()
+
+    assert manager.get_draft_input_buffers(buffers) is buffers
+    assert buffers.input_ids.data_ptr() == ids_ptr
+    assert buffers.input_ids[:3].tolist() == [7, 8, 0]
+    assert buffers.positions[:3].tolist() == [5, 6, 0]
+    assert buffers.is_padding[:3].tolist() == [False, False, True]
+
+    last, hidden = torch.zeros(3, 2), torch.zeros(3, 2)
+    with patch.object(PCPManager, "restore_draft_prefill", return_value=("last", "hidden")) as parent:
+        assert manager.restore_draft_prefill(last, hidden) == ("last", "hidden")
+    parent.assert_called_once_with(last, hidden)
+    assert torch.equal(buffers.input_ids, global_ids)
+    assert torch.equal(buffers.positions, global_positions)
+    assert not buffers.is_padding.any()
+    assert manager._staged_draft_inputs is None
+
+
+def test_draft_input_buffers_pass_through_outside_draft_prefill() -> None:
+    manager = _hook_manager()
+    buffers = object()
+    assert manager.get_draft_input_buffers(buffers) is buffers
+    assert manager._staged_draft_inputs is None
+
+
+def test_is_target_attn_groups_excludes_draft_only_groups() -> None:
+    manager = _hook_manager()
+    group = lambda *names: SimpleNamespace(layer_names=list(names))  # noqa: E731
+    # Before a speculator is set, every group is a target group.
+    assert manager.is_target_attn_groups([[group("mtp.layers.0")]])
+    speculator = SimpleNamespace(
+        draft_attn_layer_names={"mtp.layers.0"},
+        vllm_config=SimpleNamespace(parallel_config=ParallelConfig(prefill_context_parallel_size=2)),
+    )
+    manager.set_speculator(speculator)
+    # Target forwards and draft prefill capture use (possibly filtered) target groups.
+    assert manager.is_target_attn_groups([[group("model.layers.0", "mtp.layers.0")], [group("model.layers.1")]])
+    assert manager.is_target_attn_groups([[group("model.layers.1")]])
+    # Draft decode metadata covers draft-only layers on the global batch.
+    assert not manager.is_target_attn_groups([[group("mtp.layers.0")]])
+
+
+@pytest.mark.parametrize(("draft_pcp_size", "expected"), [(2, True), (1, False)], ids=["mtp", "dspark"])
+def test_set_speculator_takes_route_from_draft_pcp_size(draft_pcp_size: int, expected: bool) -> None:
+    manager = _hook_manager()
+    speculator = SimpleNamespace(
+        draft_attn_layer_names=set(),
+        vllm_config=SimpleNamespace(parallel_config=ParallelConfig(prefill_context_parallel_size=draft_pcp_size)),
+    )
+    manager.set_speculator(speculator)
+    assert manager._is_draft_prefill_sharded is expected
+
+
+def test_sharded_draft_prefill_handoff_across_pcp_ranks() -> None:
+    """partition -> target -> restore_for_sampling -> draft prefill hooks.
+
+    Two PCP ranks run the real upstream partition. The fake target and draft
+    emit each token's global position, so restoration must recover the global
+    order, and the staged draft inputs must be exactly the rank-local tokens.
+    """
+    world = 2
+    managers, local_batches = [], []
+    for rank in range(world):
+        manager = _ReplicatedPCPManager(world, rank, torch.device("cpu"), max_num_reqs=4, max_num_tokens=32)
+        manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE, speculative_config=SimpleNamespace(method="mtp"))
+        global_batch = _make_global_pcp_batch()
+        global_batch.is_dummy = False
+        with (
+            patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+            patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
+            patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        ):
+            local_batches.append(_partition_batch(manager, global_batch))
+        managers.append(manager)
+    num_local_padded = local_batches[0].num_tokens_after_padding
+    assert all(batch.num_tokens_after_padding == num_local_padded for batch in local_batches)
+
+    def gather_from(per_rank):
+        return SimpleNamespace(all_gather=lambda tensor, dim=0: torch.cat(per_rank, dim=0))
+
+    # Target forward: hidden row = global position (padding rows are -1).
+    target_hidden = [
+        torch.where(batch.is_padding[:num_local_padded], -1, batch.positions[:num_local_padded]).float()[:, None]
+        for batch in local_batches
+    ]
+    sampling_batches = []
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=gather_from(target_hidden)),
+        patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+    ):
+        for manager, hidden in zip(managers, target_hidden):
+            restored, _, batch = manager.restore_for_sampling(hidden, None)
+            assert restored[:, 0].tolist() == list(range(18))
+            sampling_batches.append(batch)
+
+    draft_outputs = []
+    staged_buffers = []
+    for manager, batch, local in zip(managers, sampling_batches, local_batches):
+        # Upstream propose: global draft inputs, then rank-local prefill.
+        buffers = AscendInputBuffers(max_num_reqs=4, max_num_tokens=32, device=torch.device("cpu"))
+        buffers.input_ids[:18].copy_(torch.arange(1000, 1018, dtype=buffers.input_ids.dtype))
+        buffers.positions[:18].copy_(torch.arange(18, dtype=buffers.positions.dtype))
+        global_ids, global_positions = buffers.input_ids.clone(), buffers.positions.clone()
+        manager.prepare_draft_prefill(batch, buffers.input_ids[: batch.num_tokens_after_padding])
+        assert manager.draft_prefill_batch is local
+        assert manager.draft_prefill_batch.num_tokens_after_padding == num_local_padded
+        staged = manager.get_draft_input_buffers(buffers)
+        assert staged is buffers
+        real = ~local.is_padding[:num_local_padded]
+        assert (staged.input_ids[:num_local_padded][real] - 1000).tolist() == (
+            local.positions[:num_local_padded][real].tolist()
+        )
+        assert staged.positions[:num_local_padded].tolist() == local.positions[:num_local_padded].tolist()
+        draft_outputs.append(staged.input_ids[:num_local_padded].float()[:, None].clone())
+        staged_buffers.append((buffers, global_ids, global_positions))
+
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=gather_from(draft_outputs)),
+        patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+    ):
+        for manager, output, (buffers, global_ids, global_positions) in zip(managers, draft_outputs, staged_buffers):
+            last, hidden = manager.restore_draft_prefill(output, output)
+            assert last is hidden
+            assert last[:, 0].tolist() == [float(1000 + i) for i in range(18)]
+            assert manager.draft_prefill_batch is None
+            # Draft decode reads the global positions again after prefill.
+            assert torch.equal(buffers.input_ids, global_ids)
+            assert torch.equal(buffers.positions, global_positions)
