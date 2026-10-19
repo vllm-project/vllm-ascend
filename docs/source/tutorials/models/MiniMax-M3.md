@@ -711,6 +711,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     # If Mooncake is installed in a non-standard path, set this before startup.
@@ -895,6 +896,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -972,6 +974,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1180,6 +1183,7 @@ Key Parameter Descriptions:
 
 - `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing. This flag can be used together with FLASHCOMM1 for text-only serving.
 - `--pipeline-parallel-size` (A3 Prefill: `4`): Splits the 60 MiniMax-M3 layers across four pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=16,15,15,14` and also writes `pp_layer_partition` into the Mooncake extra config. With `TP=4`, use `DP=1` to fit all four stages on one 16-NPU node. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
+- `HCCL_OP_EXPANSION_MODE`: The examples export `"AIV"` only for `PP=1` (no pipeline parallelism) and omit the export for `PP>1`. If you change `PP_SIZE` in a template or launch block, adjust this export to match the resulting PP size.
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Decode nodes and single-node mixed-serving examples on A3 and 950DT use full graph capture for decode-only batches.
@@ -1331,7 +1335,7 @@ The 950DT examples use `64GB` per worker rank on both P and D. Adjust the size t
 
 ##### 5.3.2.2 Environment Variables
 
-Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Keep `HCCL_OP_EXPANSION_MODE="AIV"` for `PP=1`; omit that export when `PP>1`. Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
@@ -1489,6 +1493,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
@@ -1591,6 +1596,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1689,6 +1695,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
     export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
@@ -1975,6 +1982,7 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=256
+        export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME="<NIC_NAME>"
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
         export GLOO_SOCKET_IFNAME="<NIC_NAME>"
