@@ -48,8 +48,11 @@ def packed_broadcast_producer(
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
     """
-    if buffer_size_bytes <= 0 or num_buffers < 1:
-        raise ValueError("buffer_size_bytes and num_buffers must be positive")
+    if buffer_size_bytes <= 0 or num_buffers <= 0:
+        raise ValueError(
+            f"buffer_size_bytes and num_buffers must be positive, got "
+            f"buffer_size_bytes={buffer_size_bytes}, num_buffers={num_buffers}"
+        )
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
@@ -94,14 +97,13 @@ def packed_broadcast_producer(
                 if len(packing_tensor_list[buffer_idx]) > 0:
                     # Pack the tensors
                     packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
+                    # Match the active packing stream and the explicit native
+                    # HCCL stream; wait for both before reusing this slot.
+                    group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
 
             if len(packing_tensor_list[buffer_idx]) == 0:
                 # No more tensors — nothing left to broadcast
                 break
-
-            # Keep packing and broadcast on the same stream. Reusing this slot
-            # waits for both operations, not only the earlier torch.cat.
-            group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
 
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
@@ -114,7 +116,9 @@ def packed_broadcast_producer(
             try:
                 stream.synchronize()
             except BaseException as exc:
-                _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                # Empty placeholders have no payload storage to protect.
+                if packed_tensors[index].numel():
+                    _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None and body_error is None:
@@ -157,16 +161,21 @@ def packed_broadcast_consumer(
         dtypes: list[torch.dtype],
         tensor_sizes: list[int],
     ) -> list[tuple[str, torch.Tensor]]:
-        """Own each byte slice before interpreting possibly unaligned dtypes."""
+        """Unpack named tensors with their declared dtypes and shapes."""
         unpacked_tensors = packed_tensor.split(tensor_sizes)
         unpacked_list = [
+            # Preserve independent storage for callbacks that retain or mutate
+            # inputs. Cloning bytes first also fixes unaligned dtype views.
             (name, tensor.clone().view(dtype).reshape(shape))
             for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
         ]
         return unpacked_list
 
-    if buffer_size_bytes <= 0 or num_buffers < 1:
-        raise ValueError("buffer_size_bytes and num_buffers must be positive")
+    if buffer_size_bytes <= 0 or num_buffers <= 0:
+        raise ValueError(
+            f"buffer_size_bytes and num_buffers must be positive, got "
+            f"buffer_size_bytes={buffer_size_bytes}, num_buffers={num_buffers}"
+        )
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
@@ -240,7 +249,9 @@ def packed_broadcast_consumer(
             try:
                 stream.synchronize()
             except BaseException as exc:
-                _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                # Empty placeholders have no payload storage to protect.
+                if packed_tensors[index].numel():
+                    _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None and body_error is None:
@@ -269,6 +280,8 @@ def packed_npu_ipc_producer(
     it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
     copied into this buffer before yielding, so only one IPC-shared
     allocation exists for the lifetime of the transfer.
+    A nonempty iterator containing only zero-element tensors still yields a
+    chunk so its names, shapes and dtypes are delivered; an empty iterator does not.
 
     Args:
         iterator: Iterator of (name, tensor) pairs.
@@ -279,7 +292,7 @@ def packed_npu_ipc_producer(
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
     """
     if buffer_size_bytes <= 0:
-        raise ValueError("buffer_size_bytes must be positive")
+        raise ValueError(f"buffer_size_bytes must be positive, got {buffer_size_bytes}")
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
     # Store only the rebuild args (drop the func); the consumer rebuilds with
     # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.

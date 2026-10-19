@@ -25,8 +25,10 @@ data correctness is verified end-to-end.
 
 from __future__ import annotations
 
+import sys
 import types
 import weakref
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -538,8 +540,6 @@ def test_packed_npu_ipc_consumer_overwrites_device_index():
             device_index=5,
         )
         # Capture the args passed to rebuild_npu_tensor while patch is active.
-        import sys
-
         fake_mod = sys.modules["torch_npu.multiprocessing.reductions"]
         fake_rebuild = fake_mod.rebuild_npu_tensor  # type: ignore[attr-defined]
         rebuilt_args = fake_rebuild.call_args.args
@@ -921,7 +921,7 @@ def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size
         packed.copy_(next(chunks))
         receive_buffers.append(packed)
 
-    received = []
+    received: list[tuple[str, torch.Tensor]] = []
     packed_broadcast_consumer(
         iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors),
         types.SimpleNamespace(broadcast=receive),
@@ -973,21 +973,33 @@ def test_packed_ipc_roundtrip_scalar_empty_and_unaligned(empty_only):
 
 @pytest.mark.parametrize("producer", [False, True])
 def test_packed_transfer_drains_storage_before_propagating_error(producer):
+    events: list[str] = []
+
     class TrackingStream(_FakeNpuStream):
+        buffer = None
         pending = None
-        completed = False
 
         def synchronize(self):
             if self.pending is not None:
                 assert self.pending() is not None
-                self.completed = True
+                events.append("drain")
+                self.pending = None
 
     stream = TrackingStream()
 
     def broadcast(packed, **kwargs):
-        stream.pending = weakref.ref(packed)
+        stream.buffer = weakref.ref(packed)
         if producer:
+            stream.pending = stream.buffer
+            events.append("error")
             raise ValueError("transfer rejected")
+
+    def reject_load(weights):
+        # Receive-before-unpack synchronization must not satisfy this check:
+        # only finally can drain work queued by the failing loader.
+        stream.pending = stream.buffer
+        events.append("error")
+        raise ValueError("transfer rejected")
 
     group = types.SimpleNamespace(broadcast=broadcast)
     with patch.object(torch.npu, "Stream", return_value=stream), pytest.raises(ValueError, match="transfer rejected"):
@@ -998,11 +1010,11 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
                 iter([("w", ([1], torch.float32))]),
                 group,
                 0,
-                MagicMock(side_effect=ValueError("transfer rejected")),
+                reject_load,
                 4,
                 1,
             )
-    assert stream.completed
+    assert events == ["error", "drain"]
 
 
 def test_packed_consumer_waits_for_receive_before_unpacking():
@@ -1068,7 +1080,7 @@ def test_packed_producer_rejects_materialized_metadata_change(backend, change):
     ids=["device", "handle", "unknown-dtype", "non-dtype", "lengths", "shape", "negative-size", "byte-count"],
 )
 def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         ipc_handle={"node-0": (0,) * 7},
         physical_npu_id="node-0",
         names=["w"],
@@ -1079,8 +1091,6 @@ def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
     )
     kwargs.update(changes)
     with _install_fake_rebuild_npu_tensor(torch.zeros(8, dtype=torch.uint8)):
-        import sys
-
         rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
         with pytest.raises(ValueError):
             packed_npu_ipc_consumer(**kwargs)
@@ -1105,7 +1115,7 @@ def test_packed_drain_failure_keeps_storage_and_original_error():
                 raise RuntimeError("drain failed")
 
     stream = FailedStream()
-    pinned = []
+    pinned: list[torch.Tensor] = []
 
     def broadcast(*args, **kwargs):
         stream.failed = True
@@ -1156,16 +1166,32 @@ def test_packed_hccl_rejects_nonpositive_buffer_count(producer, num_buffers):
 
 def test_packed_producer_passes_packing_stream_to_broadcast():
     streams = [_FakeNpuStream(), _FakeNpuStream()]
-    group = _make_group_mock()
+    active: list[_FakeNpuStream] = []
+
+    class StreamContext:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            active.append(self.stream)
+
+        def __exit__(self, *exc):
+            active.pop()
+
+    def broadcast(tensor, *, src, stream):
+        assert active == [stream]
+
+    group = types.SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
-        patch.object(torch.npu, "stream", side_effect=lambda stream: stream) as context,
+        patch.object(torch.npu, "stream", side_effect=StreamContext) as context,
     ):
         packed_broadcast_producer(
             iter((f"w{i}", torch.ones(1)) for i in range(3)), group, 0, lambda item: item[1], 1, 2
         )
     assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == [streams[0], streams[1], streams[0]]
     assert [call.args[0] for call in context.call_args_list[:3]] == [streams[0], streams[1], streams[0]]
+    assert active == []
 
 
 @pytest.mark.parametrize("producer", [False, True])
@@ -1182,7 +1208,7 @@ def test_packed_cleanup_failure_after_success_is_raised_and_retains_storage(prod
                 raise failure
 
     stream = CleanupStream()
-    pinned = []
+    pinned: list[torch.Tensor] = []
 
     def finish(*args, **kwargs):
         stream.fail = True
@@ -1201,3 +1227,24 @@ def test_packed_cleanup_failure_after_success_is_raised_and_retains_storage(prod
     assert error.value is failure
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
+
+
+@pytest.mark.parametrize("producer", [False, True])
+def test_packed_drain_failure_does_not_retain_unused_empty_slots(producer):
+    import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
+
+    class FailedStream(_FakeNpuStream):
+        def synchronize(self):
+            raise RuntimeError("stream unavailable")
+
+    pinned: list[torch.Tensor] = []
+    with (
+        patch.object(torch.npu, "Stream", return_value=FailedStream()),
+        patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
+        pytest.raises(RuntimeError, match="stream unavailable"),
+    ):
+        if producer:
+            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], 4, 2)
+        else:
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, 2)
+    assert pinned == []
