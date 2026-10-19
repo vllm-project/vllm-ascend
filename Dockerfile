@@ -76,18 +76,20 @@ ARG TARGETPLATFORM
 RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
-            MOONCAKE_WHL="mooncake_transfer_engine-${MOONCAKE_TAG}-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
         "linux/amd64"|"x86_64") \
-            MOONCAKE_WHL="mooncake_transfer_engine-${MOONCAKE_TAG}-cp312-cp312-manylinux_2_38_x86_64.whl" ;; \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_38_x86_64.whl" ;; \
         *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
     esac && \
     MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
     echo "Download mooncake whl: ${MOONCAKE_URL}" && \
-    wget --quiet --no-check-certificate "${MOONCAKE_URL}" -O /tmp/${MOONCAKE_WHL} && \
+    wget -q --no-check-certificate "${MOONCAKE_URL}" -P /tmp && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install /tmp/${MOONCAKE_WHL} && \
-    rm -f /tmp/${MOONCAKE_WHL} && \
-    python3 -m pip cache purge
+    pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    echo "***********check mooncake-transfer-engine-npu version***********" && \
+    pip show mooncake-transfer-engine && \
+    rm -rf /tmp/${MOONCAKE_WHL} && \
+    pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
