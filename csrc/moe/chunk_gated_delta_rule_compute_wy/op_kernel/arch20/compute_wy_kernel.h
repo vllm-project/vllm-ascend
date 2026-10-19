@@ -39,6 +39,11 @@ constexpr float FP32_FS_ROW_SUM_THRESHOLD = 0.75f;
 // not bound cancellation error. Keep its implementation for this diagnostic
 // patch; it is unreachable because the lower/upper bounds now coincide.
 constexpr float COMP_DOUBLING_MAX_ROW_SUM = FP32_FS_ROW_SUM_THRESHOLD;
+// Additional empirical admission for distributed, small coefficients. Frozen
+// on training chunks with a 20% Frobenius-norm margin to the first unsafe
+// case, then checked on reserved layers and a separate model. This is not a
+// universal precision bound; retain the original gate and FP32 retry paths.
+constexpr float FAST_DOUBLING_FROB_SQUARED_THRESHOLD = 7.502183356513852f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -474,6 +479,19 @@ class KernelComputeWy {
     // input data routes to the scalar path like before.
     gateMaxRowSum_ = (totSum != totSum) ? totSum : maxSum;
     return (totSum != totSum) || (maxSum >= FP32_FS_ROW_SUM_THRESHOLD);
+  }
+
+  __aicore__ inline float FrobeniusSquared(const LocalTensor<float> a,
+                                          LocalTensor<float> scratch,
+                                          LocalTensor<float> reduceScratch) {
+    // The Gram operand in qHalf is dead here. Reuse it for the large
+    // reduction; A and the W RHS remain unchanged, without additional UB.
+    LocalTensor<float> work = qHalfBuf_.Get<half>().ReinterpretCast<float>();
+    Mul(scratch, a, a, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    ReduceSum(reduceScratch, scratch, work, ATTEN_ELEMS);
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    return reduceScratch.GetValue(0);
   }
 
   // Exact in-place solve R = (I-A)^-1 R for ANY ||A|| (fp32 coefficients).
@@ -914,8 +932,15 @@ class KernelComputeWy {
     BroadcastMulRowsFloat(rhs, rhs, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_, alignK_);
     // expGLocal is dead after γ was applied and can hold the 64 row sums;
     // betaLocal must survive for the pass-2 βV product.
-    const bool useFp32ForwardSubstitution =
+    bool useFp32ForwardSubstitution =
         NeedsFp32ForwardSubstitution(attnLocal, scratch, expGLocal, reduceScratch);
+    if (allowCompDoubling && useFp32ForwardSubstitution &&
+        gateMaxRowSum_ >= FP32_FS_ROW_SUM_THRESHOLD && gateMaxRowSum_ < 1.0e30f) {
+      const float frobSquared = FrobeniusSquared(attnLocal, scratch, reduceScratch);
+      if (frobSquared >= 0.0f && frobSquared < FAST_DOUBLING_FROB_SQUARED_THRESHOLD) {
+        useFp32ForwardSubstitution = false;
+      }
+    }
     if (allowCompDoubling && useFp32ForwardSubstitution && kHeadDim_ == 128 && vHeadDim_ == 128) {
       return ProcessRefinedTask(b, kHeadIdx, vHeadIdx, tokenStart);
     }
