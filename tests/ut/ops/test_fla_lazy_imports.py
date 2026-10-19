@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -27,8 +28,8 @@ class TestFLALazyImports(unittest.TestCase):
         return module
 
     def setUp(self):
-        self.registry = {}
-        self.registrations = []
+        self.registry: dict[str, type] = {}
+        self.registrations: list[type] = []
         registry, registrations = self.registry, self.registrations
 
         class CustomOp:
@@ -51,7 +52,7 @@ class TestFLALazyImports(unittest.TestCase):
                 self.weight, self.bias = object(), None
                 self.eps, self.activation = eps, activation
 
-        self.modules = {}
+        self.modules: dict[str, ModuleType] = {}
         for name in ["vllm", "vllm.model_executor", "vllm.third_party", "vllm.third_party.flash_linear_attention"]:
             self._module(name, __path__=[])
         self._module("vllm.third_party.flash_linear_attention.ops", __path__=[])
@@ -100,7 +101,7 @@ class TestFLALazyImports(unittest.TestCase):
 
     def test_upstream_dispatch_preserves_kernel_arguments(self):
         cls = self.register()
-        layer = self.upstream_class(8, eps=1e-6, activation="sigmoid")
+        layer = cast(Any, self.upstream_class(8, eps=1e-6, activation="sigmoid"))
         self.assertIsInstance(layer, cls)
         x, gate, residual, out = object(), object(), object(), object()
         result = layer.forward_oot(x, gate, residual=residual, prenorm=True, residual_in_fp32=True, out=out)
@@ -119,7 +120,12 @@ class TestFLALazyImports(unittest.TestCase):
         )
 
     def test_worker_registers_after_device_selection_before_model_runner(self):
-        events = []
+        events: list[str] = []
+
+        def select_device():
+            events.append("device")
+            return object()
+
         namespace = {
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
@@ -127,7 +133,7 @@ class TestFLALazyImports(unittest.TestCase):
         }
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
         worker = SimpleNamespace(
-            _init_device=lambda: events.append("device") or object(),
+            _init_device=select_device,
             use_v2_model_runner=False,
             vllm_config=object(),
             rank=1,
