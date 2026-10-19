@@ -63,6 +63,30 @@ the active window instead.
 GitHub Actions will trigger the `Nightly-A2` or `Nightly-A3` workflow. Only tests
 matching the filter will be dispatched, which saves hardware resources.
 
+## AISBench Output Artifacts
+
+YAML-driven nightly tests upload the complete AISBench `outputs/` directory to
+the dispatched workflow run's **Artifacts** section, for all YAML-driven runs.
+Look for `aisbench-outputs-<scene>-<job>-<run-id>-<attempt>`. It contains the experiments
+from that test container, including configuration snapshots, logs, performance
+details, and reports produced by AISBench. Multiple benchmark experiments retain
+their original directory structure:
+
+```text
+# Single node
+default/<experiment-timestamp>/...
+
+# Multiple nodes
+node-0/default/<experiment-timestamp>/...
+```
+
+Multi-node tests preserve outputs on shared storage after pytest finishes and
+before AOP reruns or Pod deletion. Only nodes that produced outputs appear in the
+artifact. Upload is attempted even when a benchmark or baseline check fails;
+files already generated are retained. A cancelled job or lost runner/Pod may
+prevent collection. These artifacts have a seven-day retention period and are
+separate from benchmark summary JSON.
+
 ## Differences Between PR and Scheduled Runs
 
 | | Scheduled / Manual Dispatch | PR-triggered |

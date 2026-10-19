@@ -585,6 +585,9 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if [ -d "$LOG_PREFIX/aisbench_outputs" ]; then
+            mv "$LOG_PREFIX/aisbench_outputs" /tmp/aisbench_outputs
+          fi
           mkdir -p /tmp/benchmark_results
           echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}..."
           # Copy from PVC mounted directory (persists after pod termination)
@@ -800,3 +803,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Upload AISBench outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: aisbench-outputs-multi-node-${{ steps.vars.outputs.benchmark_job_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/aisbench_outputs/
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true

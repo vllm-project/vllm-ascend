@@ -520,6 +520,16 @@ jobs:
           retention-days: 90
           compression-level: 0
 
+      - name: Upload AISBench outputs
+        if: ${{ always() && inputs.config_file_path != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: aisbench-outputs-single-node-${{ steps.bench_ts.outputs.effective_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /vllm-workspace/vllm-ascend/outputs/
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true
+
       - name: Collect requested path
         if: ${{ always() && inputs.download_path != '' }}
         id: collect_download
