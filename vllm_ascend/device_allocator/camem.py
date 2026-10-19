@@ -121,6 +121,10 @@ class CaMemAllocator(CuMemAllocator):
         # Pending NPU work must finish before CANN mappings are released.
         torch.npu.synchronize()
 
+    def _synchronize_before_sleep(self) -> None:
+        # Sleep unmaps allocations as a batch, so drain all pending NPU work.
+        torch.npu.synchronize()
+
     def _empty_cache(self) -> None:
         torch.npu.empty_cache()
 
@@ -143,3 +147,8 @@ class CaMemAllocator(CuMemAllocator):
 
     def _use_memory_pool_with_allocator(self):
         return use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback)
+
+    def _create_cudagraph_pool(self):
+        allocator = get_pluggable_allocator(self.python_malloc_callback, self.python_free_callback)
+        mem_pool = torch.npu.memory.MemPool(allocator._allocator)
+        return mem_pool, allocator

@@ -45,6 +45,7 @@ class TestCaMem(PytestBase):
             "use_allocation_tag",
             "use_memory_pool",
             "get_current_usage",
+            "cudagraph_pool",
         ):
             assert getattr(CaMemAllocator, method_name) is getattr(CuMemAllocator, method_name)
 
@@ -287,6 +288,27 @@ class TestCaMem(PytestBase):
         create.assert_called_once_with(*handle)
         unmap.assert_called_once_with(*handle)
 
+    def test_npu_cudagraph_pool_uses_npu_allocator_and_mempool(self):
+        allocator = CaMemAllocator()
+        pluggable_allocator = MagicMock()
+        mem_pool = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.device_allocator.camem.get_pluggable_allocator",
+                return_value=pluggable_allocator,
+            ) as get_allocator,
+            patch(
+                "vllm_ascend.device_allocator.camem.torch.npu.memory.MemPool",
+                return_value=mem_pool,
+            ) as create_mem_pool,
+        ):
+            result = allocator._create_cudagraph_pool()
+
+        get_allocator.assert_called_once_with(allocator.python_malloc_callback, allocator.python_free_callback)
+        create_mem_pool.assert_called_once_with(pluggable_allocator._allocator)
+        assert result == (mem_pool, pluggable_allocator)
+
     def test_use_memory_pool_context_manager(self):
         allocator = CaMemAllocator.get_instance()
         old_tag = allocator.current_tag
@@ -301,7 +323,7 @@ class TestCaMem(PytestBase):
                 assert allocator.current_tag == "my_tag"
             # restore old tag after context manager exits
             assert allocator.current_tag == old_tag
-            assert allocator.allocator_and_pools["my_tag"] == mock_ctx.__enter__.return_value
+            assert allocator.allocator_and_pools["my_tag"] == [mock_ctx.__enter__.return_value]
 
     def test_use_memory_pool_restores_tag_when_body_raises(self):
         allocator = CaMemAllocator()
