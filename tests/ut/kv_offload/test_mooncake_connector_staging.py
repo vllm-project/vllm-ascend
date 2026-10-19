@@ -226,6 +226,59 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         mock_sync.assert_not_called()
         mock_register_buffer.assert_not_called()
 
+    def test_coalesce_merges_only_fully_contiguous_neighbours(self):
+        merge = KVCacheRecvingThread._coalesce_dsa_pd_mooncake_copy_plan
+        chunk = self.staging_chunk_bytes
+        # Fully contiguous run (pool and staging): three entries -> one copy.
+        self.assertEqual(
+            merge([(1000, chunk, 0), (1000 + chunk, chunk, chunk), (1000 + 2 * chunk, chunk, 2 * chunk)]),
+            [(1000, 3 * chunk, 0)],
+        )
+        # Pool-contiguous but staging jumps slot (wrapped bank): stays split.
+        self.assertEqual(
+            merge([(1000, chunk, 0), (1000 + chunk, chunk, 3 * chunk)]),
+            [(1000, chunk, 0), (1000 + chunk, chunk, 3 * chunk)],
+        )
+        # Staging-contiguous but pool target jumps: stays split.
+        self.assertEqual(
+            merge([(1000, chunk, 0), (5000, chunk, chunk)]),
+            [(1000, chunk, 0), (5000, chunk, chunk)],
+        )
+        # Empty and single-entry plans pass through unchanged.
+        self.assertEqual(merge([]), [])
+        self.assertEqual(merge([(1000, chunk, 0)]), [(1000, chunk, 0)])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer")
+    def test_read_probe_disabled_keeps_no_extra_sync(
+        self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
+    ):
+        # With the probe off (default) the fast path stays probe-free: the
+        # only sync sites are the landing modes themselves.
+        offloaded_kv = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
+        register_dsa_pd_mooncake_offloaded_kv_tensor(offloaded_kv)
+        staging = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
+
+        self.thread._dsa_pd_mooncake_staging_tensor = staging
+        self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
+        self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
+        self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
+        self.thread._pipeline_landing_enabled = True
+        self.thread.engine.batch_transfer_sync_read.return_value = 0
+
+        ret = self.thread._batch_transfer_sync_read_with_optional_staging(
+            "remote:7777",
+            [offloaded_kv.data_ptr()],
+            [0xA00000],
+            [offloaded_kv.numel()],
+            "req-probe-off",
+        )
+
+        self.assertEqual(ret, 0)
+        mock_sync.assert_not_called()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.stream")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.synchronize")
@@ -273,13 +326,9 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         self.assertEqual(
             copied,
             [
-                # window 1: slots 0 and 1; window 2 wraps back to slot 0
-                (offloaded_kv.data_ptr(), self.staging_chunk_bytes, 0),
-                (
-                    offloaded_kv.data_ptr() + self.staging_chunk_bytes,
-                    self.staging_chunk_bytes,
-                    self.staging_chunk_bytes,
-                ),
+                # window 1 (slots 0,1) merges into one contiguous copy;
+                # window 2 wraps back to slot 0 and stays alone
+                (offloaded_kv.data_ptr(), 2 * self.staging_chunk_bytes, 0),
                 (offloaded_kv.data_ptr() + 2 * self.staging_chunk_bytes, self.staging_chunk_bytes, 0),
             ],
         )
@@ -404,15 +453,15 @@ class TestKVCacheRecvingThreadStaging(unittest.TestCase):
         )
         mock_register_buffer.assert_not_called()
         chunk = self.staging_chunk_bytes
+        # Each fully-contiguous half-window batch (slots k,k+1 -> pool
+        # contiguous, staging offsets k*chunk,(k+1)*chunk) merges into one
+        # copy of 2 chunks.
         self.assertEqual(
             copied,
             [
-                (offloaded_kv.data_ptr(), chunk, 0),
-                (offloaded_kv.data_ptr() + chunk, chunk, chunk),
-                (offloaded_kv.data_ptr() + 2 * chunk, chunk, 2 * chunk),
-                (offloaded_kv.data_ptr() + 3 * chunk, chunk, 3 * chunk),
-                (offloaded_kv.data_ptr() + 4 * chunk, chunk, 0),
-                (offloaded_kv.data_ptr() + 5 * chunk, chunk, chunk),
+                (offloaded_kv.data_ptr(), 2 * chunk, 0),
+                (offloaded_kv.data_ptr() + 2 * chunk, 2 * chunk, 2 * chunk),
+                (offloaded_kv.data_ptr() + 4 * chunk, 2 * chunk, 0),
             ],
         )
 

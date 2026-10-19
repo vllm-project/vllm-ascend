@@ -126,6 +126,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS": lambda: max(
         1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "2"))
     ),
+    # Opt-in probe for the staged-read timing blind spot: after each engine
+    # batch read returns, a device-wide torch.npu.synchronize() reveals how
+    # much later the network data actually becomes visible on the device
+    # (read_settle_s in the receive timing line). 0 = off. Measurement runs
+    # only - the device-wide sync defeats the pipelining. Valid values: 0 or
+    # 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE": lambda: _strict_binary_env(
+        "VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE"
+    ),
 }
 
 # end-env-vars-definition

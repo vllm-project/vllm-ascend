@@ -904,6 +904,26 @@ class KVCacheRecvingThread(threading.Thread):
                 pending_event.synchronize()
                 pending_slot_events[slot] = None
 
+    @staticmethod
+    def _coalesce_dsa_pd_mooncake_copy_plan(copy_plan: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+        """Merge adjacent plan entries that are contiguous on both sides.
+
+        Consecutive pieces of one layer run are contiguous in the offloaded
+        KV pool; when their remote page offsets are zero they are contiguous
+        in staging too (consecutive slots), so the whole run lands as one
+        copy instead of one copy per 2 MiB piece. Non-contiguous neighbours
+        stay separate entries.
+        """
+        merged: list[tuple[int, int, int]] = []
+        for dst, length, staging_offset in copy_plan:
+            if merged:
+                prev_dst, prev_length, prev_offset = merged[-1]
+                if prev_dst + prev_length == dst and prev_offset + prev_length == staging_offset:
+                    merged[-1] = (prev_dst, prev_length + length, prev_offset)
+                    continue
+            merged.append((dst, length, staging_offset))
+        return merged
+
     def _batch_transfer_sync_read_with_optional_staging(
         self,
         session_id: str,
@@ -1011,14 +1031,20 @@ class KVCacheRecvingThread(threading.Thread):
         # Per-receive timing (one INFO line per request): read_s is the
         # network stage, land_exposed_s the landing time spent on the
         # critical path (waits plus, in sync modes, the copies themselves).
+        # copies/plan bracket the coalescing attribution: plan counts raw
+        # staging-window entries, copies the actual copy_ calls after
+        # adjacent runs were merged.
         # Device-side landing duration is deliberately NOT measured with
         # enable_timing events: elapsed_time() can block for a long time on
         # a busy device (observed ~75s stalls), which would poison the very
         # receive it instruments.
         timing_total_start = time.perf_counter()
         timing_read_secs = 0.0
+        timing_read_settle_secs = 0.0
         timing_land_exposed_secs = 0.0
         timing_batches = 0
+        timing_plan_entries = 0
+        timing_copy_calls = 0
         for batch_start in range(0, len(staged_transfers), bank_window):
             batch = staged_transfers[batch_start : batch_start + bank_window]
             bank_index = (batch_start // bank_window) % banks if pipeline_active else 0
@@ -1036,6 +1062,9 @@ class KVCacheRecvingThread(threading.Thread):
                 remote_src_ptrs.append(remote_src)
                 transfer_lengths.append(length)
                 copy_plan.append((local_dst, length, staging_offset))
+            timing_plan_entries += len(copy_plan)
+            copy_plan = self._coalesce_dsa_pd_mooncake_copy_plan(copy_plan)
+            timing_copy_calls += len(copy_plan)
             if pipeline_active:
                 reclaim_started = time.perf_counter()
                 for slot in range(bank_slot_base, bank_slot_base + len(batch)):
@@ -1047,6 +1076,12 @@ class KVCacheRecvingThread(threading.Thread):
             read_started = time.perf_counter()
             ret = self.engine.batch_transfer_sync_read(session_id, local_staging_ptrs, remote_src_ptrs, transfer_lengths)
             timing_read_secs += time.perf_counter() - read_started
+            if ret >= 0 and ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE:
+                # Timing-probe runs only: reveals whether read_s was the full
+                # network transfer or just its submission (see envs.py).
+                settle_started = time.perf_counter()
+                torch.npu.synchronize()
+                timing_read_settle_secs += time.perf_counter() - settle_started
             if ret < 0:
                 logger.error(
                     "Staged Mooncake batch read failed: request=%s "
@@ -1098,13 +1133,16 @@ class KVCacheRecvingThread(threading.Thread):
             timing_land_exposed_secs += time.perf_counter() - drain_started
         logger.info(
             "Staged DSA PD mooncake receive timing: request=%s mode=%s batches=%s chunks=%s "
-            "total_s=%.3f read_s=%.3f land_exposed_s=%.3f",
+            "copies=%s plan=%s total_s=%.3f read_s=%.3f read_settle_s=%.3f land_exposed_s=%.3f",
             remote_request_id,
             "pipeline" if pipeline_active else ("async" if self._async_landing_enabled else "sync"),
             timing_batches,
             len(staged_transfers),
+            timing_copy_calls,
+            timing_plan_entries,
             time.perf_counter() - timing_total_start,
             timing_read_secs,
+            timing_read_settle_secs,
             timing_land_exposed_secs,
         )
         return 0
