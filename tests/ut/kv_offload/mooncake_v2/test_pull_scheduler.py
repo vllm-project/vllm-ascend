@@ -669,8 +669,8 @@ def test_set_worker_metadata_reports_real_zmq_bind_failure(
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
 
-    context = zmq.Context()
-    occupied_socket = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    occupied_socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     scheduler.side_channel_port = occupied_socket.bind_to_random_port("tcp://127.0.0.1")
     # Deterministically exercise the window in which startup has failed but
     # Thread.is_alive() can still report true while run() is unwinding.
@@ -684,7 +684,7 @@ def test_set_worker_metadata_reports_real_zmq_bind_failure(
         occupied_socket.close(linger=0)
         context.destroy(linger=0)
 
-    assert isinstance(exc_info.value.__cause__, zmq.ZMQError)
+    assert isinstance(exc_info.value.__cause__, zmq.ZMQError)  # type: ignore[attr-defined]
     assert "Address already in use" in str(exc_info.value)
     assert "Address already in use" in str(exc_info.value.__cause__)
 
@@ -698,8 +698,8 @@ def test_set_worker_metadata_starts_and_stops_real_sending_thread() -> None:
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
 
-    context = zmq.Context()
-    temporary_socket = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    temporary_socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     scheduler.side_channel_port = temporary_socket.bind_to_random_port("tcp://127.0.0.1")
     temporary_socket.close(linger=0)
     context.destroy(linger=0)
