@@ -356,7 +356,7 @@ def test_dcp_chunked_prefill_keeps_host_parameters_and_device_history_separate(
 ):
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.chunked_prefill_enabled = True
-    builder.use_pcp = False
+    builder._pcp_context = None
     builder.dcp_size, builder.dcp_rank = size, rank
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))

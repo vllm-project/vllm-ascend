@@ -291,7 +291,7 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> dict[str, object]:
         prefill_metadata = None
         if num_prefills > 0:
-            if self.use_pcp:
+            if self._pcp_context is not None:
                 prefill_metadata = self._build_pcp_prefill_metadata(
                     common_attn_metadata, block_table, query_lens, seq_lens, num_decodes, num_prefills
                 )

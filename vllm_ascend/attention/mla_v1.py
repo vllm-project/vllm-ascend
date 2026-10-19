@@ -481,7 +481,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ) -> AscendMLAMetadata:
         self._pcp_context = common_attn_metadata.pcp_context
         self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.use_pcp else None
+        expanded_slot_mapping = (
+            common_attn_metadata.slot_mapping if common_attn_metadata.pcp_context is not None else None
+        )
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -546,8 +548,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
-        if self.use_pcp:
-            assert expanded_slot_mapping is not None
+        if expanded_slot_mapping is not None:
             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch

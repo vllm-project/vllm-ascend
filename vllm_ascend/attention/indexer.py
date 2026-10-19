@@ -1017,14 +1017,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        pcp_context = kwargs.get("pcp_context")
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
-                kwargs.get("pcp_context"),
+                pcp_context,
                 kwargs.get("pcp_cache_group_idx"),
                 buffer_key,
             )
-        elif self.use_pcp:
+        elif pcp_context is not None:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
@@ -1069,7 +1070,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if self.use_pcp:
+        if pcp_context is not None:
             # Preserve the decode boundary for PCP's cache-write gather.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
