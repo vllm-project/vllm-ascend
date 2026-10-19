@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pcp_group, get_pp_group
+from vllm.distributed import get_pcp_group
 
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
@@ -207,19 +207,6 @@ class AscendPCPManager(PCPManager):
         else:
             hidden_states = pcp_group.broadcast(hidden_states[:num_tokens].contiguous(), src=0)
         return last_hidden_states, hidden_states
-
-    @property
-    def global_batch(self) -> AscendInputBatch:
-        """Return the scheduled batch retained before PCP partitioning."""
-        global_batch = self._global_batch
-        if not isinstance(global_batch, AscendInputBatch):
-            raise RuntimeError("PCP global batch is unavailable before partition_batch().")
-        return global_batch
-
-    @property
-    def is_last_pp_rank(self) -> bool:
-        """Whether this PCP manager belongs to the last PP stage."""
-        return get_pp_group().is_last_rank
 
     @staticmethod
     def validate_config(
@@ -484,9 +471,6 @@ class AscendPCPManager(PCPManager):
         Fixed-K speculative decode sharding restores to the unpadded global
         batch instead, returning the compact ``num_tokens`` rows.
         """
-        if not self.is_last_pp_rank:
-            return hidden_states
-
         restored_hidden_states = super().restore_hidden_states(hidden_states)
         if self._global_batch is None:
             return restored_hidden_states
@@ -559,32 +543,10 @@ class AscendPCPManager(PCPManager):
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
         """Restore a model-owned rank-local buffer to the global PCP layout."""
-        if not self.is_last_pp_rank:
-            return
-
         assert self._padded_gather_idx is not None
         local_num_tokens_padded = self._padded_gather_idx.shape[0] // self.pcp_world_size
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
-
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        """Return capture views backed by the persistent PCP-local tables.
-
-        FULL graph replay cannot rebind SFA's captured block-table pointer, so
-        capture must use the same storage that ``prepare_attn`` updates at
-        runtime instead of the model runner's global block-table buffers.
-        """
-        if self._local_block_tables is None:
-            raise RuntimeError("PCP-local block tables are not initialized.")
-
-        dummy_block_tables = []
-        for block_table in self._local_block_tables:
-            if num_reqs > block_table.shape[0]:
-                raise RuntimeError(
-                    f"PCP graph request count exceeds the local block table: {num_reqs} > {block_table.shape[0]}."
-                )
-            dummy_block_tables.append(block_table[:num_reqs].zero_())
-        return tuple(dummy_block_tables)
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         """Pad PCP slot mappings to the fixed FULL-decode graph layout.

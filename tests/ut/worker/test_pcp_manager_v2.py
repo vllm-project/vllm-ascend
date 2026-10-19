@@ -25,6 +25,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.config.utils import replace
+from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -33,7 +34,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
 from vllm_ascend.worker.v2 import states as states_module
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -851,10 +852,6 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
         return restored.clone()
 
     with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
         patch.object(
             PCPManager,
             "restore_hidden_states",
@@ -884,10 +881,6 @@ def test_pcp_manager_rejects_mismatched_restored_hidden_states(parent_rows: int,
     manager._global_batch = SimpleNamespace(num_tokens=num_tokens, num_tokens_after_padding=6)
 
     with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
         patch.object(PCPManager, "restore_hidden_states", return_value=torch.randn(parent_rows, 2)),
         pytest.raises(RuntimeError, match="does not match the global graph layout"),
     ):
@@ -899,34 +892,10 @@ def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
     manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
     restored_hidden_states = torch.randn(6, 2)
 
-    with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
-        patch.object(PCPManager, "restore_hidden_states", return_value=restored_hidden_states),
-    ):
+    with patch.object(PCPManager, "restore_hidden_states", return_value=restored_hidden_states):
         result = manager.restore_hidden_states(torch.randn(3, 2))
 
     assert result is restored_hidden_states
-
-
-def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    hidden_states = torch.randn(2, 4)
-
-    with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=False),
-        ),
-        patch.object(PCPManager, "restore_hidden_states") as parent_restore,
-    ):
-        restored_hidden_states = manager.restore_hidden_states(hidden_states)
-        manager.restore_hidden_state_buffer(hidden_states)
-
-    assert restored_hidden_states is hidden_states
-    parent_restore.assert_not_called()
 
 
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
@@ -983,94 +952,57 @@ def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
     assert "pcp_manager" in signature(ModelAclGraphManager.capture).parameters
 
 
-def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
-    """Follow the PCP-local capture contract introduced by vLLM #53515/#53869."""
-    input_batch = MagicMock()
-    input_buffers = MagicMock()
-    input_block_tables = object()
-    slot_mappings = torch.arange(8)
-    slot_mappings_by_layer = object()
-    attn_metadata = object()
-    block_tables = MagicMock(cp_size=2, cp_rank=0, cp_interleave=1)
-    pcp_manager = MagicMock()
-    pcp_manager.get_dummy_block_tables.return_value = input_block_tables
-    pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
+def test_main_pcp_capture_stages_ascend_dummy_on_pcp_local_storage() -> None:
+    """Upstream capture staging keeps the PCP-local layout used on replay.
+
+    The Ascend dummy (patched InputBatch) must not be repartitioned, and the
+    captured block tables must keep the storage that runtime prepare_attn
+    updates, because the SFA full graph cannot rebind their pointer.
+    """
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=4, max_num_tokens=16)
+    local_block_tables = (torch.full((8, 4), 7, dtype=torch.int32),)
+    manager._local_block_tables = local_block_tables
+    manager._gathered_kv_slot_mappings = torch.full((1, 32), 5, dtype=torch.int64)
+    input_buffers = manager.input_buffers
+    block_tables = SimpleNamespace(cp_size=1, get_dummy_block_tables=MagicMock(), get_dummy_slot_mappings=MagicMock())
     model_state = MagicMock()
+    attn_metadata = object()
     model_state.prepare_attn.return_value = attn_metadata
-    kv_cache_config = object()
-    dcp_local_seq_lens = object()
 
     with (
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.AscendInputBatch.make_dummy",
-            return_value=input_batch,
-        ) as make_dummy,
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer",
-            return_value=slot_mappings_by_layer,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils._prepare_dcp_local_seq_lens",
-            return_value=dcp_local_seq_lens,
-        ) as prepare_dcp_local_seq_lens,
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch.object(cudagraph_utils, "build_slot_mappings_by_layer", side_effect=lambda slots, _: slots),
+        patch.object(manager, "partition_batch") as partition,
     ):
-        state = _prepare_pcp_inputs_to_capture(
-            num_reqs=2,
-            num_tokens=8,
-            model_state=model_state,
-            input_buffers=input_buffers,
-            _block_tables=block_tables,
-            attn_groups=[],
-            kv_cache_config=kv_cache_config,
+        state = cudagraph_utils.prepare_inputs_to_capture(
+            2,
+            8,
+            model_state,
+            input_buffers,
+            block_tables,
+            [],
+            None,
             full_cudagraph=True,
             max_query_len=4,
-            pcp_manager=pcp_manager,
+            pcp_manager=manager,
         )
 
-    make_dummy.assert_called_once_with(2, 8, input_buffers, max_query_len=4)
-    pcp_manager.partition_batch.assert_not_called()
-    pcp_manager.prepare_attn.assert_not_called()
+    partition.assert_not_called()
     block_tables.get_dummy_block_tables.assert_not_called()
-    pcp_manager.get_dummy_block_tables.assert_called_once_with(2)
-    pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
-    prepare_dcp_local_seq_lens.assert_called_once_with(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        2,
-        0,
-        1,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
-    assert input_batch.dcp_local_seq_lens is dcp_local_seq_lens
-    model_state.prepare_attn.assert_called_once_with(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        [],
-        kv_cache_config,
-        for_capture=True,
-    )
+    block_tables.get_dummy_slot_mappings.assert_not_called()
+    batch, cg_mode, captured_block_tables, captured_slots = model_state.prepare_attn.call_args.args[:4]
+    assert isinstance(batch, AscendInputBatch)
+    assert batch.is_dummy
+    assert cg_mode == CUDAGraphMode.NONE
+    assert batch.input_ids.data_ptr() == input_buffers.input_ids.data_ptr()
+    assert batch.query_start_loc.data_ptr() == input_buffers.query_start_loc.data_ptr()
+    assert captured_block_tables[0].data_ptr() == local_block_tables[0].data_ptr()
+    assert torch.count_nonzero(captured_block_tables[0]) == 0
+    assert torch.count_nonzero(local_block_tables[0][2:]) > 0
+    assert captured_slots.shape == (1, 16)
+    assert torch.all(captured_slots == -1)
+    assert model_state.prepare_attn.call_args.kwargs == {"for_capture": True}
     assert state.attn_metadata is attn_metadata
-    assert state.slot_mappings is slot_mappings_by_layer
-
-
-def test_main_pcp_capture_block_tables_keep_runtime_storage() -> None:
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    local_block_tables = (
-        torch.full((4, 8), 7, dtype=torch.int32),
-        torch.full((4, 4), 9, dtype=torch.int32),
-    )
-    manager._local_block_tables = local_block_tables
-
-    dummy_block_tables = manager.get_dummy_block_tables(2)
-
-    assert len(dummy_block_tables) == len(local_block_tables)
-    for dummy, runtime_table in zip(dummy_block_tables, local_block_tables):
-        assert dummy.data_ptr() == runtime_table.data_ptr()
-        assert torch.count_nonzero(dummy) == 0
-        assert torch.count_nonzero(runtime_table[2:]) > 0
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
@@ -1079,7 +1011,7 @@ def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
 
 
 @pytest.mark.parametrize("is_last_pp_rank", [False, True])
-def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
+def test_sample_tokens_leaves_pcp_batch_selection_to_upstream(
     is_last_pp_rank: bool,
 ) -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -1118,8 +1050,9 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     ) as parent_sample_tokens:
         actual_output = runner.sample_tokens(grammar_output)
 
-    expected_batch = local_batch if is_last_pp_rank else global_batch
-    assert runner.execute_model_state.input_batch is expected_batch
+    # Upstream sample_tokens selects pcp_manager.global_batch on non-last PP
+    # ranks and restore_for_sampling's batch on the last one.
+    assert runner.execute_model_state.input_batch is local_batch
     assert actual_output is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
 
