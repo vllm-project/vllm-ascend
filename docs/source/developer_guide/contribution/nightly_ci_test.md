@@ -171,39 +171,53 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
 | `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
-**Single-node tests** (`a3.single_node.test_config`):
-
-| Test name | Description |
-|-----------|-------------|
-| `mtpx-deepseek-r1-0528-w8a8` | MTP-X + DeepSeek-R1-0528-W8A8 |
-| `deepseek-r1-0528-w8a8` | DeepSeek-R1-0528-W8A8 |
-| `kimi-k2-thinking` | Kimi-K2-Thinking |
-| `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |
-| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
-| `kimi-k2.5` | Kimi-K2.5 |
-| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
-| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |
-| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |
-| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |
-
-**Multi-card tests** (`a3.multi_card.test_config`):
-
-| Test name | Description |
-|-----------|-------------|
-| `qwen3-30b-acc` | Qwen3-30B accuracy test |
-| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B-W8A8 |
-| `qwen3-32b-int8` | Qwen3-32B-Int8 |
-| `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |
-| `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8 via llm-compressor |
-| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |
-| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |
-
 !!! warning
 
     The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
     run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
     A3 will queue a large number of jobs — prefer targeting specific test names when
     possible.
+
+### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
+
+**Single-node tests** (`a3-560t.single_node.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 + MTP |
+| `MiniMax-M3-W8A8-A3` | MiniMax-M3 W8A8 |
+| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 + MTP |
+| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 + MTP |
+| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8, MRV2 + DSpark |
+| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 + MTP |
+| `kimi-k2.6_max_model_len` | Kimi-K2.6 W4A8, maximum model length |
+| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 + DFlash |
+| `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8, prefill MC2 |
+| `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
+| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |
+| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |
+| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
+| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
+| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
+| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8, DCP16 |
+| `glm-5.2-w4a8-dspark` | GLM-5.2 W4A8 + DSpark |
+| `glm-5.2-w4a8-mtp` | GLM-5.2 W4A8 + MTP |
+| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8, MRV2 + DSpark |
+| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8, MRV2 + MTP |
+
+**Multi-card tests** (`a3-560t.multi_card.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `qwen3-30b-acc` | Qwen3-30B accuracy test |
+| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 + MTP |
+| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B W8A8 |
+| `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8 via llm-compressor |
+| `qwen3-32b-int8-prefix-cache` | Qwen3-32B W8A8 QuaRot prefix cache |
+| `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |
+| `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |
+| `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |
+| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP |
 
 ## Examples
 
@@ -223,6 +237,12 @@ Run two specific tests at once (one per SoC):
 
 ```text
 /nightly test_custom_op_multi_card mtpx-deepseek-r1-0528-w8a8
+```
+
+Run the MLA, GQA and SFA context-parallel tests on A3-560T:
+
+```text
+/nightly Kimi-K2.6-W4A8-PCP-DCP Qwen3-30B-A3B-VWN-eagle3-PCP glm-5.2-W4A8C8-DSpark-PCP --a3-560t
 ```
 
 Run a single accuracy group (with all of its models):

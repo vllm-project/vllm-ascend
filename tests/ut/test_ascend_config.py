@@ -883,6 +883,56 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_950_rejects_sparse_offload(self, mock_is_950):
+        for keep_device_kv_cache in (False, True):
+            for use_fused_overlap in (False, True):
+                with (
+                    self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
+                    self.assertRaisesRegex(ValueError, "not supported on 950PR&950DT Products"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(speculative_config=None),
+                        {
+                            "enabled": True,
+                            "keep_device_kv_cache": keep_device_kv_cache,
+                            "use_fused_overlap": use_fused_overlap,
+                        },
+                    )
+        mock_is_950.assert_called()
+
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_a5_allows_sparse_offload_disabled(self, mock_is_950):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(speculative_config=None), {})
+        self.assertFalse(config.enabled)
+        mock_is_950.assert_not_called()
+
+    def test_preempt_offload_is_mutually_exclusive(self):
+        for multi_connector in (False, True):
+            transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector" if multi_connector else "PreemptOffloadConnector",
+                kv_role="kv_consumer",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "SfaRemoteD2HConnector", "kv_role": "kv_consumer"},
+                        {"kv_connector": "PreemptOffloadConnector", "kv_role": "kv_consumer"},
+                    ]
+                }
+                if multi_connector
+                else {},
+            )
+            vllm_config = SimpleNamespace(kv_transfer_config=transfer_config, speculative_config=None)
+            for keep_device_kv_cache in (False, True):
+                with (
+                    self.subTest(multi_connector=multi_connector, keep_device_kv_cache=keep_device_kv_cache),
+                    self.assertRaisesRegex(ValueError, "cannot be combined with PreemptOffloadConnector"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        vllm_config, {"enabled": True, "keep_device_kv_cache": keep_device_kv_cache}
+                    )
+            # Preempt offload alone remains supported.
+            self.assertFalse(SparseKVOffloadConfig.from_additional_config(vllm_config, {}).enabled)
+
     def test_topk_buffer_default_is_unset(self):
         self.assertEqual(SparseKVOffloadConfig().topk_buffer_size, -1)
 
@@ -927,7 +977,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
         )
 
@@ -956,7 +1006,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -978,7 +1028,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -1006,7 +1056,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )

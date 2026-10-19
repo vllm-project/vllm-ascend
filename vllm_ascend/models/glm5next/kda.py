@@ -106,6 +106,8 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
+    use_contiguous_conv_indices = True
+
     head_dim: int
     num_heads: int
     conv_size: int
