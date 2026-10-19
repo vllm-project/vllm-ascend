@@ -2828,6 +2828,7 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        # Postprocessing walks all Mamba groups, including draft state caches.
         update_states_before_draft = (
             self.need_accepted_tokens
             and self.use_async_scheduling
@@ -2835,6 +2836,8 @@ class NPUModelRunner(GPUModelRunner):
             and self.speculative_config is not None
             and self.speculative_config.method == "mtp"
             and not self.is_kv_producer
+            and self.drafter is not None
+            and not any(isinstance(group.kv_cache_spec, MambaSpec) for group in self.drafter.draft_attn_groups)
         )
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -6323,11 +6326,14 @@ class NPUModelRunner(GPUModelRunner):
             attention_backend_list.append(attn_backends[1])
 
         # GLM NoPE cache layers can differ from the initial fallback backend.
-        # Preserve the original synchronization policy for other cache families.
-        if any(
-            is_glm5_next_cache_spec(group_key.kv_cache_spec)
-            for backend_map in attention_backend_maps
-            for group_key in backend_map
+        # Keep the original policy for other cache families and TP/CP layouts.
+        if (
+            any(
+                is_glm5_next_cache_spec(group_key.kv_cache_spec)
+                for backend_map in attention_backend_maps
+                for group_key in backend_map
+            )
+            and self.parallel_config.tensor_parallel_size == 1
         ):
             self._needs_seq_lens_cpu_sync = self.use_compress or any(
                 issubclass(backend, (AscendAttentionBackend, AscendMLABackend))

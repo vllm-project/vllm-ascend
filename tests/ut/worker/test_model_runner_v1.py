@@ -1138,7 +1138,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             with self.subTest(asynchronous=asynchronous, cache_mode=cache_mode, method=method, producer=producer):
                 self._check_state_update_order(asynchronous, cache_mode, method, producer, update_before_draft)
 
-    def _check_state_update_order(self, asynchronous, cache_mode, method, producer, update_before_draft):
+    def test_mamba_draft_keeps_postprocess_after_drafting(self):
+        self._check_state_update_order(True, "align", "mtp", False, False, draft_uses_mamba=True)
+
+    def _check_state_update_order(
+        self, asynchronous, cache_mode, method, producer, update_before_draft, draft_uses_mamba=False
+    ):
         runner = MagicMock()
         runner.kv_connector_output = None
         runner.need_accepted_tokens = True
@@ -1146,6 +1151,8 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.cache_config.mamba_cache_mode = cache_mode
         runner.speculative_config.method = method
         runner.is_kv_producer = producer
+        draft_spec = MagicMock(spec=MambaSpec) if draft_uses_mamba else object()
+        runner.drafter.draft_attn_groups = [SimpleNamespace(kv_cache_spec=draft_spec)]
         runner.dynamic_eplb = False
         runner.input_batch.vocab_size = 128
         runner.speculative_config.disable_padded_drafter_batch = False
@@ -1377,6 +1384,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
         runner.sparse_kv_offload_config = MagicMock()
         runner.tp_rank = 0
+        runner.parallel_config = SimpleNamespace(tensor_parallel_size=1)
         runner.compilation_config = SimpleNamespace(static_forward_context={})
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
@@ -2461,11 +2469,20 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 KVCacheGroupSpec(layer_names=[target_layer, draft_layer, cache_layer], kv_cache_spec=glm_spec)
             ],
         )
-        for use_compress in (False, True):
+        for tp_size, use_compress in ((1, False), (1, True), (8, False)):
             runner.attn_groups = []
+            runner.parallel_config.tensor_parallel_size = tp_size
             runner.use_compress = use_compress
+            runner._needs_seq_lens_cpu_sync = True
             runner.initialize_attn_backend(kv_cache_config)
-            self.assertEqual(runner._needs_seq_lens_cpu_sync, use_compress)
+            self.assertEqual(runner._needs_seq_lens_cpu_sync, use_compress or tp_size != 1)
+
+        runner.attn_groups = []
+        runner.parallel_config.tensor_parallel_size = 1
+        runner.use_compress = False
+        target_attn.get_attn_backend.return_value = FakeMLABackend
+        runner.initialize_attn_backend(kv_cache_config)
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
 
     def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
         cases = (
