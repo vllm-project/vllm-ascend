@@ -69,7 +69,7 @@ def fused_gdn_gating_patch(
 
     num_cores = get_vectorcore_num()
 
-    BLK_HEADS = 8
+    BLK_HEADS = 16
 
     progs = num_cores
     row_per_core = triton.cdiv(batch, progs)
