@@ -1,4 +1,4 @@
-# GLM-5.3-Flash single-node MRV2 accuracy coverage.
+# GLM-5.3-Flash single-node MRV2 accuracy and performance coverage.
 # CI uses shared checkpoints and dynamic service ports.
 # The existing single-node harness manages the local Memcache service/config.
 # GSM8K-lite baseline 90 / threshold 10 is an initial gate, pending MRV2 calibration.
@@ -68,6 +68,31 @@ test_cases:
     max_tokens: 16
     temperature: 0.0
   benchmarks:
+    # Shared-prefix workload reused from the GLM-5.3-Flash PD nightly.
+    perf_warmup:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 8
+      max_out_len: 1024
+      batch_size: 1
+      request_rate: 0
+      baseline: 0
+      threshold: 0.97
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 512
+      max_out_len: 1024
+      batch_size: 32
+      request_rate: 0
+      # TODO: Replace 0 with the measured A3 single-node MRV2 throughput baseline.
+      # Until calibrated, this records throughput without a regression floor.
+      baseline: 0
+      threshold: 0.97
     accuracy_placeholder_gsm8k:
       case_type: accuracy
       dataset_path: vllm-ascend/gsm8k-lite
