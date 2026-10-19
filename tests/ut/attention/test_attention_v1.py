@@ -391,6 +391,25 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
 
 
+def test_pcp_replicated_draft_decode_writes_cache_locally() -> None:
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.use_pcp = True
+    impl.key_cache = object()
+    # A draft decode built without a PCP context has no PCP-local layout.
+    metadata = AscendMetadata(model_runner_type="generate")
+    query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
+    written = (query, key, value, output)
+    with (
+        patch.object(impl, "_reshape_and_cache_pcp", return_value=written) as pcp_write,
+        patch.object(impl, "reshape_and_cache", return_value=written) as write,
+        patch.object(impl, "forward_impl", return_value=output),
+    ):
+        impl.forward(layer, query, key, value, (), metadata, output)
+    pcp_write.assert_not_called()
+    write.assert_called_once()
+
+
 class TestAscendAttentionBackendImpl(TestBase):
     def setUp(self):
         self.mock_event = MagicMock()

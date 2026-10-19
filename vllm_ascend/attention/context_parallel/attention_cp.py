@@ -518,11 +518,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         )
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        if self.use_pcp:
-            prefill = attn_metadata.prefill
-            assert prefill is not None
-            chunked_context = prefill.chunked_context
-            assert chunked_context is not None and chunked_context.pcp_query_restore_idx is not None
+        prefill = attn_metadata.prefill
+        assert prefill is not None and prefill.chunked_context is not None
+        chunked_context = prefill.chunked_context
+        # Only PCP-context metadata splits the query sequence across ranks.
+        if chunked_context.pcp_query_restore_idx is not None:
             # PCP splits the query sequence, not the history KV cache. Restore
             # all current queries before computing each DCP history shard.
             prefill_query = self.pcp_group.all_gather(prefill_query.contiguous(), dim=0)
@@ -589,8 +589,8 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         query_lens = prefill.actual_seq_lengths_q
         local_query = query[attn_metadata.num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
         causal = attn_metadata.causal
-        if self.use_pcp:
-            assert prefill.pcp_current_kv_indices is not None and prefill.pcp_actual_seq_lengths_kv is not None
+        if prefill.pcp_current_kv_indices is not None:
+            assert prefill.pcp_actual_seq_lengths_kv is not None
             key = torch.index_select(key, 0, prefill.pcp_current_kv_indices)
             value = torch.index_select(value, 0, prefill.pcp_current_kv_indices)
             kv_lens = prefill.pcp_actual_seq_lengths_kv
@@ -669,8 +669,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         if chunked_context is not None:
             # PCP query gather includes padding; current attention uses actual local tokens.
             query_end = attn_metadata.num_actual_tokens
-            if self.use_pcp:
-                assert attn_metadata.pcp_local_num_input_tokens is not None
+            if attn_metadata.pcp_local_num_input_tokens is not None:
                 query_end = attn_metadata.pcp_local_num_input_tokens
             history_query = query[num_decode_tokens:query_end].contiguous()
             comm_stream = cp_chunkedprefill_comm_stream()
@@ -686,8 +685,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             with torch_npu.npu.stream(comm_stream):
                 history_recv = self._merge_dcp_attention_output(history_output, history_lse, defer_combine=True)
             main_stream.wait_stream(comm_stream)
-            if self.use_pcp:
-                assert chunked_context.pcp_local_query_indices is not None
+            if chunked_context.pcp_local_query_indices is not None:
                 history_recv = torch.index_select(history_recv, 2, chunked_context.pcp_local_query_indices)
             current_output = fused_dcp_lse_combine(
                 history_recv,

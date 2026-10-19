@@ -1350,7 +1350,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            if self.use_pcp:
+            # Only PCP-context metadata is finalized with the rank-local
+            # layout; a replicated draft decode writes its local slots.
+            if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output
                 )
