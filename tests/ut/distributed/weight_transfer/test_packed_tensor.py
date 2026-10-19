@@ -26,6 +26,7 @@ data correctness is verified end-to-end.
 from __future__ import annotations
 
 import types
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -87,12 +88,22 @@ def _stub_torch_npu():
     original_empty = torch.empty
 
     def _fake_empty(*args, **kwargs):
-        if kwargs.get("device") == "npu":
+        device = kwargs.get("device")
+        if getattr(device, "type", None) == "npu" or (isinstance(device, str) and device.split(":", 1)[0] == "npu"):
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
     with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
         yield
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["npu", "npu:0", types.SimpleNamespace(type="npu")],
+    ids=["unindexed-string", "indexed-string", "device-type"],
+)
+def test_cpu_fixture_redirects_all_npu_device_forms(device):
+    assert torch.empty(1, device=device).device.type == "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -889,3 +900,105 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
 
     ptrs = [w[1].storage().data_ptr() for w in weights]
     assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
+
+
+@pytest.mark.parametrize("buffer_size", [1, 8, 128])
+def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size):
+    tensors = [
+        ("byte", torch.tensor([7], dtype=torch.uint8)),
+        ("scalar", torch.tensor(2.5)),
+        ("empty", torch.empty(0, 3, dtype=torch.float16)),
+        ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
+    ]
+    group = _make_group_mock()
+    packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
+    payloads = [call.args[0].clone() for call in group.broadcast.call_args_list]
+    chunks = iter(payloads)
+    receive_buffers = []
+
+    def receive(packed, **kwargs):
+        packed.copy_(next(chunks))
+        receive_buffers.append(packed)
+
+    received = []
+    packed_broadcast_consumer(
+        iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors),
+        types.SimpleNamespace(broadcast=receive),
+        0,
+        received.extend,
+        buffer_size,
+    )
+    # A retained layer input must not alias the reusable receive allocation.
+    for payload in receive_buffers:
+        payload.zero_()
+    assert [name for name, _ in received] == [name for name, _ in tensors]
+    for (_, actual), (_, expected) in zip(received, tensors):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_packed_ipc_roundtrip_scalar_empty_and_unaligned(empty_only):
+    tensors = [("empty", torch.empty(0, 3, dtype=torch.float16))]
+    if not empty_only:
+        tensors = [("byte", torch.tensor([7], dtype=torch.uint8)), ("scalar", torch.tensor(2.5)), *tensors]
+    exported = []
+
+    def export(tensor):
+        exported.append(tensor)
+        return None, ("handle", 0, 0, 0, 0, 0, 0)
+
+    with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
+        chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], 128))
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert isinstance(chunk, dict)  # Keep the existing IPC wire representation.
+    with _install_fake_rebuild_npu_tensor(exported[0]):
+        received = packed_npu_ipc_consumer(
+            chunk["ipc_handle"],
+            "node-0",
+            chunk["names"],
+            chunk["shapes"],
+            chunk["dtype_names"],
+            chunk["tensor_sizes"],
+            0,
+        )
+    exported[0].zero_()
+    for (_, actual), (_, expected) in zip(received, tensors):
+        assert actual.shape == expected.shape
+        assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("producer", [False, True])
+def test_packed_transfer_drains_storage_before_propagating_error(producer):
+    class TrackingStream(_FakeNpuStream):
+        pending = None
+        completed = False
+
+        def synchronize(self):
+            if self.pending is not None:
+                assert self.pending() is not None
+                self.completed = True
+
+    stream = TrackingStream()
+
+    def broadcast(packed, **kwargs):
+        stream.pending = weakref.ref(packed)
+        if producer:
+            raise ValueError("transfer rejected")
+
+    group = types.SimpleNamespace(broadcast=broadcast)
+    with patch.object(torch.npu, "Stream", return_value=stream), pytest.raises(ValueError, match="transfer rejected"):
+        if producer:
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, 1)
+        else:
+            packed_broadcast_consumer(
+                iter([("w", ([1], torch.float32))]),
+                group,
+                0,
+                MagicMock(side_effect=ValueError("transfer rejected")),
+                4,
+                1,
+            )
+    assert stream.completed

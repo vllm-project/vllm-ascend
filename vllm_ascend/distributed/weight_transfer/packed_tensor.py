@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Packed tensor utilities for efficient weight transfer."""
 
+import logging
 import math
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from typing import Any
 
 import torch
@@ -13,6 +15,11 @@ from torch.multiprocessing.reductions import reduce_tensor
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+logger = logging.getLogger(__name__)
+
+# On a failed stream drain, keep storage alive until process exit. Its async
+# users may still be running, so returning it to the allocator is unsafe.
+_UNSYNCHRONIZED_BUFFERS: list[torch.Tensor] = []
 
 
 def packed_broadcast_producer(
@@ -36,6 +43,8 @@ def packed_broadcast_producer(
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
     """
+    if buffer_size_bytes <= 0 or num_buffers < 1:
+        raise ValueError("buffer_size_bytes and num_buffers must be positive")
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
@@ -45,48 +54,66 @@ def packed_broadcast_producer(
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
 
-    done = False
-    while not done:
-        # Synchronize the current stream (waits for previous
-        # iteration's work on this buffer to finish)
-        streams[buffer_idx].synchronize()
-        # Start tasks for the new buffer in a new stream
-        with torch.npu.stream(streams[buffer_idx]):
-            # Initialize the packing tensor list and sizes
-            packing_tensor_list[buffer_idx] = []
-            packing_tensor_sizes[buffer_idx] = 0
-            # Pack the tensors
-            while True:
-                try:
-                    item = next(iterator)
-                except StopIteration:
-                    done = True
-                    break
-                # Apply post processing and convert to linearized uint8 tensor
-                tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
-                packing_tensor_list[buffer_idx].append(tensor)
-                packing_tensor_sizes[buffer_idx] += tensor.numel()
-                if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
-                    break
-            if len(packing_tensor_list[buffer_idx]) > 0:
+    body_error: BaseException | None = None
+    try:
+        done = False
+        while not done:
+            # Synchronize the current stream (waits for previous
+            # iteration's work on this buffer to finish)
+            streams[buffer_idx].synchronize()
+            # Start tasks for the new buffer in a new stream
+            with torch.npu.stream(streams[buffer_idx]):
+                # Initialize the packing tensor list and sizes
+                packing_tensor_list[buffer_idx] = []
+                packing_tensor_sizes[buffer_idx] = 0
                 # Pack the tensors
-                packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
+                while True:
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        done = True
+                        break
+                    # Apply post processing and convert to linearized uint8 tensor
+                    tensor = post_iter_func(item).contiguous().reshape(-1).view(torch.uint8)
+                    packing_tensor_list[buffer_idx].append(tensor)
+                    packing_tensor_sizes[buffer_idx] += tensor.numel()
+                    if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
+                        break
+                if len(packing_tensor_list[buffer_idx]) > 0:
+                    # Pack the tensors
+                    packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
 
-        if len(packing_tensor_list[buffer_idx]) == 0:
-            # No more tensors — nothing left to broadcast
-            break
+            if len(packing_tensor_list[buffer_idx]) == 0:
+                # No more tensors — nothing left to broadcast
+                break
 
-        # torch.cat runs on the custom stream.  Synchronize before
-        # broadcasting on the default stream so the packed data is ready.
-        streams[buffer_idx].synchronize()
-        group.broadcast(packed_tensors[buffer_idx], src=src)
+            # Keep packing and broadcast on the same stream. Reusing this slot
+            # waits for both operations, not only the earlier torch.cat.
+            group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
 
-        # Move to the next buffer
-        buffer_idx = (buffer_idx + 1) % num_buffers
-
-    # Ensure the last broadcast on the default stream has completed
-    # before returning, so NPU tensor cleanup at exit doesn't hang.
-    torch.npu.current_stream().synchronize()
+            # Move to the next buffer
+            buffer_idx = (buffer_idx + 1) % num_buffers
+    except BaseException as exc:
+        body_error = exc
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        for index, stream in enumerate(streams):
+            try:
+                stream.synchronize()
+            except BaseException as exc:
+                _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and body_error is None:
+            raise cleanup_error
+        if cleanup_error is not None and body_error is not None:
+            with suppress(BaseException):
+                logger.warning(
+                    "Failed to drain a packed HCCL stream while handling another exception; "
+                    "retaining its buffer until process exit: %s",
+                    cleanup_error,
+                )
 
 
 def packed_broadcast_consumer(
@@ -118,81 +145,97 @@ def packed_broadcast_consumer(
         dtypes: list[torch.dtype],
         tensor_sizes: list[int],
     ) -> list[tuple[str, torch.Tensor]]:
-        """Unpack a packed uint8 tensor into a list of typed tensors."""
+        """Own each byte slice before interpreting possibly unaligned dtypes."""
         unpacked_tensors = packed_tensor.split(tensor_sizes)
         unpacked_list = [
-            (name, tensor.contiguous().view(dtype).view(*shape))
+            (name, tensor.clone().view(dtype).reshape(shape))
             for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
         ]
         return unpacked_list
 
+    if buffer_size_bytes <= 0 or num_buffers < 1:
+        raise ValueError("buffer_size_bytes and num_buffers must be positive")
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
-    default_stream = torch.npu.current_stream()
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
 
-    done = False
-    while not done:
-        # Synchronize the current stream (waits for previous
-        # iteration's load_weights on this buffer to finish)
-        streams[buffer_idx].synchronize()
-        with torch.npu.stream(streams[buffer_idx]):
-            # Collect parameter metadata for this buffer
-            packing_tensor_meta_data[buffer_idx] = []
-            packing_tensor_sizes[buffer_idx] = 0
-            while True:
-                try:
-                    name, (shape, dtype) = next(iterator)
-                except StopIteration:
-                    done = True
-                    break
-                tensor_size = math.prod(shape) * dtype.itemsize
-                packing_tensor_meta_data[buffer_idx].append((name, shape, dtype, tensor_size))
-                packing_tensor_sizes[buffer_idx] += tensor_size
-                if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
-                    break
-            if len(packing_tensor_meta_data[buffer_idx]) > 0:
-                packed_tensors[buffer_idx] = torch.empty(
-                    packing_tensor_sizes[buffer_idx],
-                    dtype=torch.uint8,
-                    device="npu",
+    body_error: BaseException | None = None
+    try:
+        done = False
+        while not done:
+            # Synchronize the current stream (waits for previous
+            # iteration's load_weights on this buffer to finish)
+            streams[buffer_idx].synchronize()
+            with torch.npu.stream(streams[buffer_idx]):
+                # Collect parameter metadata for this buffer
+                packing_tensor_meta_data[buffer_idx] = []
+                packing_tensor_sizes[buffer_idx] = 0
+                while True:
+                    try:
+                        name, (shape, dtype) = next(iterator)
+                    except StopIteration:
+                        done = True
+                        break
+                    tensor_size = math.prod(shape) * dtype.itemsize
+                    packing_tensor_meta_data[buffer_idx].append((name, shape, dtype, tensor_size))
+                    packing_tensor_sizes[buffer_idx] += tensor_size
+                    if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
+                        break
+                if len(packing_tensor_meta_data[buffer_idx]) > 0:
+                    packed_tensors[buffer_idx] = torch.empty(
+                        packing_tensor_sizes[buffer_idx],
+                        dtype=torch.uint8,
+                        device="npu",
+                    )
+
+            if len(packing_tensor_meta_data[buffer_idx]) == 0:
+                break
+
+            # Broadcast, unpack clones and load_weights share one ordered stream.
+            group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
+
+            # Unpack and load weights on the custom stream
+            with torch.npu.stream(streams[buffer_idx]):
+                names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
+                post_unpack_func(
+                    unpack_tensor(
+                        packed_tensors[buffer_idx],
+                        list(names),
+                        list(shapes),
+                        list(dtypes),
+                        list(tensor_sizes),
+                    )
                 )
 
-        if len(packing_tensor_meta_data[buffer_idx]) == 0:
-            break
+            # Move to the next buffer
+            buffer_idx = (buffer_idx + 1) % num_buffers
 
-        # Broadcast on the default stream.
-        group.broadcast(packed_tensors[buffer_idx], src=src)
-
-        # Synchronize the default stream so broadcast completes before
-        # load_weights (running on the custom stream) reads the data.
-        default_stream.synchronize()
-
-        # Unpack and load weights on the custom stream
-        with torch.npu.stream(streams[buffer_idx]):
-            names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-            post_unpack_func(
-                unpack_tensor(
-                    packed_tensors[buffer_idx],
-                    list(names),
-                    list(shapes),
-                    list(dtypes),
-                    list(tensor_sizes),
+    except BaseException as exc:
+        body_error = exc
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        for index, stream in enumerate(streams):
+            try:
+                stream.synchronize()
+            except BaseException as exc:
+                _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and body_error is None:
+            raise cleanup_error
+        if cleanup_error is not None and body_error is not None:
+            with suppress(BaseException):
+                logger.warning(
+                    "Failed to drain a packed HCCL stream while handling another exception; "
+                    "retaining its buffer until process exit: %s",
+                    cleanup_error,
                 )
-            )
-
-        # Move to the next buffer
-        buffer_idx = (buffer_idx + 1) % num_buffers
-
-    # Wait for all in-flight load_weights (on custom streams) to finish.
-    # Otherwise NPU tensor cleanup at exit may hang.
-    for s in streams:
-        s.synchronize()
 
 
 # ── NPU IPC packed transfer ────────────────────────────────────────────
@@ -217,6 +260,8 @@ def packed_npu_ipc_producer(
         post_iter_func: Applied to each (name, tensor) before packing.
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
     """
+    if buffer_size_bytes <= 0:
+        raise ValueError("buffer_size_bytes must be positive")
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
     # Store only the rebuild args (drop the func); the consumer rebuilds with
     # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.
@@ -229,7 +274,7 @@ def packed_npu_ipc_producer(
     total_bytes = 0
 
     for name, orig_tensor in iterator:
-        flat = post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+        flat = post_iter_func((name, orig_tensor)).contiguous().reshape(-1).view(torch.uint8)
 
         if flat.numel() > buffer_size_bytes:
             raise ValueError(
@@ -257,7 +302,7 @@ def packed_npu_ipc_producer(
         tensor_sizes.append(flat.numel())
         total_bytes += flat.numel()
 
-    if total_bytes:
+    if names:
         torch.npu.current_stream().synchronize()
         yield {
             "names": names,
@@ -318,7 +363,7 @@ def packed_npu_ipc_consumer(
     offset = 0
     for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
         raw = packed[offset : offset + size]
-        tensor = raw.contiguous().view(dtype).view(*shape).clone()
+        tensor = raw.clone().view(dtype).reshape(shape)
         weights.append((name, tensor))
         offset += size
 
