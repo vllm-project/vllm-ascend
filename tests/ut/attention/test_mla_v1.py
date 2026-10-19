@@ -427,7 +427,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = SimpleNamespace(
         weight=torch.empty(0),
@@ -497,7 +497,7 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
 
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = object()
     impl.num_kv_heads = 1
@@ -551,7 +551,7 @@ def test_mla_pcp_no_rope_gathers_before_cache_write() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
     metadata.slot_mapping = torch.tensor([5, -1, 7, -1], dtype=torch.int64)
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl.use_mla_rope = False
     with (
         patch("vllm_ascend.attention.mla_v1.get_pcp_group", return_value=pcp_group),
@@ -1225,7 +1225,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             self.mock_vllm_config,
             self.mock_device,
         )
-        self.assertFalse(builder.pcp_enabled)
+        self.assertFalse(builder.use_pcp)
         self.assertIs(builder.metadata_cls, AscendMLAMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
@@ -1235,7 +1235,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             self.mock_vllm_config,
             self.mock_device,
         )
-        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMLAMetadata)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
@@ -1433,7 +1433,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             ):
                 self.mock_vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
                 builder.pcp_size = pcp_size
-                builder.pcp_enabled = pcp_size > 1
+                builder.use_pcp = pcp_size > 1
                 common_attn_metadata.slot_mapping = torch.arange(3 * pcp_size)
                 metadata = builder.build(0, common_attn_metadata)
                 expected_decodes = 3 if pcp_size == 1 else 0
@@ -1702,7 +1702,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertFalse(self.impl.pcp_enabled)
+        self.assertFalse(self.impl.use_pcp)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
@@ -2994,7 +2994,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(prefill_res)
 
     def test_mla_preprocess_prefill_pcp_empty_rank(self):
-        self.impl.pcp_enabled = True
+        self.impl.use_pcp = True
         self.impl.num_heads = 2
         self.impl.num_kv_heads = 1
         self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)

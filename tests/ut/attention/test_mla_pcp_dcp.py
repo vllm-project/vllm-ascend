@@ -13,7 +13,7 @@ from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 def test_query_gather_restores_only_distinct_tp_heads(tp_size, pcp_size, logical_pcp):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.dcp_size = tp_size * pcp_size
-    impl.pcp_enabled = logical_pcp
+    impl.use_pcp = logical_pcp
     impl.pcp_group = SimpleNamespace(world_size=pcp_size)
     impl.tp_group = SimpleNamespace(
         all_gather=Mock(side_effect=lambda q, dim: torch.cat([q + 100 * rank for rank in range(tp_size)], dim=dim))
@@ -206,13 +206,13 @@ def test_mla_dcp_inherits_standard_build_and_does_not_materialize_whole_cache():
     assert "_gather_prefill_cache_blocks" not in AscendMlaDCPImpl.__dict__
 
 
-@pytest.mark.parametrize("pcp_enabled", [False, True])
-def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_chunked_metadata_preserves_explicit_plan_and_workspace(use_pcp):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = pcp_enabled
+    builder.use_pcp = use_pcp
     builder.dcp_enabled = True
     builder.num_decodes = 0
     builder.seq_lens = torch.tensor([6, 12], dtype=torch.int32)
@@ -226,7 +226,7 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
     assert result is None
     assert base.call_args.kwargs["chunk_plan_lens_cpu"] is plan
     assert base.call_args.kwargs["chunk_workspace_size"] == 48
-    if pcp_enabled:
+    if use_pcp:
         builder._get_pcp_prefill_kv_inputs.assert_called_once()
     else:
         builder._get_pcp_prefill_kv_inputs.assert_not_called()
@@ -268,7 +268,7 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = builder.dcp_enabled = builder.chunked_prefill_enabled = True
+    builder.use_pcp = builder.dcp_enabled = builder.chunked_prefill_enabled = True
     builder.chunked_prefill_workspace_size = workspace_size
     builder.chunked_prefill_workspace = torch.empty(0)
     builder.block_size = builder.cp_virtual_block_size = 2048
@@ -317,7 +317,7 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder, ChunkedContextMetadata
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     builder.dcp_enabled = True
     builder.chunked_prefill_workspace_size = 64
     builder.dcp_collective_rank_order = [0, 2, 1, 3]
