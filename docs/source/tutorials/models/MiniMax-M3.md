@@ -2223,6 +2223,9 @@ The four Decode engines share one global DP group. Each process serves one DP ra
     export SERVICE_PORT=${SERVICE_PORT:-31260}
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
+    # Per-NPU KV cache bytes: tested example; adjust as explained below.
+    KV_CACHE_MEMORY_BYTES=47620449894
+
     unset VLLM_PP_LAYER_PARTITION
 
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -2266,7 +2269,7 @@ The four Decode engines share one global DP group. Each process serves one DP ra
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.99 \
-        --kv-cache-memory-bytes 47620449894 \
+        --kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES" \
         --kv-cache-dtype auto \
         --language-model-only \
         --reasoning-parser minimax_m3 \
@@ -2294,7 +2297,13 @@ The four Decode engines share one global DP group. Each process serves one DP ra
     }'
     ```
 
-`--kv-cache-memory-bytes` sets the Decode KV allocation explicitly, so the retained `--gpu-memory-utilization 0.99` does not determine or add to that KV budget. The byte value is the tested allocation for this setup, not a portable fraction of NPU memory. Check the available memory and reported token capacity after loading weights and communication resources when reproducing on another stack. `HCCL_BUFFSIZE` is `256` on P and `64` on D.
+Set `KV_CACHE_MEMORY_BYTES` in both Decode templates for the target environment:
+
+- **Meaning and units:** `--kv-cache-memory-bytes` specifies the KV cache budget per NPU worker, in bytes (1 GiB = 1,073,741,824 bytes). `47620449894` (about 44.35 GiB) is the tested example for this layout, not a fixed MiniMax-M3 requirement. When set explicitly, it overrides `--gpu-memory-utilization` for KV cache sizing; the two values are not added together.
+- **Choosing a value:** Keep the same value in both Decode templates. Size it for the least available NPU memory across the Decode workers after accounting for model weights, communication buffers, activations, and operator workspaces, with runtime headroom. Recheck this budget when changing hardware, TP/PP, KV dtype, or software versions.
+- **Checking capacity:** After startup, confirm the reported KV token capacity can support `--max-model-len 1049600`, then verify a 1M-token request. A value that is too large can cause an out-of-memory error; a value that is too small cannot hold the required context. If the required KV cache cannot fit, revise the parallel layout rather than assuming a smaller allocation still supports 1M tokens.
+
+`HCCL_BUFFSIZE` is `256` on P and `64` on D.
 
 ##### 5.4.2.3 Start the Services
 
