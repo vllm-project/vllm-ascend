@@ -1738,3 +1738,17 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       Sustained SHM fast-path reads bypass notification polling. CONFLATE
+#       limits payloads but internal activate_read commands can accumulate.
+#    How:
+#       Service the notification socket on its reader thread at most once per
+#       second during successful reads, preserving SHM and cancellation logic.
+#    Related PR (if no, explain why):
+#       No upstream fix for this receiver-mailbox growth is included in v0.30.0.
+#    Future Plan:
+#       Remove when upstream bounds notification mailbox growth during reads.
