@@ -123,3 +123,42 @@ def _update_committed_marker_cache_kernel_ascend(
     if new_scan_pos < 0:
         new_scan_pos = 0
     tl.store(cached_scan_pos_ptr + req_state_idx, new_scan_pos)
+
+
+def update_committed_marker_cache_npu(
+    req_ids_ptr,
+    thinking_token_budget_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    total_len_ptr,
+    cached_last_start_ptr,
+    cached_last_end_ptr,
+    cached_scan_pos_ptr,
+    reasoning_start_token_ids_ptr,
+    natural_reasoning_end_token_ids_ptr,
+    START_LEN,
+    NATURAL_END_LEN,
+    MAX_LEN,
+    BLOCK,
+):
+    """Plain-callable launch adapter for the kernel dispatcher.
+
+    Upstream launches with grid = (req_ids.shape[0],) -- derived here from
+    the first launch argument because the dispatcher drops the grid.
+    """
+    return _update_committed_marker_cache_kernel_ascend[(req_ids_ptr.shape[0],)](
+        req_ids_ptr,
+        thinking_token_budget_ptr,
+        all_token_ids_ptr,
+        all_token_ids_stride,
+        total_len_ptr,
+        cached_last_start_ptr,
+        cached_last_end_ptr,
+        cached_scan_pos_ptr,
+        reasoning_start_token_ids_ptr,
+        natural_reasoning_end_token_ids_ptr,
+        START_LEN=START_LEN,
+        NATURAL_END_LEN=NATURAL_END_LEN,
+        MAX_LEN=MAX_LEN,
+        BLOCK=BLOCK,
+    )
