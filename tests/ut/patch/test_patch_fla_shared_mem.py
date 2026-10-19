@@ -14,6 +14,7 @@ class TestFLASharedMemPatch(unittest.TestCase):
     def setUp(self):
         path = Path(__file__).resolve().parents[3] / "vllm_ascend/patch/patch_fla_shared_mem.py"
         spec = importlib.util.spec_from_file_location("fla_patch_under_test", path)
+        assert spec is not None and spec.loader is not None
         self.patch = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.patch)
         self.original_meta_path = sys.meta_path[:]
@@ -78,7 +79,7 @@ class TestFLASharedMemPatch(unittest.TestCase):
 
     def test_already_loaded_module_is_patched_without_import(self):
         module = ModuleType(self.patch._FLA_UTILS_MODULE)
-        module.device = "npu"
+        module.__dict__["device"] = "npu"
         with patch.dict(sys.modules, {self.patch._FLA_UTILS_MODULE: module}):
             self.patch.install_fla_shared_mem_patch()
             self.assertFalse(module.check_shared_mem(arch="hopper", tensor_idx=7))

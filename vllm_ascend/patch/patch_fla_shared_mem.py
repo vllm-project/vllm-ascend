@@ -26,7 +26,7 @@ def _npu_check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
 
 def _patch_fla_utils(module: ModuleType) -> None:
     if getattr(module, "device", None) == "npu":
-        module.check_shared_mem = _npu_check_shared_mem
+        module.__dict__["check_shared_mem"] = _npu_check_shared_mem
 
 
 class _FLAUtilsLoader(importlib.abc.Loader):
