@@ -421,13 +421,37 @@ class AscendPCPManager(PCPManager):
         )
         return local_batch
 
-    def prepare_inputs_to_capture(
+    # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
+    # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
+    # ``is_padding`` to the rows the MoE routes. Define the public method name
+    # per lane and share the staging body below.
+    if vllm_version_is("0.31.0"):
+
+        def prepare_inputs_to_capture(
+            self,
+            input_batch: AscendInputBatch,
+        ) -> AscendInputBatch:
+            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+            return self._prepare_inputs_to_capture(input_batch)
+
+    else:
+
+        def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
+            self,
+            input_batch: AscendInputBatch,
+        ) -> AscendInputBatch:
+            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+            return self._prepare_inputs_to_capture(input_batch)
+
+    def _prepare_inputs_to_capture(
         self,
         input_batch: AscendInputBatch,
     ) -> AscendInputBatch:
-        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
         if not getattr(input_batch, "is_cpp_profile", False):
-            staged = super().prepare_inputs_to_capture(input_batch)
+            if vllm_version_is("0.31.0"):
+                staged = super().prepare_inputs_to_capture(input_batch)
+            else:
+                staged = super().prepare_inputs_for_capture_or_profile(input_batch)
             assert isinstance(staged, AscendInputBatch)
             return staged
 

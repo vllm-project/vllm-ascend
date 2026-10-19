@@ -56,6 +56,9 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # vLLM main reads this during model/parallel validation; the v0.31.0
+        # lane ignores the extra attribute.
+        enable_hc_sp=False,
     )
 
     ModelConfig.verify_with_parallel_config(model_config, parallel_config)
@@ -81,6 +84,9 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # vLLM main reads this during model/parallel validation; the v0.31.0
+        # lane ignores the extra attribute.
+        enable_hc_sp=False,
     )
 
     with pytest.raises(NotImplementedError):
