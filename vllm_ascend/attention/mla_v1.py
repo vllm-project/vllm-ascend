@@ -1949,7 +1949,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         projections = (self.fused_qkv_a_proj, self.q_proj)
         if self._mlapo_uses_native_weights:
             return self.mlapo_weight_quant_mode == 0 and all(
-                isinstance(layer.quant_method, UnquantizedLinearMethod) for layer in projections
+                layer is not None and isinstance(layer.quant_method, UnquantizedLinearMethod) for layer in projections
             )
         return self.mlapo_weight_quant_mode == 3 and all(
             type(self._get_context_prolog_quant_method(layer)) is AscendW8A8MXFP8DynamicLinearMethod
@@ -3154,6 +3154,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         norm_kwargs = {}
         if flash_mlapo:
+            assert self.q_a_layernorm is not None
+            assert self.kv_a_layernorm is not None
             norm_kwargs = {
                 "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
                 "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,

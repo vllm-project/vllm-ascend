@@ -144,7 +144,7 @@ def test_flashmla_mlapo_no_rope(tokens, heads, dcp_current, record_property):
     baseline_cache = (baseline[..., :KV_RANK], baseline[..., KV_RANK:])
     expected_raw = raw.cpu().clone()
     expected = expected_raw.as_strided(fused.shape, fused.stride(), fused.storage_offset())
-    times = [], []
+    times: tuple[list[float], list[float]] = [], []
     for iteration in range(3):
         x = torch.randn((tokens, HIDDEN), device=device, dtype=torch.bfloat16) * 0.03
         slots_cpu = torch.randperm(fused.shape[0] * BLOCK)[:tokens].long()
