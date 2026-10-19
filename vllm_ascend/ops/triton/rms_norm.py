@@ -1,6 +1,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes
+
 
 @triton.jit(
     do_not_specialize=[
@@ -37,14 +39,25 @@ def triton_rms_kernel(
         tl.store(norm_output_ptr + offset_hidden, output, mask=mask_row)
 
 
-def _rms_block_m(total_batch: int, num_vectorcore: int) -> int:
+def _rms_block_m(total_batch: int, num_vectorcore: int, dim: int, dtype) -> int:
     """Tile size used by ``triton_q_rms``.
 
-    Flooring ``BLOCK_M`` to a power of two is math-equivalent (leftover rows
-    are already masked) and cuts the JIT constexpr set from 16 values to
-    ``{1, 2, 4, 8, 16}``.
+    Derived adaptively from the runtime Unified Buffer (UB) size so small
+    hidden dims get larger tiles (fewer loop iterations) while large hidden
+    dims shrink the tile to avoid UB overflow. ``BLOCK_M`` is floored to a
+    power of two (leftover rows are already masked), which keeps the JIT
+    constexpr set small.
     """
-    row_block_size = 16
+    resv_buffer = 6144  # reserve 6 KB to prevent UB overflow
+    available_ub_size = get_ub_size_bytes() - resv_buffer
+    element_size = torch.empty(1, dtype=dtype).element_size()
+    if element_size == 4:
+        data_multiplier = 5  # input + offsets + mid_out + output + others
+    elif element_size == 2:
+        data_multiplier = 7  # input + offsets + mid_out + output + others
+    else:
+        raise NotImplementedError(f"triton_q_rms: element size ({element_size} B) not supported")
+    row_block_size = int(available_ub_size / (dim * element_size * data_multiplier))
     batch_per_core = triton.cdiv(total_batch, num_vectorcore)
     raw = min(row_block_size, int(batch_per_core))
     return 1 << (max(raw, 1).bit_length() - 1)
@@ -64,7 +77,7 @@ def triton_q_rms(
     device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
     num_vectorcore = device_properties.get("num_vectorcore", -1)
 
-    BLOCK_M = _rms_block_m(total_batch, num_vectorcore)
+    BLOCK_M = _rms_block_m(total_batch, num_vectorcore, dim, q.dtype)
 
     grid = (num_vectorcore,)
     norm_output = torch.empty_like(q)

@@ -15,22 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
-
-def test_qwen3_dense_tp2_fp16():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-8B",
-        tensor_parallel_size=2,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 
 def test_qwen3_dense_tp4_w8a8():

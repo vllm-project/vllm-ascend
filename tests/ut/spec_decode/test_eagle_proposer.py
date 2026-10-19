@@ -25,6 +25,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -45,6 +46,48 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
+
+
+class _NullPatch:
+    """No-op stand-in for a ``unittest.mock.patch`` object."""
+
+    def start(self):
+        return None
+
+    def stop(self):
+        return None
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _supports_multimodal_inputs_patch(vllm_config=None):
+    """Keep the proposer on the vLLM 0.31 text-only path.
+
+    Both supported lanes read ``ModelConfig.supports_multimodal_inputs``.
+    Set the fixture flags when a ``vllm_config`` is provided.
+    """
+    if vllm_config is not None:
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is not None:
+            # The fixtures use MagicMock configs whose auto-created attributes
+            # are truthy, so force both entry points onto the text-only path.
+            model_config.supports_multimodal_inputs = False
+            model_config.is_multimodal_model = False
+    return _NullPatch()
 
 
 @dataclass
@@ -381,9 +424,7 @@ class TestEagleProposerInitialization(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -537,9 +578,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -698,9 +737,7 @@ class TestEagleProposerDummyRun(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Mock parallel state functions
@@ -849,9 +886,7 @@ class TestEagleProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -947,9 +982,7 @@ class TestEagleProposerPropose:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Mock parallel state functions
@@ -1801,9 +1834,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         set_current_vllm_config(self.vllm_config)
@@ -2293,9 +2324,7 @@ class TestRunMergedDraft(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
         self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
@@ -2394,10 +2423,6 @@ class TestRunMergedDraft(TestBase):
         import vllm.multimodal.registry
 
         assert hasattr(vllm.multimodal.registry, "MultiModalRegistry")
-        assert hasattr(vllm.multimodal.registry.MultiModalRegistry, "supports_multimodal_inputs")
-        sig = inspect.signature(vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "model_config"]
 
         import vllm.v1.spec_decode.eagle
 
@@ -2791,9 +2816,7 @@ class TestDraftProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -2886,9 +2909,7 @@ class TestEagleProposerPrepareInputs:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -2953,7 +2974,7 @@ class TestEagleProposerPrepareInputs:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3239,9 +3260,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -3306,7 +3325,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3591,9 +3610,7 @@ class TestEagleProposerSetInputsFirstPass:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -3674,7 +3691,7 @@ class TestEagleProposerSetInputsFirstPass:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             if method == "eagle":

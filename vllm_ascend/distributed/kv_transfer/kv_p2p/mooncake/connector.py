@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -83,6 +84,10 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.connector_scheduler: MooncakeBaseConnectorScheduler | None = None
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
+
+    def shutdown(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
@@ -174,6 +179,10 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """Return requests whose receive and send operations have finished."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return block IDs whose Mooncake KV load failed."""

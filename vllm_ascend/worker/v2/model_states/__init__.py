@@ -20,6 +20,7 @@
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention import CrossAttention
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -60,6 +61,18 @@ def init_asecnd_model_state(
         )
 
         return Ascend310PModelState(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
+    if any(isinstance(module, CrossAttention) for module in model.modules()):
+        from vllm_ascend.worker.v2.model_states.encoder_decoder import (
+            AscendEncoderDecoderModelState,
+        )
+
+        return AscendEncoderDecoderModelState(
             vllm_config,
             model,
             encoder_cache,

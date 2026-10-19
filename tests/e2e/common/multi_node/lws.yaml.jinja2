@@ -29,6 +29,8 @@ spec:
                 value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -107,8 +109,8 @@ spec:
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
-              - mountPath: /usr/local/Ascend/driver/tools
-                name: driver-tools
+              - mountPath: /usr/local/Ascend/driver
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -126,9 +128,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-tools
+        - name: ascend-driver
           hostPath:
-            path: /usr/local/Ascend/driver/tools
+            path: /usr/local/Ascend/driver
     workerTemplate:
       spec:
         tolerations:
@@ -149,6 +151,8 @@ spec:
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -217,8 +221,8 @@ spec:
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
-              - mountPath: /usr/local/Ascend/driver/tools
-                name: driver-tools
+              - mountPath: /usr/local/Ascend/driver
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -236,9 +240,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-tools
+        - name: ascend-driver
           hostPath:
-            path: /usr/local/Ascend/driver/tools
+            path: /usr/local/Ascend/driver
 ---
 apiVersion: v1
 kind: Service

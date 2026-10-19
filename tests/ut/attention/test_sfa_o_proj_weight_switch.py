@@ -231,6 +231,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         attn_metadata.dcp_context = None
         attn_metadata.dsa_cp_context = None
         attn_metadata.num_input_tokens = 1
+        attn_metadata.num_actual_tokens = 1
         impl._get_parallel_forward_context = MagicMock(
             return_value=SFAForwardContext(
                 actual_seq_lengths_query=MagicMock(),

@@ -264,7 +264,6 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
     indexer = SimpleNamespace(
         enable_sparse_li_c8=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
-        _use_c8_reshape_optim=lambda: False,
     )
     with (
         patch.object(
@@ -280,7 +279,6 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
             keys[0] if scale_dtype else keys[0].unsqueeze(1),
             keys[1] if scale_dtype else None,
             slots,
-            SimpleNamespace(num_actual_tokens=tokens // 2),
         )
         torch.npu.synchronize()
         a5 = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED

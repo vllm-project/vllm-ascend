@@ -1,14 +1,12 @@
 from dataclasses import dataclass
-from enum import Enum
 from math import lcm
 from typing import NamedTuple
 
 import numpy as np
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
-from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -28,41 +26,30 @@ from vllm_ascend.attention.mla_v1 import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
+    CPKVScope,
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    use_history_current_split_decode,
 )
 from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
+    update_draft_graph_params_workspaces,
+    update_draft_graph_prefill_params_workspaces,
     update_graph_params_workspaces,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
-from vllm_ascend.utils import weak_ref_tensors
-
-
-class MLASplitAttentionKind(Enum):
-    HISTORY = "split_history"
-    CURRENT = "split_current"
+from vllm_ascend.utils import cp_decode_comm_stream, weak_ref_tensors
 
 
 class MLASplitAttentionGraphParams(NamedTuple):
     """One split attention task and its layer metadata identity."""
 
     attention_params: tuple
-    attention_kind: MLASplitAttentionKind
+    attention_kind: CPKVScope
     layer_name: str
-
-
-_DCP_MTP_COMM_STREAM: torch.npu.Stream | None = None
-
-
-def _dcp_mtp_comm_stream() -> torch.npu.Stream:
-    global _DCP_MTP_COMM_STREAM
-    if _DCP_MTP_COMM_STREAM is None:
-        _DCP_MTP_COMM_STREAM = torch_npu.npu.Stream()
-    return _DCP_MTP_COMM_STREAM
 
 
 @dataclass
@@ -331,26 +318,91 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._dcp_prefill_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        if self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz:
+        # PCP cannot consume the RoPE PROLOG_V3 workspaces. The legacy no-rope
+        # MLAPO decode buffer still has a consumer with PCP enabled.
+        if self.dcp_enabled and (
+            (self.supports_prolog_v3_writer() and not self.pcp_enabled and not self.is_pcp_decode_sharded)
+            or (self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz)
+        ):
             self._prepare_dcp_current_kv_buffers()
+        if self.dcp_enabled:
+            # The shared writer contract checks these workspaces. Prepare the
+            # projections after them, still inside the loader memory profile.
+            self._prepare_prolog_v3_weights_after_loading()
 
-    def _prepare_dcp_current_kv_buffers(self) -> None:
-        # Every graph size uses a view of this layer-owned allocation, so the
-        # current KV and index addresses stay live across capture and replay.
-        max_tokens = min(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            MLAPO_MAX_SUPPORTED_TOKENS,
+    def _required_dcp_current_kv_capacity(self) -> int:
+        """Upper bound on query rows in a DCP decode graph."""
+        decode_query_len = 1
+        if self.speculative_config is not None:
+            decode_query_len += self.speculative_config.num_speculative_tokens or 0
+        scheduler_config = self.vllm_config.scheduler_config
+        return min(
+            scheduler_config.max_num_batched_tokens,
+            scheduler_config.max_num_seqs * decode_query_len,
         )
+
+    def _required_dcp_prefill_current_kv_capacity(self) -> int:
+        """Upper bound on current rows in a DCP prefill graph."""
+        return self.vllm_config.scheduler_config.max_num_batched_tokens
+
+    def _allocate_dcp_current_kv_buffers(
+        self,
+        max_tokens: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         block_size = self.vllm_config.cache_config.block_size
         cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
-        device = self.weight_dq.device
-        self._dcp_current_kv_buffers = (
+        return (
             torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
             torch.empty((*cache_shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
             torch.arange(max_tokens, dtype=torch.int64, device=device),
+        )
+
+    def _prepare_dcp_current_kv_buffers(self) -> None:
+        uses_prolog_v3_writer = self.supports_prolog_v3_writer()
+        if self._dcp_current_kv_buffers is not None and (
+            not uses_prolog_v3_writer or self._dcp_prefill_current_kv_buffers is not None
+        ):
+            # Graph capture stores these buffer addresses. A weight reload must
+            # not replace the allocation out from under a captured graph.
+            return
+        assert self.fused_qkv_a_proj is not None
+        device = self.fused_qkv_a_proj.weight.device
+        if self._dcp_current_kv_buffers is None:
+            decode_capacity = self._required_dcp_current_kv_capacity()
+            if not uses_prolog_v3_writer:
+                # The legacy MLAPO DCP contract retains its operator token cap.
+                decode_capacity = min(decode_capacity, MLAPO_MAX_SUPPORTED_TOKENS)
+            self._dcp_current_kv_buffers = self._allocate_dcp_current_kv_buffers(decode_capacity, device)
+        if uses_prolog_v3_writer and self._dcp_prefill_current_kv_buffers is None:
+            # Mixed batches keep decode and prefill current chunks alive until
+            # their attention kernels run, so the two workspaces are disjoint.
+            prefill_capacity = self._required_dcp_prefill_current_kv_capacity()
+            self._dcp_prefill_current_kv_buffers = self._allocate_dcp_current_kv_buffers(prefill_capacity, device)
+
+    def _dcp_current_kv_buffers_are_sufficient(self) -> bool:
+        """Whether allocation-time buffers cover every admitted DCP graph."""
+        decode_buffers = self._dcp_current_kv_buffers
+        if decode_buffers is None or self._required_dcp_current_kv_capacity() > decode_buffers[2].numel():
+            return False
+        if not self.supports_prolog_v3_writer():
+            return True
+        prefill_buffers = self._dcp_prefill_current_kv_buffers
+        return (
+            prefill_buffers is not None
+            and self._required_dcp_prefill_current_kv_capacity() <= prefill_buffers[2].numel()
+        )
+
+    def _prefill_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        """Whether DCP prefill attention needs the complete current chunk."""
+        return (
+            self.dcp_enabled
+            and attn_metadata.prefill is not None
+            and attn_metadata.num_actual_tokens > attn_metadata.num_decode_tokens
         )
 
     @staticmethod
@@ -420,17 +472,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
                 # History/current share one layer invocation. Advance after
                 # selecting its metadata, once current or an unsplit task is reached.
-                if split_kind is not MLASplitAttentionKind.HISTORY:
+                if split_kind is not CPKVScope.HISTORY:
                     attn_count += 1
 
                 if split_kind is not None:
                     actual_seq_lengths = decode_meta.actual_seq_lengths_q
-                    seq_len = (
-                        decode_meta.cp_history_seq_len
-                        if split_kind is MLASplitAttentionKind.HISTORY
-                        else actual_seq_lengths
-                    )
-                    block_table = decode_meta.block_table if split_kind is MLASplitAttentionKind.HISTORY else None
+                    seq_len = decode_meta.cp_history_seq_len if split_kind is CPKVScope.HISTORY else actual_seq_lengths
+                    block_table = decode_meta.block_table if split_kind is CPKVScope.HISTORY else None
                 else:
                     seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
@@ -443,25 +491,23 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
-                torch_npu.npu_fused_infer_attention_score.out(
+                torch_npu.npu_fused_infer_attention_score_v2.out(
                     q_nope,
                     k_nope,
                     k_nope,
                     query_rope=q_pe,
                     key_rope=k_pe,
-                    num_heads=num_heads,
+                    num_query_heads=num_heads,
                     num_key_value_heads=num_kv_heads,
                     input_layout=input_layout,
                     atten_mask=spec_attn_mask,
                     sparse_mode=sparse_mode,
-                    scale=scale,
-                    antiquant_mode=0,
-                    antiquant_scale=None,
-                    softmax_lse_flag=True,
+                    softmax_scale=scale,
+                    return_softmax_lse=True,
                     block_table=block_table,
                     block_size=block_size,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    actual_seq_lengths=actual_seq_lengths,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
+                    actual_seq_qlen=actual_seq_lengths,
                     workspace=graph_params.workspaces.get(num_tokens),
                     out=[attn_output, softmax_lse],
                 )
@@ -497,23 +543,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             dim=1,
         )
 
-    def _use_history_current_split_decode(self, attn_metadata: AscendMLAMetadata) -> bool:
-        if not attn_metadata.causal:
-            return False
-        if not _EXTRA_CTX.is_draft_model:
-            return True
-        # Keep the captured task layout: the autoregressive draft dummy run can
-        # describe multiple queries even for later single-token draft steps.
-        if _EXTRA_CTX.capturing or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            return True
-        # The first draft pass may process several tokens from the target pass;
-        # only later autoregressive steps are necessarily single-token decodes.
-        query_lens = attn_metadata.query_lens
-        assert query_lens is not None
-        return any(query_len > 1 for query_len in query_lens[: attn_metadata.num_decodes])
-
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
-        return self._use_history_current_split_decode(attn_metadata)
+        return use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
+        )
 
     def _run_dcp_mtp_split_attention_op(
         self,
@@ -527,31 +563,29 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         actual_seq_lengths: list[int],
         actual_seq_lengths_kv: list[int],
-        attention_kind: MLASplitAttentionKind,
+        attention_kind: CPKVScope,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q_nope.size(0)
         num_heads = q_nope.size(1)
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_heads": num_heads,
+            "num_query_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": "TND",
             "atten_mask": attn_mask,
             "sparse_mode": sparse_mode,
-            "scale": self.scale,
-            "antiquant_mode": 0,
-            "antiquant_scale": None,
-            "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": actual_seq_lengths_kv,
-            "softmax_lse_flag": True,
+            "softmax_scale": self.scale,
+            "actual_seq_qlen": actual_seq_lengths,
+            "actual_seq_kvlen": actual_seq_lengths_kv,
+            "return_softmax_lse": True,
         }
         if block_table is not None:
             common_kwargs["block_table"] = block_table
             common_kwargs["block_size"] = block_size
 
         if not _EXTRA_CTX.capturing:
-            return torch_npu.npu_fused_infer_attention_score(
+            return torch_npu.npu_fused_infer_attention_score_v2(
                 q_nope,
                 k_nope,
                 k_nope,
@@ -604,7 +638,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
         )
         torch.npu.graph_task_group_begin(stream)
-        torch_npu.npu_fused_infer_attention_score.out(
+        torch_npu.npu_fused_infer_attention_score_v2.out(
             q_nope,
             k_nope,
             k_nope,
@@ -641,7 +675,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
-        current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe)
+        current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
         current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
         current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
@@ -660,37 +694,35 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 workspace_kwargs = {
                     "num_key_value_heads": self.num_kv_heads,
                     "input_layout": "TND",
-                    "scale": self.scale,
-                    "antiquant_mode": 0,
-                    "antiquant_scale": None,
-                    "actual_seq_lengths": decode_meta.actual_seq_lengths_q,
-                    "softmax_lse_flag": True,
+                    "softmax_scale": self.scale,
+                    "actual_seq_qlen": decode_meta.actual_seq_lengths_q,
+                    "return_softmax_lse": True,
                 }
                 workspaces = [
-                    torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                    torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                         q_nope,
                         history_k_nope,
                         history_k_nope,
                         query_rope=q_pe,
                         key_rope=history_k_pe,
-                        num_heads=num_heads,
+                        num_query_heads=num_heads,
                         atten_mask=None,
                         sparse_mode=0,
                         block_table=decode_meta.block_table,
                         block_size=block_size,
-                        actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
+                        actual_seq_kvlen=decode_meta.cp_history_seq_len,
                         **workspace_kwargs,
                     ),
-                    torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                    torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                         current_q_nope,
                         current_k_nope,
                         current_k_nope,
                         query_rope=current_q_pe,
                         key_rope=current_k_pe,
-                        num_heads=self.num_heads,
+                        num_query_heads=self.num_heads,
                         atten_mask=decode_meta.attn_mask,
                         sparse_mode=3,
-                        actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                        actual_seq_kvlen=decode_meta.actual_seq_lengths_q,
                         **workspace_kwargs,
                     ),
                 ]
@@ -710,14 +742,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             block_size=block_size,
             actual_seq_lengths=decode_meta.actual_seq_lengths_q,
             actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
-            attention_kind=MLASplitAttentionKind.HISTORY,
+            attention_kind=CPKVScope.HISTORY,
         )
 
         # Run current-token attention on the side stream while the main
         # stream packs and exchanges history. The ready event also orders
         # current attention after the history FIA's shared workspace use.
         main_stream = torch.npu.current_stream()
-        attn_stream = _dcp_mtp_comm_stream()
+        attn_stream = cp_decode_comm_stream()
         history_ready = main_stream.record_event()
         for tensor in (current_q_nope, current_q_pe, current_k_nope, current_k_pe, decode_meta.attn_mask):
             if tensor is not None:
@@ -737,7 +769,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 block_size=0,
                 actual_seq_lengths=decode_meta.actual_seq_lengths_q,
                 actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-                attention_kind=MLASplitAttentionKind.CURRENT,
+                attention_kind=CPKVScope.CURRENT,
             )
             current_attn_done = attn_stream.record_event()
         current_output.record_stream(main_stream)
@@ -766,7 +798,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
-        if self._use_history_current_split_decode(attn_metadata):
+        if self._decode_requires_current_kv(attn_metadata):
             return self._forward_decode_split_attention(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
@@ -832,19 +864,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_heads": num_heads,
+            "num_query_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": spec_attn_mask,
             "sparse_mode": sparse_mode,
-            "scale": self.scale,
-            "antiquant_mode": 0,
-            "antiquant_scale": None,
+            "softmax_scale": self.scale,
             "block_table": decode_meta.block_table,
             "block_size": block_size,
-            "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": decode_meta.cp_seq_len,
-            "softmax_lse_flag": True,
+            "actual_seq_qlen": actual_seq_lengths,
+            "actual_seq_kvlen": decode_meta.cp_seq_len,
+            "return_softmax_lse": True,
         }
 
         if _EXTRA_CTX.is_draft_model:
@@ -862,13 +892,20 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             graph_params.events[num_tokens].append(event)
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                     q_nope,
                     k_nope,
                     k_nope,
                     **common_kwargs,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                # Keep target, draft decode, and draft prefill workspaces in their own registries.
+                if _EXTRA_CTX.is_draft_model:
+                    if _EXTRA_CTX.is_draft_model_prefill:
+                        update_draft_graph_prefill_params_workspaces(num_tokens, workspace)
+                    else:
+                        update_draft_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BSND":
                 num_decodes = attn_metadata.num_decodes
@@ -901,13 +938,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 )
             )
             torch.npu.graph_task_group_begin(stream)
-            torch_npu.npu_fused_infer_attention_score.out(
+            torch_npu.npu_fused_infer_attention_score_v2.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
                 q_nope,
                 k_nope,
                 k_nope,

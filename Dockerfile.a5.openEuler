@@ -32,7 +32,7 @@ ARG MOONCAKE_TAG=0.3.11.post1
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
-ARG VLLM_TAG=v0.30.0
+ARG VLLM_TAG=v0.31.0
 # VLLM_COMMIT (optional): Exact vLLM commit to build; empty to fall back to VLLM_TAG.
 ARG VLLM_COMMIT=""
 # SOC_VERSION (optional): Ascend SoC version used for custom kernel compilation.
@@ -63,8 +63,8 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-ARG FLA_VERSION="26.9.1+deva4a7958"
-ARG FLA_RELEASE_TAG="v26.9.1-beta2"
+ARG FLA_VERSION="26.9.1+dev812ccc8"
+ARG FLA_RELEASE_TAG="v26.9.1-20261015-121515"
 
 WORKDIR /workspace
 
@@ -72,7 +72,7 @@ SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
 RUN yum update -y && \
-    yum install -y git vim wget curl protobuf protobuf-devel protobuf-compiler net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
+    yum install -y git vim wget curl protobuf protobuf-devel protobuf-compiler net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} && \
     rm -rf /var/cache/yum/*
@@ -125,10 +125,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="014ccd0cce4f21f4b030341a42e6be3065c2e6a436e7595e629de9d5c0547c48" ;; \
+            FLA_SHA256="52718f982f39e7e83bb3e9eb6d81f17d7062bb8350ce2fb85f4b9f155114cec2" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="2f7eef7be3cafdda698f533063dea67bf581fd6837488304c0f5f1a5e67a2fd8" ;; \
+            FLA_SHA256="d0b7ae671b0cad699a9767c12d9ec622397acd5e607f5eb31753dd8b0c43e112" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"; \
@@ -141,16 +141,27 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     rm -f /tmp/${FLA_WHL} && \
     python3 -m pip cache purge
 
+# Install cannbot wheels (only aarch64)
+RUN ARCH=$(uname -m); \
+    if [ "$ARCH" = "aarch64" ]; then \
+        wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbotdsl-0.6.0+g91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl" -P /tmp && \
+        wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbot_arena_net_ops-0.1.0-cp312-cp312-linux_aarch64.whl" -P /tmp && \
+        python3 -m pip install /tmp/cannbot*.whl && \
+        rm -f /tmp/cannbot*.whl && \
+        python3 -m pip cache purge; \
+    else \
+        echo "x86_64, skip cannbot wheels"; \
+    fi
+
 # Install _rust_tool_parser for the Rust frontend.
 # The default toolchain is read from vllm's rust-toolchain.toml (falling back
 # to stable).
 ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
 
-RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
 # ===== Conditional installation based on BUILD_TYPE =====

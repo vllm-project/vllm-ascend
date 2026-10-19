@@ -855,15 +855,25 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(queued["num_computed_tokens"], 0)
 
     def test_mark_and_is_failed(self):
-        self.thread._mark_failed_recv_request("req1", [[10, 20]])
-        self.assertTrue(self.thread._is_failed_recv_request("req1"))
-        self.assertIn(10, self.thread.invalid_block_ids)
-        self.assertIn(20, self.thread.invalid_block_ids)
+        for request_level in (False, True):
+            with self.subTest(request_level=request_level):
+                self.thread.use_request_level_recv_errors = request_level
+                self.thread._mark_failed_recv_request("req1", [[10, 20]])
+                self.assertTrue(self.thread._is_failed_recv_request("req1"))
+                self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), set() if request_level else {10, 20})
 
-    def test_clear_failed_recv_request(self):
-        self.thread._mark_failed_recv_request("req2", [[30]])
-        self.thread._clear_failed_recv_request("req2")
-        self.assertFalse(self.thread._is_failed_recv_request("req2"))
+    def test_get_and_clear_failed_recv_requests(self):
+        for request_level in (False, True):
+            with self.subTest(request_level=request_level):
+                self.thread.use_request_level_recv_errors = request_level
+                self.thread._mark_failed_recv_request("req2", [[30]])
+                self.assertEqual(self.thread.get_and_clear_failed_recv_requests(set()), set())
+                self.assertTrue(self.thread._is_failed_recv_request("req2"))
+                self.assertEqual(
+                    self.thread.get_and_clear_failed_recv_requests({"req2"}), {"req2"} if request_level else set()
+                )
+                self.assertFalse(self.thread._is_failed_recv_request("req2"))
+                self.assertEqual(self.thread.get_and_clear_failed_recv_requests({"req2"}), set())
 
     def test_get_and_clear_invalid_block_ids(self):
         self.thread.invalid_block_ids = {1, 2, 3}
@@ -2236,17 +2246,27 @@ def test_worker_role_drains_only_its_completion_and_error_channel(role):
     worker.kv_recv_thread = receiver
     sender.get_and_clear_finished_requests.side_effect = [{"sent"}, set()]
     receiver.get_and_clear_finished_requests.side_effect = [{"received"}, set()]
+    receiver.get_and_clear_failed_recv_requests.side_effect = [{"received"}, set()]
     receiver.get_and_clear_invalid_block_ids.side_effect = [{7}, set()]
 
-    assert worker.get_finished() == (({"sent"}, set()) if role == "kv_producer" else (set(), {"received"}))
+    results = worker.get_transfer_results()
+    assert (results.finished_sending, results.finished_recving) == (
+        ({"sent"}, set()) if role == "kv_producer" else (set(), {"received"})
+    )
+    assert results.failed_recving == (set() if role == "kv_producer" else {"received"})
     assert worker.get_finished() == (set(), set())
     assert worker.get_block_ids_with_load_errors() == (set() if role == "kv_producer" else {7})
     assert worker.get_block_ids_with_load_errors() == set()
     if role == "kv_producer":
         receiver.get_and_clear_finished_requests.assert_not_called()
+        receiver.get_and_clear_failed_recv_requests.assert_not_called()
         receiver.get_and_clear_invalid_block_ids.assert_not_called()
     else:
         sender.get_and_clear_finished_requests.assert_not_called()
+        assert [call.args[0] for call in receiver.get_and_clear_failed_recv_requests.call_args_list] == [
+            {"received"},
+            set(),
+        ]
 
 
 def test_tracker_completion_is_consumed_by_only_one_reader():

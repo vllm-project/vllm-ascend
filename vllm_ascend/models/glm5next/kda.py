@@ -25,6 +25,7 @@ from vllm.model_executor.utils import set_weight_attrs
 # FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
 # through the OOT registration in `vllm_ascend.utils` rather than by import.
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -32,10 +33,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -106,6 +106,8 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
+    use_contiguous_conv_indices = True
+
     head_dim: int
     num_heads: int
     conv_size: int
@@ -269,7 +271,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def get_attn_backend(self):
-        return AscendGDNAttentionBackend
+        return AscendGDNHostMetadataBackend
 
     def forward(
         self,

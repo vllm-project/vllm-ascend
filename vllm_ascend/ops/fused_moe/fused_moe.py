@@ -33,10 +33,13 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
+    PreparedSharedExpertExecution,
     SharedExpertParallelMode,
+    SubmittedSharedExpertGateUp,
 )
 
 
@@ -119,11 +122,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
-        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
-
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -140,9 +138,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
         self.routed_experts.mega_moe_activation_kwargs = getattr(
-            get_moe_comm_method(MoECommType.FUSED_MC2), "mega_moe_activation_kwargs", None
+            get_moe_comm_method(MoECommType.FUSED_MC2, self.moe_config), "mega_moe_activation_kwargs", None
         )
-        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL, self.moe_config)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
@@ -384,6 +382,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_experts.wait_for_output()
         return fused_output
 
+    def _prepare_router_input(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prepare only the input needed by a pre-cast FP32 router gate."""
+        gate = self.gate
+        assert gate is not None
+        if not hasattr(gate, "weight_fp32"):
+            return hidden_states
+        return router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+
+    def _apply_router_linear(self, router_input: torch.Tensor) -> torch.Tensor:
+        """Apply the internal router gate to an already prepared input."""
+        gate = self.gate
+        assert gate is not None
+        # Gates without pre-cast FP32 weights keep their registered forward
+        # path and its dtype semantics.
+        if hasattr(gate, "weight_fp32"):
+            return F.linear(router_input, gate.weight_fp32)
+        gate_out = gate(router_input)
+        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
     def _compute_router_logits(
         self,
         hidden_states: torch.Tensor,
@@ -407,19 +428,67 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         router_input = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
         return F.linear(router_input, gate.weight_fp32)
 
+    def _prepare_shared_for_router_overlap(
+        self,
+        prepared_shared_input: PreparedSharedExpertInput,
+        shared_input_ready: torch.npu.Event,
+    ) -> PreparedSharedExpertExecution | None:
+        shared_experts = self.ascend_shared_experts
+        assert shared_experts is not None
+        if not getattr(shared_experts, "multistream_overlap", False):
+            return None
+        return shared_experts.prepare_for_router_overlap(
+            prepared_shared_input,
+            shared_input_ready,
+        )
+
     def _prepare_router_and_milestones(
         self,
+        prepared_shared_input: PreparedSharedExpertInput,
         shared_hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.npu.Event, torch.npu.Event]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.npu.Event | None,
+        torch.npu.Event | None,
+        SubmittedSharedExpertGateUp | None,
+    ]:
+        # The milestones are consumed only by the shared-expert side stream,
+        # which runs only when multistream overlap is enabled; skip the record
+        # (notably slow host-side) when it is off.
         if self.is_internal_router:
-            shared_input_ready = torch.npu.current_stream().record_event()
-            router_logits = self._compute_router_logits(shared_hidden_states, router_logits)
-            router_output_ready = torch.npu.current_stream().record_event()
+            router_input = self._prepare_router_input(shared_hidden_states, router_logits)
+            # Release shared Vector/AIV preparation only after the router input
+            # Cast. It then overlaps the Cube-heavy gate matmul instead of
+            # competing with another Vector/AIV operation.
+            shared_input_ready = maybe_record_event()
+            prepared_execution = self._prepare_shared_for_router_overlap(
+                prepared_shared_input,
+                shared_input_ready,
+            )
+            router_logits = self._apply_router_linear(router_input)
+            router_output_ready = maybe_record_event()
         else:
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
+            prepared_execution = self._prepare_shared_for_router_overlap(
+                prepared_shared_input,
+                shared_input_ready,
+            )
             router_output_ready = shared_input_ready
-        return router_logits, shared_input_ready, router_output_ready
+        # Submit Gate-Up now, before routed_experts.forward_impl enqueues TopK
+        # and dispatch. The auxiliary stream waits for router_output_ready, so
+        # Gate-Up starts together with routed TopK and can cover dispatch.
+        shared_experts = self.ascend_shared_experts
+        assert shared_experts is not None
+        submitted_gate_up = (
+            shared_experts.enqueue_gate_up_after_router(
+                prepared_execution,
+                router_output_ready,
+            )
+            if prepared_execution is not None
+            else None
+        )
+        return router_logits, shared_input_ready, router_output_ready, submitted_gate_up
 
     def _forward_impl(
         self,
@@ -445,9 +514,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if shared_input_is_gathered
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
-            router_logits, shared_input_ready, router_output_ready = self._prepare_router_and_milestones(
-                shared_hidden_states,
-                router_logits,
+            router_logits, shared_input_ready, router_output_ready, submitted_gate_up = (
+                self._prepare_router_and_milestones(
+                    prepared_shared_input,
+                    shared_hidden_states,
+                    router_logits,
+                )
             )
             routed_out, milestones = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
@@ -460,9 +532,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            shared_out = self.ascend_shared_experts.forward(
-                prepared_shared_input,
-                milestones,
-                defer_output_wait=defer_shared_output_wait,
-            )
+            if submitted_gate_up is None:
+                shared_out = self.ascend_shared_experts.forward(
+                    prepared_shared_input,
+                    milestones,
+                    defer_output_wait=defer_shared_output_wait,
+                )
+            else:
+                shared_out = self.ascend_shared_experts.forward(
+                    prepared_shared_input,
+                    milestones,
+                    defer_output_wait=defer_shared_output_wait,
+                    submitted_gate_up=submitted_gate_up,
+                )
             return shared_out, routed_out

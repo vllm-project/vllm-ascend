@@ -41,8 +41,7 @@ def make_glm53_plan(layer_offset=0):
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
         specs[".".join(parts)] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
-    # Round trips use dense retention; sparse checkpoint policy is tested separately.
-    config = make_config(retention_interval=None)
+    config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
 
@@ -158,6 +157,7 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(worker.cache_transfer_granularity, 512)
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
+                    scheduler.client.closed = False
                     scheduler.client.lookup.return_value = hit
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
@@ -178,7 +178,7 @@ class TestGLM53Store(unittest.TestCase):
                 def put(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
                         stored[key] = [ctypes.string_at(address, length) for address, length in zip(row, lengths)]
-                    return [0] * len(keys)
+                    return [True] * len(keys)
 
                 def get(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
@@ -211,7 +211,9 @@ class TestGLM53Store(unittest.TestCase):
                     self.fill_caches(plan, caches, source, target, rank)
                     metadata = self.make_metadata(source, hashes)
                     worker.wait_for_save(metadata)
-                    worker.wait_for_previous_save()
+                    # Drain this batch under the per-request fence (the
+                    # whole-batch wait_for_previous_save is gone).
+                    worker.kv_send_thread.wait_for_requests_saved({req.req_id for req in metadata.requests})
                     workers.append((worker, caches))
                     self.doCleanups()
 
@@ -294,6 +296,7 @@ class TestGLM53Store(unittest.TestCase):
                 extra_config={"backend": "memcache"},
             )
             worker.m_store.batch_alloc.side_effect = alloc
+            worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
             worker.m_store.batch_get_key_info.side_effect = infos
             worker.m_store.batch_write_finish.side_effect = finish
             worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -341,9 +344,19 @@ class TestGLM53Store(unittest.TestCase):
         hit_request.request_id = "missing"
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
 
-    def test_mooncake_layerwise_still_rejects_hybrid(self):
-        with self.assertRaisesRegex(ValueError, "AscendStore private KV state requires non-layerwise transfer"):
-            make_worker(self, kv_cache_config=make_glm53_plan(), use_layerwise=True, use_mla=True)
+    def test_mooncake_layerwise_excludes_private_tail(self):
+        plan = make_glm53_plan()
+        worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
+        start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        scheduler = KVPoolScheduler(worker.vllm_config, True, plan)
+        self.assertTrue(worker.use_block_key_layerwise)
+        self.assertTrue(scheduler.use_block_key_layerwise)
+        self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
+        self.assertEqual(scheduler.cacheable_group_ids, worker.cacheable_group_ids)
+        worker.register_kv_caches(make_glm53_caches(plan))
+        for layer in range(worker.num_layers):
+            for group_id, _ in worker._groups_for_layerwise_transfer(layer):
+                self.assertIn(group_id, worker.cacheable_group_ids)
 
     def test_empty_final_layer_waits_for_pending_save_before_reusing_events(self):
         pending: queue.Queue[str] = queue.Queue()
@@ -423,6 +436,7 @@ class TestGLM53Store(unittest.TestCase):
         )
         worker.register_kv_caches(make_glm53_caches(plan))
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]
         metadata = self.make_metadata(blocks, hashes, req_id="null-kda-slots")
@@ -433,7 +447,7 @@ class TestGLM53Store(unittest.TestCase):
             self.assertEqual(request.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in worker._allocated_gvas, valid)
+                self.assertEqual(key in request.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:

@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -30,8 +31,6 @@ import tempfile
 import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
-
-import regex as re
 
 SCHEMA_VERSION = 4
 ARTIFACT_MODEL_BY_DOMAIN = {"third_party": 1, "custom_operator": 2}
@@ -557,7 +556,7 @@ def _has_path_left_boundary(text: str, start: int) -> bool:
     # -I/root, -L/root, or '-include/root' inside a generated argument list.
     return (
         re.search(
-            r"(?:^|[\s\"'=,:;([{])-{1,2}[A-Za-z][A-Za-z0-9_-]*$",
+            r"(?:^|[^\S\x1c-\x1f]|[\"'=,:;([{])-{1,2}[A-Za-z][A-Za-z0-9_-]*$",
             text[:start],
         )
         is not None
@@ -589,7 +588,9 @@ def _normalize_text(text: str, normalize_paths: Sequence[Path]) -> str:
         key=lambda item: len(item[0]),
         reverse=True,
     ):
-        pattern = re.compile(rf"{re.escape(source)}(?=$|[\\/\s\"'=,:;)\]}}])")
+        # Path delimiters use Unicode White_Space. stdlib \s also accepts the
+        # ASCII separators U+001C-U+001F, which must remain identity-sensitive.
+        pattern = re.compile(rf"{re.escape(source)}(?=$|[^\S\x1c-\x1f]|[\\/\"'=,:;)\]}}])")
         current_text = normalized
         normalized = pattern.sub(
             lambda match, current_text=current_text, replacement=replacement: (
@@ -1297,7 +1298,6 @@ def _publish_action_artifacts(
     action_identity: str,
     artifacts: Sequence[dict],
 ) -> None:
-    publish_dir.mkdir(parents=True, exist_ok=True)
     publish_state_dir.mkdir(parents=True, exist_ok=True)
 
     lock_path = publish_state_dir / ".publish.lock"
@@ -1325,9 +1325,9 @@ def _publish_action_artifacts(
         if not owners.get("initialized", False):
             if publish_dir.exists():
                 shutil.rmtree(publish_dir)
-            publish_dir.mkdir(parents=True, exist_ok=True)
             owners["initialized"] = True
 
+        publish_dir.mkdir(parents=True, exist_ok=True)
         action_state = _load_publish_state(
             action_state_path,
             {

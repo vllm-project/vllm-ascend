@@ -8,7 +8,24 @@ the Ascend token history lives in ``hash_state`` next to the SWA slot cache,
 which is where upstream keeps it too.
 """
 
+from pathlib import Path
+
 import torch
+from safetensors import safe_open
+
+
+def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:
+    """Use the A3 Quarot basis, or the native A5 identity basis."""
+    rotation_path = rotation_path or Path(model_root) / "optional/quarot.safetensors"
+    if not rotation_path.is_file():
+        return torch.eye(32)
+    with safe_open(rotation_path, framework="pt") as checkpoint:
+        rotation = checkpoint.get_tensor("global_rotation")
+    block = rotation[:32, :32].contiguous()
+    expected = torch.block_diag(*[block] * (hidden_size // 32))
+    if not torch.equal(rotation, expected):
+        raise ValueError("Engram gate requires repeated block32 global rotation")
+    return block
 
 
 def engram_enabled(text_config) -> bool:
