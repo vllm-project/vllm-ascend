@@ -251,10 +251,12 @@ def test_dflash2_graph_gate_uses_shared_family_resolver(monkeypatch):
     seen = []
     speculative_config = SimpleNamespace(method="dflash", enforce_eager=False)
     vllm_config = SimpleNamespace(speculative_config=speculative_config)
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v1.spec_decode.method.is_dflash2_draft",
-        lambda config, method=None: seen.append(config) or True,
-    )
+
+    def is_dflash2_draft(config, method=None):
+        seen.append(config)
+        return True
+
+    monkeypatch.setattr("vllm_ascend.worker.v1.spec_decode.method.is_dflash2_draft", is_dflash2_draft)
 
     assert mrv2_utils._spec_decode_reasons(vllm_config, speculative_config) == ["dflash2 graph"]
     assert seen == [speculative_config]
