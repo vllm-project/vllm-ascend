@@ -1220,7 +1220,7 @@ def test_packed_hccl_rejects_nonpositive_buffer_count(producer, num_buffers):
 
 @pytest.mark.parametrize("num_buffers", [1, 2, 3])
 def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
-    pending = []
+    pending: list[_FakeNpuStream] = []
 
     class BroadcastStream(_FakeNpuStream):
         def synchronize(self):
