@@ -2,9 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test-only Worker RPC probes; never imported by normal serving."""
 
+from __future__ import annotations
+
 import hashlib
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCWeightTransferEngine
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
 SUFFIXES = ("tid2eid", "bias_vl", "e_score_correction_bias", "attn_sink")
 PATTERNS = ["*.mlp.gate." + s for s in SUFFIXES[:3]] + ["*.self_attn.attn_sink"]
@@ -26,6 +36,15 @@ def digest(tensor):
 
 
 class RetentionProbe:
+    # Worker injects this extension as a mixin; these members come from Worker.
+    model_runner: NPUModelRunner | NPUModelRunnerV2
+    model_config: ModelConfig
+    weight_transfer_engine: NPUIPCWeightTransferEngine
+    _sleep_saved_parameters: dict[str, torch.Tensor]
+    _wsc_events: list[dict[str, object]]
+    _wsc_hook_events: list[dict[str, object]]
+    _wsc_phase: str
+
     def wsc_state(self):
         model = self.model_runner.model
         params = {
