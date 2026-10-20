@@ -82,11 +82,15 @@ def test_compact_prefill_path_matches_upstream_state_semantics() -> None:
     compact_state = reference_state.clone()
 
     original_attr = "_ascend_original_short_conv_dilated_prefill_batched"
-    original = getattr(
-        Qwen4ExpPLELayer,
-        original_attr,
-        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched,
-    )
+    original = getattr(Qwen4ExpPLELayer, original_attr, None)
+    if original is None:
+        original = getattr(
+            Qwen4ExpPLELayer,
+            "_short_conv_dilated_prefill_batched",
+            None,
+        )
+    if original is None:
+        pytest.skip("upstream uses the fused PLE prefill dispatcher")
     expected = original(
         layer,
         x_p,
@@ -210,11 +214,13 @@ def test_ple_internal_format_is_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     original = Mock(return_value=output)
     layer = object()
     inputs = torch.tensor([1.0])
+    residual = torch.tensor([2.0])
+    outer_residual = torch.tensor([3.0])
 
     wrapped = ple._wrap_ple_short_conv(original)
 
-    assert wrapped(layer, inputs) is output
-    original.assert_called_once_with(layer, inputs)
+    assert wrapped(layer, inputs, residual, outer_residual) is output
+    original.assert_called_once_with(layer, inputs, residual, outer_residual)
     assert updates == [False, True]
 
 
@@ -266,30 +272,31 @@ def test_installing_ple_patch_is_idempotent() -> None:
 
 
 def test_installing_ple_prefill_patch_is_idempotent() -> None:
-    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
-
     original_attr = "_ascend_original_short_conv_dilated_prefill_batched"
-    initial_method = Qwen4ExpPLELayer._short_conv_dilated_prefill_batched
-    had_original = hasattr(Qwen4ExpPLELayer, original_attr)
-    initial_original = getattr(Qwen4ExpPLELayer, original_attr, None)
 
     def original(_layer: object, *_args: object) -> torch.Tensor:
         return torch.empty(0)
 
-    try:
-        if had_original:
-            delattr(Qwen4ExpPLELayer, original_attr)
-        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched = original
-        ple.patch_upstream_ple_short_conv()
-        installed = Qwen4ExpPLELayer._short_conv_dilated_prefill_batched
-        ple.patch_upstream_ple_short_conv()
+    class LegacyPLELayer:
+        _short_conv_dilated_prefill_batched = original
 
-        assert installed is ple._short_conv_dilated_prefill_batched
-        assert Qwen4ExpPLELayer._short_conv_dilated_prefill_batched is installed
-        assert getattr(Qwen4ExpPLELayer, original_attr) is original
-    finally:
-        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched = initial_method
-        if had_original:
-            setattr(Qwen4ExpPLELayer, original_attr, initial_original)
-        elif hasattr(Qwen4ExpPLELayer, original_attr):
-            delattr(Qwen4ExpPLELayer, original_attr)
+    ple._patch_legacy_prefill(LegacyPLELayer)
+    installed = LegacyPLELayer._short_conv_dilated_prefill_batched
+    ple._patch_legacy_prefill(LegacyPLELayer)
+
+    assert installed is ple._short_conv_dilated_prefill_batched
+    assert LegacyPLELayer._short_conv_dilated_prefill_batched is installed
+    assert getattr(LegacyPLELayer, original_attr) is original
+
+
+def test_legacy_prefill_patch_skips_removed_upstream_method() -> None:
+    class FusedPLELayer:
+        pass
+
+    ple._patch_legacy_prefill(FusedPLELayer)
+
+    assert not hasattr(
+        FusedPLELayer,
+        "_ascend_original_short_conv_dilated_prefill_batched",
+    )
+    assert not hasattr(FusedPLELayer, "_short_conv_dilated_prefill_batched")
