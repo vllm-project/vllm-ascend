@@ -1,0 +1,9 @@
+pr: 19248
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek-V4 Flash Vision weight updates across sleep and wake,
+      including packed NPU IPC transfers and explicitly retained routing
+      parameters. Graph-visible weights remain resident during sleep to
+      preserve captured addresses.
+    model: deepseek-v4-flash-vision
