@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+SFA_TQ4_SLOT_BYTES = 512 // 2 + 64 * 2 + 2
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -136,6 +137,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    cache_final_prefill_turboquant: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -162,7 +164,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return (
             get_storage_block_size(self)
             * self.num_kv_heads
-            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
+            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
+               + (SFA_TQ4_SLOT_BYTES if self.cache_final_prefill_turboquant else 0))
         )
 
     @property
@@ -183,6 +186,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.cache_final_prefill_turboquant,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -207,6 +211,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            cache_final_prefill_turboquant=first_spec.cache_final_prefill_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )

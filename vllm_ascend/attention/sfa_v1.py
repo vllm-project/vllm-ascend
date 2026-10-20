@@ -68,6 +68,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import ColocatedFinalPrefill
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -913,8 +914,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Shared signed-Hadamard transform plus the ops-nn quantizer.
         self.turboquant = (
             TurboQuantLatent(fused_finalize=ascend_config.enable_turboquant_fused_finalize)
-            if self.enable_sparse_sfa_turboquant
+            if self.enable_sparse_sfa_turboquant or ascend_config.enable_turboquant_final_prefill
             else None
+        )
+        self.final_prefill = (
+            ColocatedFinalPrefill(self.turboquant) if ascend_config.enable_turboquant_final_prefill else None
         )
         self._tq_rotations_folded = False
         self.tq_prefill_bf16_current = ascend_config.enable_turboquant_prefill_bf16_current
@@ -1771,7 +1775,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         if return_softmax_lse:
             kwargs["return_softmax_lse"] = True
         result = torch_npu.npu_kv_quant_sparse_flash_attention(query, kv, kv, topk_indices, **kwargs)
-        return result if isinstance(result, tuple) else (result, None, None)
+        result = result if isinstance(result, tuple) else (result, None, None)
+        # Empty TP query shards and FULL-graph padding are not written by the
+        # kernel. Do not feed allocator contents (including NaNs) through the
+        # inverse rotation, output projection or TP collectives.
+        valid = torch.arange(query.shape[0], device=query.device) < actual_seq_lengths_query[-1]
+        output = result[0].masked_fill(~valid[:, None, None], 0)
+        return output, result[1], result[2]
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -1784,6 +1794,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        if self.final_prefill is not None and not self.final_prefill.plan.has_prefill:
+            # BF16 prolog and PrefixCache remain authoritative. Only the
+            # attention read switches to the stable TQ4 mirror during Decode.
+            self.final_prefill.update_decode_tokens(self._get_sfa_kv_slot_mapping(attn_metadata))
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                self.final_prefill.cache[2],
+                topk_indices,
+                attn_metadata.block_table if block_table is None else block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            return self._tq_inverse_output(attn_out)
+        if self.final_prefill is not None and attn_metadata.num_decode_tokens:
+            # Mixed batches compute against authoritative BF16 pages. Keep
+            # existing decoders' mirrors current for the next pure-decode step.
+            slots = self._get_sfa_kv_slot_mapping(attn_metadata)[: attn_metadata.num_decode_tokens]
+            self.final_prefill.update_decode_tokens(slots)
         if self.enable_sparse_sfa_turboquant:
             expanded = self._try_tq_prefill_workspace(
                 ql_nope,
@@ -2045,6 +2074,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         output_scale: float = 1.0,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        if self.final_prefill is not None:
+            self.turboquant._initialize(hidden_states.device)
+            if attn_metadata is not None:
+                self.final_prefill.bind(kv_cache)
+                kv_cache = kv_cache[:2]
         if self.enable_sparse_sfa_turboquant:
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
@@ -2227,6 +2261,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )
+
+        if self.final_prefill is not None:
+            self.final_prefill.start_prefill()
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.

@@ -590,6 +590,9 @@ class AscendConfig:
     # Keep current Prefill KV in BF16 before quantization; scratch and TP gather
     # buffers share the workspace budget. Changes the Prefill numerical path.
     enable_turboquant_prefill_bf16_current: bool = False
+    # Colocated compatibility mode: persistent BF16 active/prefix cache plus a
+    # separately budgeted TQ4 decode mirror, populated incrementally during Prefill.
+    enable_turboquant_final_prefill: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
@@ -926,6 +929,14 @@ class AscendConfig:
         cache_config = getattr(vc, "cache_config", None)
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
+        if self.enable_turboquant_final_prefill:
+            from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import validate_colocated_final_prefill
+
+            validate_colocated_final_prefill(vc)
+            if not use_sparse or self.enable_kv_nz or self.enable_turboquant_rotation_fusion:
+                raise ValueError("Final-prefill BF16 cache requires SFA ND layout and unfolded BF16 projections")
+            if self.sparse_kv_offload_config.enabled:
+                raise ValueError("Final-prefill BF16 cache does not support sparse KV host offload")
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse

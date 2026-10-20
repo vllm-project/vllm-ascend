@@ -54,6 +54,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import (
+    FinalPrefillExporter,
+    describe_layout,
+    final_prefill_mode,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -98,6 +103,13 @@ class LayerMetadata:
     kv_caches_base_addr: list[int]
     block_len: list[int]
     block_size_scale: list[int]
+    export_mode: str | None = None
+    cache_format: str | None = None
+    logical_block_size: int = 0
+    component_shapes: list[list[int]] = field(default_factory=list)
+    component_dtypes: list[str] = field(default_factory=list)
+    block_stride: list[int] = field(default_factory=list)
+    num_blocks: list[int] = field(default_factory=list)
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -235,6 +247,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
         reuse_completion_callback: Callable[[int, str | None], None] | None = None,
+        final_prefill_exporter: FinalPrefillExporter | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -274,6 +287,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        self.final_prefill_exporter = final_prefill_exporter
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -498,6 +512,9 @@ class KVCacheSendingLayerThread(threading.Thread):
         return (src_list, dst_list, length_list)
 
     def _transfer_kv_cache(self, send_task: SendTask) -> str | None:
+        if self.final_prefill_exporter is not None:
+            self.final_prefill_exporter.transfer(send_task)
+            return None
         key = send_task.k_cache
         value = send_task.v_cache
         if self.pd_head_ratio > 1 and key is not None and value is not None:
@@ -754,6 +771,12 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         self._is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.is_producer = self._is_kv_producer
         self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self.final_prefill_export = final_prefill_mode(vllm_config)
+        self.prefill_export_incremental = bool(self.final_prefill_export) and bool(
+            vllm_config.kv_transfer_config.get_from_extra_config("prefill_export_incremental", False)
+        )
+        self._final_prefill_prepared = False
+        self._early_exported_layers = set()
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
 
         if role == KVConnectorRole.SCHEDULER:
@@ -817,7 +840,22 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        self._final_prefill_prepared = False
+        self._early_exported_layers = set()
+
+    def _prepare_final_prefill(self) -> None:
+        # Recent vLLM starts async loads after forward. Producers need their
+        # transfer maps before layer hooks, but must not map the same IDs twice.
+        if self.final_prefill_export and self._is_kv_producer and not self._final_prefill_prepared:
+            self.connector_worker.start_load_kv(self._connector_metadata)
+            self._final_prefill_prepared = True
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        if self.final_prefill_export and self._is_kv_producer:
+            self._prepare_final_prefill()
+            return
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -839,7 +877,11 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         if not self._connector_metadata.requests:
             return
         assert self.connector_worker is not None
+        self._prepare_final_prefill()
         self.connector_worker.on_kv_cache_written(layer_name)
+        if getattr(self, "prefill_export_incremental", False):
+            self.connector_worker.save_kv_layer(layer_name, [], None, self._connector_metadata)
+            self._early_exported_layers.add(layer_name)
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: list[torch.Tensor], attn_metadata: "AttentionMetadata", **kwargs
@@ -847,11 +889,17 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         """MooncakeLayerwiseConnector does not save explicitly."""
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
+        self._prepare_final_prefill()
+        if layer_name in self._early_exported_layers:
+            self._early_exported_layers.remove(layer_name)
+            return
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._connector_metadata)
 
     def wait_for_save(self):
-        """MooncakeLayerwiseConnector does not save explicitly."""
-        pass
+        if self.final_prefill_export and self._is_kv_producer:
+            # Scheduler may release/cache the source pages as soon as this
+            # forward completes. Drain exports before that ownership boundary.
+            self.connector_worker.kv_send_layer_thread.send_queue.join()
 
 
 class MooncakeLayerwiseConnectorScheduler:
@@ -861,6 +909,10 @@ class MooncakeLayerwiseConnectorScheduler:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.final_prefill_export = final_prefill_mode(vllm_config)
+        self.prefill_export_incremental = bool(self.final_prefill_export) and bool(
+            vllm_config.kv_transfer_config.get_from_extra_config("prefill_export_incremental", False)
+        )
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -1069,6 +1121,9 @@ class MooncakeLayerwiseConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MooncakeLayerwiseConnectorMetadata()
+        if self.final_prefill_export:
+            for req_id in scheduler_output.finished_req_ids:
+                self._reqs_need_send_layerwise.pop(req_id, None)
 
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             # Loop through scheduled reqs and convert to ReqMeta.
@@ -1092,7 +1147,10 @@ class MooncakeLayerwiseConnectorScheduler:
             scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
             for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
                 if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
-                    self._reqs_need_send_layerwise[req_id].extend_local_block_ids(new_blocks)
+                    if self.final_prefill_export and req_id in cached_reqs.resumed_req_ids:
+                        self._reqs_need_send_layerwise[req_id].local_block_ids = [list(ids) for ids in new_blocks]
+                    else:
+                        self._reqs_need_send_layerwise[req_id].extend_local_block_ids(new_blocks)
             computed_tokens = dict(
                 list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
                 + [(x.req_id, x.num_computed_tokens) for x in new_reqs]
@@ -1101,9 +1159,15 @@ class MooncakeLayerwiseConnectorScheduler:
                 if req_id in self._reqs_need_send_layerwise:
                     send_req_info = self._reqs_need_send_layerwise[req_id]
                     # update local transferred tokens
-                    send_req_info.update_transferred_tokens(
-                        round_down(send_req_info.local_computed_tokens, min(self.block_size))
-                    )
+                    if getattr(self, "prefill_export_incremental", False) and req_id in cached_reqs.resumed_req_ids:
+                        send_req_info.local_transferred_tokens = send_req_info.request.kv_transfer_params["remote_cached_tokens"]
+                    elif not self.final_prefill_export or getattr(self, "prefill_export_incremental", False):
+                        send_req_info.update_transferred_tokens(
+                            max(send_req_info.local_transferred_tokens,
+                                round_down(send_req_info.local_computed_tokens, min(self.block_size)))
+                            if getattr(self, "prefill_export_incremental", False)
+                            else round_down(send_req_info.local_computed_tokens, min(self.block_size))
+                        )
                     # update local computed tokens, not transfer spec decode tokens
                     spec_decode_tokens = (
                         len(scheduled_spec_decode_tokens[req_id]) if (req_id in scheduled_spec_decode_tokens) else 0
@@ -1148,6 +1212,8 @@ class MooncakeLayerwiseConnectorScheduler:
                     # whether chunk finish
                     chunk_finish = send_req_info.local_computed_tokens >= len(send_req_info.request.all_token_ids)
 
+                    if self.final_prefill_export and not getattr(self, "prefill_export_incremental", False) and not chunk_finish:
+                        continue
                     add_transfer_task(req_id, send_req_info, chunk_finish=chunk_finish)
                     if chunk_finish:
                         self._reqs_need_send_layerwise.pop(req_id)
@@ -1217,6 +1283,11 @@ class MooncakeLayerwiseConnectorWorker:
         self.dcp_rank: int = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.tp_group = get_tp_group()
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.final_prefill_export = final_prefill_mode(vllm_config)
+        self.prefill_export_incremental = bool(self.final_prefill_export) and bool(
+            vllm_config.kv_transfer_config.get_from_extra_config("prefill_export_incremental", False)
+        )
+        self.final_prefill_exporter = None
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.use_mla = self.vllm_config.model_config.use_mla
@@ -1262,6 +1333,10 @@ class MooncakeLayerwiseConnectorWorker:
         )
         self.pd_head_ratio = get_ascend_config().pd_head_ratio
         self.num_head_replica = get_ascend_config().num_head_replica
+        if self.final_prefill_export and (
+            not self.use_mla or self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant
+        ):
+            raise ValueError("Final-prefill export requires equal-TP SFA without FA/C8 weight quant hooks")
         self.resharding_stream = None
         if self.pd_head_ratio > 1 or self.enable_kv_quant or self.enable_c8_quant:
             self.resharding_stream = torch.npu.Stream()
@@ -1406,7 +1481,7 @@ class MooncakeLayerwiseConnectorWorker:
             layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-            if kv_cache_spec_uses_packed_sfa_main_cache(layer_kv_cache_spec):
+            if kv_cache_spec_uses_packed_sfa_main_cache(layer_kv_cache_spec) and not self.final_prefill_export:
                 raise NotImplementedError(
                     "Mooncake layerwise connector does not support packed SFA main KV caches yet."
                 )
@@ -1431,7 +1506,7 @@ class MooncakeLayerwiseConnectorWorker:
                     layer_kv_group_id,
                     block_size_scale,
                 )
-                if group_block_size_scale != block_size_scale:
+                if group_block_size_scale != block_size_scale and not self.final_prefill_export:
                     raise NotImplementedError(
                         "Mooncake layerwise connector does not support KV cache components "
                         "with different block size scales in one group, including DCP replicated indexer cache."
@@ -1448,6 +1523,15 @@ class MooncakeLayerwiseConnectorWorker:
                         num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                     )
                 logger.info("layer: %s, num_blocks: %s, block_shape: %s", layer_name, num_blocks, block_shape)
+            if self.final_prefill_export:
+                describe_layout(
+                    single_layer_meta,
+                    kv_cache_tuple,
+                    layer_kv_cache_spec,
+                    self.final_prefill_export,
+                    self.vllm_config.kv_transfer_config.is_kv_producer,
+                )
+                self.kv_caches[layer_name] = tuple(kv_cache_tuple)
             self.layer_metadata[layer_name] = single_layer_meta
 
         if self.use_attn_mamba_hybrid:
@@ -1486,7 +1570,9 @@ class MooncakeLayerwiseConnectorWorker:
         for layer_names in self.index_to_name.values():
             layer_names.sort(key=lambda name: "indexer" in name.lower())
             primary_group_idx = self.layer_metadata[layer_names[0]].tensor_group_idx[0]
-            assert all(self.layer_metadata[name].tensor_group_idx[0] == primary_group_idx for name in layer_names), (
+            assert self.final_prefill_export or all(
+                self.layer_metadata[name].tensor_group_idx[0] == primary_group_idx for name in layer_names
+            ), (
                 f"Mooncake layerwise merged components must share one KV cache group. layer_names={layer_names}"
             )
         if mtp_layer_name != "":
@@ -1502,6 +1588,16 @@ class MooncakeLayerwiseConnectorWorker:
             layer_metadata=self.layer_metadata,
         )
         if self.vllm_config.kv_transfer_config.is_kv_producer:
+            if self.final_prefill_export:
+                self.final_prefill_exporter = FinalPrefillExporter(
+                    self.kv_caches,
+                    self.layer_metadata,
+                    self.final_prefill_export,
+                    self.vllm_config.kv_transfer_config.get_from_extra_config("final_prefill_chunk_tokens", 4096),
+                    self.engine,
+                    fused_finalize=get_ascend_config().enable_turboquant_fused_finalize,
+                    incremental=self.prefill_export_incremental,
+                )
             ready_event = threading.Event()
             self.kv_send_layer_thread = KVCacheSendingLayerThread(
                 engine=self.engine,
@@ -1525,6 +1621,7 @@ class MooncakeLayerwiseConnectorWorker:
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
                 reuse_completion_callback=self._complete_layer_reuse,
+                final_prefill_exporter=self.final_prefill_exporter,
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
@@ -1735,6 +1832,8 @@ class MooncakeLayerwiseConnectorWorker:
                 req_meta.remote_block_ids[i] = remtote_block_ids_with_scale
 
     def _get_kernel_block_ids(self, block_ids):
+        if self.final_prefill_export:
+            return block_ids
         for i in range(self.num_kv_cache_groups):
             if isinstance(self.kv_cache_specs[i], MambaSpec):
                 continue
@@ -1764,6 +1863,13 @@ class MooncakeLayerwiseConnectorWorker:
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
+                if self.final_prefill_export and (
+                    req_meta.remote_tp_size != self.tp_size
+                    or req_meta.remote_pcp_size != 1
+                    or req_meta.remote_dcp_size != 1
+                    or list(req_meta.remote_block_size) != self.block_size
+                ):
+                    raise ValueError("Final-prefill export requires equal TP and matching logical cache groups")
                 self._align_remote_block_ids(req_meta)
                 for i, kv_cache_spec in enumerate(self.kv_cache_specs):
                     if isinstance(kv_cache_spec, MambaSpec):
@@ -1877,7 +1983,9 @@ class MooncakeLayerwiseConnectorWorker:
                 )
             cache_write_event = self._cache_write_events[self.current_layer]
             self._cache_write_events[self.current_layer] = None
-            if cache_write_event is None:
+            if cache_write_event is None or (
+                self.final_prefill_export and not getattr(self, "prefill_export_incremental", False)
+            ):
                 cache_write_event = torch.npu.Event()
                 cache_write_event.record()
             send_task = connector_metadata.send_task

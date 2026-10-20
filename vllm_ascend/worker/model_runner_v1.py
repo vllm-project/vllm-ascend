@@ -184,6 +184,12 @@ from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
+from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import (
+    PrefillQuantizationPipeline,
+    colocated_cache_views,
+    plan_final_prefill,
+    plan_incremental_slots,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -991,8 +997,51 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_block_copies=[],
             )
         sampling_metadata = super()._update_states(scheduler_output)
+        self._prepare_tq_final_prefill(scheduler_output)
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
+
+    def _prepare_tq_final_prefill(self, scheduler_output):
+        if not get_ascend_config().enable_turboquant_final_prefill:
+            return
+        self._tq_has_prefill = False
+        finalized = getattr(self, "_tq_finalized_req_ids", set())
+        finalized.intersection_update(self.requests)
+        finalized.difference_update(request.req_id for request in scheduler_output.scheduled_new_reqs)
+        finalized.difference_update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        pending = self.requests.keys() - finalized
+        prepared = getattr(self, "_tq_prepared_req_ids", set())
+        prepared.intersection_update(self.requests)
+        prepared.difference_update(request.req_id for request in scheduler_output.scheduled_new_reqs)
+        prepared.difference_update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        initial = self.requests.keys() - prepared
+        if not hasattr(self, "_tq_prefill_pipeline"):
+            self._tq_prefill_pipeline = PrefillQuantizationPipeline(self.device)
+        for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            plan = plan_final_prefill(
+                self.requests, scheduler_output.num_scheduled_tokens, group_id, self.block_size, pending
+            )
+            self._tq_has_prefill |= plan.has_prefill
+            slots = plan_incremental_slots(
+                self.requests, scheduler_output.num_scheduled_tokens, group_id, self.block_size, pending, initial
+            )
+            device_slots = torch.tensor(slots, dtype=torch.int64, device=self.device) if slots else None
+            for name in group.layer_names:
+                layer = self.compilation_config.static_forward_context[name]
+                state = getattr(getattr(layer, "impl", None), "final_prefill", None)
+                if state is not None:
+                    state.plan = plan
+                    state.pipeline = self._tq_prefill_pipeline
+                    state.prefill_slots = device_slots
+        prepared.update(scheduler_output.num_scheduled_tokens)
+        self._tq_prepared_req_ids = prepared
+        # Remember completion across chunks, including a one-token final chunk
+        # after a resumed request has already recomputed its original prompt.
+        for req_id, count in scheduler_output.num_scheduled_tokens.items():
+            request = self.requests[req_id]
+            if request.num_computed_tokens + count >= request.num_tokens:
+                finalized.add(req_id)
+        self._tq_finalized_req_ids = finalized
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -3248,6 +3297,9 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
         finally:
+            pipeline = getattr(self, "_tq_prefill_pipeline", None)
+            if pipeline is not None:
+                pipeline.join()
             # A forward that raises must still retire the device-metadata
             # submission: otherwise the next submit() refuses to start and a
             # single request error wedges every DP rank of the instance.
@@ -3337,6 +3389,10 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        if force_uniform_decode is None and getattr(self, "_tq_has_prefill", False):
+            # A full prefix hit may leave just one prompt token. It must still
+            # use BF16 and finalize its mirror outside the Decode graph.
+            force_eager = True
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         if self.use_dcp or self.model_config.is_hybrid:
             # Mamba prompt chunks must retain prefill state semantics even when
@@ -5218,6 +5274,11 @@ class NPUModelRunner(GPUModelRunner):
                     use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
+                if getattr(layer_kv_cache_spec[layer_name], "cache_final_prefill_turboquant", False):
+                    if layer_name not in kv_cache_raw_tensors:
+                        size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                        kv_cache_raw_tensors[layer_name] = torch.zeros(size, dtype=torch.int8, device=self.device)
+                    continue
                 if reuse_slot and idx > 0:
                     kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[shared_layers[0]]
                     continue
@@ -5491,6 +5552,13 @@ class NPUModelRunner(GPUModelRunner):
                 kernel_block_size = (
                     group_kernel_block_size or current_kv_cache_spec.block_size
                 )
+                if getattr(current_kv_cache_spec, "cache_final_prefill_turboquant", False):
+                    if current_kv_cache_spec.block_size != kernel_block_size:
+                        raise ValueError("Final-prefill mirror requires matching logical and kernel page sizes")
+                    kv_caches[layer_name] = colocated_cache_views(
+                        kv_cache_raw_tensors[layer_name], kv_cache_config.num_blocks, kernel_block_size
+                    )
+                    continue
 
                 if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
                     raw = kv_cache_raw_tensors[layer_name]
@@ -6391,6 +6459,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                         cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
+                        cache_final_prefill_turboquant=getattr(impl, "final_prefill", None) is not None,
                         store_on_host=self.sparse_kv_offload_enabled,
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,

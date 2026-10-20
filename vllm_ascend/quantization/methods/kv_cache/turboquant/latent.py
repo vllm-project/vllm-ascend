@@ -129,6 +129,18 @@ class TurboQuantLatent:
         scale = (norm.float() / selected_norm).to(torch.float16)
         return torch.cat((packed, scale.view(torch.uint8).reshape(-1, 2)), dim=-1).unsqueeze(1)
 
+    def compress_kv_into(self, nope, rope, slots, output):
+        """Pack the established GLM ABI and scatter directly into target slots."""
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        rows = self.compress(nope.reshape(-1, HEAD_DIM)).reshape(-1, HEAD_DIM // 2 + 2)
+        scale = rows[:, HEAD_DIM // 2:].contiguous().view(torch.float16).reshape(-1, 1)
+        rope = (rope.reshape(-1, 64).float() / (scale.float() + 1e-20)).bfloat16()
+        packed = torch.cat((rows[:, :HEAD_DIM // 2], rope.view(torch.uint8), rows[:, HEAD_DIM // 2:]), -1)
+        # P/D staging is uint8, whereas the cache is int8. Scatter supports
+        # signed bytes only; reinterpret both views without changing the ABI.
+        DeviceOperator.scatter_cache(output.view(torch.int8), slots.view(-1, 1), packed.view(torch.int8))
+
 
 @cache
 def _get_legacy_transforms(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

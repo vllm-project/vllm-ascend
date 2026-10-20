@@ -40,6 +40,7 @@ def test_profile_reserves_one_shared_workspace_for_all_layers():
     with patch("vllm_ascend.attention.sfa_v1.current_workspace_manager", return_value=manager):
         pointers = []
         for layer in layers:
+            layer.final_prefill = None
             layer.enable_sparse_sfa_turboquant = True
             layer.turboquant = MagicMock()
             layer.tq_prefill_workspace_bytes = 2 * 1024**2
@@ -187,6 +188,7 @@ def test_current_forward_waits_for_gather_and_keeps_cache_notification_order(has
     from vllm_ascend.attention.sfa_v1 import PreprocessType
 
     layer = object.__new__(AscendSFAImpl)
+    layer.final_prefill = None
     layer.enable_sparse_sfa_turboquant = True
     layer.turboquant = MagicMock()
     layer.qk_rope_head_dim, layer.kv_lora_rank, layer.q_lora_rank = 64, 512, 8

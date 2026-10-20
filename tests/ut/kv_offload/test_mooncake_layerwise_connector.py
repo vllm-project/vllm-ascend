@@ -1209,6 +1209,7 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
     def test_cache_written_hook_delegates_to_worker(self):
         connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
         connector._is_kv_producer = True
+        connector.final_prefill_export = None
         connector._connector_metadata = MooncakeLayerwiseConnectorMetadata()
         connector._connector_metadata.requests["req"] = MagicMock()
         connector.connector_worker = MagicMock()
@@ -1264,6 +1265,7 @@ def _make_worker_for_cache_write_event_test():
     worker.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True),
     )
+    worker.final_prefill_export = None
     worker.current_layer = 0
     worker.total_layers = 1
     worker.index_to_name = {0: ["layer0"]}
@@ -1601,3 +1603,137 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
 
         worker.create_kv_buffer.assert_called_once_with(main_cache)
+
+
+def test_final_prefill_scheduler_accumulates_chunks_and_prefix_without_early_send():
+    scheduler = MooncakeLayerwiseConnectorScheduler.__new__(MooncakeLayerwiseConnectorScheduler)
+    scheduler.final_prefill_export = "bf16_to_tq4"
+    scheduler.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=False))
+    scheduler.block_size = [4]
+    request = SimpleNamespace(all_token_ids=list(range(15)),
+                              kv_transfer_params={
+                                  "remote_cached_tokens": 4,
+                                  "remote_block_ids": [[4, 5, 6, 7]],
+                                  "remote_block_size": [4],
+                              })
+    info = SendReqInfo([[0, 1]], 4, 0, request)
+    scheduler._reqs_need_send_layerwise = {"r": info}
+
+    def step(computed, scheduled, new_blocks, resumed=False):
+        cached = SimpleNamespace(req_ids=["r"],
+                                 new_block_ids=[new_blocks],
+                                 num_computed_tokens=[computed],
+                                 resumed_req_ids={"r"} if resumed else set())
+        return scheduler.build_connector_meta(
+            SimpleNamespace(
+                finished_req_ids=set(),
+                scheduled_cached_reqs=cached,
+                scheduled_new_reqs=[],
+                scheduled_spec_decode_tokens={},
+                num_scheduled_tokens={"r": scheduled},
+            ))
+
+    # First four tokens were a P prefix hit. No pages are exported on chunk 1.
+    assert not step(4, 4, None).requests
+    assert info.local_transferred_tokens == 4
+    assert not step(8, 4, ([2], )).requests
+    assert info.local_block_ids == [[0, 1, 2]]
+    meta = step(12, 3, ([3], ))
+    assert meta.requests["r"].local_block_ids == [[0, 1, 2, 3]]
+    assert meta.requests["r"].local_transed_tokens == 4
+    assert meta.requests["r"].chunk_finish
+    assert "r" not in scheduler._reqs_need_send_layerwise
+
+    # A preempted request must use its replacement allocation, never stale IDs.
+    info = SendReqInfo([[90, 91]], 4, 8, request)
+    scheduler._reqs_need_send_layerwise = {"r": info}
+    assert not step(4, 4, ([10, 11], ), resumed=True).requests
+    assert info.local_block_ids == [[10, 11]]
+    assert info.local_transferred_tokens == 4
+
+
+def test_final_prefill_initializes_before_hooks_once_and_drains_exports():
+    connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+    connector.final_prefill_export = "bf16_to_tq4"
+    connector._is_kv_producer = True
+    connector.connector_worker = MagicMock()
+    metadata = MooncakeLayerwiseConnectorMetadata()
+    metadata.requests["r"] = MagicMock()
+    connector.bind_connector_metadata(metadata)
+    connector.on_kv_cache_written("layer0")
+    connector.save_kv_layer("layer0", [], MagicMock())
+    connector.start_load_kv(MagicMock())  # Current vLLM's post-forward call.
+    connector.connector_worker.start_load_kv.assert_called_once_with(metadata)
+    connector.wait_for_save()
+    connector.connector_worker.kv_send_layer_thread.send_queue.join.assert_called_once()
+    connector.bind_connector_metadata(MooncakeLayerwiseConnectorMetadata())
+    connector.start_load_kv(MagicMock())
+    assert connector.connector_worker.start_load_kv.call_count == 2
+
+
+def test_final_prefill_uses_post_attention_event():
+    worker, metadata = _make_worker_for_cache_write_event_test()
+    worker.final_prefill_export = "bf16_to_tq4"
+    early, final = MagicMock(), MagicMock()
+    worker._cache_write_events[0] = early
+    with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.Event",
+               return_value=final):
+        worker.save_kv_layer("layer0", [], MagicMock(), metadata)
+    task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+    assert task.wait_event is final
+    final.record.assert_called_once()
+
+
+def test_incremental_export_dispatches_at_write_once():
+    connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+    connector.final_prefill_export = "bf16_to_tq4"
+    connector.prefill_export_incremental = True
+    connector._is_kv_producer = True
+    connector.connector_worker = MagicMock()
+    metadata = MooncakeLayerwiseConnectorMetadata()
+    metadata.requests["r"] = MagicMock()
+    connector.bind_connector_metadata(metadata)
+    connector.on_kv_cache_written("layer0")
+    connector.connector_worker.save_kv_layer.assert_called_once_with("layer0", [], None, metadata)
+    connector.save_kv_layer("layer0", [], MagicMock())
+    assert connector.connector_worker.save_kv_layer.call_count == 1
+    connector.wait_for_save()
+    connector.connector_worker.kv_send_layer_thread.send_queue.join.assert_called_once()
+
+
+def test_incremental_export_uses_cache_write_event():
+    worker, metadata = _make_worker_for_cache_write_event_test()
+    worker.final_prefill_export = "bf16_to_tq4"
+    worker.prefill_export_incremental = True
+    early = MagicMock()
+    worker._cache_write_events[0] = early
+    worker.save_kv_layer("layer0", [], MagicMock(), metadata)
+    task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+    assert task.wait_event is early
+
+
+def test_incremental_scheduler_advances_only_sent_pages_and_resets_on_resume():
+    scheduler = MooncakeLayerwiseConnectorScheduler.__new__(MooncakeLayerwiseConnectorScheduler)
+    scheduler.final_prefill_export = "bf16_to_tq4"
+    scheduler.prefill_export_incremental = True
+    scheduler.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=False))
+    scheduler.block_size = [4]
+    request = SimpleNamespace(all_token_ids=list(range(15)), kv_transfer_params={
+        "remote_cached_tokens": 4, "remote_block_ids": [[4,5,6,7]], "remote_block_size": [4]})
+    info = SendReqInfo([[0,1,2,3]], 4, 0, request)
+    scheduler._reqs_need_send_layerwise = {"r": info}
+    def step(computed, count, resumed=False):
+        return scheduler.build_connector_meta(SimpleNamespace(
+            finished_req_ids=set(), scheduled_new_reqs=[], scheduled_spec_decode_tokens={},
+            num_scheduled_tokens={"r": count}, scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["r"], new_block_ids=[([10,11,12,13],) if resumed else None],
+                num_computed_tokens=[computed], resumed_req_ids={"r"} if resumed else set())))
+    first = step(4,5).requests["r"]
+    assert first.local_transed_tokens == 4 and first.local_computed_tokens == 9 and not first.chunk_finish
+    second = step(9,3).requests["r"]
+    assert second.local_transed_tokens == 8 and not second.chunk_finish
+    resumed = step(4,4,True).requests["r"]
+    assert resumed.local_transed_tokens == 4 and resumed.local_block_ids == [[10,11,12,13]]
+    last = step(8,7).requests["r"]
+    assert last.local_transed_tokens == 8 and last.chunk_finish
+    assert "r" not in scheduler._reqs_need_send_layerwise
