@@ -975,3 +975,22 @@ def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, phys
 def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
     utils.setup_ascend_local_comm_res(0, config)
     physical_device_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("oproj_tp_size", [0, 1, 2, 8])
+@pytest.mark.parametrize("is_draft_model", [False, True])
+def test_oproj_tp_requires_dp_shape_coordination(oproj_tp_size, is_draft_model):
+    config = SimpleNamespace()
+    ascend_config = SimpleNamespace(
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=oproj_tp_size),
+        get_mc2_comm_alg=lambda: "mc2",
+    )
+    # Dense models can ordinarily skip DP coordination. A cross-rank O-proj
+    # exchange must retain it even when its own rank has little or no work.
+    with (
+        mock.patch.object(utils, "get_ascend_config", return_value=ascend_config),
+        mock.patch.object(utils, "is_mega_moe_supported", return_value=False),
+        mock.patch.object(utils, "is_moe_model", return_value=False),
+        mock.patch.object(utils, "is_drafter_moe_model", return_value=False),
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model) == (oproj_tp_size <= 1)

@@ -1778,28 +1778,25 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             groups_per_rank = self.n_local_groups // oproj_tp_size
 
             o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
-            # Pad to a static exchange size so the all_to_all / reduce_scatter
-            # shapes are identical across all ACL graph buckets — variable
-            # shapes desync the HCCL communicator during graph replay.
-            # Profiling can use the scheduler's full token budget even when
-            # the decode capacity is smaller. Freeze the larger capacity when
-            # allocating the buffers, then reuse it for capture and replay.
+            # Capacity bounds the allocation, not this step's collective/GEMM
+            # shapes. The runner coordinates the current graph bucket across DP
+            # ranks whenever O-proj TP exchanges tokens between them.
             if hasattr(self, "_oproj_send_buf"):
-                exchange_num_tokens = self._oproj_send_buf.shape[1]
+                capacity = self._oproj_send_buf.shape[1]
             else:
-                exchange_num_tokens = max(
+                capacity = max(
                     get_potential_max_tokens(),
                     self.vllm_config.scheduler_config.max_num_batched_tokens,
                 )
-            if exchange_num_tokens < num_tokens:
+            exchange_num_tokens = max(num_tokens, 1)
+            if capacity < exchange_num_tokens:
                 scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"oproj static exchange capacity ({capacity}) must cover "
                     f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
-                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
-                    "tokens to max_num_seqs * decode_query_len "
-                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
-                    "raise the largest cudagraph_capture_sizes entry."
+                    "capacity >= the largest decode graph bucket. Please raise "
+                    "the largest cudagraph_capture_sizes entry "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs})."
                 )
             # Lazily allocate static send/recv buffers on first call. The
             # profiling run hits this path before ACL graph capture, so the
@@ -1808,13 +1805,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # that was recorded at capture; new_zeros per call would desync
             # the HCCL operator).
             if not hasattr(self, "_oproj_send_buf"):
-                buf_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
+                buf_shape = (oproj_tp_size, capacity, groups_per_rank, group_hidden_dim)
                 self._oproj_send_buf = torch.zeros(buf_shape, dtype=o_proj_input.dtype, device=o_proj_input.device)
                 self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
-            send = self._oproj_send_buf
-            recv = self._oproj_recv_buf
-            # In-place fill into the address-stable buffer: zero the padding
-            # tail, then copy the real tokens.
+            # Repack each exchange in a contiguous prefix. Slicing [:, :N]
+            # from [OTP, capacity, ...] would leave gaps between peers and
+            # flattening that slice could allocate a new communication buffer.
+            exchange_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
+            exchange_elements = oproj_tp_size * exchange_num_tokens * groups_per_rank * group_hidden_dim
+            send = self._oproj_send_buf.view(-1)[:exchange_elements].view(exchange_shape)
+            recv = self._oproj_recv_buf.view(-1)[:exchange_elements].view(exchange_shape)
             send.zero_()
             send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
             dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
@@ -1830,12 +1830,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # and the embedding TP path use raw dist + static buffers.
             if not hasattr(self, "_oproj_rs_out_buf"):
                 self._oproj_rs_out_buf = torch.empty(
-                    (exchange_num_tokens, o_proj_output.shape[-1]),
+                    (capacity, o_proj_output.shape[-1]),
                     dtype=o_proj_output.dtype,
                     device=o_proj_output.device,
                 )
-            dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
-            output[...] = self._oproj_rs_out_buf[:num_tokens]
+            rs_output = self._oproj_rs_out_buf[:exchange_num_tokens]
+            dist.reduce_scatter_tensor(rs_output, o_proj_output, group=oproj_group.device_group)
+            output[...] = rs_output[:num_tokens]
         else:
             o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
@@ -1876,8 +1877,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             self.turboquant._initialize(hidden_states.device)
         o_proj_input_shape = self._get_o_proj_input_shape(attn_metadata)
         if attn_metadata is None:
-            # Profiling run: run o_proj on zero input so HCCL collectives are
-            # captured by the ACL graph.  Non-OTP just zeros the output.
             if oproj_tp_enable() or self.enable_pcp_o_proj_weight_sharding:
                 o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
