@@ -111,8 +111,17 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         is_drafting: bool = False,
+        *,
+        pcp_context: Any | None = None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMetadata:
-        attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        attn_metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            pcp_context=pcp_context,
+            pcp_cache_group_idx=pcp_cache_group_idx,
+        )
 
         num_reqs = common_attn_metadata.num_reqs
 

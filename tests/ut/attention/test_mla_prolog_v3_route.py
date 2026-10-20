@@ -133,7 +133,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     impl.qk_head_dim = 4
     impl.v_head_dim = 2
     impl.enable_mlapo = False
-    impl.pcp_enabled = False
+    impl.use_pcp = False
     impl.dcp_enabled = impl_type is AscendMlaDCPImpl
     impl.is_pcp_decode_sharded = False
     impl.speculative_config = None
@@ -323,7 +323,7 @@ def test_post_load_skips_unused_prolog_weights(monkeypatch, excluded_path):
     elif excluded_path == "no_rope":
         impl.use_mla_rope = False
     elif excluded_path == "pcp":
-        impl.pcp_enabled = True
+        impl.use_pcp = True
     elif excluded_path == "sharded_pcp":
         impl.is_pcp_decode_sharded = True
     elif excluded_path == "nz":
@@ -418,7 +418,7 @@ def test_constructor_initializes_parallel_routing_flags(
 ):
     impl = _construct_impl(pcp_size, dcp_size)
 
-    assert impl.pcp_enabled is expected_pcp
+    assert impl.use_pcp is expected_pcp
     assert impl.dcp_enabled is expected_dcp
     assert impl.is_pcp_decode_sharded is (expected_pcp and dcp_size == 1)
 
@@ -690,7 +690,7 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
 
 
 @pytest.mark.parametrize(
-    ("dcp_enabled", "pcp_enabled", "decode_sharded", "use_rope", "expected_buffers"),
+    ("dcp_enabled", "use_pcp", "decode_sharded", "use_rope", "expected_buffers"),
     [
         (False, False, False, True, "none"),
         (True, False, False, True, "both"),
@@ -702,7 +702,7 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
     ],
 )
 def test_dcp_post_load_allocates_only_consumed_workspaces(
-    dcp_enabled, pcp_enabled, decode_sharded, use_rope, expected_buffers
+    dcp_enabled, use_pcp, decode_sharded, use_rope, expected_buffers
 ):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
@@ -711,7 +711,7 @@ def test_dcp_post_load_allocates_only_consumed_workspaces(
     )
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=7)
     impl.dcp_enabled = dcp_enabled
-    impl.pcp_enabled = pcp_enabled
+    impl.use_pcp = use_pcp
     impl.is_pcp_decode_sharded = decode_sharded
     impl.enable_mlapo = True
     impl.fa_quant_layer = False
@@ -882,7 +882,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     (
         "dcp_enabled",
         "has_dcp_buffers",
-        "pcp_enabled",
+        "use_pcp",
         "is_pcp_decode_sharded",
         "requires_current_kv",
         "expects_prolog",
@@ -900,7 +900,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
 def test_forward_routes_strided_cache_with_runtime_exclusions(
     dcp_enabled,
     has_dcp_buffers,
-    pcp_enabled,
+    use_pcp,
     is_pcp_decode_sharded,
     requires_current_kv,
     expects_prolog,
@@ -915,7 +915,7 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
             torch.empty(1, BLOCK_SIZE, 1, ROPE_DIM),
             torch.arange(BLOCK_SIZE),
         )
-    impl.pcp_enabled = pcp_enabled
+    impl.use_pcp = use_pcp
     impl.is_pcp_decode_sharded = is_pcp_decode_sharded
     impl._decode_requires_current_kv = MagicMock(return_value=requires_current_kv)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
@@ -953,7 +953,7 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     impl.use_output_gate = False
     impl.enable_mlapo = False
     impl.dcp_enabled = True
-    impl.pcp_enabled = False
+    impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),
@@ -990,7 +990,7 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
     impl.use_output_gate = False
     impl.enable_mlapo = False
     impl.dcp_enabled = True
-    impl.pcp_enabled = False
+    impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),

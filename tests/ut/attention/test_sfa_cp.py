@@ -682,7 +682,9 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.is_pcp_decode_sharded = False
-    attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1)
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=1, num_prefills=1, num_input_tokens=2, pcp_slot_mapping=torch.arange(4)
+    )
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
     sin = cos + 10
@@ -1369,6 +1371,8 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
     metadata = SimpleNamespace(
         num_decode_tokens=num_decode_tokens,
         num_prefills=int(rows > 0),
+        num_input_tokens=num_tokens,
+        pcp_slot_mapping=slots.flatten(),
         pcp_has_global_prefill=False,
         pcp_prolog_local_slots=expected_local_slots if rows else None,
         pcp_prolog_global_slots=slots[:, num_decode_tokens:].reshape(-1) if rows else None,
@@ -1545,6 +1549,8 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     metadata = SimpleNamespace(
         num_decode_tokens=1,
         num_prefills=0,
+        num_input_tokens=2,
+        pcp_slot_mapping=torch.tensor([0, 1, -1, -1], dtype=torch.int64),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=torch.tensor([0, -1], dtype=torch.int64),
         pcp_prolog_global_slots=torch.tensor([1, -1], dtype=torch.int64),
@@ -1592,6 +1598,8 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     metadata = SimpleNamespace(
         num_decode_tokens=0,
         num_prefills=0,
+        num_input_tokens=1,
+        pcp_slot_mapping=torch.full((2,), -1),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=slots,
         pcp_prolog_global_slots=slots,
@@ -1621,7 +1629,38 @@ def test_sfa_pcp_padded_decode_skips_kv_gather():
     hidden = torch.zeros((num_input_tokens, 3))
     slots = torch.cat((torch.arange(num_decode_tokens), torch.full((num_decode_tokens,), -1)))
     cache = (torch.empty(0), torch.empty(0))
-    metadata = SimpleNamespace(num_decode_tokens=num_decode_tokens, num_prefills=0, pcp_has_global_prefill=False)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_prefills=0,
+        num_input_tokens=num_input_tokens,
+        pcp_slot_mapping=torch.cat((slots, torch.full((num_input_tokens,), -1))),
+        pcp_has_global_prefill=False,
+    )
+    output = (hidden, hidden, hidden, None)
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs") as gather,
+        patch.object(AscendSFAImpl, "_sfa_preprocess_prolog_v3", return_value=output),
+        patch.object(AscendSFAImpl, "exec_kv", return_value="written") as base_write,
+    ):
+        assert impl._sfa_preprocess_prolog_v3(hidden, cache, hidden, hidden, slots, attn_metadata=metadata) is output
+        assert impl.exec_kv(hidden, hidden, hidden, cache, slots, metadata) == "written"
+    group.assert_not_called()
+    gather.assert_not_called()
+    torch.testing.assert_close(base_write.call_args.args[4], slots)
+
+
+def test_sfa_pcp_replicated_draft_decode_skips_kv_gather():
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    # Sharded-decode config, but a draft decode built without a PCP context
+    # keeps an unexpanded slot mapping and runs replicated on every rank.
+    impl.is_pcp_decode_sharded = True
+    hidden = torch.zeros((2, 3))
+    slots = torch.tensor([5, 7])
+    cache = (torch.empty(0), torch.empty(0))
+    metadata = SimpleNamespace(
+        num_decode_tokens=0, num_prefills=0, num_input_tokens=2, pcp_slot_mapping=slots, pcp_has_global_prefill=False
+    )
     output = (hidden, hidden, hidden, None)
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,

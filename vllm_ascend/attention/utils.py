@@ -69,7 +69,7 @@ def supports_strided_mla_cache(
     ):
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         return False
     if getattr(impl, "dcp_enabled", False):
         buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
