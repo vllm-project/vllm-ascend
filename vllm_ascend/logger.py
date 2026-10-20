@@ -24,6 +24,12 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
 _LOG_MAX_BYTES = 20 * 1024 * 1024
 
+_ascend_log_dir = _LOG_DIR
+
+
+def get_ascend_log_dir() -> str:
+    return _ascend_log_dir
+
 
 def _use_color() -> bool:
     """Determine if colored output should be used."""
@@ -135,12 +141,12 @@ _file_handler: logging.Handler | None = None
 
 
 def _setup_file_logging(log_dir: str | None = None) -> None:
-    global _file_logging_configured, _file_handler
+    global _file_logging_configured, _file_handler, _ascend_log_dir
     if _file_logging_configured:
         return
-    target_dir = log_dir or _LOG_DIR
-    os.makedirs(target_dir, exist_ok=True)
-    file_handler = RotatingAscendFileHandler(target_dir)
+    _ascend_log_dir = log_dir or _LOG_DIR
+    os.makedirs(_ascend_log_dir, exist_ok=True)
+    file_handler = RotatingAscendFileHandler(_ascend_log_dir)
     vllm_logger = logging.getLogger("vllm")
     ascend_logger = logging.getLogger("vllm_ascend")
     log_level = logging.INFO
