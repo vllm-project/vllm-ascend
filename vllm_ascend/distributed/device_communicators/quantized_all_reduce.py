@@ -48,6 +48,18 @@ import torch.distributed as dist
 import torch_npu  # noqa: F401
 from vllm.logger import logger
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
+# Hardware families where the scheme is validated or considered safe:
+# - A2 (910B): measured end to end (latency, throughput, GPQA accuracy).
+# - A3 (910C): npu_quantize/npu_anti_quant support the SoC, but the int8
+#   reduce behavior is not yet measured there; use with care above TP=8.
+_VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3)
+# Above this TP size the headroom eats too many bits (ws=16 -> max_q=7,
+# i.e. 3 effective bits) and accuracy degrades; fall back to bf16.
+_MAX_VALID_WORLD_SIZE = 8
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -63,6 +75,27 @@ class QuantizedAllReduce:
     def __init__(self, group: "dist.ProcessGroup") -> None:
         self.group = group
         self.world_size = dist.get_world_size(group)
+        device_type = get_ascend_device_type()
+        # Fail fast on unvalidated device families: silently falling back to
+        # bf16 would hide a misconfiguration, and 310P additionally lacks
+        # bf16 npu_quantize support, so the quantized kernels cannot run.
+        if device_type not in _VALID_DEVICE_TYPES:
+            raise RuntimeError(
+                "VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1 is only validated on "
+                f"{'/'.join(t.name for t in _VALID_DEVICE_TYPES)} devices, "
+                f"but the current device family is {device_type.name}. "
+                "Unset the environment variable or use a supported device."
+            )
+        # Above this TP size the headroom eats too many bits (ws=16 -> max_q=7,
+        # i.e. 3 effective levels) and accuracy degrades; refuse instead of
+        # silently degrading.
+        if self.world_size > _MAX_VALID_WORLD_SIZE:
+            raise RuntimeError(
+                f"VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1 supports TP size up to "
+                f"{_MAX_VALID_WORLD_SIZE} (the integer-safe headroom leaves "
+                f"too few int8 levels beyond that), but the current TP size "
+                f"is {self.world_size}."
+            )
         # Integer-safe per-rank bound. Rounding can push |q| above 127/ws
         # (e.g. x == amax on every rank with ws=4: round(31.75) == 32, and
         # 4 * 32 == 128 overflows int8, wrapping to -128). Clamping to

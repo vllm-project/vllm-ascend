@@ -27,21 +27,33 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
 
 
-def _make(world_size: int = 4, min_numel: int = 8) -> QuantizedAllReduce:
-    with patch.dict(
-        os.environ, {"VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": str(min_numel)}
+def _make(
+    world_size: int = 4,
+    min_numel: int = 8,
+    device_type: AscendDeviceType = AscendDeviceType.A2,
+) -> QuantizedAllReduce:
+    """Build a wrapper; raises RuntimeError on unvalidated configs."""
+    with (
+        patch.dict(
+            os.environ, {"VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": str(min_numel)}
+        ),
+        patch(
+            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
+            return_value=device_type,
+        ),
     ):
-        wrapper = QuantizedAllReduce.__new__(QuantizedAllReduce)
-        wrapper.group = MagicMock()
-        wrapper.world_size = world_size
-        wrapper.max_q = 127 // world_size
-        wrapper.min_numel = min_numel
-        return wrapper
+        group = MagicMock()
+        with patch(
+            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.dist.get_world_size",
+            return_value=world_size,
+        ):
+            return QuantizedAllReduce(group)
 
 
 class TestQuantizedAllReduce(unittest.TestCase):
@@ -49,8 +61,26 @@ class TestQuantizedAllReduce(unittest.TestCase):
         wrapper = _make(min_numel=12345)
         self.assertEqual(wrapper.min_numel, 12345)
 
+    def test_accepted_on_validated_device_families(self):
+        for dt in (AscendDeviceType.A2, AscendDeviceType.A3):
+            wrapper = _make(world_size=4, device_type=dt)
+            self.assertEqual(wrapper.max_q, 31)
+
+    def test_raises_on_unvalidated_device_families(self):
+        for dt in (AscendDeviceType._310P, AscendDeviceType.A5):
+            with self.assertRaisesRegex(RuntimeError, "only validated on"):
+                _make(world_size=4, device_type=dt)
+
+    def test_raises_above_max_tp_size(self):
+        # ws=16 -> max_q=7 (3 effective int8 levels): refuse instead of
+        # silently degrading accuracy.
+        with self.assertRaisesRegex(RuntimeError, "supports TP size up to"):
+            _make(world_size=16, device_type=AscendDeviceType.A2)
+        wrapper = _make(world_size=8, device_type=AscendDeviceType.A2)
+        self.assertEqual(wrapper.max_q, 15)
+
     def test_max_q_integer_safe_for_common_tp_sizes(self):
-        for ws in (2, 4, 8, 16):
+        for ws in (2, 4, 8):
             self.assertLessEqual(ws * (127 // ws), 127)
 
     def test_small_message_skips_quantization(self):
@@ -98,16 +128,16 @@ class TestQuantizedAllReduce(unittest.TestCase):
             wrapper = _make(world_size=ws)
             amax = torch.ones(8, dtype=torch.float32)
             scale = amax * (ws / 127.0)
-            x = torch.ones(4, 8, dtype=torch.bfloat16) * amax[0]
-            q = torch.quantize_per_tensor(
-                x.float(), 1.0, 0, torch.qint32
-            ).int_repr()  # identity stand-in for rounding behavior
+            x = torch.ones(ws, 8, dtype=torch.bfloat16) * amax[0]
             q = (x.float() / scale).round().to(torch.int8)
-            self.assertEqual(q.abs().max().item(), 32)  # exceeds 127/ws
+            # rounding always exceeds the integer-safe bound (ws=2: 63.5->64,
+            # ws=4: 31.75->32, ws=8: 15.875->16), hence the clamp is required
+            self.assertGreater(q.abs().max().item(), wrapper.max_q)
             q.clamp_(-wrapper.max_q, wrapper.max_q)
             self.assertLessEqual(q.abs().max().item(), wrapper.max_q)
-            total = q.sum().item()
-            self.assertLessEqual(abs(total), 127)
+            # x has 4 rows simulating 4 ranks; the reduced sum is per position
+            total = q.sum(dim=0).abs().max().item()
+            self.assertLessEqual(total, 127)
 
     def test_clamp_applied_in_wrapper_path(self):
         """The wrapper must clamp the int8 payload before the all-reduce."""
