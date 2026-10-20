@@ -10,14 +10,22 @@ describes the MRv1 default layout for these models.
 - Pure GQA allocates K and V separately, with contiguous logical views.
 - Ordinary hybrid models use contiguous regions in shared backing: all conv
   states, all SSM states, and all Attention K blocks and V blocks. See Section 3.1.
-- The hybrid Attention block size is derived from K/SSM segment sizes. Larger
-  manually configured blocks must not violate segment alignment. Restoring
-  contiguous layouts may increase padding and reduce cache capacity; performance
-  benefits require controlled A/B testing.
+- The hybrid Attention block size is derived from K/SSM segment sizes. An
+  explicit block size larger than the derived value is overridden with a
+  warning, matching the upstream hybrid-alignment contract. Restoring
+  contiguous layouts may increase padding, reduce cache capacity, and coarsen
+  the prefix-cache granularity; performance benefits require controlled A/B
+  testing.
+- The contiguous layout assumes Mamba states are ordered conv then SSM, at most
+  two states are present, and K/V head sizes are equal. Unsupported geometries
+  fail fast at startup instead of silently aliasing the wrong region.
+- 310P keeps its legacy `patch_mamba_config_310` alignment path.
 - Specialized GLM/DeepSeek physical pages and existing C8_MXFP packed layouts are
   outside this generic cache-layout rollback and retain their required page
   strides. FLA operators, state gather/scatter, and cache-copy/zeroing
   compatibility remain unchanged.
+- Sections 2-9 describe the non-contiguous MRv2/historical design and are kept
+  for reference; they are not the MRv1 default for ordinary GQA/hybrid models.
 
 ## 1. Overview
 
