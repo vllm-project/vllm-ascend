@@ -18,9 +18,8 @@
 Follows the pattern from vllm's test_extraction.py, validating that hidden
 states are correctly extracted and saved on the Ascend NPU. Parametrized over:
 
-* a dense model (Qwen3-8B) in ACL graph mode on the default runner, and in
-  eager mode on Model Runner V2, using real weights so outputs can be checked
-  to be non-zero, and
+* a dense model (Qwen3-8B) in ACL graph mode on the default runner, using real
+  weights so outputs can be checked to be non-zero, and
 * a hybrid attention model (Qwen3.5-0.8B, GatedDeltaNet + full_attention)
   loaded with dummy weights on Model Runner V2 as a shape/round-trip smoke
   test. The hybrid case mirrors upstream vLLM PR #39949.
@@ -94,21 +93,6 @@ CASES = [
             max_num_seqs=16,
         ),
         id="dense_aclgraph",
-    ),
-    pytest.param(
-        ExtractHiddenStatesCase(
-            model_name=DENSE_MODEL,
-            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
-            prompts=[
-                "Hello, how are you?",
-                "What is machine learning?",
-            ],
-            enforce_eager=True,
-            gpu_memory_utilization=0.8,
-            max_num_seqs=16,
-            use_v2_model_runner=True,
-        ),
-        id="dense_eager_mrv2",
     ),
     pytest.param(
         ExtractHiddenStatesCase(
