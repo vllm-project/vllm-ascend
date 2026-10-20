@@ -233,15 +233,32 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
     """
 
     @wraps(original)
-    def wrapped(self: Any, inputs: torch.Tensor) -> torch.Tensor:
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         previous = _get_allow_internal_format()
         _set_allow_internal_format(False)
         try:
-            return original(self, inputs)
+            return original(self, *args, **kwargs)
         finally:
             _set_allow_internal_format(previous)
 
     return wrapped
+
+
+def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
+    """Install the bounded legacy prefill path when upstream still exposes it.
+
+    Newer vLLM revisions route prefill through the fused ``ple_conv``
+    dispatcher and no longer define ``_short_conv_dilated_prefill_batched``.
+    Keep the override for older supported revisions without making a removed
+    private method an import-time requirement.
+    """
+    method_name = "_short_conv_dilated_prefill_batched"
+    original_attr = "_ascend_original_short_conv_dilated_prefill_batched"
+    original_prefill = getattr(ple_layer_cls, method_name, None)
+    if original_prefill is None or hasattr(ple_layer_cls, original_attr):
+        return
+    setattr(ple_layer_cls, original_attr, original_prefill)
+    setattr(ple_layer_cls, method_name, _short_conv_dilated_prefill_batched)
 
 
 def patch_upstream_ple_short_conv() -> None:
@@ -288,13 +305,7 @@ def patch_upstream_ple_short_conv() -> None:
             from_quant_config
         )
 
-    prefill_attr = "_ascend_original_short_conv_dilated_prefill_batched"
-    if not hasattr(Qwen4ExpPLELayer, prefill_attr):
-        original_prefill = Qwen4ExpPLELayer._short_conv_dilated_prefill_batched
-        setattr(Qwen4ExpPLELayer, prefill_attr, original_prefill)
-        Qwen4ExpPLELayer._short_conv_dilated_prefill_batched = (
-            _short_conv_dilated_prefill_batched
-        )
+    _patch_legacy_prefill(Qwen4ExpPLELayer)
 
 
 __all__ = ["patch_upstream_ple_short_conv"]
