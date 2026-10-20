@@ -191,7 +191,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Gemma3                         | 🔵            |                                                                      | A2/A3 |
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
-| GLM-4.6V                       | 🔵            | BF16, TP=8; requires `--mm-encoder-tp-mode data`. See [deployment tutorial](../../tutorials/models/GLM4.6V.md). | A3 |
+| GLM-4.6V                       | 🔵            |                                                                      | A3 |
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |
 | Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |
