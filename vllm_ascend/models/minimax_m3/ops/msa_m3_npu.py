@@ -165,9 +165,7 @@ def _minimax_m3_index_score(
     ``init_blocks`` and ``local_blocks`` are kept for parity with the index
     scoring interface; candidate forcing is applied by the TopK stage.
     """
-    from cann_ops_transformer.ops import (  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
-        msa_index_score,
-    )
+    from cann_ops_transformer.ops import msa_index_score
 
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
