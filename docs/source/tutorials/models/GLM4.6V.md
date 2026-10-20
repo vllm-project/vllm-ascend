@@ -87,7 +87,7 @@ The output should list the `vllm-ascend` container with an `Up` status.
 
 ### 5.1 Single-Node Online Deployment
 
-The following example uses eight NPU devices on an A3 node with TP=8 and expert parallelism.
+The following example uses eight NPU devices on an A3 node with TP=8.
 
 Run the following script to execute online inference.
 
@@ -100,7 +100,6 @@ vllm serve /root/.cache/GLM-4.6V \
     --tensor-parallel-size 8 \
     --mm-encoder-tp-mode data \
     --mm-processor-cache-type shm \
-    --enable-expert-parallel \
     --max-model-len 65536 \
     --max-num-seqs 256 \
     --max-num-batched-tokens 8192 \
@@ -118,7 +117,7 @@ vllm serve /root/.cache/GLM-4.6V \
 **Notice:**
 The parameters are explained as follows:
 
-- `--mm-encoder-tp-mode data`: Use data parallelism for the vision encoder.
+- `--mm-encoder-tp-mode data`: Required for this TP=8 deployment. Use data parallelism for the vision encoder; omitting this option causes engine initialization to fail.
 - `--mm-processor-cache-type shm`: Use shared memory for the multimodal processor cache.
 - `--tool-call-parser glm45` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable tool-call and reasoning parsing.
 - `--max-model-len` and `--max-num-seqs` need to be set according to the actual usage scenario.
@@ -197,10 +196,6 @@ For evaluating MMStar with AISBench, refer to [Using AISBench](../../developer_g
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-## 9 Performance Tuning
-
-Refer to [Performance Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods. Adjust `--max-model-len` and `--max-num-seqs` for your workload and available device memory.
-
-## 10 FAQ
+## 9 FAQ
 
 For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md).
