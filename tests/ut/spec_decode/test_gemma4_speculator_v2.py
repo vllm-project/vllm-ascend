@@ -128,9 +128,6 @@ def test_sync_kv_sharing_target_to_impl_without_layers():
 
 
 def test_prefill_rebinds_prefill_nocache_state():
-    # The Gemma4 window is Q-only and reads the KV shared with the target, so
-    # a target PrefillNoCache run must be rebound to a cache-reading state on
-    # a metadata copy; the target's metadata itself must stay untouched.
     speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
     original = {
         "shared": SimpleNamespace(attn_state=AscendAttentionState.PrefillNoCache),
@@ -147,7 +144,6 @@ def test_prefill_rebinds_prefill_nocache_state():
 
 
 def test_prefill_keeps_cache_reading_states():
-    # Metadata that already reads the KV cache passes through unchanged.
     speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
     original = {"shared": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)}
     with patch.object(AscendAutoRegressiveSpeculator, "_prefill") as parent_prefill:

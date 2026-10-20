@@ -762,8 +762,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        # Draft steps with fixed positions (advance_draft_positions is False,
-        # e.g. Gemma4 MTP) keep the KV length constant across steps.
         advance_draft_positions = getattr(self, "advance_draft_positions", True)
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
@@ -807,7 +805,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         parallel_config = self.draft_vllm_config.parallel_config
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        # Same fixed-position rule as build_fia_params above.
         advance_draft_positions = getattr(self, "advance_draft_positions", True)
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
@@ -840,10 +837,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
 
         # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
-        # Speculators that keep draft positions fixed (advance_draft_positions
-        # is False, e.g. Gemma4 MTP) do not grow the KV length per draft step;
-        # mirror the device-side update_draft_inputs kernel, which honors the
-        # same flag.
         if not getattr(self, "advance_draft_positions", True):
             step = 0
         next_seqs_cpu = torch.clamp(seq_lens_cpu[:num_reqs_padded] + step, max=self.max_model_len)
