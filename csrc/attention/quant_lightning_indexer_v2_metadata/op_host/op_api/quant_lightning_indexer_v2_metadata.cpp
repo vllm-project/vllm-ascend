@@ -28,13 +28,13 @@ OP_TYPE_REGISTER(VllmAscendQuantLightningIndexerV2Metadata);
 
 const aclTensor *QuantLightningIndexerV2Metadata(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
-    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional, int64_t numHeadsQ, int64_t numHeadsK,
+    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional, const aclTensor *dcpContextOptional, int64_t numHeadsQ, int64_t numHeadsK,
     int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK,
     char *layoutQOptional, char *layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t aicCoreNum,
     int64_t aivCoreNum, const char *socVersion, const aclTensor *metadata, aclOpExecutor *executor)
 {
     L0_DFX(QuantLightningIndexerV2Metadata, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
-        cmpResidualKOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
+        cmpResidualKOptional, dcpContextOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
         layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion, metadata);
 
     static internal::AicpuTaskSpace space("VllmAscendQuantLightningIndexerV2Metadata");
@@ -44,7 +44,7 @@ const aclTensor *QuantLightningIndexerV2Metadata(
         OP_ATTR_NAMES({ "num_heads_q", "num_heads_k", "head_dim", "topk", "quant_mode", "batch_size", "max_seqlen_q",
                         "max_seqlen_k", "layout_q", "layout_k", "mask_mode", "cmp_ratio", "aic_core_num",
                         "aiv_core_num", "soc_version" }),
-        OP_INPUT(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional),
+        OP_INPUT(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional, dcpContextOptional),
         OP_OUTPUT(metadata),
         OP_ATTR(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional,
             layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion));

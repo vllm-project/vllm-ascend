@@ -267,6 +267,7 @@ class AscendIndexerOps:
                 mask_mode=3,
                 cmp_ratio=4,
                 return_value=return_value,
+                dcp_context=metadata.dcp_causal_context,
             )
 
         if return_values and not _QLI_RETURN_VALUE_UNSUPPORTED:

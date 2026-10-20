@@ -21,6 +21,7 @@
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
 #include "quant_lightning_indexer_v2_common_arch22.h"
+#include "../../../common/dcp_causal.h"
 #include "quant_lightning_indexer_v2_vector.h"
 
 namespace QLIV2Kernel {
@@ -815,7 +816,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
     for (int innerS1Idx = 0; innerS1Idx < cuS1ProcNumPerAiv; innerS1Idx++) {
         if (constInfo_.attenMaskFlag) {
             cuRealAcSeqCount += 1;
-            cuRealAcSeq = (cuRealAcSeqCount + cuRealAcSeqIni) / static_cast<int32_t>(constInfo_.cmpRatio);
+            if (constInfo_.dcpSize > 1) {
+                const int64_t rawEnd = static_cast<int64_t>(info.globalSeqLen) - info.actS1Size +
+                    cuS1BeginIdxPerAiv + innerS1Idx + 1;
+                cuRealAcSeq = vllm_ascend::dcp::LocalCompressedLength(
+                    rawEnd, constInfo_.cmpRatio, constInfo_.dcpSize, constInfo_.dcpRank, constInfo_.dcpInterleave);
+            } else {
+                cuRealAcSeq = (cuRealAcSeqCount + cuRealAcSeqIni) / static_cast<int32_t>(constInfo_.cmpRatio);
+            }
         }
         int32_t cuS2Len = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq ? cuRealAcSeq - cuBaseS2Idx : s2BaseSize_;
         int32_t cuS1Idx = cuS1BeginIdxPerAiv + innerS1Idx;
@@ -974,7 +982,8 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             }
         }
 
-        int32_t invalidS1Num2 = info.actS1Size - info.actS2SizeOrig;
+        const int32_t rawSeqLen = constInfo_.dcpSize > 1 ? info.globalSeqLen : info.actS2SizeOrig;
+        int32_t invalidS1Num2 = static_cast<int32_t>(info.actS1Size) - rawSeqLen;
         if (invalidS1Num2 > 0 && isS1LoopEnd && blockS2StartIdx_ == 0 && constInfo_.attenMaskFlag) {
             int32_t s1NumPerAiv = blockId_ % 2 == 0 ? CeilDiv(invalidS1Num2, 2) : (invalidS1Num2 / 2);
             int32_t s1OffsetPerAiv = (blockId_ % 2) * CeilDiv(invalidS1Num2, 2);

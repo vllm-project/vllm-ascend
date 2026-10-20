@@ -219,7 +219,7 @@ int GenerateMetadata(TensorResources &resources, aclrtStream stream, int64_t B, 
     aclOpExecutor *executor;
     uint64_t workspaceSize = 0;
     int ret = aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
-        nullptr, nullptr, nullptr, nullptr, nullptr, N1, N2, D, topk, quantMode, B, S1, S2, layoutQCopy, layoutKCopy,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, N1, N2, D, topk, quantMode, B, S1, S2, layoutQCopy, layoutKCopy,
         maskMode, cmpRatio, resources.metadataTensor, &workspaceSize, &executor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
         LOG_PRINT("aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize failed. ERROR: %d\n", ret);
@@ -287,9 +287,9 @@ int ExecuteQuantLightningIndexerV2(TensorResources &resources, aclrtStream strea
 
     int ret = aclnnVllmAscendQuantLightningIndexerV2GetWorkspaceSize(
         resources.queryTensor, resources.keyTensor, resources.weightsTensor, resources.qScaleTensor,
-        resources.kScaleTensor, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, resources.metadataTensor,
-        topk, quantMode, -1, layoutQ, layoutK, maskMode, cmpRatio, returnValue, resources.sparseIndicesTensor,
-        resources.sparseValuesTensor, workspaceSize, &executor);
+        resources.kScaleTensor, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, resources.metadataTensor, nullptr, nullptr,
+        topk, quantMode, -1, layoutQ, layoutK, maskMode, cmpRatio, returnValue, 3, 2048, 8, 0, 0, resources.sparseIndicesTensor,
+        resources.sparseValuesTensor, nullptr, workspaceSize, &executor);
 
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
         LOG_PRINT("aclnnQuantLightningIndexerV2GetWorkspaceSize failed. ERROR: %d\n", ret);

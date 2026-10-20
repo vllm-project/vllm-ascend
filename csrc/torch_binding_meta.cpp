@@ -921,8 +921,10 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
     const c10::optional<at::Tensor> &output_idx_offset,
     const c10::optional<at::Tensor> &metadata,
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
-    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
+    const c10::optional<at::Tensor> &dcp_context)
 {
+    (void)dcp_context; // DCP changes visibility, not output shapes.
     std::string query_layout_str = std::string(layout_q);
     std::string key_layout_str = std::string(layout_k);
     std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_v2_output_tensor(
@@ -956,8 +958,10 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_meta(const at::Tenso
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_kv,
     const c10::optional<at::Tensor> &sinks, const c10::optional<at::Tensor> &metadata,
     double softmax_scale, int64_t cmp_ratio, int64_t ori_mask_mode, int64_t cmp_mask_mode, int64_t ori_win_left,
-    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, bool return_softmax_lse)
+    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, bool return_softmax_lse,
+    const c10::optional<at::Tensor> &dcp_context)
 {
+    (void)dcp_context;
     std::string layout_q_str = std::string(layout_q);
     std::tuple<at::Tensor, at::Tensor> output = construct_output_tensor(q, layout_q_str, return_softmax_lse);
 
@@ -987,8 +991,9 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
     c10::string_view layout_kv,
     bool has_ori_kv,
     bool has_cmp_kv,
-    const c10::string_view device)
+    const c10::string_view device, const c10::optional<at::Tensor> &dcp_context)
 {
+    (void)dcp_context;
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
     if (cu_seqlens_q.has_value()) {
@@ -1031,8 +1036,9 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
     const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
     const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
-    const c10::string_view device)
+    const c10::string_view device, const c10::optional<at::Tensor> &dcp_context)
 {
+    (void)dcp_context;
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
     if (cu_seqlens_q.has_value()) {

@@ -17,6 +17,7 @@
 #define QUANT_LIGHTNING_INDEXER_V2_KERNEL_H
 
 #include "kernel_operator.h"
+#include "../../../common/dcp_causal.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
@@ -66,7 +67,7 @@ public:
                                 __gm__ uint8_t *cuSeqlensK, __gm__ uint8_t *sequsedQ, __gm__ uint8_t *sequsedK,
                                 __gm__ uint8_t *cmpResidualK, __gm__ uint8_t *blockTable,
                                 __gm__ uint8_t *outputIdxOffset, __gm__ uint8_t *metadata,
-                                __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *sparseIndices,
+                                __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *dcpContext, __gm__ uint8_t *sparseIndices,
                                 __gm__ uint8_t *sparseValues, __gm__ uint8_t *candidateTopkIndexOut,
                                 __gm__ uint8_t *workspace, const QLIV2TilingData *__restrict tiling, TPipe *tPipe);
     __aicore__ inline void Process();
@@ -120,6 +121,7 @@ protected:
     GlobalTensor<K_T> keyGm;
     GlobalTensor<half> weightsGm;
     GlobalTensor<uint32_t> metadataGm;
+    GlobalTensor<int32_t> dcpContextGm;
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
@@ -147,7 +149,7 @@ protected:
                                             __gm__ uint8_t *cmpResidualK);
     // ================================Split Core================================
     __aicore__ inline void SplitCore();
-    __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size, uint32_t actS2SizeOrig,
+    __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t bIdx, uint32_t s1gIdx, uint32_t actS1Size, uint32_t actS2SizeOrig,
                                                        uint32_t &validS2Len);
     __aicore__ inline uint32_t GetTotalBaseBlockNum();
     // ================================Process functions================================
@@ -315,7 +317,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::GetS1S2ActualSeqLen(uint32_t bIdx, 
 }
 
 template <typename QLIV2T>
-__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size,
+__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_t bIdx, uint32_t s1gIdx, uint32_t actS1Size,
                                                                          uint32_t actS2SizeOrig, uint32_t &validS2Len)
 {
     if (actS2SizeOrig / constInfo.cmpRatio == 0) {
@@ -323,6 +325,17 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_
         return 0;
     }
     uint32_t s1Offset = constInfo.s1BaseSize * s1gIdx;
+    if (constInfo.dcpSize > 1) {
+        const int64_t rawEnd = static_cast<int64_t>(dcpContextGm.GetValue(
+            vllm_ascend::dcp::SEQ_LENS_OFFSET + bIdx)) - actS1Size +
+            Min(s1Offset + constInfo.s1BaseSize, actS1Size);
+        validS2Len = vllm_ascend::dcp::LocalCompressedLength(
+            rawEnd, constInfo.cmpRatio, constInfo.dcpSize, constInfo.dcpRank, constInfo.dcpInterleave);
+        // Schedule one stored entry even for an empty causal prefix so the
+        // vector stage writes -1 outputs. Its per-query bound remains zero.
+        validS2Len = Max(validS2Len, 1U);
+        return CeilDiv(validS2Len, constInfo.s2BaseSize);
+    }
     int32_t validS2LenBase =
         static_cast<int32_t>(actS2SizeOrig) - static_cast<int32_t>(actS1Size); // 压缩前的validS2LenBase
     validS2Len = (static_cast<int32_t>(s1Offset) + validS2LenBase + static_cast<int32_t>(constInfo.s1BaseSize)) /
@@ -348,7 +361,7 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetTotalBaseBlockNum()
             continue;
         }
         for (uint32_t s1gIdx = 0; s1gIdx < s1GBaseNum; s1gIdx++) {
-            s2BaseNum = GetS2BaseBlockNumOnMask(s1gIdx, actS1Size, actS2SizeOrig, validS2Len);
+            s2BaseNum = GetS2BaseBlockNumOnMask(bIdx, s1gIdx, actS1Size, actS2SizeOrig, validS2Len);
             totalBlockNum += s2BaseNum * constInfo.kHeadNum;
         }
     }
@@ -448,7 +461,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
     __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights, __gm__ uint8_t *queryScale,
     __gm__ uint8_t *keyScale, __gm__ uint8_t *cuSeqlensQ, __gm__ uint8_t *cuSeqlensK, __gm__ uint8_t *sequsedQ,
     __gm__ uint8_t *sequsedK, __gm__ uint8_t *cmpResidualK, __gm__ uint8_t *blockTable, __gm__ uint8_t *outputIdxOffset,
-    __gm__ uint8_t *metadata, __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *sparseIndices,
+    __gm__ uint8_t *metadata, __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *dcpContext, __gm__ uint8_t *sparseIndices,
     __gm__ uint8_t *sparseValues, __gm__ uint8_t *candidateTopkIndexOut, __gm__ uint8_t *workspace,
     const QLIV2TilingData *__restrict tiling, TPipe *tPipe)
 {
@@ -462,6 +475,12 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
 
     InitTilingData(tiling);
     InitActualSeqLen(cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK);
+    if (dcpContext != nullptr) {
+        dcpContextGm.SetGlobalBuffer((__gm__ int32_t *)dcpContext);
+        constInfo.dcpSize = dcpContextGm.GetValue(vllm_ascend::dcp::SIZE_INDEX);
+        constInfo.dcpRank = dcpContextGm.GetValue(vllm_ascend::dcp::RANK_INDEX);
+        constInfo.dcpInterleave = dcpContextGm.GetValue(vllm_ascend::dcp::INTERLEAVE_INDEX);
+    }
 
     if (metadata != nullptr) {
         metadataGm.SetGlobalBuffer((__gm__ uint32_t *)metadata);
@@ -550,7 +569,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcS2LoopParams(uint32_t bN2LoopId
     uint32_t s2BlockNum;
     uint32_t validS2Len = 0;
     if (constInfo.attenMaskFlag) {
-        s2BlockNum = GetS2BaseBlockNumOnMask(gS1LoopIdx, tempLoopInfo.actS1Size, tempLoopInfo.actS2SizeOrig,
+        s2BlockNum = GetS2BaseBlockNumOnMask(tempLoopInfo.bIdx, gS1LoopIdx, tempLoopInfo.actS1Size, tempLoopInfo.actS2SizeOrig,
                                              tempLoopInfo.validS2Len);
     } else {
         s2BlockNum = (tempLoopInfo.actS2Size + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
@@ -614,6 +633,9 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcRunInfo(uint32_t loop, uint32_t
     runInfo.actS1Size = tempLoopInfo.actS1Size;
     runInfo.actS2Size = tempLoopInfo.actS2Size;
     runInfo.actS2SizeOrig = tempLoopInfo.actS2SizeOrig;
+    if (constInfo.dcpSize > 1) {
+        runInfo.globalSeqLen = dcpContextGm.GetValue(vllm_ascend::dcp::SEQ_LENS_OFFSET + runInfo.bIdx);
+    }
     // 计算实际基本块size
     runInfo.actMBaseSize = tempLoopInfo.actMBaseSize;
     runInfo.actualSingleProcessSInnerSize = constInfo.s2BaseSize;

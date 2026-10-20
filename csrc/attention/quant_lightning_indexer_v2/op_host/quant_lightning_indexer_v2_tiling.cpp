@@ -208,6 +208,9 @@ ge::graphStatus QLIV2InfoParser::GetNpuInfo()
 
     socVersion_ = ascendcPlatform.GetSocVersion();
     npuArch_ = ascendcPlatform.GetCurNpuArch();
+    // The DCP causal-coordinate path is implemented by the A2/A3 int8 kernel.
+    OP_CHECK_IF(context_->GetOptionalInputShape(DCP_CONTEXT_INPUT_INDEX) != nullptr && npuArch_ != NpuArch::DAV_2201,
+                OP_LOGE(opName_, "dcp_context requires the DAV_2201 indexer kernel."), return GRAPH_FAILED);
     if ((npuArch_ != NpuArch::DAV_2201) && (npuArch_ != NpuArch::DAV_3510)) {
         OP_LOGE(opName_, "NpuArch[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;

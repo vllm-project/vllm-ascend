@@ -70,7 +70,6 @@ import os
 import torch
 import torch.distributed as dist
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -99,6 +98,7 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 DSA_DCP_SUPPORTED_COMPRESS_RATIOS = (4, 128)
+DSA_DCP_CAUSAL_HEADER_SIZE = 3
 DSA_DCP_PAD_SLOT = -1
 
 # Temporary debug instrumentation (eager mode only): set DSA_DCP_DEBUG=1 to
@@ -228,12 +228,12 @@ def get_dsa_dcp_local_compressed_seq_lens(
     """
     _compressed_stripe_len(interleave_size, compress_ratio)
     group_aligned = torch.div(seq_lens_cpu.to(torch.int64), compress_ratio, rounding_mode="floor") * compress_ratio
-    local_raw = get_dcp_local_seq_lens(
-        group_aligned,
-        dcp_size=dcp_size,
-        dcp_rank=dcp_rank,
-        cp_kv_cache_interleave_size=interleave_size,
-    ).to(torch.int64)
+    # Keep the fixed rank as a Python scalar. Older upstream helpers create
+    # an NPU scalar here, synchronizing the host with the previous decode.
+    cycle = interleave_size * dcp_size
+    base = torch.div(group_aligned, cycle, rounding_mode="floor") * interleave_size
+    tail = (torch.remainder(group_aligned, cycle) - dcp_rank * interleave_size).clamp(0, interleave_size)
+    local_raw = base + tail
     return torch.div(local_raw, compress_ratio, rounding_mode="floor").to(torch.int32)
 
 
@@ -378,6 +378,7 @@ class AscendDSADCPContext:
         self.storage_block_size = storage_block_size
         self.has_prefill = has_prefill
         self.num_reqs = num_reqs
+        self.causal_context: torch.Tensor | None = None
         # Per-request local compressed lengths and their exclusive cumsum.
         self.local_cmp_seq_lens: torch.Tensor | None = None
         self.local_cu_cmp_seqlens: torch.Tensor | None = None
@@ -449,6 +450,13 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         self.dcp_local_cu_cmp_buf = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.dcp_local_cmp_residual_buf = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.dcp_global_cmp_buf = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        # Native metadata and attention/indexer kernels share this device
+        # buffer. Only the sequence lengths change between graph replays.
+        self.dcp_causal_context_buf = torch.tensor(
+            [self.dcp_size, self.dcp_rank, self.cp_interleave_size] + [0] * max_num_reqs,
+            dtype=torch.int32,
+            device=device,
+        )
         # Identity table indexed by global compressed block column.
         # Materialized with repeat (not expand) so custom ops see a
         # contiguous tensor.
@@ -514,6 +522,10 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         # would freeze the first step's lengths under ACL graph capture (and
         # costs a host sync every eager step).
         seq_lens = self.seq_lens[:num_reqs]
+        self.dcp_causal_context_buf[
+            DSA_DCP_CAUSAL_HEADER_SIZE : DSA_DCP_CAUSAL_HEADER_SIZE + num_reqs
+        ].copy_(seq_lens)
+        self.dcp_causal_context_buf[DSA_DCP_CAUSAL_HEADER_SIZE + num_reqs :].zero_()
 
         context = AscendDSADCPContext(
             dcp_size=self.dcp_size,
@@ -524,6 +536,8 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
             has_prefill=self.num_prefills > 0,
             num_reqs=num_reqs,
         )
+        context.causal_context = self.dcp_causal_context_buf
+        req_metadata.dcp_causal_context = context.causal_context
 
         local_cmp = get_dsa_dcp_local_compressed_seq_lens(
             seq_lens,
@@ -669,6 +683,10 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        if self.compressor_ratio == 128:
+            # C4 consumes the indexer's causal candidates; C128 enumerates
+            # its dense local prefix directly.
+            metadata_kwargs["dcp_context"] = context.causal_context
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_gathered_heads,
@@ -781,11 +799,11 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         max_seqlen_q = int(torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item())
         self.qli_seqused_k[:num_reqs].copy_(context.local_cmp_seq_lens)
         self.qli_cmp_residual_k[:num_reqs].copy_(self.dcp_local_cmp_residual_buf[:num_reqs])
-        local_cmp = context.local_cmp_seq_lens
-        max_local_cmp = int(local_cmp.max().item()) if num_reqs else 1
-        # Drop the base async INDEXER task: it would rebuild with global
-        # compressed lengths after this synchronous local refresh.
-        self._drop_device_metadata_tasks(DeviceMetadataStage.INDEXER)
+        # An upper bound is sufficient for the metadata operator; the device
+        # seqused_k buffer supplies exact lengths. Do not read local K back.
+        max_local_cmp = cdiv(
+            common_attn_metadata.max_seq_len, self.cp_interleave_size * self.dcp_size
+        ) * (self.cp_interleave_size // self.compressor_ratio)
         qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
             num_heads_q=self.model_config.hf_config.index_n_heads,
             num_heads_k=1,
@@ -803,6 +821,7 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
             mask_mode=3,
             cmp_ratio=4,
             device=str(self.seqused_q.device),
+            dcp_context=context.causal_context,
         )
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata[:DSA_METADATA_BUFFER_SIZE]
 
@@ -816,6 +835,14 @@ class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, AscendDSAMetadataBuil
         indexer still selects over the local shard, so qli goes local."""
         if self.compressor_ratio != 4:
             return
+        self._drop_device_metadata_tasks(DeviceMetadataStage.INDEXER)
+        self._device_metadata_tasks += (
+            DeviceMetadataTask(
+                DeviceMetadataStage.INDEXER,
+                lambda: self._refresh_local_qli(context, common_attn_metadata),
+                id(self.qli_metadata_buffer),
+            ),
+        )
         self._refresh_local_qli(context, common_attn_metadata)
         req_metadata.qli_metadata = self.qli_metadata_buffer
         req_metadata.qli_seqused_k = self.qli_seqused_k[: context.num_reqs]
@@ -1288,6 +1315,8 @@ class AscendDSADCPImpl(DCPImplMixin, AscendDSAImpl):
                 cmp_block_table=common_metadata.block_table,
                 cmp_mask_mode=3,
             )
+            if self.compress_ratio == 128:
+                attn_kwargs["dcp_context"] = context.causal_context
             if self.compress_ratio == 4:
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs

@@ -64,6 +64,7 @@ aclnnStatus aclnnSparseAttnSharedkvMetadataGetWorkspaceSize(
     const aclTensor* cuSeqLensCmpKvOptional,
     const aclTensor* sequsedQOptional,
     const aclTensor* sequsedKvOptional,
+    const aclTensor* dcpContextOptional,
     int64_t numHeadsQ,
     int64_t numHeadsKv,
     int64_t headDim,
@@ -117,9 +118,15 @@ aclnnStatus aclnnSparseAttnSharedkvMetadataGetWorkspaceSize(
   auto sequsedKvOptionalContiguous = l0op::Contiguous(sequsedKvOptional, uniqueExecutor.get());
   CHECK_RET(sequsedKvOptionalContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
+  const aclTensor *dcpContextContiguous = nullptr;
+  if (dcpContextOptional != nullptr) {
+    dcpContextContiguous = l0op::Contiguous(dcpContextOptional, uniqueExecutor.get());
+    CHECK_RET(dcpContextContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
+  }
+
   auto output = l0op::SparseAttnSharedkvMetadata(
       cuSeqLensQOptionalContiguous, cuSeqLensOriKvOptionalContiguous, cuSeqLensCmpKvOptionalContiguous,
-      sequsedQOptionalContiguous, sequsedKvOptionalContiguous, numHeadsQ, numHeadsKv, headDim, batchSizeOptional,
+      sequsedQOptionalContiguous, sequsedKvOptionalContiguous, dcpContextContiguous, numHeadsQ, numHeadsKv, headDim, batchSizeOptional,
       maxSeqlenQOptional, maxSeqlenKvOptional, oriTopKOptional, cmpTopKOptional, cmpRatioOptional, oriMaskModeOptional,
       cmpMaskModeOptional, oriWinLeftOptional, oriWinRightOptional, layoutQOptional, layoutKvOptional,
       hasOriKvOptional, hasCmpKvOptional, socVersion, aicCoreNum, aivCoreNum, metaData,

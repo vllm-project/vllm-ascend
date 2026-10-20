@@ -1302,14 +1302,15 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
     const c10::optional<at::Tensor> &output_idx_offset,
     const c10::optional<at::Tensor> &metadata,
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
-    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
+    const c10::optional<at::Tensor> &dcp_context)
 {
     TORCH_CHECK(return_value == 0, "npu_quant_lightning_indexer_v2 only supports return_value=0");
     auto outputs = qli_v2::QuantLightningIndexerCandidate(
         query, key, weights, query_dequant_scale, key_dequant_scale, topk, quant_mode,
         c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
         block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
-        mask_mode, cmp_ratio, 3, 2048, 8);
+        mask_mode, cmp_ratio, 3, 2048, 8, dcp_context);
     return {std::get<0>(outputs), std::get<1>(outputs)};
 }
 
@@ -1344,7 +1345,8 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_npu(const at::Tensor
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_kv,
     const c10::optional<at::Tensor> &sinks, const c10::optional<at::Tensor> &metadata,
     double softmax_scale, int64_t cmp_ratio, int64_t ori_mask_mode, int64_t cmp_mask_mode, int64_t ori_win_left,
-    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, bool return_softmax_lse)
+    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, bool return_softmax_lse,
+    const c10::optional<at::Tensor> &dcp_context)
 {
     std::string layout_q_str = std::string(layout_q);
     std::string layout_kv_str = std::string(layout_kv);
@@ -1366,7 +1368,7 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_npu(const at::Tensor
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
     EXEC_NPU_CMD(aclnnSparseAttnSharedkv, q, ori_kv, cmp_kv, ori_sparse_indices, cmp_sparse_indices,
         ori_block_table, cmp_block_table, cu_seqlens_q, cu_seqlens_ori_kv, cu_seqlens_cmp_kv, seqused_q, seqused_kv, sinks,
-        metadata, softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_kv_stride, cmp_kv_stride, ori_win_left, ori_win_right, layout_q_ptr,
+        metadata, dcp_context, softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_kv_stride, cmp_kv_stride, ori_win_left, ori_win_right, layout_q_ptr,
         layout_kv_ptr, return_softmax_lse, attn_out, softmax_lse);
     return std::tuple<at::Tensor, at::Tensor>(attn_out, softmax_lse);
 }
@@ -1398,7 +1400,8 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     c10::string_view layout_kv,
     bool has_ori_kv,
     bool has_cmp_kv,
-    const c10::string_view device)
+    const c10::string_view device,
+    const c10::optional<at::Tensor> &dcp_context)
 {
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Device output_device = at::Device(std::string(device));
@@ -1420,6 +1423,7 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     auto cu_seqlens_cmp_kv_val = get_valid_tensor(cu_seqlens_cmp_kv, output_device);
     auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
     auto seqused_kv_val = get_valid_tensor(seqused_kv, output_device);
+    auto dcp_context_val = get_valid_tensor(dcp_context, output_device);
 
     std::string layout_q_str = std::string(layout_q);
     std::string layout_kv_str = std::string(layout_kv);
@@ -1427,7 +1431,7 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(aclnnSparseAttnSharedkvMetadata, cu_seqlens_q_val, cu_seqlens_ori_kv_val, cu_seqlens_cmp_kv_val, seqused_q_val,
-                    seqused_kv_val, num_heads_q, num_heads_kv, head_dim, batch_size, max_seqlen_q, max_seqlen_kv, ori_topk, cmp_topk,
+                    seqused_kv_val, dcp_context_val, num_heads_q, num_heads_kv, head_dim, batch_size, max_seqlen_q, max_seqlen_kv, ori_topk, cmp_topk,
                     cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q_ptr,
                     layout_kv_ptr, has_ori_kv, has_cmp_kv, output);
     return output;
@@ -1439,7 +1443,7 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
     const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
     const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
-    const c10::string_view device)
+    const c10::string_view device, const c10::optional<at::Tensor> &dcp_context)
 {
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Device output_device = at::Device(std::string(device));
@@ -1461,6 +1465,7 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
     auto seqused_k_val = get_valid_tensor(seqused_k, output_device);
     auto cmp_residual_k_val = get_valid_tensor(cmp_residual_k, output_device);
+    auto dcp_context_val = get_valid_tensor(dcp_context, output_device);
 
     std::string layout_q_str = std::string(layout_q);
     char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
@@ -1469,7 +1474,7 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
 
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2Metadata,
                  cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
-                 cmp_residual_k_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size, max_seqlen_q,
+                 cmp_residual_k_val, dcp_context_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size, max_seqlen_q,
                  max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, output);
 
     return output;
@@ -3073,7 +3078,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
         "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, int max_seqlen_q=0, "
         "int max_seqlen_k=0, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, int cmp_ratio=1, "
-        "str device='npu') -> Tensor"
+        "str device='npu', Tensor? dcp_context=None) -> Tensor"
     );
     ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kPrivateUse1,
              &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu);
@@ -3085,7 +3090,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
         "int max_seqlen_q=-1, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, "
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
-        "int candidate_block_size=8) -> (Tensor, Tensor, Tensor)"
+        "int candidate_block_size=8, Tensor? dcp_context=None) -> (Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);
@@ -3280,7 +3285,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor? metadata=None, "
             "int max_seqlen_q=-1, "
             "str layout_q=\"TND\", str layout_k=\"PA_BBND\", "
-            "int mask_mode=3, int cmp_ratio=4, int return_value=0"
+            "int mask_mode=3, int cmp_ratio=4, int return_value=0, Tensor? dcp_context=None"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
     ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1,
@@ -3310,7 +3315,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int ori_win_right=0, "
             "str layout_q=\"BSND\", "
             "str layout_kv=\"PA_ND\", "
-            "bool return_softmax_lse=False"
+            "bool return_softmax_lse=False, Tensor? dcp_context=None"
         ") -> (Tensor out, Tensor softmax_lse)"
         );
     ops.impl("npu_sparse_attn_sharedkv", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attn_sharedkv_npu);
@@ -3339,7 +3344,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "str layout_kv=\"PA_ND\", "
             "bool has_ori_kv=True, "
             "bool has_cmp_kv=True, "
-            "str device=\"npu\""
+            "str device=\"npu\", Tensor? dcp_context=None"
         ") -> (Tensor metadata)"
         );
     ops.impl("npu_sparse_attn_sharedkv_metadata", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attn_sharedkv_metadata_npu);

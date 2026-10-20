@@ -17,6 +17,7 @@
 #define SPARSE_ATTN_SHAREDKV_SWA_KERNEL_H
 
 #include "kernel_operator.h"
+#include "../../../common/dcp_causal.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
@@ -83,7 +84,7 @@ public:
                                 __gm__ uint8_t *oriSparseIndices, __gm__ uint8_t *cmpSparseIndices,
                                 __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
                                 __gm__ uint8_t* cuSeqlensKV, __gm__ uint8_t *cuSeqlensCmpKV, __gm__ uint8_t *seqUsedQ,
-                                __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks, __gm__ uint8_t *metadata,
+                                __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks, __gm__ uint8_t *metadata, __gm__ uint8_t *dcpContext,
                                 __gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxLse, __gm__ uint8_t *workspace,
                                 const SparseAttnSharedkvTilingData *__restrict tiling, __gm__ uint8_t *gmTiling,
                                 TPipe *tPipe);
@@ -121,6 +122,10 @@ private:
 
     TPipe *pipe = nullptr;
     GlobalTensor<uint32_t> metadataGm;
+    GlobalTensor<int32_t> dcpContextGm;
+    uint32_t dcpSize = 1;
+    uint32_t dcpRank = 0;
+    uint32_t dcpInterleave = 0;
 
     uint64_t mSizeVStart = 0ULL;
     int64_t threshold = 0;
@@ -403,6 +408,13 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::GetSparseActualSeqLen()
     // 对于cmp部分还有top k, tempLoopInfo.actS2Size只针对cmp
     if (constInfo.templateMode == CFA_TEMPLATE) {
         int32_t thresHold = (tempLoopInfo.cmpMaskRight + tempLoopInfo.s1EndIdx + 1) / constInfo.cmpRatio;
+        if (dcpSize > 1) {
+            const int64_t rawEnd = static_cast<int64_t>(dcpContextGm.GetValue(
+                vllm_ascend::dcp::SEQ_LENS_OFFSET + tempLoopInfo.bIdx)) - tempLoopInfo.actS1Size +
+                tempLoopInfo.s1EndIdx + 1;
+            thresHold = vllm_ascend::dcp::LocalCompressedLength(
+                rawEnd, constInfo.cmpRatio, dcpSize, dcpRank, dcpInterleave);
+        }
         tempLoopInfo.actCmpS2Size = thresHold;
     }
 }
@@ -426,7 +438,7 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::Init(
     __gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV, __gm__ uint8_t *oriSparseIndices,
     __gm__ uint8_t *cmpSparseIndices, __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
     __gm__ uint8_t *cuSeqlensKV, __gm__ uint8_t *cuSeqlensCmpKV, __gm__ uint8_t *seqUsedQ,
-    __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks, __gm__ uint8_t *metadata, __gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxLse,
+    __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks, __gm__ uint8_t *metadata, __gm__ uint8_t *dcpContext, __gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxLse,
     __gm__ uint8_t *workspace, const SparseAttnSharedkvTilingData *__restrict tiling, __gm__ uint8_t *gmTiling,
     TPipe *tPipe)
 {
@@ -442,6 +454,12 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::Init(
     tilingData = tiling;
 
     InitTilingData();
+    if (dcpContext != nullptr) {
+        dcpContextGm.SetGlobalBuffer((__gm__ int32_t *)dcpContext);
+        dcpSize = dcpContextGm.GetValue(vllm_ascend::dcp::SIZE_INDEX);
+        dcpRank = dcpContextGm.GetValue(vllm_ascend::dcp::RANK_INDEX);
+        dcpInterleave = dcpContextGm.GetValue(vllm_ascend::dcp::INTERLEAVE_INDEX);
+    }
     if (KV_LAYOUT_T == SAS_LAYOUT::TND && LAYOUT_T == SAS_LAYOUT::TND) {
         InitActualSeqLen(cuSeqlensQ, cuSeqlensKV, cuSeqlensCmpKV);
     } else if (KV_LAYOUT_T == SAS_LAYOUT::TND) {
@@ -621,7 +639,7 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::CalcParams(uint32_t loop, ui
                 info.actualSingleProcessSInnerSize = constInfo.s2BaseSize;
             }
             info.s2StartPoint = 0;
-            info.cmpS2IdLimit = (tempLoopInfo.cmpMaskRight + tempLoopInfo.s1EndIdx + 1) / constInfo.cmpRatio;
+            info.cmpS2IdLimit = tempLoopInfo.actCmpS2Size;
         }
     }
 

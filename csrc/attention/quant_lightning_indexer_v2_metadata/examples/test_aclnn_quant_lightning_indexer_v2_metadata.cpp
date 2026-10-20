@@ -278,7 +278,7 @@ int main()
     void *workspaceAddr = nullptr;
     ret = aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
         context.cuSeqlensQOptional.data, context.cuSeqlensKOptional.data, context.sequsedQOptional.data,
-        context.sequsedKOptional.data, context.cmpResidualKOptional.data, context.numHeadsQ, context.numHeadsK,
+        context.sequsedKOptional.data, context.cmpResidualKOptional.data, nullptr, context.numHeadsQ, context.numHeadsK,
         context.headDim, context.topk, context.quantMode, context.batchSize, context.maxSeqlenQ, context.maxSeqlenK,
         context.layoutQOptional, context.layoutKOptional, context.maskMode, context.cmpRatio, context.metadata.data,
         &workspaceSize, &executor);

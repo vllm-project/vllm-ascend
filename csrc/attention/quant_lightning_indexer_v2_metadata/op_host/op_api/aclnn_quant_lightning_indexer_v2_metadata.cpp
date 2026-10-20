@@ -36,7 +36,7 @@ extern "C" {
 
 aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
-    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional, int64_t numHeadsQ, int64_t numHeadsK,
+    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional, const aclTensor *dcpContextOptional, int64_t numHeadsQ, int64_t numHeadsK,
     int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK,
     char *layoutQOptional, char *layoutKOptional, int64_t maskMode, int64_t cmpRatio, const aclTensor *metadata,
     uint64_t *workspaceSize, aclOpExecutor **executor)
@@ -110,9 +110,15 @@ aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
         }
     }
 
+    const aclTensor *dcpContextContiguous = nullptr;
+    if (dcpContextOptional != nullptr) {
+        dcpContextContiguous = l0op::Contiguous(dcpContextOptional, uniqueExecutor.get());
+        CHECK_RET(dcpContextContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    }
+
     auto output = l0op::QuantLightningIndexerV2Metadata(
         cuSeqlensQOptionalContiguous, cuSeqlensKOptionalContiguous, sequsedQOptionalContiguous,
-        sequsedKOptionalContiguous, cmpResidualLKOptionalContiguous, numHeadsQ, numHeadsK, headDim, topk, quantMode,
+        sequsedKOptionalContiguous, cmpResidualLKOptionalContiguous, dcpContextContiguous, numHeadsQ, numHeadsK, headDim, topk, quantMode,
         batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum,
         socVersion.c_str(), metadata, uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);

@@ -52,6 +52,7 @@ struct RunInfo {
     uint32_t actS1Size = 1;
     uint32_t actS2Size = 1;
     uint32_t actS2SizeOrig = 1;
+    uint32_t globalSeqLen = 0;
     uint32_t actMBaseSize;
     uint32_t actualSingleProcessSInnerSize;
     uint32_t actualSingleProcessSInnerSizeAlign;
@@ -114,6 +115,9 @@ struct ConstInfo {
     LI_LAYOUT outputLayout;           // 输出的格式
     bool attenMaskFlag = false;
     uint32_t cmpRatio = 1; // 压缩率
+    uint32_t dcpSize = 1;
+    uint32_t dcpRank = 0;
+    uint32_t dcpInterleave = 0;
 
     uint32_t actualLenQDims = 0U;     // query的actualSeqLength 的维度
     uint32_t actualLenDims = 0U;      // KV 的actualSeqLength 的维度

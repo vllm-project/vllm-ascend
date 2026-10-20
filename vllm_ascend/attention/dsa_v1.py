@@ -394,6 +394,7 @@ class AscendDSAReqMetadata:
     cache_group_key: str = ""
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    dcp_causal_context: torch.Tensor | None = None
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
     qli_cmp_residual_k: torch.Tensor = None
