@@ -16,7 +16,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
@@ -76,7 +76,7 @@ def _emit_range_debug_event(
     results: list[int],
 ) -> None:
     try:
-        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+        if not get_ascend_config().kv_pool_range_debug:
             return
         payload = _build_range_debug_payload(direction, layer_id, sizes, object_offsets, results)
         logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
@@ -87,7 +87,7 @@ def _emit_range_debug_event(
 
 def _emit_commit_debug_event(layer_id: int, key_count: int, results: list[int]) -> None:
     try:
-        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+        if not get_ascend_config().kv_pool_range_debug:
             return
         payload = {
             "event": "commit",

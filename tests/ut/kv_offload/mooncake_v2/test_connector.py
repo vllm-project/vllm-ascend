@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakePushConnector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_facade() -> MooncakeBaseConnector:
@@ -26,6 +27,25 @@ def make_facade() -> MooncakeBaseConnector:
 
 def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
+
+
+def test_loaded_group_ids_hook_is_version_gated() -> None:
+    # vLLM main added the scheduler hook `get_loaded_kv_cache_group_ids`,
+    # which reads `_kv_cache_config`; v0.31.0 has neither.
+    if vllm_version_is("0.31.0"):
+        assert "get_loaded_kv_cache_group_ids" not in MooncakeBaseConnector.__dict__
+    else:
+        assert "get_loaded_kv_cache_group_ids" in MooncakeBaseConnector.__dict__
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only scheduler hook")
+def test_loaded_group_ids_returns_transfer_groups() -> None:
+    # A P/D transfer restores the request's own blocks, so the scheduler must
+    # skip zeroing (and SWA replay) for every transfer group, not only the
+    # prefix-cacheable ones.
+    connector = make_facade()
+    connector._kv_cache_config = SimpleNamespace(transfer_group_ids=(0, 2))  # type: ignore[attr-defined]
+    assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 2)
 
 
 def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None:

@@ -692,30 +692,25 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
-# ** 20a. File: platform/patch_swa_bounded_replay_legacy.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Targets: CacheConfig, EngineArgs, Scheduler.schedule, KVCacheManager,
-#   NewRequestData, and SingleTypeKVCacheManager.cache_blocks.
+#   3. `xgrammar.GrammarCompiler.compile_json_schema`
 #    Why:
-#       vLLM 0.30 lacks the bounded-replay admission protocol required by
-#       the Ascend V4.1 worker. The release image and compiled operators must
-#       remain usable without replacing installed vLLM source files.
+#       vLLM #58067 (main only, absent from v0.31.0) passes
+#       `separators=(",", ":")` when `disable_any_whitespace` is set. The
+#       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
+#       stricter grammar makes small models loop on `","` until `max_tokens`
+#       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
+#       test). The v0.31.0 lane never passes the argument.
 #    How:
-#       Backport declared config/payload fields and the local-prefix rewind.
-#       Insert the minimal scheduling/allocation changes into the pinned
-#       methods, verifying each source anchor before compiling the replacement.
-#       SWA blocks remain private; cached groups adopt the full hit and replayed
-#       tokens consume compute budget without allocating duplicate slots.
-#       Register config and payload interfaces before parsing/serialization.
-#       Install scheduler/cache behavior only after config enables replay.
-#       Validate source anchors rather than matching a version string.
-#    Related upstream work: vLLM #56227.
+#       On the main lane, wrap `GrammarCompiler.compile_json_schema` to force
+#       `separators=None`, restoring the legacy (v0.31.0) grammar. Gated by
+#       `vllm_version_is("0.31.0")` so the release lane is untouched.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58067
 #    Future Plan:
-#       Remove after the release lane supplies the upstream replay protocol.
-#       Native replay implementations are detected and left unchanged.
-#       KV connectors are rejected while this backport only supports local hits.
+#       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
+#       pinned.
 #
-# ** 20b. File: platform/patch_swa_bounded_replay.py**
+# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
 #   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
@@ -815,7 +810,7 @@
 #    Why:
 #       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
 #    How:
-#       Removed with the v0.30.0 boundary: the release-only validator override
+#       Removed with the v0.31.0 boundary: the release-only validator override
 #       is no longer applied.
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
@@ -1295,6 +1290,22 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
+#   3. `vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes`
+#    Why:
+#       vLLM #57169 stops splitting a cache group whose KV tensors are
+#       block-outermost packed (`block_stride > layer_stride`). Ascend layerwise
+#       reuse aliases layers inside one physical slot (`layer_stride == 0`), so
+#       the group silently keeps the manager block size while NoPE SFA
+#       addresses 256-token blocks although its backend, metadata builder and
+#       block table all expect 128-token kernel blocks, so KV is read wrong.
+#    How：
+#       Re-run the selection with an alias-aware packing check
+#       (`0 < layer_stride < block_stride`) so alias layouts still split.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove this patch once upstream stops treating alias layouts as packed.
+#
 # ** 23. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1325,7 +1336,9 @@
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
+#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
+#       upstream vLLM #60335; the v0.31.0 release lane still uses that path).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1638,7 +1651,7 @@
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       Removed with the v0.31.0 boundary: v0.31.0 equals the pinned main and
 #       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files

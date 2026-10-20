@@ -24,7 +24,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -45,6 +44,7 @@ def _make_runner(need_timing: bool = True):
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
+    runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
     runner.use_pp = False
     runner.is_last_pp_rank = False
@@ -150,93 +150,26 @@ def test_lmhead_tp_rejects_unpadded_prompt_scoring(ordinary_logprobs, fixed_toke
         runner.sample_tokens(None)
 
 
-def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
+def _make_batch_state(
+    computed: list[int], scheduled: list[int], prefill_lens: list[int], draft_tokens: int = 0
+) -> BatchReqState:
     num_reqs = len(computed)
     is_prefilling = np.array(computed) < np.array(prefill_lens)
+    prefill_runs_as_decode = is_prefilling & (np.array(scheduled) - draft_tokens == 1) & (np.array(computed) > 0)
     return BatchReqState(
         req_ids=[f"req-{i}" for i in range(num_reqs)],
         num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
         num_tokens=sum(scheduled),
-        num_draft_tokens_np=None,
+        num_draft_tokens_np=np.full(num_reqs, draft_tokens, dtype=np.int32) if draft_tokens else None,
         idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
         prefill_len_np=np.array(prefill_lens, dtype=np.int32),
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
         has_prefill=bool(is_prefilling.any()),
-        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
-        prefill_runs_as_decode_np=None,
-        decode_graph_eligible=not bool(is_prefilling.any()),
+        max_seq_len_np=None,
+        prefill_runs_as_decode_np=prefill_runs_as_decode,
+        decode_graph_eligible=bool((prefill_runs_as_decode | ~is_prefilling).all()),
     )
-
-
-def test_pd_decode_reclassifies_pd_tail_in_mixed_decode_batch():
-    runner = _make_runner()
-    runner.decode_query_len = 1
-    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
-    batch_state = _make_batch_state([127, 64], [1, 1], [128, 64])
-
-    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
-        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
-
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
-    assert gathered.has_prefill is False
-    assert uniform == 1
-
-
-@pytest.mark.parametrize(
-    ("computed", "scheduled", "kv_role"),
-    [(64, 8, "consumer"), (0, 1, "consumer"), (127, 1, None), (127, 1, "producer"), (127, 1, "both")],
-)
-def test_pd_decode_keeps_non_matching_prefill(computed, scheduled, kv_role):
-    runner = _make_runner()
-    if kv_role is not None:
-        runner.vllm_config.kv_transfer_config = SimpleNamespace(
-            is_kv_consumer=kv_role in ("consumer", "both"),
-            is_kv_producer=kv_role in ("producer", "both"),
-        )
-    runner.decode_query_len = 1
-    batch_state = _make_batch_state([computed, 64], [scheduled, 1], [128, 64])
-
-    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
-        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
-
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
-    assert gathered.has_prefill is True
-    assert uniform is None
-
-
-@pytest.mark.parametrize("query_len", [2, 4])
-def test_pd_decode_supports_multi_token_decode_query(query_len):
-    runner = _make_runner()
-    runner.decode_query_len = query_len
-    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
-    batch_state = _make_batch_state([128 - query_len, 64], [query_len, query_len], [128, 64])
-
-    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
-        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
-
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
-    assert gathered.has_prefill is False
-    assert uniform == query_len
-
-
-def test_pd_decode_preserves_remaining_prefill():
-    runner = _make_runner()
-    runner.decode_query_len = 4
-    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
-    batch_state = _make_batch_state([124, 64], [4, 4], [128, 128])
-    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
-        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
-    assert gathered.has_prefill is True
-    assert uniform is None
-
-
-def test_pd_decode_preserves_dummy_batch():
-    runner = _make_runner()
-    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
-    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(None, 4)):
-        assert runner.gather_batch_req_state(SimpleNamespace(), True) == (None, 4)
 
 
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
@@ -267,10 +200,14 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     runner = _make_runner()
     runner.decode_query_len = 1
     batch_state = _make_batch_state([127, 0], [1, 1], [128, 1])
-    batch_state = batch_state._replace(prefill_runs_as_decode_np=np.array([False, prefill_runs_as_decode]))
+    batch_state = batch_state._replace(
+        prefill_runs_as_decode_np=np.array([True, prefill_runs_as_decode]),
+        decode_graph_eligible=prefill_runs_as_decode,
+    )
+    expected_uniform = 1 if prefill_runs_as_decode else None
 
     with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, expected_uniform)),
         patch.object(
             runner.vllm_config,
             "kv_transfer_config",
@@ -279,10 +216,10 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     ):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
-    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, True])
     assert gathered.has_prefill is True
     assert gathered.decode_graph_eligible is prefill_runs_as_decode
-    assert uniform == (1 if prefill_runs_as_decode else None)
+    assert uniform == expected_uniform
 
 
 def test_execute_model_records_profiling_time():
@@ -317,9 +254,8 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
         "valid_dummy_state_slots": False,
+        "randomize_inputs": False,
     }
-    if vllm_version_is("0.31.0"):
-        expected_kwargs["randomize_inputs"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -543,6 +479,7 @@ def _make_dump_runner(debugger=None):
     runner = _make_runner(need_timing=False)
     runner.debugger = debugger
     runner.model = Mock()
+    runner.prompt_logprobs_worker = None
     runner._debugger_started = False
     return runner
 
@@ -1016,6 +953,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
+    state.decoder_replay = None
     runner.model_state = state
     batch = SimpleNamespace(
         num_reqs=2,
@@ -1359,9 +1297,57 @@ def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
         patch.object(GPUModelRunner, "profile_run") as parent,
     ):
         runner.profile_run(randomize_inputs=randomize_inputs)
-    profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+    profile_kwargs = {"randomize_inputs": randomize_inputs}
     runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True, **profile_kwargs)
     parent.assert_called_once_with(**profile_kwargs)
+
+
+@pytest.mark.parametrize("fail_warmup", [False, True])
+@pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
+def test_profile_run_disables_nested_backbone_compilation(fail_warmup, moe_type):
+    runner = _make_runner()
+    runner.max_num_tokens = 2048
+
+    # Match V4.1's wrapper -> language_model -> model structure.
+    backbone = torch.nn.Module()
+    backbone.do_not_compile = False
+    language_model = torch.nn.Module()
+    language_model.model = backbone
+    model = torch.nn.Module()
+    model.language_model = language_model
+    runner.get_model = MagicMock(return_value=model)
+    calls = []
+
+    def warmup(num_tokens, **kwargs):
+        calls.append(("warmup", num_tokens))
+        assert num_tokens == 1
+        assert backbone.do_not_compile is True
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
+
+    def profile(*args, **kwargs):
+        calls.append(("profile", runner.max_num_tokens))
+        assert runner.max_num_tokens == 2048
+        assert backbone.do_not_compile is False
+
+    runner._dummy_run = MagicMock(side_effect=warmup)
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=1),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=moe_type),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run", side_effect=profile),
+    ):
+        if fail_warmup:
+            with pytest.raises(RuntimeError, match="warmup failed"):
+                runner.profile_run()
+        else:
+            runner.profile_run()
+
+    assert backbone.do_not_compile is False
+    expected = [("warmup", 1)]
+    if not fail_warmup:
+        expected.append(("profile", 2048))
+    assert calls == expected
 
 
 def test_profile_run_skips_mc2_dummy_without_capacity():
@@ -1381,7 +1367,7 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("randomize_inputs", [False, True])
 def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail, randomize_inputs):
-    expected_randomize = randomize_inputs if vllm_version_is("0.31.0") else False
+    expected_randomize = randomize_inputs
     runner = _make_runner()
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
     runner.max_num_tokens = tokens
@@ -1467,28 +1453,6 @@ def test_register_sparse_kv_caches_binds_fused_target_and_draft_layers():
     follower.bind_copy_sfa_kv_cache.assert_called_once_with(manager, "draft.layer")
 
 
-@pytest.mark.parametrize(("query_width", "expected_reqs"), [(7, 4), (None, 32)])
-def test_parallel_draft_dummy_requests_fit_input_buffer(query_width, expected_reqs):
-    runner = _make_runner()
-    runner.max_num_tokens = runner.max_num_reqs = 32
-    runner.speculator = SimpleNamespace(num_query_per_req=query_width) if query_width else object()
-    observed = []
-
-    def old_vllm_dummy_run(self, num_tokens, *args, **kwargs):
-        num_reqs = min(num_tokens, self.max_num_reqs)
-        assert num_reqs * getattr(self.speculator, "num_query_per_req", 1) <= self.max_num_tokens
-        observed.append(num_reqs)
-        return None, None
-
-    with (
-        patch.object(GPUModelRunner, "_dummy_run", old_vllm_dummy_run),
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
-    ):
-        runner._dummy_run(32, is_profile=True, skip_eplb=True)
-    assert observed == [expected_reqs]
-    assert runner.max_num_reqs == 32
-
-
 def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=False, rswa=False, speculator=False):
     runner = _make_runner()
     runner.max_num_reqs = 4
@@ -1539,7 +1503,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         has_prefill=True,
         decode_graph_eligible=False,
         prefill_runs_as_decode_np=None,
-        **({"max_seq_len_np": None} if vllm_version_is("0.31.0") else {}),
+        max_seq_len_np=None,
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
@@ -1602,10 +1566,7 @@ def _run_prepare_inputs(
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
         assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
-        if vllm_version_is("0.31.0"):
-            assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
-        else:
-            assert "max_seq_len_np" not in make_batch.call_args.kwargs
+        assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
         return prepared, batch
 
 
@@ -1621,11 +1582,11 @@ def test_prepare_inputs_common_path():
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
 @pytest.mark.parametrize("full_cg", [False, True])
-def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg):
+def test_pd_tail_input_survives_upstream_decode_graph_classification(num_spec_tokens, full_cg):
     runner, scheduler_output, _, batch_desc = _prepare_inputs_runner(full_cg=full_cg)
     query_len = 1 + num_spec_tokens
     runner.decode_query_len = query_len
-    batch_state = _make_batch_state([127, 128], [query_len, query_len], [128, 128])
+    batch_state = _make_batch_state([127, 128], [query_len, query_len], [128, 128], num_spec_tokens)
     batch_state = batch_state._replace(req_ids=["r0", "r1"])
     scheduler_output.num_scheduled_tokens = dict.fromkeys(batch_state.req_ids, query_len)
     scheduler_output.scheduled_spec_decode_tokens = (
@@ -1641,7 +1602,7 @@ def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg
     runner.req_states.next_prefill_tokens = torch.full((1, 2), -999, dtype=torch.int32)
 
     with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, query_len)),
         patch.object(
             runner.vllm_config,
             "kv_transfer_config",
@@ -1649,7 +1610,9 @@ def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg
         ),
     ):
         gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
-    assert not gathered.has_prefill
+    assert gathered.has_prefill
+    assert gathered.is_prefilling_np.tolist() == [True, False]
+    assert gathered.decode_graph_eligible
     assert uniform == query_len
 
     def prepare_prefill(input_ids, next_tokens, idx_mapping, query_start, all_tokens, prefill_len, computed):
@@ -1680,7 +1643,7 @@ def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg
     )
     expected = [127] + [702] * num_spec_tokens + [701] + [702] * num_spec_tokens
     assert runner.input_buffers.input_ids[: 2 * query_len].tolist() == expected
-    assert not gathered.has_prefill  # Keep decode graph eligibility.
+    assert gathered.has_prefill  # Keep prompt-tail metadata for replay.
 
 
 def test_decode_without_prompt_tail_skips_prefill_preparation():

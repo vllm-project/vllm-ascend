@@ -36,7 +36,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -2414,7 +2414,10 @@ class TestRunMergedDraft(TestBase):
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
         assert hasattr(vllm.config, "PassConfig"), "PassConfig not found"
-        assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
+        # vLLM main (#60517) removed PassConfig.enable_sp with the torch.compile
+        # sequence-parallelism pass; v0.31.0 still declares it.
+        if vllm_version_is("0.31.0"):
+            assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
 
         import vllm.forward_context
 
