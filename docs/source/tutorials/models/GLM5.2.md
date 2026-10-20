@@ -237,25 +237,12 @@ Use the same checkpoint path on all nodes.
 
     ##### 950DT products {: #glm52-53-5-1-1-950dt }
 
-    ###### Topology and Prerequisites
-
-    Both GLM-5.3 and GLM-5.2 W4A4C8/MXFP4 checkpoints passed startup and
-    short chat/completion requests on one 950DT products (96GB × 8) in the
-    2026-10-10 validation. Use W4A4C8 for this single-node example; the
-    GLM-5.3 W8A8C8/MXFP8 checkpoint failed during expert-weight allocation
-    on that machine and is covered by the PP2 examples instead.
-
-    The tested local image ID was
-    `sha256:cc0062c206978be60a1c4b729a9b4975eecdec498e5569f2406a09d6ab98841e`,
-    with vLLM `0.30.0+empty` and vLLM-Ascend commit `a50eb57f1`.
-    The local GLM-5.3 checkpoint has 78 layers and 102 indexed shards;
-    its identity with a public release revision was not verified.
-    Use a validated local checkpoint path. See
-    [W4A4C8 Validation](#73-w4a4c8-950dt-products-validation-records) for the exact scope.
-
-    For GLM-5.2, replace the checkpoint path in `vllm serve` with
+    The GLM-5.2 and GLM-5.3 W4A4C8/MXFP4 checkpoints can run on one
+    950DT products (96GB × 8) node with DP1/TP8. The command below uses
+    GLM-5.3; for GLM-5.2, replace the checkpoint path with
     `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4`.
-    The GLM-5.3 path below is an example local directory, not a download source.
+    Startup and short requests were validated; see
+    [W4A4C8 Validation](#73-w4a4c8-950dt-products-validation-records) for details.
 
     ###### Start the Engine
 
