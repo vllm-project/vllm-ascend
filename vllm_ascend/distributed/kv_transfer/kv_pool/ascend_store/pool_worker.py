@@ -999,6 +999,56 @@ class KVPoolWorker:
             raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
         return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
 
+    def _get_combined_cache_transfer_segments(
+        self, caches: tuple[torch.Tensor, ...], group_id: int
+    ) -> list[tuple[int, int, int]] | None:
+        """Coalesce adjacent MLA components for complete bulk pages only.
+
+        The packed object becomes physical-page major. All readers and writers
+        must use this layout and a fresh namespace when upgrading an old pool.
+        Layerwise/partial transfers retain component-major segment metadata.
+        """
+        if self.use_layerwise or len(caches) != 2:
+            return None
+        extra_config = getattr(self, "_extra_config", None)
+        if not isinstance(extra_config, dict) or extra_config.get("discard_partial_chunks", True) is not True:
+            return None
+        if extra_config.get("save_decode_cache", False) or getattr(self, "tp_mismatch", False):
+            return None
+        if getattr(self, "dcp_size", 1) != 1 or getattr(self, "use_kvpp", False):
+            return None
+        block_sizes = getattr(self, "grouped_block_size", ())
+        granularity = getattr(self, "cache_transfer_granularity", 0)
+        if group_id >= len(block_sizes) or not granularity or granularity % block_sizes[group_id]:
+            return None
+        align_state = getattr(self, "group_uses_align_state", ())
+        if group_id < len(align_state) and align_state[group_id]:
+            return None
+        first, second = caches
+        if (
+            first.ndim != 4
+            or second.ndim != 4
+            or first.shape[:-1] != second.shape[:-1]
+            or first.dtype != second.dtype
+            or first.device != second.device
+            or self._get_storage_key(first) != self._get_storage_key(second)
+            or not first[0].is_contiguous()
+            or not second[0].is_contiguous()
+        ):
+            return None
+        first_len, block_stride, _, scale = self._get_cache_block_metadata(first)
+        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second)
+        if scale <= 1 or scale != second_scale or block_stride != second_stride:
+            return None
+        first_bytes = first_len // scale
+        page_bytes = (first_len + second_len) // scale
+        page_stride = block_stride // scale
+        if second.data_ptr() != first.data_ptr() + first_bytes or page_stride < page_bytes:
+            return None
+        if page_stride == page_bytes:
+            return [(first.data_ptr(), first_len + second_len, block_stride)]
+        return [(first.data_ptr() + index * page_stride, page_bytes, block_stride) for index in range(scale)]
+
     @staticmethod
     def _get_storage_key(cache: torch.Tensor) -> int:
         try:
@@ -1067,13 +1117,27 @@ class KVPoolWorker:
                 )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
-                for cache in self._as_cache_tuple(cache_or_caches):
-                    segments = self._get_cache_transfer_segments(cache)
+                caches = self._as_cache_tuple(cache_or_caches)
+                combined = self._get_combined_cache_transfer_segments(caches, group_id)
+                cache_segments = (
+                    [combined]
+                    if combined is not None
+                    else [self._get_cache_transfer_segments(cache) for cache in caches]
+                )
+                for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
                         group_cache_entry_segments.append((segment_index, len(segments)))
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
+                if combined is not None:
+                    logger.info(
+                        "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
+                        layer_name,
+                        group_id,
+                        2 * (caches[0].shape[0] // self.num_blocks),
+                        len(combined),
+                    )
             layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
