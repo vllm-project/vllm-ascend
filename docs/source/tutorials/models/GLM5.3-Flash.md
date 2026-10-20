@@ -12,7 +12,7 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-This document is based on vLLM-Ascend v0.30.0RC2, which supports GLM-5.3-Flash on Atlas 800I A2 and Atlas 800I A3. Support for 950DT Products is currently experimental; official support will be available in a future release.
+This document is based on vLLM-Ascend v0.30.0RC2, which supports GLM-5.3-Flash on A2 series and A3 series. Support for 950DT Products is currently experimental; official support will be available in a future release.
 
 ## 2 Supported Features
 
@@ -21,17 +21,17 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all Atlas 800I A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+all A3 series scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
 - `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800I A3 (128GB × 8) node for
+- `GLM-5.3-Flash-w8a8`: requires 1 A3 series (128GB × 8) node for
   single-node deployment, or 2 nodes for 1P1D PD disaggregated deployment.
   [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800I A2 (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+- `GLM-5.3-Flash-w8a8`: requires 2 A2 series (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -84,7 +84,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -itd $IMAGE bash
     ```
 
-=== "Atlas 800I A3 series"
+=== "A3 series"
 
     Start the docker image on each node.
 
@@ -129,7 +129,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -it $IMAGE bash
     ```
 
-=== "Atlas 800I A2 series"
+=== "A2 series"
 
     Start the docker image on each node.
 
@@ -202,9 +202,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
-=== "Atlas 800I A3 series"
+=== "A3 series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 Atlas 800I A3 (64GB × 16) .
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 series (64GB × 16) .
 
     Run the following script to execute online inference.
 
@@ -246,18 +246,18 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800I A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on A3 series. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800I A3. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT Products, while `enforce_eager: false` enables graph mode for the draft model on Atlas 800I A3. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC2; the forced-eager restriction for other GLM models does not apply to this model.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on A3 series. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT Products, while `enforce_eager: false` enables graph mode for the draft model on A3 series. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC2; the forced-eager restriction for other GLM models does not apply to this model.
 
 ### 5.2 Multi-Node Colocated Deployment
 
-=== "Atlas 800I A2 series"
+=== "A2 series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 2 Atlas 800I A2 (64GB × 8) nodes with DP2 across the two nodes (one DP rank per node) and TP8 inside each node.
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 2 A2 series (64GB × 8) nodes with DP2 across the two nodes (one DP rank per node) and TP8 inside each node.
 
     Run the following scripts on two nodes respectively.
 
@@ -373,7 +373,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 ### 5.3 1P1D PD Disaggregated Deployment
 
-Both Atlas 800I A3 and Atlas 800I A2 deployments use the same `launch_online_dp.py` script to
+Both A3 series and A2 series deployments use the same `launch_online_dp.py` script to
 start one vLLM process per local DP rank. Save it on every Prefill and Decode
 node before following the platform-specific instructions below.
 
@@ -444,9 +444,9 @@ if __name__ == "__main__":
 The launcher passes visible devices, engine port, global DP size, DP rank, DP
 address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
-=== "Atlas 800I A3 series"
+=== "A3 series"
 
-    This example uses two Atlas 800I A3 servers. The Prefill node runs two
+    This example uses two A3 series servers. The Prefill node runs two
     DP ranks with TP8 (DP2/TP8), and the Decode node runs eight DP ranks
     with TP2 (DP8/TP2). Both layouts consume all 16 logical devices on their
     respective servers. `MooncakeConnectorV2` transfers KV cache from the
@@ -454,12 +454,12 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     Before starting the services, replace `LOCAL_IP`, `NIC_NAME`, and
     `MODEL_PATH` in the following scripts with values for the deployment
-    environment. These scripts target an Atlas 800I A3 supernode using HCCS with its
+    environment. These scripts target an A3 series supernode using HCCS with its
     device RoCE ports down. They explicitly select `hccs:device` for device
     communication; the socket interface variables still select the host
     network. Adjust the resource configuration for other network topologies.
 
-    **Atlas 800I A3 Serving Scripts and Startup Commands**
+    **A3 series Serving Scripts and Startup Commands**
 
     **Start the Prefill node**
 
@@ -472,7 +472,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
     #   <dp_rank> <dp_address> <rpc_port> <tp_size>
 
-    # This Atlas 800I A3 supernode uses HCCS; its device RoCE ports are down.
+    # This A3 series supernode uses HCCS; its device RoCE ports are down.
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
     export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
@@ -549,7 +549,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     # Usage is the same as run_p.sh.
 
-    # This Atlas 800I A3 supernode uses HCCS; its device RoCE ports are down.
+    # This A3 series supernode uses HCCS; its device RoCE ports are down.
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
     export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
@@ -646,7 +646,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     - `--data-parallel-size` and `--tensor-parallel-size` define DP2/TP8 on
       Prefill and DP8/TP2 on Decode. Both layouts use all 16 logical devices
-      on their respective Atlas 800I A3 nodes.
+      on their respective A3 series nodes.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP
       ranks within one role. Prefill and Decode use their respective node IPs.
       The default RPC port `12325` can be reused because the roles run on
@@ -684,9 +684,9 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       select the host network used by the configured node IPs. The DP RPC,
       engine, Mooncake, and proxy ports must be allowed by the host firewall.
 
-=== "Atlas 800I A2 series"
+=== "A2 series"
 
-    This example uses four Atlas 800I A2 (64GB × 8) servers: two Prefill
+    This example uses four A2 series (64GB × 8) servers: two Prefill
     nodes running one DP rank with TP8 each (DP2/TP8 in total), and two
     Decode nodes running four DP ranks with TP2 each (DP8/TP2 in total).
     Each Prefill rank uses eight devices, and each Decode rank uses two.
@@ -1000,11 +1000,11 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --decoder-ports 9900 9901 9902 9903 9900 9901 9902 9903
     ```
 
-    **Key parameter differences from the Atlas 800I A3 layout**
+    **Key parameter differences from the A3 series layout**
 
-    - Atlas 800I A2 uses the same global DP2/TP8 Prefill and DP8/TP2 Decode sizes as
-      Atlas 800I A3, but spreads each role across two nodes with eight devices per
-      node. Each Atlas 800I A3 role runs on one node with 16 logical devices.
+    - A2 series uses the same global DP2/TP8 Prefill and DP8/TP2 Decode sizes as
+      A3 series, but spreads each role across two nodes with eight devices per
+      node. Each A3 series role runs on one node with 16 logical devices.
     - P0 and P1 use the shared launcher with one local DP rank each. P0
       exposes the Prefill API with `--api-server-count 1`; P1 is headless.
       D0 and D1 each run four API-serving DP8/TP2 engines through their
@@ -1021,7 +1021,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       `VLLM_USE_V2_MODEL_RUNNER=0`, consistent with the other tabs in
       this guide. `VLLM_HOST_IP` advertises the IP that peers use to
       reach each engine for KV transfer.
-    - MTP speculative decoding uses three speculative tokens on Atlas 800I A2.
+    - MTP speculative decoding uses three speculative tokens on A2 series.
       `enforce_eager: true` keeps the MTP draft model in eager mode.
     - `HCCL_HOST_SOCKET_PORT_RANGE` and `HCCL_NPU_SOCKET_PORT_RANGE` on
       Decode reserve a disjoint 100-port window per DP rank (starting at
@@ -1031,7 +1031,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     - The remaining timeout and runtime variables
       (`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, `HCCL_EXEC_TIMEOUT`,
       `HCCL_CONNECT_TIMEOUT`, `VLLM_RPC_TIMEOUT`, `OMP_PROC_BIND`,
-      `OMP_NUM_THREADS`) are the validated Atlas 800I A2 startup defaults for this
+      `OMP_NUM_THREADS`) are the validated A2 series startup defaults for this
       model size; keep them unless your environment requires different
       values.
     - `HCCL_IF_IP` and all socket interface variables must select the
@@ -1041,8 +1041,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section uses the Memcache backend for Atlas 800I A3 and the Mooncake
-backend for Atlas 800I A2. Select the platform subsection that matches the PD
+This section uses the Memcache backend for A3 series and the Mooncake
+backend for A2 series. Select the platform subsection that matches the PD
 topology in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Both
 platforms use `MultiConnector` to combine two connectors:
 
@@ -1053,19 +1053,19 @@ platforms use `MultiConnector` to combine two connectors:
 For backend installation, hardware dependencies, memory sizing, eviction,
 and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
-=== "Atlas 800I A3 series"
+=== "A3 series"
 
-    Reuse the Atlas 800I A3 DP2/TP8 Prefill and DP8/TP2 Decode topology, launcher, and
+    Reuse the A3 series DP2/TP8 Prefill and DP8/TP2 Decode topology, launcher, and
     proxy endpoint mapping from Section 5.3.
 
     **Prepare the Memcache Backend**
 
     Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
-    for prerequisite checks and memory sizing. The Atlas 800I A3 HCCS
+    for prerequisite checks and memory sizing. The A3 series HCCS
     configuration uses `device_sdma`, which requires LingQu Computing Network
     1.5 or later. Also check the HDK and CANN requirements in the guide's
     [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference).
-    **When starting the Atlas 800I A3 containers on both Prefill and Decode nodes, you must include the following read-only mount in the Docker command from Section 4.1:**
+    **When starting the A3 series containers on both Prefill and Decode nodes, you must include the following read-only mount in the Docker command from Section 4.1:**
 
     ```shell
     -v /etc/hccn.conf:/etc/hccn.conf:ro \
@@ -1132,7 +1132,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-local.conf"
     export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
-    # Atlas 800I A3 HCCS fabric-memory pooling.
+    # A3 series HCCS fabric-memory pooling.
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     ```
@@ -1143,7 +1143,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     **Update the Prefill and Decode Connectors**
 
-    For Atlas 800I A3 KV Cache Pool deployment, add `--enable-prefix-caching` to both
+    For A3 series KV Cache Pool deployment, add `--enable-prefix-caching` to both
     `run_p.sh` and `run_d.sh` in Section 5.3, and keep
     chunked prefill enabled (the model default). GLM-5.3-Flash has
     linear-attention state, and `AscendStoreConnector`
@@ -1153,7 +1153,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining Atlas 800I A3 Prefill flags from Section 5.3, including
+    the remaining A3 series Prefill flags from Section 5.3, including
     `--max-num-seqs 64`.
 
     ```shell
@@ -1186,7 +1186,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining Atlas 800I A3 Decode flags from Section 5.3, including
+    the remaining A3 series Decode flags from Section 5.3, including
     `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1249,13 +1249,13 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with the Atlas 800I A3 launcher command in Section 5.3. Wait until
+    2. Start Decode with the A3 series launcher command in Section 5.3. Wait until
        all eight Decode engines on ports `9900-9907` are ready and their
        Memcache LocalServices have reserved the configured DDR pool memory.
-    3. Start Prefill with the Atlas 800I A3 launcher command in Section 5.3. Wait until
+    3. Start Prefill with the A3 series launcher command in Section 5.3. Wait until
        both Prefill engines on ports `9081-9082` are ready and their Memcache
        LocalServices have reserved the configured DDR pool memory.
-    4. Start the Atlas 800I A3 proxy from Section 5.3. Send inference requests to
+    4. Start the A3 series proxy from Section 5.3. Send inference requests to
        `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
 
     **Verify KV Cache Reuse**
@@ -1271,13 +1271,13 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     complete, cacheable blocks are reused, so a partial trailing block can
     still require computation.
 
-=== "Atlas 800I A2 series"
+=== "A2 series"
 
     Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
     DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
-    Section 5.3. Atlas 800I A2 nodes do not have the Atlas 800I A3 HCCS fabric: the
-    pool runs over the Atlas 800I A2 RoCE network with the `P2PHANDSHAKE` metadata server
-    and the `ascend` protocol, and the Atlas 800I A3 fabric-memory exports do not apply.
+    Section 5.3. A2 series nodes do not have the A3 series HCCS fabric: the
+    pool runs over the A2 series RoCE network with the `P2PHANDSHAKE` metadata server
+    and the `ascend` protocol, and the A3 series fabric-memory exports do not apply.
 
     Retain the Prefill internal-LB settings from Section 5.3, including
     P1's `--headless --data-parallel-start-rank 1` wrapper and the P0-only
@@ -1290,7 +1290,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     **Prepare the Mooncake Configuration**
 
-    The Atlas 800I A2 Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
+    The A2 series Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
     Install the Mooncake backend according to the KV Cache Pool Deployment
     Guide, then create the following `mooncake.json` on both Prefill nodes.
     Mooncake Master runs in the first Prefill container at
@@ -1331,9 +1331,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
     ```
 
-    All nodes must use the same `PYTHONHASHSEED`. Do not add the Atlas 800I A3
-    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the Atlas 800I A3 HCCS fabric
-    only. The general Atlas 800I A2 branch of the KV Cache Pool Deployment Guide also
+    All nodes must use the same `PYTHONHASHSEED`. Do not add the A3 series
+    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the A3 series HCCS fabric
+    only. The general A2 series branch of the KV Cache Pool Deployment Guide also
     suggests huge pages and `HCCL_INTRA_ROCE_ENABLE`; with the `P2PHANDSHAKE`
     metadata server and the `ascend` protocol these are not required, and the
     validated configuration does not set them.
@@ -1455,12 +1455,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
        `9081`, while P1 is headless). Wait until the P0 API endpoint is
        ready and P1 logs confirm successful initialization.
-    4. Start the Atlas 800I A2 proxy from Section 5.3. Send inference requests to
+    4. Start the A2 series proxy from Section 5.3. Send inference requests to
        `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
 
     **Verify KV Cache Reuse**
 
-    Follow the KV Cache reuse verification steps in the Atlas 800I A3 subsection. The proxy
+    Follow the KV Cache reuse verification steps in the A3 series subsection. The proxy
     sends requests to the P0 API while the DP group uses both Prefill ranks. A
     repeated request can hit a local prefix cache, so confirm pool load/hit
     information on the other Prefill rank to verify shared pool reuse.
@@ -1469,7 +1469,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
 Once the selected deployment is ready, query its service endpoint. For the
 1P1D PD deployment, use the Prefill node IP and proxy port `8081`. For a
-single-node or Atlas 800I A2 colocated deployment, use the API endpoint exposed by its
+single-node or A2 series colocated deployment, use the API endpoint exposed by its
 vLLM service.
 
 ```shell
@@ -1514,7 +1514,7 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 ### 7.2 Accuracy Results with PD Disaggregation
 
-The following accuracy results were obtained using the Atlas 800I A3 PD
+The following accuracy results were obtained using the A3 series PD
 configuration in [Section 5.3](#53-1p1d-pd-disaggregated-deployment), with
 DP2/TP8 on the Prefill node and DP8/TP2 on the Decode node. Evaluation requests
 were sent through the PD proxy. The table below lists the generation parameters
@@ -1522,8 +1522,8 @@ used for each dataset.
 
 | Dataset | Hardware | Score | generation_kwargs |
 | --- | --- | --- | --- |
-| GPQA | Atlas 800I A3 | 89.9 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
-| MMMU-PRO | Atlas 800I A3 | 78.4 | `temperature=1.0, top_p=0.95, max_tokens=98304` |
+| GPQA | A3 series | 89.9 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
+| MMMU-PRO | A3 series | 78.4 | `temperature=1.0, top_p=0.95, max_tokens=98304` |
 
 ## 8 Performance Evaluation
 
@@ -1537,7 +1537,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 9 Performance Tuning
 
-### 9.1 Atlas 800I A3 PD Optimizations
+### 9.1 A3 series PD Optimizations
 
 The following optimizations are already enabled in the reference configuration
 in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Use the same W8A8 weights

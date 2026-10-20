@@ -1,4 +1,19 @@
 (function () {
+  function hideTabbedToc() {
+    const title = document.querySelector('.md-content h1')
+    if (!title || !/^GLM-5\.(2|3-Flash)(?:\s|$)/.test(title.textContent.trim())) {
+      return
+    }
+
+    // Keep tab contents in the page without repeating them in the navigation.
+    document.querySelectorAll('.md-nav--secondary a[href]').forEach(link => {
+      const target = document.getElementById(decodeURIComponent(link.hash.slice(1)))
+      if (target && target.closest('.tabbed-block')) {
+        link.closest('.md-nav__item').remove()
+      }
+    })
+  }
+
   function revealTabbedTarget() {
     if (!window.location.hash) {
       return
@@ -35,6 +50,9 @@
     })
   }
 
-  document$.subscribe(revealTabbedTarget)
+  document$.subscribe(() => {
+    hideTabbedToc()
+    revealTabbedTarget()
+  })
   window.addEventListener('hashchange', revealTabbedTarget)
 })()
