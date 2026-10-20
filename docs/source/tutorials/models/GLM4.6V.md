@@ -144,19 +144,27 @@ The health check should return HTTP 200, and the model list should contain `glm`
 
 Once your server is started, you can query the model with input prompts.
 
-### 6.1 Text Input
+### 6.1 Text Request
 
-Send a text request:
+Send a text request and check that the response contains generated content:
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
+curl -sS -o response.json -w '%{http_code}\n' \
+    http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"glm","messages":[{"role":"user","content":"Hello, please introduce yourself."}],"max_tokens":256,"temperature":0.0}'
+
+jq -e '.choices[0].message.content | length > 0' response.json
 ```
 
-The request should return HTTP 200 and a JSON response containing `choices` and the generated message.
+Expected output:
 
-### 6.2 Image Input
+```text
+200
+true
+```
+
+### 6.2 Image Request
 
 Set `IMAGE_PATH` to a local JPEG file and send an image request:
 
@@ -164,7 +172,8 @@ Set `IMAGE_PATH` to a local JPEG file and send an image request:
 IMAGE_PATH=/root/.cache/example.jpg
 IMAGE_BASE64=$(base64 -w 0 "$IMAGE_PATH")
 
-curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
+curl -sS -o response.json -w '%{http_code}\n' \
+    http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     --data-binary @- <<EOF
 {
@@ -180,9 +189,18 @@ curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
     "temperature": 0.0
 }
 EOF
+
+jq -e '.choices[0].message.content | length > 0' response.json
 ```
 
-The request should return HTTP 200 and a JSON response containing `choices`. Check that the generated description matches the image content.
+Expected output:
+
+```text
+200
+true
+```
+
+Check that `.choices[0].message.content` describes the image content.
 
 ## 7 Accuracy Evaluation
 
