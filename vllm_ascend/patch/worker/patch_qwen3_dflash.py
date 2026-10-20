@@ -1,9 +1,6 @@
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.models.qwen3_dflash import (
-    DFlashQwen3ForCausalLM,
-    DFlashQwen3Model,
-)
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
 
@@ -72,11 +69,11 @@ def precompute_and_store_context_kv(
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
+    # Ascend RoPE can return a new tensor (e.g. the non-Triton path).
+    # Consume its result rather than relying on an in-place update.
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
 
     if context_slot_mapping is None:
         return
@@ -105,15 +102,3 @@ def precompute_and_store_context_kv(
 
 DFlashQwen3Model._project_context_kv = _project_context_kv
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
-
-_orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
-
-
-def _patched_read_mask_embedding(self):
-    try:
-        return _orig_read_mask_embedding(self)
-    except Exception:
-        return None
-
-
-DFlashQwen3ForCausalLM._read_mask_embedding = _patched_read_mask_embedding

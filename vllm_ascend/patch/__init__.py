@@ -1208,6 +1208,8 @@
 #       upstream DFlash2 layer rather than the Ascend implementation.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
+#       using a key-only call to avoid cloning the entire context buffer.
 #       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
 #       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
 #    Related PR:

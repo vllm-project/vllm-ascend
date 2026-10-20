@@ -1,12 +1,67 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
+
+
+@pytest.mark.parametrize("use_triton", [False, True])
+@pytest.mark.parametrize("is_neox_style", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype):
+    """Both NPU RoPE backends must write rotated context K, including key-only calls."""
+    import vllm_ascend.ops.rotary_embedding as rope_module
+    from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
+
+    monkeypatch.setattr(rope_module, "HAS_TRITON", use_triton)
+    torch.manual_seed(7)
+    layers, tokens, heads, head_dim = 2, 3, 2, 64
+    keys = torch.randn(layers, tokens, heads, head_dim, dtype=dtype, device="npu")
+    values = torch.randn_like(keys)
+    positions = torch.tensor([2, 4, 7], device="npu")
+    angles = torch.outer(torch.arange(16).float(), 10000.0 ** (-torch.arange(0, head_dim, 2).float() / head_dim))
+    cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(device="npu", dtype=dtype)
+    rope = SimpleNamespace(
+        head_size=head_dim, rotary_dim=head_dim, is_neox_style=is_neox_style, use_mtp=False, cos_sin_cache=cache
+    )
+
+    def rotate(pos, query, key):
+        return rope_module.AscendRotaryEmbedding.forward_oot(rope, pos, query, key)
+
+    caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(layers)]
+    model = SimpleNamespace(
+        _num_attn_layers=layers,
+        _kv_size=heads * head_dim,
+        _head_dim=head_dim,
+        _num_kv_heads=heads,
+        _project_context_kv=lambda *args: (keys.clone(), values.clone()),
+        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=torch.nn.Identity(), rotary_emb=rotate))] * layers,
+        _attn_layers=caches,
+    )
+    mapping = torch.arange(tokens, dtype=torch.int32, device="npu")
+    precompute_and_store_context_kv(model, torch.zeros(tokens, heads * head_dim, device="npu"), positions, mapping)
+
+    original = keys.cpu().float()
+    cos, sin = cache.cpu().float()[positions.cpu()].chunk(2, dim=-1)
+    cos, sin = cos[None, :, None], sin[None, :, None]
+    if is_neox_style:
+        left, right = original.chunk(2, dim=-1)
+        expected = torch.cat((left * cos - right * sin, right * cos + left * sin), dim=-1)
+    else:
+        left, right = original[..., ::2], original[..., 1::2]
+        expected = torch.stack((left * cos - right * sin, right * cos + left * sin), dim=-1).flatten(-2)
+    for layer, attn in enumerate(caches):
+        attn.impl.do_kv_cache_update.assert_called_once()
+        args = attn.impl.do_kv_cache_update.call_args.args
+        torch.testing.assert_close(args[1].cpu().float(), expected[layer], atol=0.03, rtol=0.02)
+        torch.testing.assert_close(args[2], values[layer])
 
 
 @pytest.mark.parametrize("probabilistic", [False, True])
