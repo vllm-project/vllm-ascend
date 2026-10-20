@@ -466,6 +466,24 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 In Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
 
+**Low eviction watermark:** With a 100 GB DRAM pool, `eviction_high_watermark_ratio=0.5` triggers eviction at 50 GB. If the warmup working set exceeds this threshold, data can be evicted before asynchronous SSD writes finish, leaving the benchmark with a cold cache and a lower initial hit rate.
+
+To preserve warmup data under memory pressure, set `enable_ssd_offload=true` in `mooncake.json` and enable offload-on-evict on the master:
+
+```shell
+mooncake_master \
+    --port 50088 \
+    --eviction_high_watermark_ratio 0.5 \
+    --eviction_ratio 0.1 \
+    --default_kv_lease_ttl 11000 \
+    --enable_offload=true \
+    --offload_on_evict=true \
+    --offload_force_evict=false \
+    --client_ttl=120
+```
+
+`offload_on_evict` defaults to `false`. When enabled, eviction queues objects without a `LOCAL_DISK` replica for offload and pins one memory replica while offload is pending. Keep `offload_force_evict=false` to defer eviction when offload cannot be queued. On Mooncake builds that expose `offloading_queue_limit`, increase the pending-object limit per local disk segment as needed (for example, `--offloading_queue_limit=200000`), and leave DRAM headroom for pending writes.
+
 SSD disk usage control environment variables:
 
 ```shell
