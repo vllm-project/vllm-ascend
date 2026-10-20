@@ -1,5 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
+from math import lcm
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -36,6 +37,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_BLOCK_SIZE,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
     FlashMLADecode,
@@ -94,11 +96,14 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+MLA_KERNEL_BLOCK_SIZE = 128
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+MLAPO_CACHE_BLOCK_ALIGNMENT = 16
+MLAPO_MAX_CACHE_BLOCK_SIZE = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -138,7 +143,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [128]
+        return [MLA_KERNEL_BLOCK_SIZE]
 
 
 class AscendMLAAttention(MLAAttention):
@@ -309,6 +314,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
+        self.chunk_alignment = self.determine_chunk_alignment(vllm_config)
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
@@ -435,8 +441,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
 
     @staticmethod
+    def determine_chunk_alignment(vllm_config: VllmConfig) -> int:
+        # GatherPa starts reads at kernel-block boundaries even when the
+        # scheduler's configured block size differs from the kernel block size.
+        return lcm(vllm_config.cache_config.block_size, MLA_KERNEL_BLOCK_SIZE)
+
+    @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-        return ascend_chunked_prefill_workspace_size(vllm_config)
+        chunk_alignment = AscendMLAMetadataBuilder.determine_chunk_alignment(vllm_config)
+        return max(
+            ascend_chunked_prefill_workspace_size(vllm_config),
+            vllm_config.scheduler_config.max_num_seqs * chunk_alignment,
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -711,15 +727,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
         workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
         self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
-        self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
+        self.max_context_chunk = round_down(self.max_context_chunk, self.chunk_alignment)
 
         if self.max_context_chunk <= 0:
             raise ValueError(
                 "MLA chunked prefill workspace is too small for one aligned chunk per request: "
                 f"workspace_size={workspace_size}, "
                 f"num_prefills_with_context={num_prefills_with_context_cpu}, "
-                f"block_size={self.block_size}, "
-                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+                f"chunk_alignment={self.chunk_alignment}, "
+                f"minimum_workspace_size={num_prefills_with_context_cpu * self.chunk_alignment}."
             )
         self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
         chunk_starts = (
@@ -957,6 +973,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    mlapo_W_UK_T: torch.Tensor
+    weight_dq: torch.Tensor
+    weight_dkv_kr: torch.Tensor
+    weight_uq_qr: torch.Tensor
+    dequant_scale_w_dq: torch.Tensor
+    dequant_scale_w_dkv_kr: torch.Tensor
+    dequant_scale_w_uq_qr: torch.Tensor
     _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
 
     def __init__(
@@ -1289,8 +1312,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
             prefer_copy=True,
         )
-        self.mlapo_W_UK_T = self.W_UK_T
-
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
@@ -1320,8 +1341,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "unsupported weight type, so MLAPO is disabled for these layers."
                 )
         if self.enable_mlapo or self.fa_quant_layer:
+            # Keep a padded UK tensor alive until it is refreshed in place.
+            if not self.enable_mlapo or not self._mlapo_uses_native_weights or self.head_padding == 0:
+                self.mlapo_W_UK_T = self.W_UK_T
             self._process_weights_for_fused(act_dtype)
         else:
+            self.mlapo_W_UK_T = self.W_UK_T
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
         if getattr(self, "_prolog_v3_weights", None) is not None:
@@ -1334,7 +1359,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
 
-        if self.use_flashmla and self.supports_prolog_v3_writer():
+        if self.use_flashmla and (
+            self.supports_prolog_v3_writer() or (self._supports_flashmla_mlapo() and not self.dcp_enabled)
+        ):
             self._prepare_flashmla_writer_buffers()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
@@ -1343,6 +1370,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
         block_size = self.vllm_config.cache_config.block_size
+        if not self.use_mla_rope:
+            capacity = min(capacity, MLAPO_MAX_SUPPORTED_TOKENS)
+            block_size = FLASHMLA_BLOCK_SIZE
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
@@ -1421,28 +1451,47 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.num_heads_padded * self.qk_head_dim,
                 )
 
-        self.weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
-        self.weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
-        self.weight_uq_qr = weight_uq_qr.contiguous()
-        self.weight_dq = torch_npu.npu_format_cast(self.weight_dq, ACL_FORMAT_FRACTAL_NZ)
-        self.weight_uq_qr = torch_npu.npu_format_cast(self.weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
-        self.weight_dkv_kr = torch_npu.npu_format_cast(self.weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
+        # Captured graphs retain these transformed tensors, not the source
+        # linear weights. Refresh compatible NZ tensors in place on reload.
+        for name, weight in (
+            ("weight_dq", fused_weight[..., : self.q_lora_rank]),
+            ("weight_dkv_kr", fused_weight[..., self.q_lora_rank :]),
+            ("weight_uq_qr", weight_uq_qr),
+        ):
+            replace_parameter(
+                self,
+                name,
+                torch_npu.npu_format_cast(weight.contiguous(), ACL_FORMAT_FRACTAL_NZ),
+                prefer_copy=True,
+            )
 
+        if is_native and self.head_padding > 0:
+            replace_parameter(
+                self,
+                "mlapo_W_UK_T",
+                F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding)),
+                prefer_copy=True,
+            )
         self.mlapo_weight_quant_mode = 0 if is_native else 3
         if is_native:
             self.mlapo_num_heads = self.num_heads_padded
-            if self.head_padding > 0:
-                self.mlapo_W_UK_T = F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding))
         elif get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
+            uq_scale = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
             weight_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1).flatten(1)
-            self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank, ...]
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :, ...]
+            dq_scale = weight_scale[: self.q_lora_rank, ...]
+            dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
         else:
-            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
+            uq_scale = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
             weight_scale = self.fused_qkv_a_proj.weight_scale  # type: ignore[union-attr]
-            self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :].to(torch.float).unsqueeze(0)
+            dq_scale = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
+            dkv_kr_scale = weight_scale[self.q_lora_rank :].to(torch.float).unsqueeze(0)
+        if not is_native:
+            for name, scale in (
+                ("dequant_scale_w_uq_qr", uq_scale),
+                ("dequant_scale_w_dq", dq_scale),
+                ("dequant_scale_w_dkv_kr", dkv_kr_scale),
+            ):
+                replace_parameter(self, name, scale, prefer_copy=True)
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
@@ -1892,6 +1941,53 @@ class AscendMLAImpl(MLAAttentionImpl):
             getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
         )
 
+    def _supports_flashmla_mlapo(self) -> bool:
+        """Admit the main model's no-RoPE FlashMLA decode without changing V3 writers."""
+        if not (
+            self.use_flashmla
+            and self.enable_mlapo
+            and not self.is_draft_model
+            and not self.use_mla_rope
+            and self.support_fp8_attention
+            and self.supports_prolog_v3_dtype()
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and not self.pcp_enabled
+            and not self.is_pcp_decode_sharded
+            and self.supports_prolog_v3_projection()
+            and getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
+            and not getattr(self.q_proj, "_chunk_size", 0)
+        ):
+            return False
+        projections = (self.fused_qkv_a_proj, self.q_proj)
+        if self._mlapo_uses_native_weights:
+            return self.mlapo_weight_quant_mode == 0 and all(
+                layer is not None and isinstance(layer.quant_method, UnquantizedLinearMethod) for layer in projections
+            )
+        return self.mlapo_weight_quant_mode == 3 and all(
+            type(self._get_context_prolog_quant_method(layer)) is AscendW8A8MXFP8DynamicLinearMethod
+            for layer in projections
+        )
+
+    def _can_use_flashmla_mlapo(self, kv_cache, attn_metadata) -> bool:
+        """Check padded decode rows and preallocated buffers before entering MLAPO."""
+        num_tokens = attn_metadata.num_decode_tokens
+        if not (
+            self._supports_flashmla_mlapo()
+            and attn_metadata.external_flashmla is not None
+            and attn_metadata.num_prefills == 0
+            and 0 < num_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+        ):
+            return False
+        for cache, width in zip(kv_cache, (self.kv_lora_rank, self.qk_rope_head_dim)):
+            if cache.dtype != torch.bfloat16 or cache.shape[1:] != (FLASHMLA_BLOCK_SIZE, self.num_kv_heads, width):
+                return False
+        buffers = getattr(self, "_dcp_current_kv_buffers", None) if self.dcp_enabled else self._flashmla_writer_buffers
+        if buffers is None or num_tokens > buffers[2].numel():
+            return False
+        block_size = buffers[0].shape[1]
+        return 0 < block_size <= MLAPO_MAX_CACHE_BLOCK_SIZE and block_size % MLAPO_CACHE_BLOCK_ALIGNMENT == 0
+
     def _uses_strided_kv_adapter(self) -> bool:
         """A5 drafts with unsupported He retain their strided cache via scatter.
 
@@ -2339,7 +2435,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=128 if self.use_flashmla else writer_cache[0].shape[1],
+            # PROLOG quantization tiles are independent of KV cache page size.
+            tile_size=128,
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer
@@ -2990,20 +3087,30 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         bsz = attn_metadata.num_decode_tokens
         history_slots = attn_metadata.slot_mapping[:bsz]
+        flash_mlapo = attn_metadata.external_flashmla is not None
+        if flash_mlapo:
+            history_slots = attn_metadata.external_flashmla.slots[:bsz]
         return_current_kv = self._decode_requires_current_kv(attn_metadata)
-        if return_current_kv:
+        scatter_history = return_current_kv or flash_mlapo
+        if return_current_kv or (flash_mlapo and self.dcp_enabled):
             # DCP attention needs every current row, while the paged cache keeps
             # only this rank's history. Use the existing prolog cache outputs for
             # the current chunk, then scatter its rank-owned rows to history.
             assert self._dcp_current_kv_buffers is not None
             current_nope_cache, current_pe_cache, current_indices = self._dcp_current_kv_buffers
             assert bsz <= current_indices.numel()
-            block_size = kv_cache[0].shape[1]
+            block_size = current_nope_cache.shape[1]
             num_blocks = cdiv(bsz, block_size)
             current_nope_cache = current_nope_cache[:num_blocks]
             current_pe_cache = current_pe_cache[:num_blocks]
             decode_k_nope, decode_k_pe = current_nope_cache, current_pe_cache
             cache_index = current_indices[:bsz]
+        elif flash_mlapo:
+            # Token-fused views have stride 576 along tokens, which MLAPO does
+            # not accept. Only stage current rows; never materialize history.
+            writer_cache, cache_index, staged = self._prolog_v3_writer_workspace(bsz, kv_cache, history_slots)
+            assert staged
+            decode_k_nope, decode_k_pe = writer_cache
         else:
             # Only the direct prolog needs int64; DCP scatters the original slots.
             cache_index = history_slots.to(torch.int64)
@@ -3059,6 +3166,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
             quant_scale_ckv = self.quant_kscale[:, :1] if self.fa_quant_layer else None
 
+        norm_kwargs = {}
+        if flash_mlapo:
+            assert self.q_a_layernorm is not None
+            assert self.kv_a_layernorm is not None
+            norm_kwargs = {
+                "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
+                "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
+            }
         decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog(
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
@@ -3081,24 +3196,31 @@ class AscendMLAImpl(MLAAttentionImpl):
             weight_quant_mode=weight_quant_mode,
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             quant_scale_ckv=quant_scale_ckv,
+            **norm_kwargs,
         )
 
         decode_q_nope = decode_q_nope.view(bsz, self.mlapo_num_heads, self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
+        if flash_mlapo:
+            # Native MLAPO pads weight heads; FlashMLA and DCP use real heads.
+            decode_q_nope = decode_q_nope[:, : self.num_heads]
+            decode_q_pe = decode_q_pe[:, : self.num_heads]
 
         decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
         current_k_nope = current_k_pe = None
-        if return_current_kv:
-            current_k_nope = current_nope_cache.flatten(0, 1)[:bsz]
-            current_k_pe = current_pe_cache.flatten(0, 1)[:bsz]
+        if scatter_history:
+            written_k_nope = decode_k_nope.flatten(0, 1)[:bsz]
+            written_k_pe = decode_k_pe.flatten(0, 1)[:bsz]
             DeviceOperator.reshape_and_cache(
-                key=current_k_nope,
-                value=current_k_pe,
+                key=written_k_nope,
+                value=written_k_pe,
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
                 slot_mapping=history_slots,
             )
             decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+            if return_current_kv:
+                current_k_nope, current_k_pe = written_k_nope, written_k_pe
         decode_preprocess_res = DecodeMLAPreprocessResult(
             decode_q_nope,
             decode_q_pe,
@@ -3381,7 +3503,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         elif (
             (self.fa_quant_layer or self.enable_mlapo)
-            and not fused_mla_cache
+            and (not fused_mla_cache or self._can_use_flashmla_mlapo(kv_cache, attn_metadata))
             and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
