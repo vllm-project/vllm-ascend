@@ -1167,8 +1167,3 @@ msgstr ""
 "    代理端点。池片段使用 `$4` 作为唯一引擎 ID 和\n"
 "    查找端口；这不需要在 Prefill 服务命令中添加\n"
 "    `--data-parallel-rank`。"
-
-msgid ""
-"Support for 950DT products is currently experimental; official support will "
-"be available in a future release."
-msgstr "950DT products 当前为实验性支持，将在后续版本中正式支持。"
