@@ -111,10 +111,14 @@ def _config(
     )
 
 
-def _run(config):
+DEFAULT_MAMBA_SHAPES = ((6, 4096), (16, 128, 128))
+DEFAULT_MAMBA_DTYPES = (torch.bfloat16, torch.float32)
+
+
+def _run(config, *, mamba_shapes=DEFAULT_MAMBA_SHAPES, mamba_dtypes=DEFAULT_MAMBA_DTYPES):
     model_cls = SimpleNamespace(
-        get_mamba_state_shape_from_config=lambda _config: ((6, 4096), (16, 128, 128)),
-        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+        get_mamba_state_shape_from_config=lambda _config: mamba_shapes,
+        get_mamba_state_dtype_from_config=lambda _config: mamba_dtypes,
     )
     with patch.object(MambaModelConfig, "verify_and_update_config") as upstream, ExitStack() as stack:
         if _get_sparse_index_kpool(config.model_config) is None:
@@ -145,6 +149,40 @@ def test_contiguous_hybrid_overrides_larger_attention_segment():
 
     assert config.cache_config.block_size == 2048
     assert config.cache_config.mamba_page_size_padded == 2 * 1048576 + 49152
+
+
+def test_contiguous_hybrid_accepts_single_ssm_state():
+    config = _config()
+
+    _run(config, mamba_shapes=((16, 128, 128),), mamba_dtypes=(torch.float32,))
+
+    assert config.cache_config.block_size == 2048
+    assert config.cache_config.mamba_page_size_padded == 2048 * 1024
+
+
+def test_contiguous_hybrid_rejects_reversed_mamba_state_order():
+    config = _config()
+
+    with pytest.raises(AssertionError, match=r"\(conv_state, ssm_state\) order"):
+        _run(config, mamba_shapes=((16, 128, 128), (6, 4096)))
+
+
+def test_contiguous_hybrid_rejects_more_than_two_mamba_states():
+    config = _config()
+
+    with pytest.raises(AssertionError, match="at most conv and SSM"):
+        _run(
+            config,
+            mamba_shapes=((6, 4096), (16, 128, 128), (16, 128, 128)),
+            mamba_dtypes=(torch.bfloat16, torch.float32, torch.float32),
+        )
+
+
+def test_contiguous_hybrid_rejects_unalignable_ssm_page():
+    config = _config()
+
+    with pytest.raises(ValueError, match="Cannot align SSM and Attention pages"):
+        _run(config, mamba_shapes=((16, 128, 129),), mamba_dtypes=(torch.float32,))
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8", "auto"])

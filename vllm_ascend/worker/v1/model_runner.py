@@ -6162,6 +6162,23 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
                     )
+                    if (
+                        self.hybrid_with_attn_and_mamba
+                        and not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                    ):
+                        # patch_mamba_config derives the hybrid page from a
+                        # single K/V head size. Reject asymmetric K/V heads
+                        # here rather than silently splitting the wrong region.
+                        head_size_v = getattr(
+                            current_kv_cache_spec,
+                            "head_size_v",
+                            current_kv_cache_spec.head_size,
+                        )
+                        assert head_size_v == current_kv_cache_spec.head_size, (
+                            "contiguous hybrid KV cache assumes equal K/V head sizes; "
+                            f"got head_size={current_kv_cache_spec.head_size} and "
+                            f"head_size_v={head_size_v} for {layer_name}"
+                        )
                     should_trim_page_padding = (
                         self.hybrid_with_attn_and_mamba and self.use_hybrid_blocks
                     ) or (

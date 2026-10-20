@@ -1743,6 +1743,66 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             2,
         )
 
+    def test_hybrid_contiguous_reshape_rejects_mismatched_kv_head_sizes(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.use_hybrid_blocks = True
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+
+        attention_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=2,
+            head_size_v=4,
+            dtype=torch.float16,
+            page_size_padded=96,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((3,), (16,)),
+            dtypes=(torch.float16, torch.float16),
+            page_size_padded=96,
+            mamba_cache_mode="align",
+        )
+
+        def _kv_shape(num_blocks, block_size, num_kv_heads, head_size, **_):
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+        attention_backend = MagicMock()
+        attention_backend.is_sparse.return_value = False
+        attention_backend.get_kv_cache_shape.side_effect = _kv_shape
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=attention_spec,
+                backend=attention_backend,
+                layer_names=["full_attn"],
+            ),
+            SimpleNamespace(
+                kv_cache_group_id=1,
+                kv_cache_spec=mamba_spec,
+                backend=MagicMock(),
+                layer_names=["linear_attn"],
+            ),
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=["full_attn"], kv_cache_spec=attention_spec),
+                KVCacheGroupSpec(layer_names=["linear_attn"], kv_cache_spec=mamba_spec),
+            ],
+        )
+        raw = torch.zeros(2 * attention_spec.page_size_bytes, dtype=torch.uint8)
+
+        with self.assertRaisesRegex(AssertionError, "equal K/V head sizes"):
+            runner._reshape_kv_cache_tensors(
+                kv_cache_config,
+                {"full_attn": raw[:], "linear_attn": raw[:]},
+                [4, 8],
+            )
+
     def test_pure_gqa_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False)
 
