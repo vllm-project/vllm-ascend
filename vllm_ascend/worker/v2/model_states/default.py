@@ -18,15 +18,20 @@
 #
 
 from collections.abc import Callable, Collection
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dp_group
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
@@ -38,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
+from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -54,6 +60,9 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 
 
 if TYPE_CHECKING:
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
+    from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+    from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
@@ -107,6 +116,225 @@ class AscendModelState(DefaultModelState):
                     pool_capacity, dtype=torch.bool, device=device, pin_memory=pin_memory
                 )
                 self._offload_request_states = CopySfaRequestStates()
+        self._initialize_decoder_replay()
+
+    def _initialize_decoder_replay(self) -> None:
+        self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
+        if self.decoder_replay is None:
+            return
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
+        capacity = max(self.max_num_tokens, max_capture)
+        capacity = ((capacity + tp_size - 1) // tp_size) * tp_size
+        self._decoder_replay_rows = torch.empty(capacity, dtype=torch.int64, device=self.device)
+        self._decoder_replay_positions = torch.empty_like(self._decoder_replay_rows)
+        self._decoder_replay_offsets = CpuGpuBuffer(
+            self.max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=is_pin_memory_available()
+        )
+        self._decoder_replay_dropped_before = CpuGpuBuffer(
+            self.max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=is_pin_memory_available()
+        )
+        self._decoder_replay_start = torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._decoder_replay_zero_start = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._decoder_replay_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_source_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self._decoder_replay_common_metadata: dict[int, AscendCommonAttentionMetadata] = {}
+        self._decoder_replay_metadata: dict[str, AscendDSAV41Metadata] | None = None
+        self._decoder_replay_num_tokens = 0
+        self._decoder_replay_num_actual_tokens = 0
+        self._decoder_replay_counts: torch.Tensor | None = None
+        self._decoder_replay_counts_device: torch.Tensor | None = None
+        self.prompt_logprobs_worker = None
+
+    def _initialize_decoder_replay_metadata(self, attn_groups, kv_cache_config) -> None:
+        from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+        assert self.decoder_replay is not None
+        self._decoder_replay_slot_mappings = torch.empty(
+            (len(kv_cache_config.kv_cache_groups), self._decoder_replay_rows.numel()),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self._decoder_replay_source_slot_mappings = torch.empty_like(self._decoder_replay_slot_mappings)
+        self._decoder_replay_builders.clear()
+        for group_id, groups in enumerate(attn_groups):
+            for group in groups:
+                if not isinstance(group.kv_cache_spec, CircularBufferSpec):
+                    builder_cls = group.backend.get_builder_cls()
+                    if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
+                        builder = builder_cls(group.kv_cache_spec, group.layer_names, self.vllm_config, self.device)
+                        self._decoder_replay_builders.append((group_id, group.layer_names, builder))
+        from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
+
+        gather_replay_batch(
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_dropped_before.gpu,
+            torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device),
+            self._decoder_replay_zero_start,
+            torch.zeros(self._decoder_replay_rows.numel(), dtype=torch.int64, device=self.device),
+            self._decoder_replay_source_slot_mappings,
+            self._decoder_replay_rows,
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_positions,
+            self._decoder_replay_slot_mappings,
+            self._decoder_replay_start,
+            self._decoder_replay_rows.numel(),
+            self.decoder_replay.window,
+            warmup=True,
+        )
+
+    def _prepare_decoder_replay(self, input_batch, cudagraph_mode, attn_groups, kv_cache_config) -> None:
+        layers = self.decoder_replay
+        if layers is None:
+            return
+        layers.rows = layers.context_factory = None
+        if self.vllm_config.parallel_config.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(
+            self.vllm_config
+        ):
+            return
+        if not self._decoder_replay_builders:
+            self._initialize_decoder_replay_metadata(attn_groups, kv_cache_config)
+        if cudagraph_mode != CUDAGraphMode.NONE or getattr(input_batch, "is_dummy", False):
+            return
+
+        common_by_group = self._decoder_replay_common_metadata
+        real_batch = input_batch.num_reqs > 0 and bool(common_by_group)
+        trims = False
+        kept_lens = np.empty(0, dtype=np.int32)
+        self._decoder_replay_num_actual_tokens = input_batch.num_tokens
+        if real_batch:
+            num_reqs = input_batch.num_reqs
+            offsets = input_batch.query_start_loc_np[: num_reqs + 1]
+            query_lens = np.diff(offsets)
+            worker = self.prompt_logprobs_worker
+            keep_rows = np.zeros(num_reqs, dtype=bool)
+            if worker is not None:
+                keep_rows = worker.uses_prompt_logprobs[input_batch.idx_mapping_np[:num_reqs]]
+            prefills = input_batch.is_prefilling_np[:num_reqs]
+            kept_lens = np.where(prefills & ~keep_rows, np.minimum(query_lens, layers.window), query_lens)
+            trims = bool((kept_lens < query_lens).any())
+            self._decoder_replay_num_actual_tokens = int(kept_lens.sum())
+            kept_offsets = self._decoder_replay_offsets.np[: num_reqs + 1]
+            kept_offsets[0] = 0
+            np.cumsum(kept_lens, out=kept_offsets[1:])
+            self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
+
+        self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
+        if enable_dsa_cp():
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            self._decoder_replay_num_tokens = ((self._decoder_replay_num_tokens + tp_size - 1) // tp_size) * tp_size
+        self._decoder_replay_counts = None
+        self._decoder_replay_counts_device = None
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        if dp_size > 1:
+            dp = get_dp_group()
+            agreed = torch.zeros((2, dp_size), dtype=torch.int32)
+            agreed[:, dp.rank_in_group] = torch.tensor([trims, self._decoder_replay_num_tokens], dtype=torch.int32)
+            with skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext():
+                if not should_skip_allreduce_across_dp_group(self.vllm_config):
+                    dist.all_reduce(agreed, group=dp.cpu_group)
+            trims = bool(agreed[0].any())
+            self._decoder_replay_counts = agreed[1]
+            self._decoder_replay_counts_device = agreed[1].to(self.device, non_blocking=True)
+        if not trims:
+            return
+        if real_batch:
+            self._decoder_replay_metadata = self._build_decoder_replay_metadata(input_batch, kept_lens)
+        else:
+            num_tokens = input_batch.num_tokens_after_padding
+            torch.arange(num_tokens, out=self._decoder_replay_rows[:num_tokens])
+            self._decoder_replay_rows[num_tokens : self._decoder_replay_num_tokens].zero_()
+            self._decoder_replay_metadata = self.attn_metadata
+        layers.rows = self._decoder_replay_rows[: self._decoder_replay_num_tokens]
+        layers.num_actual_rows = self._decoder_replay_num_actual_tokens
+        layers.context_factory = self._decoder_replay_context
+
+    def _build_decoder_replay_metadata(self, input_batch, kept_lens):
+        from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+        from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
+
+        assert self.decoder_replay is not None
+        assert self._decoder_replay_source_slot_mappings is not None
+        assert self._decoder_replay_slot_mappings is not None
+        num_reqs = len(kept_lens)
+        num_tokens = self._decoder_replay_num_tokens
+        self._decoder_replay_dropped_before.copy_to_gpu(num_reqs + 1)
+        source_slots = self._decoder_replay_source_slot_mappings[:, : input_batch.num_tokens]
+        for group_id in range(len(self.block_tables)):
+            source_slots[group_id].copy_(self.slot_mappings[group_id][: input_batch.num_tokens])
+        slots = self._decoder_replay_slot_mappings[:, :num_tokens]
+        original = next(iter(self._decoder_replay_common_metadata.values()))
+        gather_replay_batch(
+            original.query_start_loc[: num_reqs + 1],
+            self._decoder_replay_dropped_before.gpu[: num_reqs + 1],
+            original.seq_lens[:num_reqs],
+            original.replay_start if original.replay_start is not None else self._decoder_replay_zero_start[:num_reqs],
+            original.positions,
+            source_slots,
+            self._decoder_replay_rows,
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_positions,
+            slots,
+            self._decoder_replay_start,
+            num_tokens,
+            self.decoder_replay.window,
+        )
+        common = original.replace(
+            query_start_loc=self._decoder_replay_offsets.gpu[: num_reqs + 1],
+            query_start_loc_cpu=self._decoder_replay_offsets.cpu[: num_reqs + 1],
+            seq_lens=original.seq_lens[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=self._decoder_replay_num_actual_tokens,
+            num_input_tokens=num_tokens,
+            positions=self._decoder_replay_positions[:num_tokens],
+            positions_cpu=None,
+            max_query_len=int(kept_lens.max()),
+            is_prefilling=original.is_prefilling[:num_reqs],
+            actual_seq_lengths_q=self._decoder_replay_offsets.np[1 : num_reqs + 1].tolist(),
+        )
+        rope = get_cos_and_sin_dsa(common.positions, use_cache=False)
+        metadata = {}
+        batch_shared: dict[str, Any] = {}
+        group_shared: dict[int, dict[str, Any]] = {}
+        for group_id, layer_names, builder in self._decoder_replay_builders:
+            group_common = common.replace(
+                block_table_tensor=self.block_tables[group_id][:num_reqs],
+                slot_mapping=slots[group_id],
+            )
+            value = builder.build(
+                0,
+                group_common,
+                num_actual_reqs=num_reqs,
+                common_v41_batch_metadata=batch_shared,
+                common_v41_metadata=group_shared.setdefault(group_id, {}),
+                rope_views=rope,
+                replay_start=self._decoder_replay_start[:num_reqs],
+                replay_seq_lens=original.seq_lens[:num_reqs],
+                replay_max_seq_len=int(kept_lens.max()) + self.decoder_replay.window - 1,
+            )
+            metadata.update({name: value for name in layer_names})
+        return metadata
+
+    @contextmanager
+    def _decoder_replay_context(self):
+        outer = get_forward_context()
+        assert self._decoder_replay_slot_mappings is not None
+        slot_mapping = {
+            name: self._decoder_replay_slot_mappings[group_id, : self._decoder_replay_num_tokens]
+            for group_id, names, _ in self._decoder_replay_builders
+            for name in names
+        }
+        with set_forward_context(
+            self._decoder_replay_metadata,
+            self.vllm_config,
+            num_tokens=self._decoder_replay_num_tokens,
+            num_tokens_across_dp=self._decoder_replay_counts_device,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            slot_mapping=slot_mapping,
+            is_padding=outer.is_padding,
+        ):
+            yield
 
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
@@ -298,6 +526,7 @@ class AscendModelState(DefaultModelState):
         build_metadata: Callable[..., Any] = build_attn_metadata
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
+        self._decoder_replay_common_metadata = {}
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -332,7 +561,13 @@ class AscendModelState(DefaultModelState):
             req_topk_buffer_active=pool_active.cpu[:num_reqs] if pool_active is not None else None,
             copy_sfa_restore_tails=restore_copy_sfa_tails,
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
+            common_metadata_callback=(
+                lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
+                if self.decoder_replay is not None
+                else None
+            ),
         )
+        self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:
             manager = get_sparse_kv_offload_manager()
             for metadata in self.attn_metadata.values():

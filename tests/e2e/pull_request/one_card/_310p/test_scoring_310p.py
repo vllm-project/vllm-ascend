@@ -5,12 +5,9 @@ from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 CROSS_ENCODER_MODELS = [
     "BAAI/bge-reranker-v2-m3",  # Roberta
 ]
-
 
 TEXTS_1 = [
     "What is the capital of France?",

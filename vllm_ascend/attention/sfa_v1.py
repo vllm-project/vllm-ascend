@@ -70,6 +70,7 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -355,6 +356,12 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_builder_cls():

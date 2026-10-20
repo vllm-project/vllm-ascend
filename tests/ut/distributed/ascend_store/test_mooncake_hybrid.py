@@ -103,7 +103,9 @@ def cpu_cache(array):
     cache = MagicMock()
     cache.shape = array.shape
     cache.element_size.return_value = array.itemsize
-    cache.stride.return_value = array.strides[0] // array.itemsize
+    strides = tuple(stride // array.itemsize for stride in array.strides)
+    cache.stride.side_effect = lambda dim=None: strides if dim is None else strides[dim]
+    cache.numel.return_value = array.size
     cache.data_ptr.return_value = array.ctypes.data
     cache.untyped_storage.return_value.data_ptr.return_value = array.ctypes.data
     cache.__getitem__.return_value.numel.return_value = array[0].size

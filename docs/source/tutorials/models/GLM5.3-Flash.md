@@ -135,7 +135,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -162,6 +162,27 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
+
+    **Check the software stack inside each A2 container**
+
+    ```shell
+    command -v python3 vllm
+    python3 -m pip show vllm vllm-ascend transformers
+    ```
+
+    This A2 recipe uses the versioned `v0.30.0rc2` image above. The
+    [rc2 release](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0rc2)
+    fixes the official Docker image build and recommends replacing rc1 images;
+    it contains no model runtime code changes.
+
+    If startup reports that Transformers does not recognize `glm5_next`, the failure occurs while
+    loading the model configuration, before DP engine initialization. Check
+    the active software versions and recreate the containers from the image
+    above if they still use the legacy `glm-5.3-flash` image or a vLLM
+    `0.23.0` environment. For source builds, follow the
+    [installation guide](../../getting_started/installation.md) and use the
+    matching vLLM, vLLM-Ascend, and Transformers dependencies for the checked-out
+    revision.
 
 ## 5 Online Service Deployment
 
@@ -292,7 +313,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
-        --data-parallel-start-rank 0 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12321 \
         --tensor-parallel-size 8 \
@@ -367,7 +387,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 2 --data-parallel-size-local 1`: Runs two DP ranks across the two nodes, one rank per node; each rank uses TP8 within its node.
-- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 uses `0`, node 1 uses `1`.
+- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 omits this option and automatically uses rank `0`; headless node 1 explicitly uses `1`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
@@ -707,6 +727,18 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     Save the following script as `run_p.sh` on P0 and P1. The node wrappers
     below provide `LOCAL_IP` and the API/headless role.
 
+    Prefill uses internal DP load balancing: P0 infers global DP rank 0
+    and exposes the only Prefill API; P1 uses
+    `--headless --data-parallel-start-rank 1`. Keep
+    `--data-parallel-size-local 1` in this template. Although the launcher
+    passes the DP rank as `$4`, do not forward it as
+    `--data-parallel-rank "$4"` on Prefill: vLLM v0.30.0 (paired with
+    vLLM-Ascend v0.30.0rc1/rc2) infers external DP load balancing from
+    that option and rejects the remote headless
+    engine with `Remote engine must not use --headless in external or hybrid dp lb mode`.
+    Decode uses explicit DP ranks and API-serving engines, so its
+    `--data-parallel-rank "$4"` configuration is intentional.
+
     ```shell
     #!/usr/bin/env bash
     # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
@@ -737,7 +769,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
-      --data-parallel-rank "$4" \
+      --data-parallel-size-local 1 \
       --data-parallel-address "$5" \
       --data-parallel-rpc-port "$6" \
       --tensor-parallel-size "$7" \
@@ -752,6 +784,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --quantization ascend \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --async-scheduling \
       --enforce-eager \
@@ -792,7 +825,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export LOCAL_IP="<PREFILL_NODE1_IP>"
     export NIC_NAME="<PREFILL_NODE1_NIC>"
     export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export SERVER_ROLE_ARGS="--headless"
+    export SERVER_ROLE_ARGS="--headless --data-parallel-start-rank 1"
     exec bash ./run_p.sh "$@"
     ```
 
@@ -1267,6 +1300,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Section 5.3. Atlas 800I A2 nodes do not have the Atlas 800I A3 HCCS fabric: the
     pool runs over the Atlas 800I A2 RoCE network with the `P2PHANDSHAKE` metadata server
     and the `ascend` protocol, and the Atlas 800I A3 fabric-memory exports do not apply.
+
+    Retain the Prefill internal-LB settings from Section 5.3, including
+    P1's `--headless --data-parallel-start-rank 1` wrapper and the P0-only
+    proxy endpoint. The pool fragments use `$4` for unique engine IDs and
+    lookup ports; this does not require adding `--data-parallel-rank`
+    to the Prefill serving command.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
     to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).

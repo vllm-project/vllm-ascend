@@ -53,6 +53,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -245,6 +246,12 @@ class AscendDSABackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_DSA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_builder_cls():
         from vllm_ascend.attention.utils import enable_dcp, enable_pcp
@@ -311,9 +318,17 @@ class AscendDSABackend(AttentionBackend):
             return AscendDSAPCPImpl
         return AscendDSAImpl
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8, 16, 32, 64, 128]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [2, 4, 8, 16, 32, 64, 128]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [2, 4, 8, 16, 32, 64, 128]
 
 
 class AscendDSAC4Backend(AscendDSABackend):
@@ -321,11 +336,21 @@ class AscendDSAC4Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-        return [128, 256, 512]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+            return [128, 256, 512]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+            return [128, 256, 512]
 
 
 class AscendDSAC128Backend(AscendDSABackend):
@@ -333,11 +358,21 @@ class AscendDSAC128Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-        return [4096, 8192, 16384]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+            return [4096, 8192, 16384]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+            return [4096, 8192, 16384]
 
 
 class AscendDSASWABackend(AscendDSABackend):
@@ -345,9 +380,17 @@ class AscendDSASWABackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_SWA"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [32, 64, 128]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [32, 64, 128]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
@@ -355,9 +398,17 @@ class AscendDSAC4StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4_STATE"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [2, 4, 8]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
@@ -365,11 +416,21 @@ class AscendDSAC128StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128_STATE"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-            return [4, 8, 16]
-        return [8, 16, 32]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
+                return [4, 8, 16]
+            return [8, 16, 32]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
+                return [4, 8, 16]
+            return [8, 16, 32]
 
 
 @dataclass
@@ -1973,18 +2034,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
             o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
             # Pad to a static exchange size so the all_to_all / reduce_scatter
-            # shapes are identical across all ACL graph buckets — variable
-            # shapes desync the HCCL communicator during graph replay.
-            # Profiling can use the scheduler's full token budget even when
-            # the decode capacity is smaller. Freeze the larger capacity when
-            # allocating the buffers, then reuse it for capture and replay.
-            if hasattr(self, "_oproj_send_buf"):
-                exchange_num_tokens = self._oproj_send_buf.shape[1]
-            else:
-                exchange_num_tokens = max(
-                    get_potential_max_tokens(),
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                )
+            # shapes stay identical across ACL graph buckets. potential_max_tokens
+            # already covers the largest decode batch; a larger scheduler budget
+            # would only pad every decode step, so the guard below rejects it.
+            exchange_num_tokens = get_potential_max_tokens()
             if exchange_num_tokens < num_tokens:
                 scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(

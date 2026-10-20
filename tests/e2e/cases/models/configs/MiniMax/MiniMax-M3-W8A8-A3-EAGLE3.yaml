@@ -1,4 +1,9 @@
 # ==========================================
+# MiniMax-M3 W8A8 A3 nightly tests
+# (accuracy + EAGLE3 speculative decoding acceptance)
+# ==========================================
+
+# ==========================================
 # ACTUAL TEST CASES
 # ==========================================
 
@@ -51,6 +56,8 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp": true}'
+      - "--speculative-config"
+      - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3", "num_speculative_tokens": 3, "enforce_eager": true, "attention_backend": "FLASH_ATTN"}'
     test_content:
       - chat_completion
     api_keyword_args:
@@ -82,3 +89,13 @@ test_cases:
         temperature: 1.0
         top_p: 0.95
         threshold: 2
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 32
+        temperature: 0
+        baseline: [0.93, 0.84, 0.75]
+        threshold: 0.03

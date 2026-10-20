@@ -206,6 +206,7 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
     state._replay_groups = (128, torch.empty(0, dtype=torch.int32))
     state._replay_start_np = np.zeros(4, dtype=np.int32)
     state._replay_start = Buffer(8)
+    state.decoder_replay_state = None
 
     batch = SimpleNamespace(
         num_reqs=1,

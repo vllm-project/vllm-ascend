@@ -146,6 +146,10 @@ a3:
         config_file_path: DeepSeek-V4.1-Flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
+      - name: DeepSeek-V4.1-Flash-w8a8-PD-MRV2
+        config_file_path: DeepSeek-V4.1-Flash-w8a8-PD-MRV2.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
@@ -162,9 +166,9 @@ a3-560t:
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen/
-      - name: MiniMax-M3-W8A8-A3
+      - name: MiniMax-M3-W8A8-A3-EAGLE3
         os: linux-aarch64-a3-800i-16
-        config_file_path: MiniMax-M3-W8A8-A3.yaml
+        config_file_path: MiniMax-M3-W8A8-A3-EAGLE3.yaml
         config_base_path: tests/e2e/cases/models/configs/MiniMax
       - name: qwen_3_6_27b_w8a8_A3
         os: linux-aarch64-a3-800i-16
@@ -354,3 +358,11 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: Gemma4_26B_A4B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_26B_A4B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma
+      - name: Gemma4_31B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_31B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma

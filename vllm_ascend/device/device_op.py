@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
@@ -891,6 +890,12 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
+        # FLA's import-time capability queries can initialize an NPU context;
+        # defer them until execution on the selected worker device.
+        # TODO: Restore the top-level import once supported vLLM FLA or Triton
+        # Ascend versions make these queries safe before device selection.
+        from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+
         q = l2norm_fwd(q.contiguous()).contiguous()
         k = l2norm_fwd(k.contiguous()).contiguous()
         v = v.contiguous()
