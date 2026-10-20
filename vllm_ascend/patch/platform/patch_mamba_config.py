@@ -9,6 +9,16 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+KERNEL_BLOCK_ALIGNMENT = 128
+
+
+def _is_c8_mxfp_cache(cache_config) -> bool:
+    # Import lazily: this module is imported while ModelConfig is still being
+    # constructed, before the Ascend runtime helpers are initialized.
+    from vllm_ascend.utils import C8_MXFP_KV_CACHE_DTYPE
+
+    return cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
 
 def _get_sparse_index_kpool(model_config) -> int | None:
     """Return the active sparse index-kpool ratio, if configured."""
@@ -76,14 +86,14 @@ def verify_and_update_config(cls, vllm_config) -> None:
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
     index_kpool = _get_sparse_index_kpool(model_config)
-    if index_kpool is not None or cache_config.cache_dtype != "mxfp8":
+    if index_kpool is not None or not _is_c8_mxfp_cache(cache_config):
         parallel_config = vllm_config.parallel_config
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
-        kernel_block_size = 128
+        kernel_block_size = KERNEL_BLOCK_ALIGNMENT
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
             model_config=model_config,
@@ -159,7 +169,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
-    elif cache_config.cache_dtype != "mxfp8":
+    elif not _is_c8_mxfp_cache(cache_config):
         ssm_page_size = max(mamba_sizes)
         conv_page_size = min(mamba_sizes)
         if len(mamba_shapes) == 2:
@@ -196,12 +206,22 @@ def verify_and_update_config(cls, vllm_config) -> None:
             )
         elif requested_block_size != attn_block_size:
             logger.info("Setting attention block size to %d tokens for contiguous hybrid KV cache.", attn_block_size)
+        previous_page_size = cache_config.mamba_page_size_padded
         cache_config.block_size = attn_block_size
         assert cache_config.block_size * attn_single_token_k_page_size == ssm_page_size
         target_mamba_page_size = cache_config.block_size * attn_token_page_size + conv_page_size
-        if cache_config.mamba_page_size_padded != target_mamba_page_size:
-            cache_config.mamba_page_size_padded = target_mamba_page_size
-            logger.info("Padding Mamba page size to %d bytes for contiguous hybrid KV cache.", target_mamba_page_size)
+        cache_config.mamba_page_size_padded = target_mamba_page_size
+        if requested_block_size != attn_block_size or previous_page_size != target_mamba_page_size:
+            logger.info(
+                "Contiguous hybrid KV cache geometry: block_size=%d, "
+                "K_segment=%d B, SSM_page=%d B, conv_page=%d B, "
+                "mamba_page=%d B.",
+                attn_block_size,
+                attn_block_size * attn_single_token_k_page_size,
+                ssm_page_size,
+                conv_page_size,
+                target_mamba_page_size,
+            )
     # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
     # manages the dedicated hidden-state cache-only layer; it does not migrate
     # mamba KV blocks across instances, so it does not require the block-aligned
