@@ -54,6 +54,17 @@ DEFAULT_WORLD_SIZE = 4
 COLLECTIVE_TENSOR_NUMEL = 1024
 
 
+def _scenario_enabled(name: str) -> bool:
+    """N0_ONLY="scenario1,scenario2" runs a subset of scenarios.
+
+    Debugging affordance: run one scenario in a fresh process set to
+    isolate it from state accumulated by earlier scenarios (HCCL
+    daemons/listeners live per process and survive group destruction).
+    """
+    only = os.getenv("N0_ONLY", "").strip()
+    return not only or name in only.split(",")
+
+
 def _find_free_ports(num_ports: int, base_port: int = 29600) -> list[int]:
     """Reserve *num_ports* free TCP ports near *base_port*.
 
@@ -126,10 +137,10 @@ def _n0_worker(
                 group_name=name,
             )
 
-        def check_all_reduce(pg, ws: int) -> None:
+        def check_all_reduce(pg, ws: int, group_rank: int) -> None:
             tensor = torch.full(
                 (COLLECTIVE_TENSOR_NUMEL,),
-                float(rank + 1),
+                float(group_rank + 1),
                 dtype=torch.float32,
                 device="npu",
             )
@@ -141,10 +152,10 @@ def _n0_worker(
                     f"expected {expected}"
                 )
 
-        def check_all_gather(pg, ws: int) -> None:
+        def check_all_gather(pg, ws: int, group_rank: int) -> None:
             tensor = torch.full(
                 (COLLECTIVE_TENSOR_NUMEL,),
-                float(rank + 1),
+                float(group_rank + 1),
                 dtype=torch.float32,
                 device="npu",
             )
@@ -162,103 +173,131 @@ def _n0_worker(
                     )
 
         # ---- Scenario 1: repeated create -> collective -> destroy ----
-        try:
-            for cycle in range(NUM_CREATE_DESTROY_CYCLES):
-                pg = make_group(
-                    ports.cycle_ports[cycle],
-                    world_size,
-                    rank,
-                    f"n0_cycle_{cycle}",
-                )
-                check_all_reduce(pg, world_size)
-                check_all_gather(pg, world_size)
-                stateless_destroy_torch_distributed_process_group(pg)
-            record("create_destroy_cycles", True)
-        except Exception as exc:  # noqa: BLE001
-            record("create_destroy_cycles", False, repr(exc))
+        if _scenario_enabled("create_destroy_cycles"):
+            try:
+                for cycle in range(NUM_CREATE_DESTROY_CYCLES):
+                    pg = make_group(
+                        ports.cycle_ports[cycle],
+                        world_size,
+                        rank,
+                        f"n0_cycle_{cycle}",
+                    )
+                    check_all_reduce(pg, world_size, rank)
+                    check_all_gather(pg, world_size, rank)
+                    stateless_destroy_torch_distributed_process_group(pg)
+                record("create_destroy_cycles", True)
+            except Exception as exc:  # noqa: BLE001
+                record("create_destroy_cycles", False, repr(exc))
 
         # ---- Scenario 2: two concurrent subgroups ----
         # Mimics standby DP/EP subgroup creation: the world is split into
         # two independent stateless groups with their own rendezvous ports.
-        try:
-            subgroup_size = world_size // 2
-            subgroup_idx = rank // subgroup_size
-            sub_rank = rank % subgroup_size
-            pg = make_group(
-                ports.subgroup_ports[subgroup_idx],
-                subgroup_size,
-                sub_rank,
-                f"n0_subgroup_{subgroup_idx}",
-            )
-            check_all_reduce(pg, subgroup_size)
-            stateless_destroy_torch_distributed_process_group(pg)
-            record("concurrent_subgroups", True)
-        except Exception as exc:  # noqa: BLE001
-            record("concurrent_subgroups", False, repr(exc))
+        if _scenario_enabled("concurrent_subgroups"):
+            try:
+                subgroup_size = world_size // 2
+                subgroup_idx = rank // subgroup_size
+                sub_rank = rank % subgroup_size
+                pg = make_group(
+                    ports.subgroup_ports[subgroup_idx],
+                    subgroup_size,
+                    sub_rank,
+                    f"n0_subgroup_{subgroup_idx}",
+                )
+                check_all_reduce(pg, subgroup_size, sub_rank)
+                stateless_destroy_torch_distributed_process_group(pg)
+                record("concurrent_subgroups", True)
+            except Exception as exc:  # noqa: BLE001
+                record("concurrent_subgroups", False, repr(exc))
 
         # ---- Scenario 3: active/standby switch ----
         # The core EEP semantic: a standby group is created while the
         # active group is still alive; the active group is then destroyed
         # and the standby group must remain fully functional afterwards.
-        try:
-            active_pg = make_group(
-                ports.active_port, world_size, rank, "n0_active"
-            )
-            check_all_reduce(active_pg, world_size)
+        if _scenario_enabled("active_standby_switch"):
+            try:
+                active_pg = make_group(
+                    ports.active_port, world_size, rank, "n0_active"
+                )
+                check_all_reduce(active_pg, world_size, rank)
 
-            standby_pg = make_group(
-                ports.standby_port, world_size, rank, "n0_standby"
-            )
-            # Both groups usable concurrently.
-            check_all_reduce(active_pg, world_size)
-            check_all_reduce(standby_pg, world_size)
+                standby_pg = make_group(
+                    ports.standby_port, world_size, rank, "n0_standby"
+                )
+                # Both groups usable concurrently.
+                check_all_reduce(active_pg, world_size, rank)
+                check_all_reduce(standby_pg, world_size, rank)
 
-            # Retire the active group (as _replace_active_groups would).
-            stateless_destroy_torch_distributed_process_group(active_pg)
+                # Retire the active group (as _replace_active_groups would).
+                stateless_destroy_torch_distributed_process_group(active_pg)
 
-            # Standby group must survive the peer group's destruction.
-            check_all_reduce(standby_pg, world_size)
-            check_all_gather(standby_pg, world_size)
-            stateless_destroy_torch_distributed_process_group(standby_pg)
-            record("active_standby_switch", True)
-        except Exception as exc:  # noqa: BLE001
-            record("active_standby_switch", False, repr(exc))
+                # Standby group must survive the peer group's destruction.
+                check_all_reduce(standby_pg, world_size, rank)
+                check_all_gather(standby_pg, world_size, rank)
+                stateless_destroy_torch_distributed_process_group(standby_pg)
+                record("active_standby_switch", True)
+            except Exception as exc:  # noqa: BLE001
+                record("active_standby_switch", False, repr(exc))
 
         # ---- Scenario 4: bidirectional isend/irecv ----
         # Mimics the elastic EP expert weight transfer
-        # (batch_transfer_weights): every rank concurrently isends a tensor
-        # to its neighbor and irecvs from its other neighbor. Posting all
-        # async ops before waiting is the NPUCommunicator.batch_isend_irecv
-        # strategy; this scenario proves it does not deadlock on HCCL.
-        try:
-            pg = make_group(ports.p2p_port, world_size, rank, "n0_p2p")
-            send_dst = (rank + 1) % world_size
-            recv_src = (rank - 1) % world_size
-            send_tensor = torch.full(
-                (COLLECTIVE_TENSOR_NUMEL,),
-                float(rank + 1),
-                dtype=torch.float32,
-                device="npu",
-            )
-            recv_tensor = torch.zeros(
-                COLLECTIVE_TENSOR_NUMEL, dtype=torch.float32, device="npu"
-            )
-            send_handle = dist.isend(send_tensor, send_dst, group=pg)
-            recv_handle = dist.irecv(recv_tensor, recv_src, group=pg)
-            send_handle.wait()
-            recv_handle.wait()
-            expected = float(((rank - 1) % world_size) + 1)
-            if not torch.allclose(
-                recv_tensor, torch.full_like(recv_tensor, expected)
-            ):
-                raise RuntimeError(
-                    f"irecv mismatch: got {recv_tensor[0].item()}, "
-                    f"expected {expected}"
+        # (elastic_execute.batch_transfer_weights): every rank concurrently
+        # isends a tensor to its neighbor and irecvs from its other
+        # neighbor, through the production path
+        # NPUCommunicator.batch_isend_irecv (which posts on the HCCL
+        # backend directly -- stateless groups are not in torch's _world
+        # registry, so dist.isend/irecv would raise). Posting all async ops
+        # before waiting is the NPUCommunicator.batch_isend_irecv strategy;
+        # this scenario proves it does not deadlock on HCCL.
+        if _scenario_enabled("bidirectional_p2p"):
+            try:
+                from torch.distributed import P2POp
+
+                from vllm_ascend.distributed.device_communicators.npu_communicator import (  # noqa: E501
+                    NPUCommunicator,
                 )
-            stateless_destroy_torch_distributed_process_group(pg)
-            record("bidirectional_p2p", True)
-        except Exception as exc:  # noqa: BLE001
-            record("bidirectional_p2p", False, repr(exc))
+
+                pg = make_group(ports.p2p_port, world_size, rank, "n0_p2p")
+                comm = NPUCommunicator(
+                    cpu_group=pg,
+                    device=torch.device(f"npu:{rank}"),
+                    device_group=pg,
+                    global_ranks=list(range(world_size)),
+                    global_world_size=world_size,
+                )
+                send_dst = (rank + 1) % world_size
+                recv_src = (rank - 1) % world_size
+                send_tensor = torch.full(
+                    (COLLECTIVE_TENSOR_NUMEL,),
+                    float(rank + 1),
+                    dtype=torch.float32,
+                    device="npu",
+                )
+                recv_tensor = torch.zeros(
+                    COLLECTIVE_TENSOR_NUMEL, dtype=torch.float32, device="npu"
+                )
+                p2p_ops = []
+                for op_fn, tensor, peer in (
+                    (torch.distributed.isend, send_tensor, send_dst),
+                    (torch.distributed.irecv, recv_tensor, recv_src),
+                ):
+                    op = object.__new__(P2POp)
+                    op.op = op_fn
+                    op.tensor = tensor
+                    op.group_peer = peer
+                    p2p_ops.append(op)
+                comm.batch_isend_irecv(p2p_ops)
+                expected = float(((rank - 1) % world_size) + 1)
+                if not torch.allclose(
+                    recv_tensor, torch.full_like(recv_tensor, expected)
+                ):
+                    raise RuntimeError(
+                        f"irecv mismatch: got {recv_tensor[0].item()}, "
+                        f"expected {expected}"
+                    )
+                stateless_destroy_torch_distributed_process_group(pg)
+                record("bidirectional_p2p", True)
+            except Exception as exc:  # noqa: BLE001
+                record("bidirectional_p2p", False, repr(exc))
     except Exception as exc:  # noqa: BLE001
         results["worker_setup"] = f"FAIL: {exc!r}"
 
