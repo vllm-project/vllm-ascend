@@ -1,0 +1,98 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+import os
+from unittest.mock import patch
+
+import pytest
+from vllm import SamplingParams
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_deepseek_v2_lite_eager_mode(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.5,
+        top_p=0.95,
+        top_k=10,
+        repetition_penalty=1.03,
+        logprobs=2,
+        prompt_logprobs=2,
+        logit_bias={0: -1.0, 1: 0.5},
+        min_p=0.01,
+        bad_words=["the", " the"],
+    )
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+    ) as runner:
+        runner.generate(prompts, sampling_params)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param({"cudagraph_mode": "FULL_DECODE_ONLY"}, id="full_decode_only"),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_deepseek_v2_lite_graph_mode(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+    compilation_config: dict,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        compilation_config=compilation_config,
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)

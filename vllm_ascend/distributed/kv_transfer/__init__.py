@@ -16,9 +16,61 @@
 #
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.logger import logger
+
+
+def _register_with_class_name_alias(name: str, module_path: str, class_name: str, *, override: bool = False) -> None:
+    """Register a connector under its config name and, when they differ, under
+    its class name as well.
+
+    MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
+    those keys through KVConnectorFactory, which is otherwise indexed by the
+    ``kv_connector`` config name. Without the class-name alias, stats
+    reconstruction raises ValueError and tears down EngineCore.
+
+    Each registration key needs its own override switch, because
+    ``register_connector`` rejects duplicates:
+
+    - ``override=True`` replaces an existing entry under the **config name**
+      (used when vllm-ascend takes over an upstream connector). This is the
+      only supported way to re-register a name, and it is never silent: the
+      caller asks for it explicitly.
+    - The **class-name** entry is popped only when this connector is the one
+      claiming that class name, after warning if another connector already
+      holds it.
+    """
+    if override:
+        KVConnectorFactory._registry.pop(name, None)
+    KVConnectorFactory.register_connector(name, module_path, class_name)
+    if class_name != name:
+        if class_name in KVConnectorFactory._registry:
+            logger.warning(
+                "Class name '%s' is already registered under a different "
+                "config name; overriding it with the alias for module %s.",
+                class_name,
+                module_path,
+            )
+        KVConnectorFactory._registry.pop(class_name, None)
+        KVConnectorFactory.register_connector(class_name, module_path, class_name)
 
 
 def register_connector():
+    # Override vLLM KV offloading specs with Ascend NPU handlers. The
+    # scheduler-side managers stay upstream; only worker-side transfers use
+    # torch.npu streams and the Ascend batched memcpy op.
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    for name, class_name in (
+        ("CPUOffloadingSpec", "NPUOffloadingSpec"),
+        ("TieringOffloadingSpec", "NPUTieringOffloadingSpec"),
+    ):
+        OffloadingSpecFactory._registry.pop(name, None)
+        OffloadingSpecFactory.register_spec(
+            name,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
+            class_name,
+        )
+
     # override multi_connector as ascend_multi_connector
     if "MultiConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("MultiConnector")
@@ -28,6 +80,24 @@ def register_connector():
 
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakeD2RHConnectorV1",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_d2rh_connector",
+        "MooncakeD2RHConnectorV1",
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakeConnectorV2",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
+        "MooncakeConnector",
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakePullConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
+        "MooncakePullConnector",
     )
 
     KVConnectorFactory.register_connector(
@@ -54,34 +124,53 @@ def register_connector():
         "MooncakeLayerwiseConnector",
     )
 
-    KVConnectorFactory.register_connector(
-        "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector", "UCMConnectorV1"
+    _register_with_class_name_alias(
+        "UCMConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector",
+        "UCMConnectorV1",
     )
 
-    KVConnectorFactory.register_connector(
-        "LMCacheAscendConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
-        "LMCacheConnectorV1",
+    # vLLM's native offloading worker assumes attention KV caches are packed
+    # into one Tensor. Ascend keeps K/V as separate tensors, so replace only
+    # the connector's worker-side canonicalization boundary while reusing the
+    # upstream scheduler, manager, metrics, and transfer lifecycle.
+    _register_with_class_name_alias(
+        "OffloadingConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
+        "AscendOffloadingConnector",
+        override=True,
     )
 
     # Override the upstream SimpleCPUOffloadConnector with the NPU
     # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
     # Only override if the upstream module exists in this vLLM version.
+    # Class-name alias is required from upstream v0.31.0 on: there the
+    # upstream SimpleCPUOffloadConnector overrides
+    # ``get_kv_connector_stats`` and so emits stats whose key (the class
+    # name) must resolve at the factory. On v0.30.0 the alias is a
+    # harmless no-op because that connector emits no stats.
     try:
         import vllm.v1.simple_kv_offload  # noqa: F401
     except ImportError:
         pass
     else:
-        if "SimpleCPUOffloadConnector" in KVConnectorFactory._registry:
-            KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
-        KVConnectorFactory.register_connector(
+        _register_with_class_name_alias(
             "SimpleCPUOffloadConnector",
-            "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector",  # noqa: E501
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
             "AscendSimpleCPUOffloadConnector",
+            override=True,
         )
 
+    # No class-name alias here: this connector does not override
+    # get_kv_connector_stats, so it never emits stats to reconstruct.
     KVConnectorFactory.register_connector(
-        "RecomputeCPUOffloadConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
-        "RecomputeCPUOffloadConnectorV1",
+        "PreemptOffloadConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector",
+        "PreemptOffloadConnectorV1",
+    )
+
+    KVConnectorFactory.register_connector(
+        "SfaRemoteD2HConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
+        "SfaRemoteD2HConnector",
     )

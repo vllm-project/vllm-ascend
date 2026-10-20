@@ -78,5 +78,5 @@ print("==========================================\n\n")
 
 # Save to disk compressed.
 SAVE_DIR = MODEL_ID.rstrip("/").split("/")[-1] + "-W8A8-Dynamic-Per-Token"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
+model.save_pretrained(SAVE_DIR, save_compressed=True, max_shard_size="5GB")
 tokenizer.save_pretrained(SAVE_DIR)

@@ -22,5 +22,5 @@ oneshot(
 
 # Save to disk in compressed-tensors format.
 SAVE_DIR = MODEL_ID.rstrip("/").split("/")[-1] + "-INT8_W8A8"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
+model.save_pretrained(SAVE_DIR, save_compressed=True, max_shard_size="5GB")
 tokenizer.save_pretrained(SAVE_DIR)

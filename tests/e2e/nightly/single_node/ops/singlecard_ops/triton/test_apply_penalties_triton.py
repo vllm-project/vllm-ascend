@@ -4,12 +4,23 @@
 # Requires NPU and Triton-Ascend.
 
 import gc
+from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_penalties
 
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
+
+
+@pytest.fixture(autouse=True)
+def single_card_sampling_config(monkeypatch):
+    # Only the histogram's configuration lookup needs a single-card config.
+    # Keep the process-wide Ascend configuration and validation unchanged.
+    config = SimpleNamespace(enable_reduce_sample=False)
+    monkeypatch.setattr("vllm_ascend.ops.triton.bincount.get_ascend_config", lambda: config)
+
 
 # Same scenario grid as test_apply_penalties_model_executor (equivalence + boundaries).
 APPLY_PENALTY_CASES = [
@@ -40,7 +51,6 @@ def _make_tokens(
     return tokens
 
 
-@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
 @pytest.mark.parametrize("num_seqs", [1, 8, 32, 128])
 @pytest.mark.parametrize("vocab_size", [5120, 151936])
 @pytest.mark.parametrize(
@@ -59,8 +69,6 @@ def test_apply_all_penalties_v1_vs_ascend(
     device="npu",
     seed=42,
 ):
-    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
     init_device_properties_triton()
     torch.manual_seed(seed)
 

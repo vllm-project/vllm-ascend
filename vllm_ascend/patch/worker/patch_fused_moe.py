@@ -16,5 +16,5 @@
 #
 
 # Reuse the platform patch. Keeping the monkey patch in one module avoids
-# wrapping an already patched FusedMoE factory during worker initialization.
+# wrapping an already patched MoE factory during worker initialization.
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa: F401

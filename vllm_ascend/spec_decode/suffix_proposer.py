@@ -23,10 +23,10 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec=None,
         token_ids_cpu=None,
-        num_speculative_tokens: int = 0,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ):
         return super().propose(

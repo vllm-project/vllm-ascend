@@ -37,17 +37,13 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_sp,
-    get_ascend_device_type,
-    is_310p,
-    maybe_trans_nz,
-)
+from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
 def unquantized_gemm(
@@ -63,8 +59,7 @@ def unquantized_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    output_shape = (x.shape[0], weight.shape[0])
-    return torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 direct_register_custom_op(
@@ -76,26 +71,64 @@ direct_register_custom_op(
 )
 
 
-def _should_keep_nd_for_310p_weight(weight: torch.Tensor) -> bool:
-    return is_310p() and weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
+def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
+    return (
+        get_current_hardware_profile().weight_layout_policy is WeightLayoutPolicy.FORCE_NZ
+        and weight.ndim >= 2
+        and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
+    )
 
 
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
+    """Whether a DSV4 wo_a weight must be reshaped to
+    [n_local_groups, hidden_size, o_lora_rank] for npu_transpose_batchmatmul.
+
+    For bf16 wo_a (unquantized), the reshape must happen here regardless of
+    whether the model has a global quant config: partially-quantized checkpoints
+    (e.g. ModelSlim) keep unquantized FLOAT wo_a alongside a non-None quant
+    config, and no quant method's process_weights_after_loading will run for
+    those layers. Quantized (fp8/int8) wo_a is unaffected and still handled by
+    the quantization path.
+    """
+    supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
+        HardwareCapability.DYNAMIC_MX_QUANT_FUSION
+    )
+    reshape_bf16_wo_a = "wo_a" in prefix and supports_dynamic_mx_quant_fusion and dtype == torch.bfloat16
+    return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
+
+
+class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
+
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+    supports_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        keep_nd_weight = _should_keep_nd_for_310p_weight(layer.weight.data)
+        keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
+        skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
-        if "conv1d" not in layer.prefix:
+            new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
+            # keep the captured graph's weight reference to the updated weight
+            # during RL weight updates.
+            replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
+        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+        # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
+        # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
+        # applies to load-format=dummy too, where weight_loader never runs.
+        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            )
 
     def apply(
         self,
@@ -275,9 +308,6 @@ class AscendRowParallelLinear(RowParallelLinear):
     and the original TP group in other modules.
     """
 
-    # NOTE: Globally unique prefix identifier used in SP scenarios
-    unique_prefix_idx = 0
-
     def __init__(
         self,
         input_size: int,
@@ -294,16 +324,6 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
-        if enable_sp():
-            compilation_config = get_current_vllm_config().compilation_config
-            unique_prefix = prefix
-            if prefix in compilation_config.static_forward_context:
-                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
-                AscendRowParallelLinear.unique_prefix_idx += 1
-            self.unique_prefix = unique_prefix
-            compilation_config.static_forward_context[unique_prefix] = self
-
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "row")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
@@ -465,12 +485,12 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        if _should_reshape_wo_a_to_3d(self.prefix, loaded_weight.dtype):
             if self.weight.ndim == 2:
+                # Keep the raw 2D layout here. The 2D -> 3D reshape happens in
+                # process_weights_after_loading so it also runs for
+                # load-format=dummy, where weight_loader is never called.
                 super().weight_loader(param, loaded_weight)
-                self.weight.data = (
-                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
-                )
             else:
                 # In RL update flows, wo_a can be loaded again after being
                 # transformed into [n_local_groups, hidden_size, o_lora_rank].

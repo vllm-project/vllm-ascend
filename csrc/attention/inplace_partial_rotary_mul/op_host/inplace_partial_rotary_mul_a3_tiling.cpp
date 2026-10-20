@@ -99,6 +99,7 @@ private:
     int64_t ubFactor_ = 0;
     int64_t start_=0;
     int64_t blockFactor_=0;
+    int64_t negateSin_ = 0;
     gert::TilingContext* context_ = nullptr;
     RopeRegbaseTilingData tilingData_;
 };
@@ -135,6 +136,7 @@ void InplacePartialRotaryMulTiling::FillTilingData()
     tilingData_.set_ubFactor(ubFactor_);
     tilingData_.set_start(start_);
     tilingData_.set_blockFactor(blockFactor_);
+    tilingData_.set_negateSin(negateSin_);
 }
 void InplacePartialRotaryMulTiling::PrintTilingData() const
 {
@@ -307,6 +309,7 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
     auto sliceData = static_cast<const int64_t *>(sliceListAttr->GetData());
     start_ = sliceData[0];
     end_ = sliceData[1];
+    negateSin_ = *(attrs->GetAttrPointer<bool>(2)) ? 1 : 0;
     OPS_LOG_I(context_->GetNodeName(), "end_ %ld, end_ %ld",start_, end_);
 
     headDim_ = end_ - start_;
@@ -558,6 +561,7 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTiling()
         }
         tilingData_.set_allHeadDim(allHeadDim_);
         tilingData_.set_start(start_);
+        tilingData_.set_negateSin(negateSin_);
         OPS_ERR_IF(TilingSplit() != ge::GRAPH_SUCCESS,
                 OPS_LOG_E(context_->GetNodeName(), "TilingSplit fail."), return ge::GRAPH_FAILED);
 

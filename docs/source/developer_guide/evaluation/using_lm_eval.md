@@ -6,7 +6,7 @@ This document guides you to conduct accuracy testing using [lm-eval][1].
 
 ### 1. Start the vLLM server
 
-You can run docker container to start the vLLM server on a single NPU:
+You can run a docker container to start the vLLM server on a single NPU:
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -209,9 +209,9 @@ lm_eval \
 After 1 to 2 minutes, the output is shown below:
 
 ```shell
-The markdown format results is as below:
+The markdown format results are as below:
 
-Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.3412|±  |0.0131|
 |gsm8k|      3|strict-match    |     5|exact_match|↑  |0.3139|±  |0.0128|

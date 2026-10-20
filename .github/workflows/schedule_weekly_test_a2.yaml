@@ -20,9 +20,6 @@
 name: Weekly-A2
 
 on:
-  schedule:
-      # Run test at 10:00 Beijing time (UTC+8) every Sunday
-      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -50,11 +47,29 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
         default: false
         type: boolean
+      build_type:
+        description: 'Build type: daily or release.'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
+        required: false
+        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
+        type: string
 
 permissions:
   contents: read
@@ -77,7 +92,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -147,7 +162,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -172,10 +187,15 @@ jobs:
     with:
       target: a2
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '910b'
+      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   single-node-accuracy-tests:
     needs: [setup-vars, parse-trigger, build-image]
@@ -192,9 +212,10 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -204,6 +225,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -222,9 +244,10 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' &&
@@ -233,6 +256,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   clear-pre-logs:

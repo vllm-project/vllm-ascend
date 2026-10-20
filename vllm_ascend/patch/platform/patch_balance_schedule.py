@@ -10,13 +10,13 @@ rank reaches that decision independently from the same gathered snapshot --
 there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
 design.
 
-The ``schedule()`` body is a verbatim copy of the **v0.24.0** release tag's
-``Scheduler.schedule()`` (the production pin), plus exactly three balance
-deltas: (1) the disabled-path early return that delegates to ``super()``,
+The copied ``schedule()`` retains the existing scheduling behavior with
+version-specific upstream compatibility changes. The balance deltas are:
+(1) the disabled-path early return that delegates to ``super()``,
 (2) the ``balance_flag`` break inside the WAITING loop
-(``any-rank-at-cap => global freeze``), and (3) ``if request_queue is None:
-break`` in place of upstream's ``assert request_queue is not None`` (so a
-drained-rank schedule does not assert when balance defers admission). Both
+(``any-rank-at-cap => global freeze``). The shared queue path uses
+``if not request_queue: break`` so drained ranks stop before peeking an
+empty waiting queue, including when every request is deferred. Both
 supported vLLM refs expose ``schedule(throttle_prefills=False)``, so the
 disabled fast path forwards that argument directly.
 
@@ -57,26 +57,28 @@ touch configs that don't use it, e.g. PD-disaggregated recompute).
 """
 
 import time
+from collections import deque
 
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
-import vllm.v1.engine.core as _engine_core_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.output import KVConnectorBlockState, NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
+
+from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -121,6 +123,15 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
+        if short_request_first_config.enabled:
+            from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
+
+            install_short_request_first_waiting_queue(
+                self,
+                threshold=short_request_first_config.threshold,
+                long_max_wait_ms=short_request_first_config.long_max_wait_ms,
+            )
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
         # Injected by BalanceDPEngineCoreProc._has_global_unfinished_reqs
         # before the first gather. Only used on the enabled path (balance
@@ -300,6 +311,15 @@ class BalanceScheduler(Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    # Check before removing the victim from the running queue.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
@@ -379,10 +399,24 @@ class BalanceScheduler(Scheduler):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
+            # Both supported versions prioritize waiting requests holding KV blocks.
+            step_skipped_waiting: deque[Request] = deque()
+            step_skipped_kv_holding: deque[Request] = deque()
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+            def _skip_request(from_queue) -> None:
+                skipped = from_queue.pop_request()
+                self.deferred_waiting.add(skipped)
+                if self._holds_kv_blocks(skipped):
+                    step_skipped_kv_holding.appendleft(skipped)
+                else:
+                    step_skipped_waiting.appendleft(skipped)
+
+            while token_budget > 0:
+                # Requests holding KV blocks are always drained first.
+                request_queue = self.kv_holding_waiting or self.waiting
+                if not request_queue:
+                    break
+                if len(self.running) == self.max_num_active_reqs:
                     break
 
                 # Keep admission balanced across DP ranks: if any rank was at
@@ -391,24 +425,12 @@ class BalanceScheduler(Scheduler):
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
-                if request_queue is None:
-                    break
-
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                if not self._handle_blocked_waiting_request(request):
+                    _skip_request(request_queue)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -422,14 +444,12 @@ class BalanceScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    _skip_request(request_queue)
                     continue
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -465,17 +485,11 @@ class BalanceScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
-
-                    # In case of hybrid models, obtain hint for Marconi-style APC logic
-                    if self.has_mamba_layers:
-                        num_uncached_common_prefix_tokens = getattr(
-                            self.kv_cache_manager.coordinator,
-                            "num_uncached_common_prefix_tokens",
-                            0,
-                        )
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -487,8 +501,7 @@ class BalanceScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            _skip_request(request_queue)
                             continue
 
                         num_external_computed_tokens = ext_tokens
@@ -506,8 +519,7 @@ class BalanceScheduler(Scheduler):
                         and request.mm_features
                         and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
                     ):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        _skip_request(request_queue)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -550,7 +562,11 @@ class BalanceScheduler(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens > token_budget
+                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                    ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
@@ -583,7 +599,6 @@ class BalanceScheduler(Scheduler):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
@@ -649,12 +664,10 @@ class BalanceScheduler(Scheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -670,8 +683,11 @@ class BalanceScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    _skip_request(request_queue)
                     continue
 
+                request = request_queue.pop_request()
+                self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
@@ -709,13 +725,16 @@ class BalanceScheduler(Scheduler):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
+            if step_skipped_kv_holding:
+                self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
             if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+                self.waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                _, num_waiting = self.get_request_counts()
+                self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -768,6 +787,22 @@ class BalanceScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain every step, including without a connector, to avoid stale
+        # Mamba boundary offers. Snapshot exact current block tables for the
+        # connector before building its metadata. (vLLM main/v0.31.0)
+        kv_connector_block_state = None
+        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+        if self.connector is not None:
+            # A scheduled request can finish a cache chunk without allocating
+            # new blocks. Resolve its current table only when the connector reads it.
+            block_state_req_ids = set(num_scheduled_tokens)
+            block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
+
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
@@ -777,7 +812,7 @@ class BalanceScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduler_output = SchedulerOutput(
+        scheduler_output_kwargs = dict(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -795,6 +830,8 @@ class BalanceScheduler(Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+        scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -808,6 +845,7 @@ class BalanceScheduler(Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+        scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
@@ -869,31 +907,10 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 
 # The scheduler is constructed as ``Scheduler(...)`` from
-# ``vllm.v1.core.sched.scheduler``. This only takes effect when scheduler_cls
-# is unset (the PD-mixed balance path); vllm-ascend's recompute / dynamic-batch
-# / profiling schedulers set scheduler_cls and bypass this name, which is
-# correct -- balance scheduling (PD-mixed) must not touch those configs.
+# ``vllm.v1.core.sched.scheduler``. This takes effect when scheduler_cls is
+# unset, covering ordinary synchronous, PD-prefill, and PD-mixed paths.
+# vLLM-Ascend's recompute, dynamic-batch, and profiling schedulers set
+# scheduler_cls and correctly bypass this name.
 _sched_mod.Scheduler = BalanceScheduler
 
-# Activate BalanceDPEngineCoreProc ONLY when balance scheduling is enabled.
-# Upstream ``run_engine_core`` resolves ``DPEngineCoreProc`` via the
-# ``vllm.v1.engine.core`` module-global name whenever DP>1 + MoE, so an
-# unconditional swap would inject balance machinery into configs that don't use
-# it -- e.g. PD-disaggregated recompute, whose scheduler is AsyncRecomputeScheduler
-# and must not be touched by balance. A conditional swap at run_engine_core
-# entry (where vllm_config is available) restores the pre-refactor "balance off
-# => no involvement" invariant without copying run_engine_core's body.
-_OriginalDPEngineCoreProc = _engine_core_mod.DPEngineCoreProc
-_OriginalRunEngineCore = EngineCoreProc.run_engine_core
-
-
-def _balance_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    vllm_config = kwargs.get("vllm_config")
-    if _balance_scheduling_enabled(vllm_config):
-        _engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
-    else:
-        _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
-    return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-
-EngineCoreProc.run_engine_core = staticmethod(_balance_run_engine_core)
+# The patch for engine core has been moved to patch_engine_core.py

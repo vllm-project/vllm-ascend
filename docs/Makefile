@@ -8,7 +8,8 @@
 #   make gen-zh     - Generate Chinese docs from .po files
 #   make clean      - Clean build artifacts
 #
-# Both `build*` targets delegate to tools/rtd_build.sh so the
+# The Chinese serve target and both `build*` targets delegate to
+# tools/rtd_build.sh so the
 # Chinese-mode env vars, language detection, and mkdocs flags stay in
 # one place (the same script is also used by .readthedocs.yaml).
 
@@ -26,11 +27,13 @@ help:
 	@echo "  gen-zh     - Generate Chinese docs from .po files"
 	@echo "  clean      - Clean build artifacts"
 
+# Click 8.3.x can incorrectly resolve MkDocs 1.6.x's default to
+# livereload=False, so enable it explicitly for compatibility.
 serve:
-	mkdocs serve
+	mkdocs serve --livereload
 
 serve-zh:
-	DOCS_LANG=zh mkdocs serve
+	DOCS_LANG=zh DOCS_SERVE=true bash tools/rtd_build.sh
 
 build:
 	SITE_DIR=$(CURDIR)/$(BUILDDIR) bash tools/rtd_build.sh

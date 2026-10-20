@@ -65,9 +65,6 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         sampling_metadata: SamplingMetadata,
         device: torch.device,
         use_block_verify: bool = False,
-        target_indices: torch.Tensor | None = None,
-        global_vocab_size: int | None = None,
-        enable_reduce_sampling: bool = False,
     ) -> torch.Tensor:
         batch_size = len(num_draft_tokens)
         vocab_size = target_probs.shape[-1]
@@ -77,9 +74,11 @@ class AscendRejectionSampler310(AscendRejectionSampler):
             dtype=torch.float32,
             device=device,
         )
-        num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
-        has_draft_mask = num_draft_tensor > 0
-        fill_exponential_310p(q, sampling_metadata.generators, has_draft_mask)
+        q = fill_exponential_310p(
+            q,
+            sampling_metadata.generators,
+            active_mask=[count > 0 for count in num_draft_tokens],
+        )
 
         recovered_token_ids = torch.empty_like(draft_token_ids)
         if use_block_verify:
@@ -92,8 +91,6 @@ class AscendRejectionSampler310(AscendRejectionSampler):
                 q,
                 vocab_size,
                 IS_NGRAM=draft_probs is None,
-                target_indices=target_indices,
-                enable_reduce_sampling=enable_reduce_sampling,
             )
         else:
             sample_recovered_tokens_pytorch(
@@ -105,7 +102,5 @@ class AscendRejectionSampler310(AscendRejectionSampler):
                 q,
                 vocab_size,
                 IS_NGRAM=draft_probs is None,
-                target_indices=target_indices,
-                enable_reduce_sampling=enable_reduce_sampling,
             )
         return recovered_token_ids

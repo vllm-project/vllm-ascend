@@ -269,16 +269,6 @@ msgstr "这对于 nightly 回归的自动根因分析非常有用。"
 msgid "## Adding a New Test Case — Worked Example"
 msgstr "## 添加新测试用例——操作示例"
 
-msgid "To add `my-new-test` to the A2 single-node section:"
-msgstr "要将 `my-new-test` 添加到 A2 单节点部分："
-
-msgid ""
-"1. Edit `.github/workflows/configs/nightly_config.yaml`, append under\n"
-"   `a2.single_node.test_config`:"
-msgstr ""
-"1. 编辑 `.github/workflows/configs/nightly_config.yaml`，在\n"
-"   `a2.single_node.test_config` 下追加："
-
 msgid "2. Commit the new pytest file (`test_my_new.py`) in the same PR."
 msgstr "2. 在同一 PR 中提交新的 pytest 文件 (`test_my_new.py`)。"
 
@@ -287,23 +277,6 @@ msgstr "3. 从 PR 触发："
 
 msgid "The workflow will:"
 msgstr "工作流将："
-
-msgid ""
-"- `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves\n"
-"  `my-new-test` → dispatch A2 only.\n"
-"- `Nightly-A2` is dispatched at `main`, but `generate-a2-matrix` checks out your\n"
-"  PR commit and reads the new entry from the matrix.\n"
-"- `single-node-tests` runs one matrix job for `my-new-test`, with\n"
-"  `should_run=true`. The reusable workflow checks out your PR code (via\n"
-"  `vllm_ascend_ref`) and runs your pytest."
-msgstr ""
-"- `pr_nightly_command.yml` 读取你 PR 的 `nightly_config.yaml` 并解析\n"
-"  `my-new-test` → 仅调度 A2。\n"
-"- `Nightly-A2` 在 `main` 上调度，但 `generate-a2-matrix` 检出你的\n"
-"  PR 提交并从矩阵中读取新条目。\n"
-"- `single-node-tests` 为 `my-new-test` 运行一个矩阵任务，\n"
-"  `should_run=true`。可重用工作流检出你的 PR 代码（通过\n"
-"  `vllm_ascend_ref`）并运行你的 pytest。"
 
 msgid "## Troubleshooting"
 msgstr "## 故障排除"
@@ -479,23 +452,6 @@ msgstr ""
 "pr_only |"
 
 msgid ""
-"| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |"
-msgstr "| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8，EP，4节点 |"
-
-msgid "| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |"
-msgstr "| `multi-node-qwen3-dp` | Qwen3-235B-A22B，2节点 DP |"
-
-msgid ""
-"| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |"
-msgstr "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8，EPLB，2节点 |"
-
-msgid "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |"
-msgstr "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8，2节点 |"
-
-msgid "| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |"
-msgstr "| `multi-node-qwen-disagg-pd` | Qwen3-235B 分离式 PD，2节点 |"
-
-msgid ""
 "| `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |"
 msgstr "| `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B 分离式 PD，2节点 |"
 
@@ -524,23 +480,11 @@ msgid ""
 "|"
 msgstr "| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 前缀缓存 |"
 
-msgid "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-msgstr "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-
-msgid "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
-msgstr "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
-
 msgid "| `kimi-k2.5` | Kimi-K2.5 |"
 msgstr "| `kimi-k2.5` | Kimi-K2.5 |"
 
-msgid "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
-msgstr "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
-
 msgid "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 msgstr "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
-
-msgid "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
-msgstr "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
 
 msgid "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
 msgstr "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
@@ -575,3 +519,90 @@ msgstr "| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |"
 
 msgid "| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |"
 msgstr "| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |"
+
+msgid "To add `my-new-test` to the A3 multi-card section:"
+msgstr "要将 `my-new-test` 添加到 A3 多卡部分："
+
+msgid ""
+"1. Edit `.github/workflows/configs/nightly_config.yaml`, append under\n"
+"   `a3.multi_card.test_config`:"
+msgstr ""
+"1. 编辑 `.github/workflows/configs/nightly_config.yaml`，在\n"
+"   `a3.multi_card.test_config` 下追加："
+
+msgid ""
+"- `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves\n"
+"  `my-new-test` → dispatch A3 only.\n"
+"- `Nightly-A3` is dispatched at `main`, but `setup-vars` checks out your\n"
+"  PR commit and reads the new entry from the matrix.\n"
+"- `multi-card-tests` runs one matrix job for `my-new-test`, with\n"
+"  `should_run=true`. The reusable workflow checks out your PR code (via\n"
+"  `vllm_ascend_ref`) and runs your pytest."
+msgstr ""
+"- `pr_nightly_command.yml` 读取你 PR 中的 `nightly_config.yaml`，并将\n"
+"  `my-new-test` 解析为仅调度 A3。\n"
+"- `Nightly-A3` 在 `main` 分支上被调度，但 `setup-vars` 会检出你的\n"
+"  PR 提交，并从矩阵中读取新条目。\n"
+"- `multi-card-tests` 为 `my-new-test` 运行一个矩阵任务，其中\n"
+"  `should_run=true`。可复用工作流会检出你的 PR 代码（通过\n"
+"  `vllm_ascend_ref`），并运行你的 pytest。"
+
+msgid ""
+"The `schedule_nightly_test_*.yaml` workflows do not declare a GitHub Actions\n"
+"    `schedule:` (cron) trigger; they are dispatched by external automation through\n"
+"    `workflow_dispatch`. See\n"
+"    [CI workflow triggers and the schedule_ prefix](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix)."
+msgstr ""
+"`schedule_nightly_test_*.yaml` 工作流并未声明 GitHub Actions 的\n"
+"    `schedule:`（cron）触发器；它们由外部自动化通过\n"
+"    `workflow_dispatch` 触发。请参阅\n"
+"    [CI 工作流触发器与 schedule_ 前缀](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix)。"
+
+msgid "### Maintenance window"
+msgstr "### 维护窗口"
+
+msgid ""
+"Maintainers can pause PR-triggered commands during a maintenance window by setting\n"
+"the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW`. The value is an optional\n"
+"switch followed by an `HH:MM-HH:MM` range in Beijing time (UTC+8):"
+msgstr ""
+"维护者可以通过设置仓库变量 `NIGHTLY_COMMAND_BLOCK_WINDOW` 在维护窗口期间暂停由 PR "
+"触发的命令。该值由一个可选的开关以及一个北京时间（UTC+8）的 `HH:MM-HH:MM` 时间范围组成："
+
+msgid "| Value | Behavior |"
+msgstr "| 值 | 行为 |"
+
+msgid "| `true 22:00-08:00` | Gate enabled; block inside the window |"
+msgstr "| `true 22:00-08:00` | 启用门控；在窗口内阻止 |"
+
+msgid "| `22:00-08:00` | Same as above (switch omitted) |"
+msgstr "| `22:00-08:00` | 与上述相同（省略开关） |"
+
+msgid "| `false 22:00-08:00` | Gate explicitly disabled |"
+msgstr "| `false 22:00-08:00` | 显式禁用门控 |"
+
+msgid "| unset / invalid | Gate disabled (fail-open) |"
+msgstr "| 未设置 / 无效 | 门控禁用（失效开放） |"
+
+msgid ""
+"Switch aliases are `true/1/yes/on` and `false/0/no/off` (case-insensitive); a space\n"
+"or comma may separate the switch from the range. Cross-midnight ranges are\n"
+"supported. While the gate is enabled and the current Beijing time falls inside the\n"
+"range, `/nightly` and `/weekly` comments do not dispatch tests; the bot replies with\n"
+"the active window instead."
+msgstr ""
+"开关的别名有 `true/1/yes/on` 和 "
+"`false/0/no/off`（不区分大小写）；开关与时间范围之间可以用空格或逗号分隔。支持跨午夜的时间范围。当门控启用且当前北京时间处于该范围内时，`/nightly`"
+" 和 `/weekly` 评论不会触发测试；机器人会改为回复当前生效的窗口。"
+
+msgid "**My `/nightly` comment was ignored during the maintenance window.**"
+msgstr "**我的 `/nightly` 评论在维护窗口期间被忽略了。**"
+
+msgid ""
+"- If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current\n"
+"  Beijing time is inside the configured range, `/nightly` and `/weekly` are\n"
+"  intentionally blocked to protect the third-party scheduling tests. The bot replies\n"
+"  with the active window; retry after it ends."
+msgstr ""
+"- 如果仓库变量 `NIGHTLY_COMMAND_BLOCK_WINDOW` 已设置，且当前北京时间处于配置的范围内，则 `/nightly` 和 "
+"`/weekly` 会被有意阻止，以保护第三方调度测试。机器人会回复当前生效的窗口；请在窗口结束后重试。"

@@ -4,11 +4,23 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import torch
 from vllm import SamplingParams
-from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
+from vllm.model_executor.models import ModelRegistry
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -40,20 +52,74 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     for block in scheduler.kv_cache_manager.block_pool.blocks:
-        assert block.ref_cnt == 0
+        assert block.is_null or block.ref_cnt == 0
+
+
+def _fake_opt_model_info() -> SimpleNamespace:
+    """Static ModelInfo for OPT fake weights; avoids registry subprocess inspect."""
+    return SimpleNamespace(
+        architecture="OPTForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
+    )
 
 
 def create_vllm_config(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 1024,
     block_size: int = 128,
+    kv_transfer_config: KVTransferConfig | None = None,
+    speculative_method: str | None = None,
+    num_speculative_tokens: int = 3,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
-    model_config = ModelConfig(
-        model=fake_weight_path,
-        skip_tokenizer_init=True,
-    )
+    model_info = _fake_opt_model_info()
+    parallel_config = ParallelConfig()
+    speculative_config = None
+    # ModelConfig inspects OPTForCausalLM in a subprocess that needs NPU tooling.
+    with patch.object(
+        ModelRegistry,
+        "inspect_model_cls",
+        return_value=(model_info, model_info.architecture),
+    ):
+        model_config = ModelConfig(
+            model=fake_weight_path,
+            skip_tokenizer_init=True,
+        )
+        if speculative_method is not None:
+            if speculative_method == "mtp":
+                # Fake weight metadata must identify an MTP draft for the
+                # real SpeculativeConfig constructor to accept this method.
+                def mtp_override(hf_config):
+                    hf_config.model_type = "deepseek_mtp"
+                    return hf_config
+
+                model_config.hf_overrides = mtp_override
+            speculative_config = SpeculativeConfig(
+                method=speculative_method,
+                num_speculative_tokens=num_speculative_tokens,
+                target_model_config=model_config,
+                target_parallel_config=parallel_config,
+            )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -67,10 +133,12 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
-    kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both")
+    kv_transfer_config = kv_transfer_config or KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both")
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),

@@ -147,6 +147,8 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                       rank offset, and world size
         """
 
+        self.shutdown()
+
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
         dp_rank = self.parallel_config.data_parallel_index
@@ -169,7 +171,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     def receive_weights(
         self,
         update_info: HCCLWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """
         Receive weights from trainer via HCCL broadcast and load them incrementally.
@@ -181,8 +182,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         Args:
             update_info: HCCL update info containing parameter names, dtypes, shapes,
                         and packed flag
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each batch of weights to avoid OOM.
         """
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
@@ -198,7 +197,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=load_weights,
+                post_unpack_func=self.model.load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
             )
@@ -208,12 +207,12 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device="npu")
                 self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
-                load_weights([(name, weight)])
+                self.model.load_weights([(name, weight)])
                 del weight
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            # Clean up the communicator by removing the reference
+            self.model_update_group.close()
             self.model_update_group = None
 
     @staticmethod

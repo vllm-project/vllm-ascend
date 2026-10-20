@@ -1,0 +1,45 @@
+# Scheduler metrics remain on generic Core handlers until their business logic
+# needs to follow a vLLM Ascend implementation.
+- symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule
+  handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
+
+- symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule
+  handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
+
+- symbol: vllm_ascend.patch.platform.patch_balance_schedule:BalanceScheduler.schedule
+  handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
+
+# Model runner metrics.
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+  handler: ms_service_metric.provider_handlers:init_data_parallel_worker
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+  handler: ms_service_metric.provider_handlers:model_runner_phase_handler
+  metrics:
+    - name: executor:model_runner_execute_model:duration
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._prepare_inputs
+  handler: ms_service_metric.provider_handlers:model_runner_phase_handler
+  metrics:
+    - name: executor:prepare_inputs:duration
+
+# Memory metrics.
+- symbol: vllm_ascend.worker.worker:NPUWorker.compile_or_warm_up_model
+  handler: ms_service_metric.provider_handlers:engine_memory_phase_handler
+  metrics:
+    - name: engine:memory:total_gb
+      type: gauge
+    - name: engine:memory:utilization_ratio
+      type: gauge
+    - name: engine:memory:reserved_gb
+      type: gauge
+    - name: engine:memory:weights_gb
+      type: gauge
+    - name: engine:memory:kvcache_gb
+      type: gauge
+    - name: engine:memory:non_torch_gb
+      type: gauge
+    - name: engine:memory:activation_gb
+      type: gauge
+    - name: engine:memory:graph_gb
+      type: gauge
