@@ -1,0 +1,4 @@
+pr: 19254
+entries:
+  - category: bugfix
+    text: '`eplb_config` now rejects 0 for `expert_heat_collection_interval` and `algorithm_execution_interval` at startup, as the validation message already stated; 0 was previously accepted.'
