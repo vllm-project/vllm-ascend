@@ -873,12 +873,12 @@ class RequestTracker:
 
     token_len: int
 
-    # Session that triggered this request, when the frontend supplied one.
-    session_id: str | None = None
-
     # The block ids that has been allocated so far, grouped by KV cache group.
     # NOTE: allocated blocks could be more than the number of tokens.
     allocated_block_ids_by_group: list[list[int]]
+
+    # Session that triggered this request, when the frontend supplied one.
+    session_id: str | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
