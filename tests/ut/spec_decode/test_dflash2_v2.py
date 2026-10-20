@@ -157,6 +157,7 @@ def test_greedy_walk_contract_reference():
 @pytest.mark.parametrize("num_reqs_padded", [2, 4])
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator._prepared_draft_attn_metadata = None
     speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
     speculator._group_causal = {0: False}
@@ -228,6 +229,20 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
 
 
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only dynamic draft budget")
+def test_dflash_proposal_forwards_dynamic_budget_and_dp_state(monkeypatch):
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    parent = MagicMock(return_value="draft")
+    monkeypatch.setattr(DFlashSpeculator, "propose", parent)
+    monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+    sync_state = object()
+    result = speculator.propose(object(), *([None] * 10), dp_sync_state=sync_state, num_speculative_tokens=3)
+    assert result == "draft"
+    assert parent.call_args.args[11] is sync_state
+    assert parent.call_args.kwargs["num_speculative_tokens"] == 3
+    assert speculator._in_draft_proposal is False
+
+
 def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate(monkeypatch):
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
@@ -237,7 +252,7 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
 
     dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
 
-    kernel.assert_called_once_with(*inputs, kv_cache_block_size=128)
+    kernel.assert_called_once_with(*inputs, kv_cache_block_size=128, kv_groups=None)
 
 
 def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):

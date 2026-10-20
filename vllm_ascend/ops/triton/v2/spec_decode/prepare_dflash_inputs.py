@@ -23,6 +23,11 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
+# Query slots, context slots, the group's block table and its kernel page size.
+DFlashKVGroup = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]
+# Explicit pointer arguments work with Triton-Ascend runtimes without tuple args.
+_KV_GROUPS_PER_LAUNCH = 2
+
 # Longer scheduled contexts are split across additional request-local workers.
 _MAX_CONTEXT_BLOCK_SIZE = 256
 _QUERY_BLOCK_SIZE = 16
@@ -90,8 +95,10 @@ def _prepare_dflash_inputs_kernel(
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
     out_query_slot_mapping_ptr,
+    out_query_slot_mapping_second_ptr,
     out_context_positions_ptr,
     out_context_slot_mapping_ptr,
+    out_context_slot_mapping_second_ptr,
     out_sample_indices_ptr,
     out_sample_pos_ptr,
     out_sample_idx_mapping_ptr,
@@ -111,9 +118,12 @@ def _prepare_dflash_inputs_kernel(
     # Block table
     block_table_ptr,
     block_table_stride,
+    block_table_second_ptr,
+    block_table_second_stride,
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    block_size_second,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -131,6 +141,8 @@ def _prepare_dflash_inputs_kernel(
     REQUEST_PADDING_BLOCK_SIZE: tl.constexpr,
     SAMPLE_PADDING_BLOCK_SIZE: tl.constexpr,
     QUERY_PADDING_BLOCK_SIZE: tl.constexpr,
+    HAS_SECOND_GROUP: tl.constexpr,
+    WRITE_COMMON: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     worker_idx = tl.program_id(1)
@@ -172,8 +184,24 @@ def _prepare_dflash_inputs_kernel(
         PAD_SLOT_ID,
     )
 
-    tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
+    if WRITE_COMMON:
+        tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
     tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
+    if HAS_SECOND_GROUP:
+        ctx_slot_second = _dflash_local_slot(
+            ctx_pos,
+            block_table_second_ptr,
+            block_table_second_stride,
+            req_idx,
+            ctx_valid_mask,
+            block_size_second,
+            cp_rank,
+            KV_CACHE_BLOCK_SIZE,
+            CP_SIZE,
+            CP_INTERLEAVE,
+            PAD_SLOT_ID,
+        )
+        tl.store(out_context_slot_mapping_second_ptr + ctx_pos_idx, ctx_slot_second, mask=ctx_mask)
 
     # Request state shared by query/sample.
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -193,16 +221,17 @@ def _prepare_dflash_inputs_kernel(
     query_pos = last_valid_pos + 1 + query_off
     query_idx = query_base + query_off
 
-    # query_off == 0 is always owned by worker 0 under quotient/remainder splitting.
-    bonus_token = 0
-    if worker_idx == 0:
-        num_sampled = tl.load(num_sampled_ptr + req_idx)
-        if num_sampled > 0:
-            bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-        else:
-            bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
+    if WRITE_COMMON:
+        # query_off == 0 is always owned by worker 0 under quotient/remainder splitting.
+        bonus_token = 0
+        if worker_idx == 0:
+            num_sampled = tl.load(num_sampled_ptr + req_idx)
+            if num_sampled > 0:
+                bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+            else:
+                bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
 
-    input_id = tl.where(query_off == 0, bonus_token, parallel_drafting_token_id)
+        input_id = tl.where(query_off == 0, bonus_token, parallel_drafting_token_id)
 
     q_slot = _dflash_local_slot(
         query_pos,
@@ -218,72 +247,89 @@ def _prepare_dflash_inputs_kernel(
         PAD_SLOT_ID,
     )
 
-    tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
-    tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
+    if WRITE_COMMON:
+        tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
+        tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
+    if HAS_SECOND_GROUP:
+        q_slot_second = _dflash_local_slot(
+            query_pos,
+            block_table_second_ptr,
+            block_table_second_stride,
+            req_idx,
+            query_mask,
+            block_size_second,
+            cp_rank,
+            KV_CACHE_BLOCK_SIZE,
+            CP_SIZE,
+            CP_INTERLEAVE,
+            PAD_SLOT_ID,
+        )
+        tl.store(out_query_slot_mapping_second_ptr + query_idx, q_slot_second, mask=query_mask)
 
-    # Sample
-    sample_begin, sample_count = _partition_work(num_speculative_steps, worker_idx, workers_per_req)
-
-    sample_lane = tl.arange(0, SAMPLE_BLOCK_SIZE)
-    sample_mask = sample_lane < sample_count
-    sample_local = sample_begin + sample_lane
-    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
-    sample_query_off = sample_local + sample_off
-    sample_mask &= sample_query_off < num_query_per_req
-
-    sample_idx = req_idx * num_speculative_steps + sample_local
-    sample_query_idx = query_base + sample_query_off
-    sample_query_pos = last_valid_pos + 1 + sample_query_off
-    sampled_pos = sample_query_pos + 1 if SAMPLE_FROM_ANCHOR else sample_query_pos
-
-    tl.store(out_sample_indices_ptr + sample_idx, sample_query_idx, mask=sample_mask)
-    tl.store(out_sample_pos_ptr + sample_idx, sampled_pos, mask=sample_mask)
-    tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=sample_mask)
-
-    # Per-request scalar state.
-    if worker_idx == 0:
-        tl.store(out_query_start_loc_ptr + req_idx, query_base)
-        tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
-        tl.store(out_temperature_ptr + req_state_idx, tl.load(temperature_ptr + req_state_idx))
-        tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
-
-    # Graph-safety padding. Each range is balanced across the full launch grid.
     last_query_end = num_reqs * num_query_per_req
+    if WRITE_COMMON:
+        # Sample
+        sample_begin, sample_count = _partition_work(num_speculative_steps, worker_idx, workers_per_req)
 
-    # query_start_loc: [num_reqs, max_num_reqs + 1)
-    qs_pad_count = max_num_reqs + 1 - num_reqs
-    qs_begin, qs_count = _partition_work(qs_pad_count, global_worker_idx, total_workers)
-    qs_begin += num_reqs
-    qs_end = qs_begin + qs_count
+        sample_lane = tl.arange(0, SAMPLE_BLOCK_SIZE)
+        sample_mask = sample_lane < sample_count
+        sample_local = sample_begin + sample_lane
+        sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+        sample_query_off = sample_local + sample_off
+        sample_mask &= sample_query_off < num_query_per_req
 
-    for i in range(qs_begin, qs_end, REQUEST_PADDING_BLOCK_SIZE):
-        qs_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
-        tl.store(out_query_start_loc_ptr + qs_off, last_query_end, mask=qs_off < qs_end)
+        sample_idx = req_idx * num_speculative_steps + sample_local
+        sample_query_idx = query_base + sample_query_off
+        sample_query_pos = last_valid_pos + 1 + sample_query_off
+        sampled_pos = sample_query_pos + 1 if SAMPLE_FROM_ANCHOR else sample_query_pos
 
-    # seq_lens: [num_reqs, max_num_reqs)
-    seq_pad_count = max_num_reqs - num_reqs
-    seq_begin, seq_count = _partition_work(seq_pad_count, global_worker_idx, total_workers)
-    seq_begin += num_reqs
-    seq_end = seq_begin + seq_count
+        tl.store(out_sample_indices_ptr + sample_idx, sample_query_idx, mask=sample_mask)
+        tl.store(out_sample_pos_ptr + sample_idx, sampled_pos, mask=sample_mask)
+        tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=sample_mask)
 
-    for i in range(seq_begin, seq_end, REQUEST_PADDING_BLOCK_SIZE):
-        seq_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
-        tl.store(out_seq_lens_ptr + seq_off, 0, mask=seq_off < seq_end)
+        # Per-request scalar state.
+        if worker_idx == 0:
+            tl.store(out_query_start_loc_ptr + req_idx, query_base)
+            tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
+            tl.store(out_temperature_ptr + req_state_idx, tl.load(temperature_ptr + req_state_idx))
+            tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
 
-    # Sample buffers: [num_reqs * steps, max_num_reqs * steps)
-    sample_pad_start = num_reqs * num_speculative_steps
-    sample_pad_count = (max_num_reqs - num_reqs) * num_speculative_steps
-    sp_begin, sp_count = _partition_work(sample_pad_count, global_worker_idx, total_workers)
-    sp_begin += sample_pad_start
-    sp_end = sp_begin + sp_count
+        # Graph-safety padding. Each range is balanced across the full launch grid.
 
-    for i in range(sp_begin, sp_end, SAMPLE_PADDING_BLOCK_SIZE):
-        sp_off = i + tl.arange(0, SAMPLE_PADDING_BLOCK_SIZE)
-        sp_mask = sp_off < sp_end
-        tl.store(out_sample_indices_ptr + sp_off, 0, mask=sp_mask)
-        tl.store(out_sample_pos_ptr + sp_off, 0, mask=sp_mask)
-        tl.store(out_sample_idx_mapping_ptr + sp_off, -1, mask=sp_mask)
+        # query_start_loc: [num_reqs, max_num_reqs + 1)
+        qs_pad_count = max_num_reqs + 1 - num_reqs
+        qs_begin, qs_count = _partition_work(qs_pad_count, global_worker_idx, total_workers)
+        qs_begin += num_reqs
+        qs_end = qs_begin + qs_count
+
+        for i in range(qs_begin, qs_end, REQUEST_PADDING_BLOCK_SIZE):
+            qs_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
+            tl.store(out_query_start_loc_ptr + qs_off, last_query_end, mask=qs_off < qs_end)
+
+        # seq_lens: [num_reqs, max_num_reqs)
+        seq_pad_count = max_num_reqs - num_reqs
+        seq_begin, seq_count = _partition_work(seq_pad_count, global_worker_idx, total_workers)
+        seq_begin += num_reqs
+        seq_end = seq_begin + seq_count
+
+        for i in range(seq_begin, seq_end, REQUEST_PADDING_BLOCK_SIZE):
+            seq_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
+            tl.store(out_seq_lens_ptr + seq_off, 0, mask=seq_off < seq_end)
+
+        # Sample buffers: [num_reqs * steps, max_num_reqs * steps)
+        sample_pad_start = num_reqs * num_speculative_steps
+        sample_pad_count = (max_num_reqs - num_reqs) * num_speculative_steps
+        sp_begin, sp_count = _partition_work(sample_pad_count, global_worker_idx, total_workers)
+        sp_begin += sample_pad_start
+        sp_end = sp_begin + sp_count
+
+        for i in range(sp_begin, sp_end, SAMPLE_PADDING_BLOCK_SIZE):
+            sp_off = i + tl.arange(0, SAMPLE_PADDING_BLOCK_SIZE)
+            sp_mask = sp_off < sp_end
+            tl.store(out_sample_indices_ptr + sp_off, 0, mask=sp_mask)
+            tl.store(out_sample_pos_ptr + sp_off, 0, mask=sp_mask)
+            tl.store(out_sample_idx_mapping_ptr + sp_off, -1, mask=sp_mask)
 
     # query_slot_mapping: [num_reqs * query_per_req, max_num_tokens)
     q_pad_start = num_reqs * num_query_per_req
@@ -295,6 +341,8 @@ def _prepare_dflash_inputs_kernel(
     for i in range(qp_begin, qp_end, QUERY_PADDING_BLOCK_SIZE):
         qp_off = i + tl.arange(0, QUERY_PADDING_BLOCK_SIZE)
         tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
+        if HAS_SECOND_GROUP:
+            tl.store(out_query_slot_mapping_second_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
 
 
 def prepare_dflash_inputs_triton(
@@ -328,6 +376,7 @@ def prepare_dflash_inputs_triton(
     sample_from_anchor: bool = False,
     *,
     kv_cache_block_size: int,
+    kv_groups: tuple[DFlashKVGroup, ...] | None = None,
 ) -> None:
     """Prepare DFlash inputs and KV slot mappings for a draft step.
 
@@ -337,6 +386,10 @@ def prepare_dflash_inputs_triton(
             ownership and convert global positions to rank-local positions.
             One physical block may span multiple kernel blocks; its size must
             be divisible by ``block_size`` (for example, 384 versus 128).
+        kv_groups: Optional groups to prepare together. Common buffers are
+            written once; groups retain their own slot buffers and block tables.
+            Pairs share a launch, without a device pointer table or extra copies.
+            Omit this for the upstream-compatible single-group call.
     """
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -363,50 +416,65 @@ def prepare_dflash_inputs_triton(
         triton.next_power_of_2(max(2, max_ctx_per_worker)),
     )
 
-    if kv_cache_block_size % block_size != 0:
-        raise ValueError("The physical KV block size must be divisible by the kernel block size.")
+    if kv_groups is None:
+        kv_groups = ((query_slot_mapping, context_slot_mapping, block_table, block_size),)
+    if not kv_groups:
+        raise ValueError("DFlash input preparation requires at least one KV cache group.")
+    if any(kv_cache_block_size % group[3] != 0 for group in kv_groups):
+        raise ValueError("The physical KV block size must be divisible by every kernel block size.")
 
-    _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
-        input_buffers.input_ids,
-        input_buffers.positions,
-        input_buffers.query_start_loc,
-        input_buffers.seq_lens,
-        query_slot_mapping,
-        context_positions,
-        context_slot_mapping,
-        sample_indices,
-        sample_pos,
-        sample_idx_mapping,
-        temperature,
-        seeds,
-        input_batch.positions,
-        input_batch.query_start_loc,
-        input_batch.idx_mapping,
-        last_sampled,
-        next_prefill_tokens,
-        num_sampled,
-        num_rejected,
-        input_temperature,
-        input_seeds,
-        block_table,
-        block_table.stride(0),
-        parallel_drafting_token_id,
-        block_size,
-        num_query_per_req,
-        num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
-        max_model_len,
-        cp_rank,
-        KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
-        PAD_SLOT_ID=PAD_SLOT_ID,
-        CP_SIZE=cp_size,
-        CP_INTERLEAVE=cp_interleave,
-        BLOCK_SIZE=block_size_kernel,
-        QUERY_BLOCK_SIZE=_QUERY_BLOCK_SIZE,
-        SAMPLE_BLOCK_SIZE=_SAMPLE_BLOCK_SIZE,
-        REQUEST_PADDING_BLOCK_SIZE=_REQUEST_PADDING_BLOCK_SIZE,
-        SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
-        QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
-    )
+    for group_index in range(0, len(kv_groups), _KV_GROUPS_PER_LAUNCH):
+        first = kv_groups[group_index]
+        has_second = group_index + 1 < len(kv_groups)
+        second = kv_groups[group_index + 1] if has_second else first
+        _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
+            input_buffers.input_ids,
+            input_buffers.positions,
+            input_buffers.query_start_loc,
+            input_buffers.seq_lens,
+            first[0],
+            second[0],
+            context_positions,
+            first[1],
+            second[1],
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            temperature,
+            seeds,
+            input_batch.positions,
+            input_batch.query_start_loc,
+            input_batch.idx_mapping,
+            last_sampled,
+            next_prefill_tokens,
+            num_sampled,
+            num_rejected,
+            input_temperature,
+            input_seeds,
+            first[2],
+            first[2].stride(0),
+            second[2],
+            second[2].stride(0),
+            parallel_drafting_token_id,
+            first[3],
+            second[3],
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            max_model_len,
+            cp_rank,
+            KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
+            SAMPLE_FROM_ANCHOR=sample_from_anchor,
+            PAD_SLOT_ID=PAD_SLOT_ID,
+            CP_SIZE=cp_size,
+            CP_INTERLEAVE=cp_interleave,
+            BLOCK_SIZE=block_size_kernel,
+            QUERY_BLOCK_SIZE=_QUERY_BLOCK_SIZE,
+            SAMPLE_BLOCK_SIZE=_SAMPLE_BLOCK_SIZE,
+            REQUEST_PADDING_BLOCK_SIZE=_REQUEST_PADDING_BLOCK_SIZE,
+            SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
+            QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
+            HAS_SECOND_GROUP=has_second,
+            WRITE_COMMON=group_index == 0,
+        )

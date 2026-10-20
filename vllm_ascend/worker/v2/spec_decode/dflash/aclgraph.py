@@ -1,8 +1,9 @@
 from collections.abc import Callable, Mapping
+from inspect import signature
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -72,7 +73,27 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        with (
+            set_current_vllm_config(self.vllm_config),
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, False),
+        ):
+            context_kwargs = {}
+            if precompute_context_kv is not None:
+                # Newer upstream captures context KV ahead of the query. Keep
+                # that compute prefix instead of dropping the callback.
+                if "precompute_context_kv" in signature(DFlashCudaGraphManager.capture).parameters:
+                    context_kwargs["precompute_context_kv"] = precompute_context_kv
+                else:
+                    # Old snapshots have the same query-forward interface.
+                    # Run the prefix inside their capture closure, exactly once.
+                    query_forward = forward_fn
+
+                    def forward_with_context(num_reqs, *args, **kwargs):
+                        precompute_context_kv(num_reqs)
+                        return query_forward(num_reqs, *args, **kwargs)
+
+                    forward_fn = forward_with_context
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -81,7 +102,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 kv_cache_config,
                 max_model_len,
                 causal=causal,
-                precompute_context_kv=precompute_context_kv,
+                **context_kwargs,
                 progress_bar_desc=progress_bar_desc,
             )
 
@@ -89,6 +110,20 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if getattr(self.speculator, "_deferred_draft_attn_metadata", None) is not None:
+            graph = self.graphs[desc]
+            assert isinstance(graph, UpdatableGraph)
+            # The update stream must wait for inputs BEFORE replay is queued:
+            # waiting on the replay itself would form a cycle at the first FIA.
+            self.update_stream.wait_stream(torch.npu.current_stream())
+            ret = super().run_fullgraph(desc)
+            with torch.npu.stream(self.update_stream):
+                metadata = self.speculator.build_draft_attn_metadatas(
+                    desc.num_reqs, self.speculator.input_batch.seq_lens_cpu_upper_bound
+                )
+                resolved_tasks = graph.iter_resolved_tasks(ContextSource(metadata[0]))
+                graph.update(self.update_stream, resolved_tasks)
+            return ret
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,

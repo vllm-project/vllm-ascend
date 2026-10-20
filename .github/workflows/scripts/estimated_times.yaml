@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/ut/worker/v2/test_dflash_context_graph.py: 30
+  tests/e2e/pull_request/one_card/test_dflash_context_graph.py: 120
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
@@ -65,6 +67,11 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 530
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
   tests/e2e/pull_request/one_card/test_ec_mooncake_fallback.py: 60
+  # Initial estimates; scheduled CI timing updates refine these values.
+  tests/e2e/pull_request/one_card/test_cached_gdn_decode.py: 600
+  tests/e2e/pull_request/one_card/test_dflash_fia_seq_lens_cpu.py: 600
+  # Initial estimate, to be refined after NPU CI timing is available.
+  tests/e2e/pull_request/one_card/test_gdn_metadata_reuse_v2.py: 600
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 690
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
@@ -85,6 +92,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 240
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 30
   tests/e2e/pull_request/one_card/test_vlm.py: 680
+  tests/e2e/pull_request/one_card/test_v2_input_staging.py: 600
   tests/e2e/pull_request/one_card/test_xlite.py: 430
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20

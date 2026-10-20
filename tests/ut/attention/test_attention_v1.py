@@ -135,6 +135,58 @@ class TestAttentionGraphHelpers(TestBase):
             self.assertTrue(using_paged_attention(None, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
+@pytest.mark.parametrize("reuse_device", [False, True], ids=["fallback", "mrv2-device-view"])
+@pytest.mark.parametrize("boundaries", [[0, 1, 2, 3], [0, 8, 16, 24], [0, 8, 16, 16]])
+def test_dense_query_boundaries_reuse_current_device_view(monkeypatch, reuse_device, boundaries):
+    builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+    builder.supports_update_block_table = reuse_device
+    builder.pcp_enabled = False
+    builder.device = torch.device("cpu")
+    builder.kv_cache_spec = None
+    builder.speculative_config = None
+    builder.vllm_config = SimpleNamespace()
+    builder.model_config = SimpleNamespace(runner_type="generate")
+    builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
+    builder._split_decodes_and_prefills = lambda common: (3, 0, boundaries[-1], 0)
+    host = torch.tensor(boundaries, dtype=torch.int32)
+    device = torch.tensor(boundaries + [999], dtype=torch.int32)
+    lengths = torch.tensor([20, 30, 1], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_reqs=3,
+        num_actual_tokens=boundaries[-1],
+        query_start_loc_cpu=host,
+        query_start_loc=device,
+        block_table_tensor=torch.zeros((3, 2), dtype=torch.int32),
+        slot_mapping=torch.arange(boundaries[-1], dtype=torch.int32),
+        attn_state=AscendAttentionState.DecodeOnly,
+        causal=True,
+        max_query_len=8,
+        seq_lens=lengths,
+    )
+    pinned = []
+
+    def pin_memory(tensor):
+        pinned.append(tensor)
+        return tensor.clone()
+
+    monkeypatch.setattr(torch.Tensor, "pin_memory", pin_memory)
+    monkeypatch.setattr(attn_module, "_select_seq_lens", lambda *args, **kwargs: lengths)
+    metadata = builder.build(0, common)
+    torch.testing.assert_close(metadata.query_start_loc, host)
+    assert metadata.query_start_loc.numel() == 4
+    assert metadata.query_start_loc_gpu is device
+    if reuse_device:
+        assert not pinned
+        assert metadata.query_start_loc.data_ptr() == device.data_ptr()
+        # Contents still come from the runner's current input, not a host cache.
+        device[1] += 1
+        assert metadata.query_start_loc[1] == device[1]
+        assert host[1] == boundaries[1]
+    else:
+        assert len(pinned) == 1
+        assert metadata.query_start_loc.data_ptr() != device.data_ptr()
+
+
 class TestAscendAttentionBackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
@@ -687,7 +739,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.actual_seq_lengths_q = [2]
         metadata.causal = True
         metadata.attn_mask = None
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
             result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
@@ -856,7 +908,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), torch.ones(10, 8, 64))
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
@@ -914,7 +966,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty(10, 8, 64)
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly

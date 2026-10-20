@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import statistics
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -590,4 +592,143 @@ def test_prepare_dflash_inputs_wrapper_forwards_dcp():
     data = _build_inputs(case, "npu")
     prepare_dflash_inputs(*_impl_args(data, case), kv_cache_block_size=case["kv_cache_block_size"])
     _validate_outputs(data, case, _build_reference(data, case))
+    _cleanup()
+
+
+@pytest.mark.parametrize("case", ACCURACY_CASES, ids=lambda case: case["name"])
+@pytest.mark.parametrize("num_groups", [2, 3, 6, 7])
+def test_grouped_prepare_keeps_each_groups_slots(case, num_groups):
+    data = _build_inputs(case, "npu")
+    group_data = [data]
+    group_cases = [case]
+    for index in range(1, num_groups):
+        group_case = dict(
+            case,
+            block_size=max(1, case["block_size"] // 2),
+            kv_cache_block_size=case.get("kv_cache_block_size", case["block_size"]),
+        )
+        other = _build_inputs(group_case, "npu")
+        # Different physical pages and a row stride larger than the row width.
+        backing = torch.empty((2 * case["max_num_reqs"], other.block_table.shape[1]), dtype=torch.int32, device="npu")
+        table = backing[::2]
+        table.copy_(other.block_table)
+        table.add_(1000 * index)
+        for req_idx, logical_block in case.get("null_blocks", []):
+            table[req_idx, logical_block] = 0
+        other.block_table = table
+        group_data.append(other)
+        group_cases.append(group_case)
+    groups = tuple(
+        (item.outputs.query_slot_mapping, item.outputs.context_slot_mapping, item.block_table, params["block_size"])
+        for item, params in zip(group_data, group_cases)
+    )
+    prepare_dflash_inputs_triton(
+        *_impl_args(data, case),
+        kv_cache_block_size=case.get("kv_cache_block_size", case["block_size"]),
+        kv_groups=groups,
+    )
+    _validate_outputs(data, case, _build_reference(data, case))
+    for item, params in zip(group_data[1:], group_cases[1:]):
+        ref = _build_reference(item, params)
+        _assert_exact(item.outputs.query_slot_mapping, ref.query_slot_mapping)
+        _assert_exact(
+            item.outputs.context_slot_mapping[: sum(cast(list[int], case["req_lens"]))], ref.context_slot_mapping
+        )
+        # Only the supplied common buffer set is written.
+        assert torch.all(item.outputs.input_buffers.seq_lens == -12345)
+    _cleanup()
+
+
+@pytest.mark.parametrize("num_groups", [2, 6, 7])
+def test_grouped_prepare_replay_refreshes_rejection_and_pages(num_groups):
+    case = next(case for case in ACCURACY_CASES if case["name"] == "mixed_prefill_rejected")
+    items = [_build_inputs(case, "npu") for _ in range(num_groups)]
+    data = items[0]
+    for index, item in enumerate(items):
+        item.block_table.add_(101 * index)
+    groups = tuple(
+        (item.outputs.query_slot_mapping, item.outputs.context_slot_mapping, item.block_table, case["block_size"])
+        for item in items
+    )
+
+    def prepare():
+        prepare_dflash_inputs_triton(*_impl_args(data, case), kv_cache_block_size=case["block_size"], kv_groups=groups)
+
+    prepare()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        prepare()
+    addresses = [tensor.data_ptr() for group in groups for tensor in group[:3]]
+    for step, rejected in enumerate(([1, 0, 3, 0], [0, 0, 0, 0], [2, 0, 1, 0])):
+        data.num_rejected.copy_(torch.tensor(rejected, dtype=torch.int32, device="npu"))
+        for index, item in enumerate(items):
+            item.num_rejected.copy_(data.num_rejected)
+            item.block_table.add_(11 + 37 * index + step)
+            item.outputs.query_slot_mapping.fill_(123456)
+            item.outputs.context_slot_mapping.fill_(123456)
+        graph.replay()
+        torch.npu.synchronize()
+        _validate_outputs(data, case, _build_reference(data, case))
+        for item in items[1:]:
+            ref = _build_reference(item, case)
+            _assert_exact(item.outputs.query_slot_mapping, ref.query_slot_mapping)
+            _assert_exact(
+                item.outputs.context_slot_mapping[: sum(cast(list[int], case["req_lens"]))], ref.context_slot_mapping
+            )
+        assert addresses == [tensor.data_ptr() for group in groups for tensor in group[:3]]
+    _cleanup()
+
+
+def test_grouped_prepare_four_groups_and_anchor_sampling():
+    case = dict(next(case for case in ACCURACY_CASES if case["name"] == "mixed_prefill_rejected"))
+    case["sample_from_anchor"] = True
+    case["num_speculative_steps"] = case["num_query_per_req"]
+    test_grouped_prepare_keeps_each_groups_slots(case, 4)
+
+
+@pytest.mark.parametrize("num_reqs", [1, 8, 64])
+def test_grouped_prepare_benchmark(num_reqs, record_property):
+    case = dict(
+        req_lens=[8] * num_reqs,
+        position_starts=[2048] * num_reqs,
+        idx_mapping=list(range(num_reqs)),
+        max_num_reqs=64,
+        max_num_tokens=16384,
+        max_model_len=32768,
+        block_size=128,
+        num_query_per_req=8,
+        num_speculative_steps=7,
+        parallel_drafting_token_id=248077,
+    )
+    data = _build_inputs(case, "npu")
+    other = _build_inputs(case, "npu")
+    groups = tuple(
+        (item.outputs.query_slot_mapping, item.outputs.context_slot_mapping, item.block_table, case["block_size"])
+        for item in (data, other)
+    )
+
+    def separate():
+        for item in (data, other):
+            prepare_dflash_inputs_triton(*_impl_args(item, case), kv_cache_block_size=case["block_size"])
+
+    def grouped():
+        prepare_dflash_inputs_triton(*_impl_args(data, case), kv_cache_block_size=case["block_size"], kv_groups=groups)
+
+    for prepare in (separate, grouped):
+        prepare()
+    torch.npu.synchronize()
+    timings: dict[str, list[float]] = {"separate": [], "grouped": []}
+    repeats = 100
+    for _ in range(7):
+        for label, prepare in (("separate", separate), ("grouped", grouped)):
+            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+            start.record()
+            for _ in range(repeats):
+                prepare()
+            end.record()
+            end.synchronize()
+            timings[label].append(start.elapsed_time(end) * 1000 / repeats)
+    for label, values in timings.items():
+        record_property(f"{label}_median_us", statistics.median(values))
     _cleanup()

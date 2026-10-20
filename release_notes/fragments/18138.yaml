@@ -1,0 +1,4 @@
+pr: 18138
+entries:
+  - category: performance
+    text: Reuse compatible GDN and DFlash preparation metadata and buffers in Model Runner V2, and include DFlash context KV preparation in supported draft ACL graphs.

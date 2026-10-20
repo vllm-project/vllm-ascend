@@ -247,6 +247,8 @@ def test_empty_metadata_is_a_noop(architecture):
 def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(attn_architecture=architecture)
+    manager.vllm_config = object()
+    monkeypatch.setattr(graph, "set_current_vllm_config", lambda config: nullcontext())
     events = []
 
     @contextmanager
@@ -273,18 +275,19 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         object(),
         128,
     )
-    args = (*forward_args, False, "capture")
+    callback = MagicMock()
+    args = (*forward_args, False, callback, "capture")
     expected_kwargs = {
         "causal": False,
-        "precompute_context_kv": "capture",
-        "progress_bar_desc": "Capturing CUDA graphs",
+        "precompute_context_kv": callback,
+        "progress_bar_desc": "capture",
     }
 
-    def capture(self, *received, **kwargs):
+    def capture(self, *received, precompute_context_kv=None, **kwargs):
         assert self is manager
         assert received == forward_args
         # The Ascend wrapper forwards the trailing options as keywords.
-        assert kwargs == expected_kwargs
+        assert {**kwargs, "precompute_context_kv": precompute_context_kv} == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:
