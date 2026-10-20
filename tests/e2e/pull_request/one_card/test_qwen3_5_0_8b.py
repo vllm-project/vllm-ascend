@@ -100,3 +100,46 @@ def test_hybrid_prefix_match_unit_cached_output_consistency():
         warm_outputs = runner.generate_greedy(prompts=prompts, max_tokens=8)
 
     assert warm_outputs == cold_outputs
+
+
+@wait_until_npu_memory_free()
+def test_hybrid_contiguous_mtp_prefix_cache_long_context_consistency():
+    """Exercise the contiguous hybrid geometry with MTP and block reuse.
+
+    The original regression needed a long context plus prefix-cache reuse and
+    MTP on a hybrid GDN model. A small model with a long shared prefix keeps
+    the same block-id/layout shape while remaining cheap enough for PR CI.
+    """
+    model_path = hf_snapshot_download(
+        "Qwen/Qwen3.5-0.8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    # Repeat the prefix so the shared span covers several scheduler blocks even
+    # after the contiguous layout raises the effective block size.
+    shared_prefix = LONG_TEXT_PREFIX * 3
+    prompts = [
+        shared_prefix + "\nQuestion: What is the capital of France?",
+        shared_prefix + "\nQuestion: What is the capital of Japan?",
+    ]
+
+    with VllmRunner(
+        model_path,
+        dtype="bfloat16",
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        block_size=128,
+        enable_prefix_caching=True,
+        prefix_match_unit=16,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [2, 4, 6, 8],
+        },
+    ) as runner:
+        cold_outputs = runner.generate_greedy(prompts=prompts, max_tokens=16)
+        warm_outputs = runner.generate_greedy(prompts=prompts, max_tokens=16)
+
+    assert warm_outputs == cold_outputs
