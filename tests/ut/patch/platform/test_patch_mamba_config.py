@@ -262,12 +262,46 @@ def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype
     upstream.assert_called_once_with(config, backend)
 
 
+_STANDARD_MAMBA_PROFILE = SimpleNamespace(supports=lambda _capability: True)
+_NO_STANDARD_MAMBA_PROFILE = SimpleNamespace(supports=lambda _capability: False)
+
+
+def test_backend_alignment_standard_platform_uses_contiguous_patch():
+    config = _config()
+    with (
+        patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_STANDARD_MAMBA_PROFILE),
+        patch.object(Platform, "_align_hybrid_block_size") as upstream,
+        patch.object(HybridAttentionMambaModelConfig, "verify_and_update_config") as contiguous,
+    ):
+        NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+
+    contiguous.assert_called_once_with(config)
+    upstream.assert_not_called()
+
+
+def test_backend_alignment_310p_delegates_to_upstream_geometry():
+    """310P installs patch_mamba_config_310 and must keep the base path."""
+    config = _config()
+    with (
+        patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_NO_STANDARD_MAMBA_PROFILE),
+        patch.object(Platform, "_align_hybrid_block_size") as upstream,
+        patch.object(HybridAttentionMambaModelConfig, "verify_and_update_config") as contiguous,
+    ):
+        NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+
+    upstream.assert_called_once_with(config, SimpleNamespace())
+    contiguous.assert_not_called()
+
+
 def test_backend_alignment_restores_contiguous_hybrid_geometry():
     config = _config()
     _run(config)
     for _ in range(2):
         config.cache_config.block_size = 128
-        with patch.object(Platform, "_align_hybrid_block_size") as upstream:
+        with (
+            patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_STANDARD_MAMBA_PROFILE),
+            patch.object(Platform, "_align_hybrid_block_size") as upstream,
+        ):
             _run_backend_alignment(config)
         upstream.assert_not_called()
         assert config.cache_config.block_size == 2048
@@ -292,7 +326,10 @@ def test_mxfp8_keeps_its_existing_page_geometry():
     _run(config)
     assert config.cache_config.block_size == 128
     assert config.cache_config.mamba_page_size_padded == 8192
-    with patch.object(Platform, "_align_hybrid_block_size") as upstream:
+    with (
+        patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_STANDARD_MAMBA_PROFILE),
+        patch.object(Platform, "_align_hybrid_block_size") as upstream,
+    ):
         NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
     upstream.assert_called_once_with(config, SimpleNamespace())
 

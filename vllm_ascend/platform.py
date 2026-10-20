@@ -397,7 +397,14 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
-        if getattr(vllm_config.model_config, "is_hybrid", False) and vllm_config.cache_config.cache_dtype != "mxfp8":
+        # 310P installs patch_mamba_config_310 instead of patch_mamba_config.
+        # Keep it on the upstream/base alignment path so this change only
+        # affects the standard Mamba platforms.
+        if (
+            get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH)
+            and getattr(vllm_config.model_config, "is_hybrid", False)
+            and vllm_config.cache_config.cache_dtype != "mxfp8"
+        ):
             from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
 
             # Reapply contiguous alignment after the backend selects its block
