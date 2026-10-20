@@ -82,19 +82,28 @@ def test_resolve_spec_decode_family_uses_dispatch_method_override():
     assert resolve_spec_decode_family(config, method="dspark") is SpecDecodeFamily.DSPARK
 
 
-def test_dflash2_architectures_can_come_from_hf_or_model_arch_config():
-    for owner_name in ("hf_config", "model_arch_config"):
-        draft_model_config = SimpleNamespace(
-            architectures=[],
-            hf_config=SimpleNamespace(architectures=[]),
-            model_arch_config=SimpleNamespace(architectures=[]),
-        )
-        getattr(draft_model_config, owner_name).architectures = ["DFlash2DraftModel"]
-        config = SimpleNamespace(
-            speculative_config=SimpleNamespace(method="dflash", draft_model_config=draft_model_config)
-        )
+@pytest.mark.parametrize(
+    ("owner_name", "attribute", "value"),
+    [
+        ("draft", "architecture", "DFlash2DraftModel"),
+        ("draft", "architectures", ["DFlash2DraftModel"]),
+        ("hf_config", "architectures", ["DFlash2DraftModel"]),
+        ("hf_text_config", "architectures", ["DFlash2DraftModel"]),
+        ("model_arch_config", "architectures", ["DFlash2DraftModel"]),
+    ],
+)
+def test_dflash2_architecture_sources(owner_name, attribute, value):
+    draft_model_config = SimpleNamespace(
+        architecture=None,
+        architectures=[],
+        hf_config=SimpleNamespace(architectures=[]),
+        hf_text_config=SimpleNamespace(architectures=[]),
+        model_arch_config=SimpleNamespace(architectures=[]),
+    )
+    setattr(draft_model_config if owner_name == "draft" else getattr(draft_model_config, owner_name), attribute, value)
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="dflash", draft_model_config=draft_model_config))
 
-        assert resolve_spec_decode_family(config) is SpecDecodeFamily.DFLASH2
+    assert resolve_spec_decode_family(config) is SpecDecodeFamily.DFLASH2
 
 
 @pytest.mark.parametrize(

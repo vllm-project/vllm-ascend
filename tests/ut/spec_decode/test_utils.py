@@ -42,6 +42,22 @@ def test_copy_slot_mapping_handles_overlapping_source_view() -> None:
     assert result.tolist() == [3, 7, 11, 12, -1, -1]
 
 
+def test_copy_slot_mapping_copies_strided_alias_with_same_data_ptr() -> None:
+    buffer = torch.arange(8, dtype=torch.int32)
+    slot_mapping = buffer[::2]
+    assert buffer.data_ptr() == slot_mapping.data_ptr()
+    assert buffer.stride() != slot_mapping.stride()
+
+    copy_slot_mapping_to_padded_buffer(
+        buffer,
+        slot_mapping,
+        copy_tokens=3,
+        padding_value=-1,
+    )
+
+    assert buffer.tolist() == [0, 2, 4, -1, -1, -1, -1, -1]
+
+
 def test_copy_slot_mapping_rejects_invalid_lengths() -> None:
     buffer = torch.zeros(4, dtype=torch.int32)
     slot_mapping = torch.arange(3, dtype=torch.int32)

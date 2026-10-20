@@ -40,7 +40,12 @@ def copy_slot_mapping_to_padded_buffer(
             f"and buffer length {buffer.numel()}"
         )
 
-    if copy_tokens and buffer.data_ptr() != slot_mapping.data_ptr():
+    shares_storage = (
+        buffer.data_ptr() == slot_mapping.data_ptr()
+        and buffer.stride() == slot_mapping.stride()
+        and buffer.storage_offset() == slot_mapping.storage_offset()
+    )
+    if copy_tokens and not shares_storage:
         buffer[:copy_tokens].copy_(slot_mapping[:copy_tokens].to(dtype=buffer.dtype))
     buffer[copy_tokens:].fill_(padding_value)
     return buffer
