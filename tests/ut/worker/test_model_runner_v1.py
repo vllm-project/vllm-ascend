@@ -1806,9 +1806,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_pure_gqa_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False)
 
-    def test_paged_attention_uses_contiguous_kv_cache(self):
-        self._check_gqa_cache_layout(xlite_enabled=False)
-
     def test_dcp_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, dcp_size=2)
 
@@ -1821,7 +1818,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False, dcp_size=1):
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, dcp_size=1):
         runner = self._build_runner()
         runner.dcp_size = dcp_size
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
