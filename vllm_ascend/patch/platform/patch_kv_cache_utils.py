@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-from vllm_ascend.utils import vllm_version_is
 import math
 from collections import defaultdict
 from dataclasses import replace
@@ -672,16 +671,8 @@ if vllm_version_is("0.31.0"):
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(
-                owner.spec.page_size_bytes
-                for owner in six_region_layout.owners
-                if owner.role == HIDDEN
-            )
-            return (
-                six_region_layout.slot_count
-                * six_region_layout.slot_backing_size
-                + hidden_bytes
-            )
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
         if not _is_deepseek_v4_groups(kv_cache_groups):
             return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -713,16 +704,8 @@ else:
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(
-                owner.spec.page_size_bytes
-                for owner in six_region_layout.owners
-                if owner.role == HIDDEN
-            )
-            return (
-                six_region_layout.slot_count
-                * six_region_layout.slot_backing_size
-                + hidden_bytes
-            )
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
         if not _is_deepseek_v4_groups(kv_cache_groups):
             return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
