@@ -69,7 +69,7 @@ You can use our official docker image to run `GLM-4.6V` directly.
         -it "$IMAGE" bash
     ```
 
-The model weight directory must be accessible inside the container. The example mounts `/root/.cache` at the same path and uses 8 GiB of shared memory for TP workers and the multimodal processor cache.
+The model weight directory must be accessible inside the container. The example mounts `/root/.cache` at the same path and uses 8 GiB of shared memory for the TP worker processes.
 
 In another terminal on the host, check that the container is running:
 
@@ -89,47 +89,42 @@ The output should list the `vllm-ascend` container with an `Up` status.
 
 The following example uses eight NPU devices on an A3 node with TP=8 and expert parallelism. Tune the limits for your workload and available device memory.
 
-Run the following script to execute online inference.
+Run the following command to start the online service:
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=900
-export TASK_QUEUE_ENABLE=1
-
 vllm serve /root/.cache/GLM-4.6V \
     --tensor-parallel-size 8 \
     --mm-encoder-tp-mode data \
-    --mm-processor-cache-type shm \
     --enable-expert-parallel \
-    --max-model-len 131072 \
     --max-num-seqs 32 \
     --max-num-batched-tokens 32768 \
-    --enable-chunked-prefill \
-    --enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.90 \
-    --enable-auto-tool-choice \
-    --tool-call-parser glm45 \
-    --reasoning-parser glm45 \
-    --served-model-name glm \
-    --host 0.0.0.0 \
-    --port 8000
+    --served-model-name glm
 ```
 
+No environment variables are required. The A3 image already sets `OMP_NUM_THREADS=1` and `TASK_QUEUE_ENABLE=1`; vLLM Ascend sets `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`; the container exposes all eight devices, so `ASCEND_RT_VISIBLE_DEVICES` is unnecessary; and the server listens on all interfaces at port 8000 by default. For HCCL tuning on a specific fabric, set `HCCL_OP_EXPANSION_MODE=AIV` and `HCCL_BUFFSIZE=900` before starting the service; these are optional performance settings.
+
 **Notice:**
+Only the model path, `--tensor-parallel-size`, and `--mm-encoder-tp-mode data` are required to start the service. The remaining options select the expert-parallel layout and tune capacity, graph capture, and serving for this example.
+
 The parameters are explained as follows:
 
 - `--mm-encoder-tp-mode data`: Required for this TP=8 deployment. Use data parallelism for the vision encoder; omitting this option causes engine initialization to fail.
-- `--mm-processor-cache-type shm`: Use shared memory for the multimodal processor cache.
 - `--enable-expert-parallel`: Enable expert parallelism for the MoE layers.
-- `--async-scheduling` and `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Enable asynchronous scheduling and full graph capture for decode.
-- `--tool-call-parser glm45` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable tool-call and reasoning parsing.
-- `--max-model-len` and `--max-num-seqs` need to be set according to the actual usage scenario.
+- `--max-num-seqs` and `--max-num-batched-tokens`: Set the scheduler limits for the target workload. The example uses 32 concurrent sequences and 32768 tokens per batch.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Capture the decode phase in an ACL graph. vLLM defaults to `FULL_AND_PIECEWISE`; this deployment uses decode-only capture.
+- `--gpu-memory-utilization 0.90`: Reserve device memory for the KV cache while leaving 10% headroom. vLLM defaults to 0.92.
+- `--served-model-name glm`: Register `glm` as the model name used in the requests below. Without this option, requests must use the model path.
+
+The following options are omitted because their defaults are sufficient:
+
+- `--max-model-len` is omitted because vLLM derives the model's native 131072-token context from the model config. Lower it if the workload or available device memory needs a smaller limit.
+- `--enable-chunked-prefill` and `--enable-prefix-caching` are enabled by default for this generative model.
+- `--async-scheduling` is enabled by default when the model and executor support it. Add `--no-async-scheduling` to disable it.
+- `--host` and `--port` default to all interfaces and port 8000.
+- `--mm-processor-cache-type` defaults to `lru`. Add `--mm-processor-cache-type shm` for high-concurrency multimodal workloads that benefit from a shared-memory processor cache.
+- `--enable-auto-tool-choice`, `--tool-call-parser glm45`, and `--reasoning-parser glm45` are only needed for the OpenAI tools and reasoning APIs; the requests in Section 6 do not use them.
 
 After model loading completes, check the service status and model list from another terminal:
 
