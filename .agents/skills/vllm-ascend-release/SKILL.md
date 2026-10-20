@@ -1,6 +1,6 @@
 ---
 name: vllm-ascend-release
-description: "End-to-end release management skill for vLLM Ascend. Creates release checklist issues, identifies critical bugs, runs functional tests, invokes release note generation, and guides through the complete release process."
+description: "End-to-end release management skill for vLLM Ascend. Creates release checklist issues, triages critical bugs, audits test coverage, aggregates release note fragments, and guides through the complete release process."
 disable-model-invocation: true
 ---
 
@@ -91,8 +91,9 @@ github.com
 │  ├── Analyze failures with extract_and_analyze.py                           │
 │  └── Update checklist with nightly status table                             │
 │                                                                             │
-│  Phase 6: Release Notes (invoke existing skill)                             │
-│  ├── Generate release notes via vllm-ascend-release-note-writer             │
+│  Phase 6: Release Notes                                                     │
+│  ├── Aggregate release note fragments (release_notes/fragments)             │
+│  ├── Audit commits without fragments                                        │
 │  └── Create release notes PR                                                │
 │                                                                             │
 │  Phase 7: Documentation & Artifacts                                         │
@@ -360,7 +361,7 @@ python scripts/update_checklist_section.py \
 
 ## Phase 6: Release Notes
 
-This phase handles the complete release notes writing process, from fetching commits to producing the final release notes.
+This phase assembles the release notes from the fragments collected in `release_notes/fragments/` (see `release_notes/README.md` for the fragment format and principles). Fragments are the primary source; the commit-level analysis is only a fallback audit for entries contributors forgot to declare.
 
 ### 6.1 Fetch Commits
 
@@ -382,12 +383,49 @@ uv run python scripts/fetch_commits.py \
 ```
 
 The script outputs:
-- `0-current-raw-commits.md`: Raw commit list for analysis
+- `0-current-raw-commits.md`: Raw commit list, used for the missing-fragment audit
 - `0-contributor-stats.md`: Contributor statistics including new contributors
 
-### 6.2 Analyze Commits
+### 6.2 Aggregate Fragments
 
-Create a CSV file to analyze each commit:
+Validate, merge, and group all fragments into a draft:
+
+```bash
+uv run python scripts/collect_release_notes.py \
+  --version ${NEW_VERSION} \
+  --raw-commits output/${VERSION}/0-current-raw-commits.md \
+  --output output/${VERSION}/1-fragments-draft.md
+```
+
+The script:
+1. Validates the fragment schema and fails with precise errors on invalid files
+2. Merges entries with identical text (for example cherry-picks) into a single bullet
+3. Groups entries into release notes sections and lists `highlight: true` candidates
+4. Emits the audit section: commits with a PR reference but no fragment, commits without a PR reference, and fragment PRs missing from the commit list
+
+It does not move anything unless `--archive` is passed. Output: `1-fragments-draft.md`.
+
+### 6.3 Audit Missing Fragments
+
+Review the "Audit: Code Changes Without a Fragment" section of the draft. For every missing
+line, judge whether users can notice the change (the same principle as `release_notes/README.md`):
+
+- User-facing and worth a release note: check it with `gh pr view <number> --repo vllm-project/vllm-ascend`, add a fragment `release_notes/fragments/<number>.yaml`, and re-run 6.2 so the audit becomes clean and the entry is archived with the rest
+- Not user-facing (tests, CI, internal refactor, small docs): ignore it
+- Unsure and the PR is important: add a fragment, so the context is not lost
+
+Also confirm the "Fragment PRs Not Found in the Commit List" entries. Such a PR may be
+unmerged, reverted, or a leftover from an earlier release: move it out of
+`release_notes/fragments/` (archive it under the version it belongs to, or delete it if the
+PR was never merged) and keep it out of the release notes.
+
+This step is the safety net for missed fragments. Do not skip it.
+
+### 6.4 Fallback: Analyze Commits
+
+Only needed when the audit list is large, for example the first release after the fragment
+process was adopted, or when a whole area was merged without fragments. Create a CSV file to
+analyze each remaining commit:
 
 ```bash
 # Create analysis workspace
@@ -404,9 +442,11 @@ The CSV should have headers:
 | `decision` | include/exclude/merge |
 | `reason` | Why this decision |
 
-### 6.3 Draft Release Notes
+### 6.5 Draft Release Notes
 
-Create the initial draft following the category order:
+Start from `output/${VERSION}/1-fragments-draft.md` (plus any entries added during the audit),
+then curate the wording, split or merge entries as needed, and write the Highlights. Keep the
+category order used in the release notes document:
 
 ```markdown
 ## v${VERSION} - ${DATE}
@@ -429,16 +469,19 @@ Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest)
 ### Dependencies
 (Version upgrades)
 
-### Deprecation & Breaking Changes
-(Breaking changes)
+### Deprecation and Configuration Changes
+(Breaking changes and deprecations)
 
 ### Documentation
 (Doc updates)
 
-### Others
-(Bug fixes, misc)
+### Stability and Bug Fixes
+(Bug fixes)
 
-### Known Issue
+### Other Changes
+(Misc)
+
+### Known Issues
 (Known limitations)
 ```
 
@@ -446,26 +489,23 @@ Save drafts to:
 - `output/${VERSION}/2-highlights-note-draft.md` - Initial draft
 - `output/${VERSION}/3-highlights-note-edit.md` - Reviewed/edited version
 
-### 6.4 Release Notes Writing Guidelines
+### 6.6 Release Notes Writing Guidelines
 
-**Inclusion Criteria:**
-- User experience improvements (CLI, error messages)
-- Core features (PD Disaggregation, KVCache, Graph mode, CP/SP, quantization)
-- Breaking changes and deprecations (always include)
-- Significant infrastructure changes
-- Major dependency updates (CANN/torch_npu/triton-ascend)
-- Hardware compatibility expansions (310P, A2, A3)
+The inclusion principle is the same as `release_notes/README.md`: include changes users can
+notice. The fragment draft is already filtered by that rule, and the audit step in 6.3 covers
+anything the fragments missed.
 
 **Writing Tips:**
 - Focus on what users should know, not internal details
 - Look up PR descriptions when uncertain: `gh pr view <number> --repo vllm-project/vllm-ascend`
 - Group related changes together
 - Include PR links: `[#12345](https://github.com/vllm-project/vllm-ascend/pull/12345)`
+- Call out breaking changes and deprecations clearly, they must always be in the notes
 
 **Reference:**
 - See `references/ref-past-release-notes-highlight.md` for style examples
 
-### 6.5 Create Release Notes PR
+### 6.7 Create Release Notes PR
 
 After release notes are finalized:
 
@@ -473,8 +513,16 @@ After release notes are finalized:
 # Create branch
 git checkout -b release/${VERSION}
 
-# Make changes (see Phase 6 for full list)
+# Make changes (see Phase 7 for the full file list)
 # ...
+
+# Archive the consumed fragments (moves them to release_notes/archive/${VERSION}/,
+# fragments are never deleted: they are the raw material of the release notes)
+uv run python scripts/collect_release_notes.py \
+  --version ${VERSION} \
+  --raw-commits output/${VERSION}/0-current-raw-commits.md \
+  --output output/${VERSION}/1-fragments-draft.md \
+  --archive
 
 # Create PR
 gh pr create --repo vllm-project/vllm-ascend \
@@ -718,6 +766,26 @@ Fetches all commits between two tags and generates contributor statistics.
 **Output:**
 - Commit list in markdown format with PR links
 - Contributor statistics including new contributors
+
+### scripts/collect_release_notes.py
+
+Validates, merges, and groups release note fragments from `release_notes/fragments/` into a
+draft, and audits raw commits for missing fragments.
+
+**Arguments:**
+- `--version`: Release version (required)
+- `--fragments`: Fragments directory (default: release_notes/fragments)
+- `--repo`: owner/repo used to build PR links (default: vllm-project/vllm-ascend)
+- `--raw-commits`: Raw commits markdown from fetch_commits.py, enables the audit section
+- `--output`: Output file for the aggregated draft (required)
+- `--archive`: Move the fragment files to `<archive-dir>/<version>/` after a successful run (used when preparing the release PR)
+- `--archive-dir`: Root directory for archived fragments (default: `archive/` next to the fragments directory, i.e. release_notes/archive)
+
+**Output:** Draft markdown grouped by release notes sections, with:
+- Highlights candidates (`highlight: true` entries)
+- Per-category bullets with PR links, deduplicated across cherry-picks
+- Support matrix hints (entries with `model`/`hardware` metadata)
+- Audit lists: PR-referenced commits without a fragment, commits without a PR reference, and fragment PRs missing from the commit list
 
 ### scripts/generate_checklist.py
 

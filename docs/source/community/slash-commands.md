@@ -50,12 +50,32 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
 | `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
 | `/nightly <test_cases> --log-path <path>` | Upload a test file or directory as a downloadable artifact |
+| `/nightly <test_cases> --profile` | Capture profiling traces during selected YAML-driven AISBench performance benchmarks |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
 
 Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
 automatically captures test results, classifies failures (env vs. code), and triggers
 binary bisect for genuine failures. By default, AOP hooks are disabled.
+
+Use `--profile` to collect Ascend PyTorch Profiler traces. Select benchmarks by
+their exact YAML keys and choose either a time offset or a successful-request
+completion threshold:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--profile-benchmark-names <names>` | All performance benchmarks | Comma-separated YAML benchmark keys to capture. |
+| `--profile-start-after <seconds>` | `60` | Delay from the first formal request, after AISBench internal warmup. |
+| `--profile-start-after-requests <count>` | Disabled | Start after this many successful formal requests complete. Mutually exclusive with `--profile-start-after`. |
+| `--profile-duration <seconds>` | `8` | Requested capture duration. |
+| `--profile-output <mode>` | `parsed` | Publish raw and parsed archives, or use `raw` for raw archives only. |
+| `--profile-with-stack` | Disabled | Collect stack/module attribution with additional overhead. |
+
+The 60-second default applies when neither start option is specified. Profiling
+can reduce throughput and increase latency enough to fail performance baselines.
+Download the `profile-artifact-<key>` GitHub Artifact for manifests and archive
+links. See [Profiling from PR Comments](../developer_guide/contribution/nightly_ci_test.md#profiling-from-pr-comments)
+for capture-window selection, downloads, and troubleshooting.
 
 Use `--log-path <path>` to collect a file or directory from `node0` after
 the test, including when the test fails. Absolute paths refer to the test
@@ -110,6 +130,12 @@ cannot be selected.
 
 # Run specific test with AOP on a release branch
 /nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
+
+# Profile the perf benchmark for eight seconds, starting after 60 seconds
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 60 --profile-duration 8
+
+# Start profiling after 100 successful formal requests instead
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after-requests 100 --profile-duration 8
 
 # Download a directory from a single-node test
 /nightly test_custom_op --log-path /tmp/test-logs

@@ -118,17 +118,19 @@ def make_page_strided_cache_view(
 
 @contextmanager
 def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
-    compilation_model = getattr(model, "model", model)
-    if not hasattr(compilation_model, "do_not_compile"):
-        yield
-        return
-
-    previous = compilation_model.do_not_compile
-    compilation_model.do_not_compile = True
+    """Temporarily disable compilation for all nested compiled modules."""
+    # Multimodal wrappers can nest the compiled backbone below language_model.
+    # Snapshot before changing flags; modules() also deduplicates shared modules.
+    previous_states = [
+        (module, module.do_not_compile) for module in model.modules() if hasattr(module, "do_not_compile")
+    ]
     try:
+        for module, _ in previous_states:
+            module.do_not_compile = True
         yield
     finally:
-        compilation_model.do_not_compile = previous
+        for module, previous in reversed(previous_states):
+            module.do_not_compile = previous
 
 
 @triton.jit

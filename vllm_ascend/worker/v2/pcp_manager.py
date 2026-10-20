@@ -404,7 +404,12 @@ class AscendPCPManager(PCPManager):
         # graph capture layout.
         needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
         needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
-        if not is_decode_only or not (needs_token_padding or needs_request_padding):
+        # Upstream may pad request capacity without extending query offsets.
+        needs_query_padding = (
+            global_batch.query_start_loc_np.size > graph_num_reqs
+            and local_batch.query_start_loc_np[-1] != global_batch.query_start_loc_np[graph_num_reqs]
+        )
+        if not is_decode_only or not (needs_token_padding or needs_request_padding or needs_query_padding):
             return local_batch
 
         assert self._input_buffers is not None

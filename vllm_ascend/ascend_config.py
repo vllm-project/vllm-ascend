@@ -426,6 +426,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
@@ -574,6 +575,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
@@ -691,6 +693,14 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if self.enable_force_eplb:
+            logger.warning(
+                "enable_force_eplb is enabled: it forces a deterministic round-robin "
+                "expert routing that replaces the real MoE router output. The model "
+                "results and accuracy are therefore invalid. This is an analysis-only "
+                "switch for measuring the EPLB performance ceiling and must not be "
+                "used in production."
+            )
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

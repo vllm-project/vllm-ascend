@@ -692,30 +692,7 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
-# ** 20a. File: platform/patch_swa_bounded_replay_legacy.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Targets: CacheConfig, EngineArgs, Scheduler.schedule, KVCacheManager,
-#   NewRequestData, and SingleTypeKVCacheManager.cache_blocks.
-#    Why:
-#       vLLM 0.30 lacks the bounded-replay admission protocol required by
-#       the Ascend V4.1 worker. The release image and compiled operators must
-#       remain usable without replacing installed vLLM source files.
-#    How:
-#       Backport declared config/payload fields and the local-prefix rewind.
-#       Insert the minimal scheduling/allocation changes into the pinned
-#       methods, verifying each source anchor before compiling the replacement.
-#       SWA blocks remain private; cached groups adopt the full hit and replayed
-#       tokens consume compute budget without allocating duplicate slots.
-#       Register config and payload interfaces before parsing/serialization.
-#       Install scheduler/cache behavior only after config enables replay.
-#       Validate source anchors rather than matching a version string.
-#    Related upstream work: vLLM #56227.
-#    Future Plan:
-#       Remove after the release lane supplies the upstream replay protocol.
-#       Native replay implementations are detected and left unchanged.
-#       KV connectors are rejected while this backport only supports local hits.
-#
-# ** 20b. File: platform/patch_swa_bounded_replay.py**
+# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
 #   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`

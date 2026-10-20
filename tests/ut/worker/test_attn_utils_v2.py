@@ -1605,6 +1605,7 @@ def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_
 
 def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypatch):
     state = AscendModelState.__new__(AscendModelState)
+    state.decoder_replay = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
@@ -1924,6 +1925,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
+        model_state.decoder_replay = None
         # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
         # model_config.
         model_state.model_config = SimpleNamespace(max_model_len=8)

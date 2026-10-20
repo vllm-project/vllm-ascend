@@ -316,9 +316,6 @@ class NPUPlatform(Platform):
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
-            from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import register_legacy_replay_argument
-
-            register_legacy_replay_argument(parser)
             quant_action = parser._option_string_actions.get("--quantization")
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
@@ -551,12 +548,6 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
-
-        # Replay may have been disabled by the scheduler-mode checks above.
-        from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
-
-        if getattr(vllm_config.cache_config, "swa_bounded_replay", False):
-            apply_legacy_replay_patch(vllm_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
@@ -1230,7 +1221,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
     if (xlite_config := ascend_config.xlite_graph_config).enabled:
         spec_config = vllm_config.speculative_config
         mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
-        decode_mode = CUDAGraphMode.NONE if spec_config is None else compilation_config.cudagraph_mode.decode_mode()
+        # TODO(SijieFu): properly resolve cudagraph_mode when xlite is enabled
+        decode_mode = (
+            CUDAGraphMode.NONE
+            if spec_config is None or vllm_config.use_v2_model_runner
+            else compilation_config.cudagraph_mode.decode_mode()
+        )
         if not decode_mode or mixed_mode == decode_mode:
             compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
         else:
@@ -1239,7 +1235,7 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             spec_config.enforce_eager = enforce_eager
         enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
         model_config.enforce_eager = enforce_eager
-        logger.info(
+        logger.info_once(
             "Xlite graph enabled; falling back `compilation_config.cudagraph_mode` to %s (enforce_eager: %s)",
             compilation_config.cudagraph_mode,
             enforce_eager,

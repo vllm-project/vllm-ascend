@@ -81,6 +81,11 @@ class EngramModelState(AscendModelState):
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
 
+    def _initialize_decoder_replay(self) -> None:
+        # Engram uses the model-specific replay state instead of preparing
+        # a second replay batch in AscendModelState.
+        self.decoder_replay = None
+
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -92,7 +97,7 @@ class EngramModelState(AscendModelState):
         self._replay_start = CpuGpuBuffer(max_num_local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self._replay_groups: tuple[int, torch.Tensor] | None = None
         layers = getattr(model, "decoder_replay_layers", None)
-        self.decoder_replay = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
+        self.decoder_replay_state = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
@@ -111,9 +116,9 @@ class EngramModelState(AscendModelState):
     def add_request(self, req_index: int, new_req_data) -> None:
         super().add_request(req_index, new_req_data)
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
-        if self.decoder_replay is not None:
+        if self.decoder_replay_state is not None:
             params = new_req_data.sampling_params
-            self.decoder_replay.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
+            self.decoder_replay_state.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement
@@ -198,8 +203,8 @@ class EngramModelState(AscendModelState):
             ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
-        if self.decoder_replay is not None:
-            self.decoder_replay.prepare(
+        if self.decoder_replay_state is not None:
+            self.decoder_replay_state.prepare(
                 DecoderReplayInputs(input_batch, block_tables, slot_mappings, attn_groups, replay_start),
                 cudagraph_mode,
                 for_capture=for_capture,

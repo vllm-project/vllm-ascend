@@ -27,7 +27,8 @@ ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 # ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 # MOONCAKE_TAG (optional): Version tag of the mooncake-transfer-engine-npu package.
-ARG MOONCAKE_TAG=0.3.11.post1
+ARG MOONCAKE_TAG=v0.3.14-rc1
+ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
@@ -61,18 +62,34 @@ ARG DAILY_DEPS_MODE="full"
 # flash-linear-attention-npu
 ARG FLA_VERSION="26.9.1+dev812ccc8"
 ARG FLA_RELEASE_TAG="v26.9.1-20261015-121515"
-
 WORKDIR /workspace
-
-# Install clang-15 (for triton-ascend) and Mooncake
+# Install clang-15 (for triton-ascend)
 RUN apt-get update -y && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
+
+# ====== Install Mooncake ======
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
+        "linux/amd64"|"x86_64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl" ;; \
+        *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
+    esac && \
+    MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
+    echo "Download mooncake whl: ${MOONCAKE_URL}" && \
+    wget -q --no-check-certificate "${MOONCAKE_URL}" -P /tmp && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    echo "***********check mooncake-transfer-engine-npu version***********" && \
+    pip show mooncake-transfer-engine && \
+    rm -rf /tmp/${MOONCAKE_WHL} && \
+    pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
@@ -98,14 +115,13 @@ ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    python3 -m pip install triton-ascend==3.6.0 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
