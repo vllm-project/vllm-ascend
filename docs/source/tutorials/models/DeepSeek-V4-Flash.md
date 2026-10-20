@@ -405,6 +405,12 @@ Before you start, please:
             help="Tensor parallel size."
         )
         parser.add_argument(
+            "--pcp-size",
+            type=int,
+            default=1,
+            help="Prefill context parallel size."
+        )
+        parser.add_argument(
             "--dp-size-local",
             type=int,
             default=-1,
@@ -439,6 +445,7 @@ Before you start, please:
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
+    pcp_size = args.pcp_size
     dp_size_local = args.dp_size_local
     if dp_size_local == -1:
         dp_size_local = dp_size
@@ -458,6 +465,7 @@ Before you start, please:
             dp_address,
             dp_rpc_port,
             str(tp_size),
+            str(pcp_size),
         ]
         subprocess.run(command, check=True)
 
@@ -468,11 +476,11 @@ Before you start, please:
             sys.exit(1)
 
         processes = []
-        num_cards = dp_size_local * tp_size
+        devices_per_rank = tp_size * pcp_size
         for i in range(dp_size_local):
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
-            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+            visible_devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
             process = multiprocessing.Process(target=run_command,
                                             args=(visible_devices, dp_rank,
                                                     vllm_engine_port))
@@ -489,6 +497,7 @@ Before you start, please:
     |---------|----|--------|-------|-----------|
     |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
     |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+    |`--pcp-size`|int|No|1|Prefill context parallel size within each DP rank. Each rank uses `--tp-size` × `--pcp-size` devices.|
     |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
     |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
     |`--dp-address`|str|Yes|-|IP address of the data parallel master node.|
@@ -670,7 +679,7 @@ Before you start, please:
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Ensure the model path matches the directory recorded during download
@@ -682,11 +691,12 @@ Before you start, please:
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --prefill-context-parallel-size $8 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 8192 \
+            --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
@@ -698,10 +708,10 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.9 \
+            --gpu-memory-utilization 0.94 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -709,8 +719,9 @@ Before you start, please:
             "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 4
+                                "dp_size": 2,
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -741,6 +752,7 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -770,8 +782,8 @@ Before you start, please:
             --reasoning-parser deepseek_v4 \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}' \
+            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
@@ -779,8 +791,9 @@ Before you start, please:
             "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 4
+                                "dp_size": 2,
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -803,9 +816,18 @@ Before you start, please:
 
     1. Prefill node
 
+        For MTP (`A3 series`), keep DP4 and TP4:
+
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        ```
+
+        For DSpark (`A3 series with dspark`), use PCP8, DP2, and TP1:
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 2 --tp-size 1 --pcp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
     2. Decode node
@@ -1085,6 +1107,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--kv-cache-dtype turboquant_4bit_nc` is not currently supported in P/D disaggregated deployments.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
+- `VLLM_USE_V2_MODEL_RUNNER=1`: Enables Model Runner V2. Set it with `export VLLM_USE_V2_MODEL_RUNNER=1` on both DSpark nodes in the A3 example. PCP requires Model Runner V2; DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
