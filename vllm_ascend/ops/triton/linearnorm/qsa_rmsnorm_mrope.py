@@ -5,13 +5,24 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 @triton.jit
 def _qsa_rmsnorm_mrope_kernel(
-    input_ptr, weight_ptr, cos_sin_ptr, output_ptr,
-    input_stride_token, input_stride_head,
-    cos_sin_stride_axis, cos_sin_stride_token,
-    output_stride_token, output_stride_head,
-    num_heads: tl.constexpr, head_dim: tl.constexpr, eps: tl.constexpr,
-    mrope_section_h: tl.constexpr, mrope_section_w: tl.constexpr,
-    rope_dim: tl.constexpr, has_mrope: tl.constexpr, block_dim: tl.constexpr,
+    input_ptr,
+    weight_ptr,
+    cos_sin_ptr,
+    output_ptr,
+    input_stride_token,
+    input_stride_head,
+    cos_sin_stride_axis,
+    cos_sin_stride_token,
+    output_stride_token,
+    output_stride_head,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    eps: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
+    rope_dim: tl.constexpr,
+    has_mrope: tl.constexpr,
+    block_dim: tl.constexpr,
 ):
     program_id = tl.program_id(0)
     token_id = program_id // num_heads
@@ -91,15 +102,26 @@ def triton_qsa_rmsnorm_mrope(
     if not num_tokens:
         return output
     _qsa_rmsnorm_mrope_kernel[(num_tokens * num_heads,)](
-        tensor, weight, cos_sin, output,
-        tensor.stride(0), tensor.stride(1),
-        cos_sin_stride_axis, cos_sin.stride(-2),
-        output.stride(0), output.stride(1),
-        num_heads=num_heads, head_dim=head_dim, eps=eps,
+        tensor,
+        weight,
+        cos_sin,
+        output,
+        tensor.stride(0),
+        tensor.stride(1),
+        cos_sin_stride_axis,
+        cos_sin.stride(-2),
+        output.stride(0),
+        output.stride(1),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        eps=eps,
         mrope_section_h=mrope_section[1] if has_mrope else 0,
         mrope_section_w=mrope_section[2] if has_mrope else 0,
-        rope_dim=rope_dim, has_mrope=has_mrope,
-        block_dim=triton.next_power_of_2(head_dim), num_warps=1, num_stages=1,
+        rope_dim=rope_dim,
+        has_mrope=has_mrope,
+        block_dim=triton.next_power_of_2(head_dim),
+        num_warps=1,
+        num_stages=1,
     )
     return output
 

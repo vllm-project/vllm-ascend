@@ -148,9 +148,7 @@ def test_qsa_gbsa_aligns_shared_block_stride(monkeypatch) -> None:
     expected_stride = 21_757_952
     assert aligned.kv_cache_tensors[0].block_stride == expected_stride
     assert expected_stride % page_bytes == 0
-    assert aligned.kv_cache_tensors[0].size == (
-        expected_stride * aligned.num_blocks
-    )
+    assert aligned.kv_cache_tensors[0].size == (expected_stride * aligned.num_blocks)
     assert aligned.num_blocks == (old_stride * old_num_blocks) // expected_stride
 
 
@@ -204,11 +202,7 @@ def test_non_qsa_cache_keeps_upstream_block_stride(monkeypatch) -> None:
     )
     config = SimpleNamespace(num_blocks=10, kv_cache_tensors=[tensor])
     vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
-                is_block_outermost=True
-            )
-        )
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: SimpleNamespace(is_block_outermost=True))
     )
 
     actual = patch_kv_cache_utils._align_qsa_gbsa_block_stride(

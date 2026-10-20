@@ -11,7 +11,6 @@ from pathlib import Path
 import torch
 import torch_npu
 
-
 REPO_ROOT = next(p for p in Path(__file__).resolve().parents if (p / "build.sh").exists())
 sys.path.insert(0, str(REPO_ROOT / "torch_extension"))
 sys.path.insert(0, str(REPO_ROOT / "attention/generic_block_sparse_attention/torch_extension"))
@@ -19,7 +18,9 @@ import generic_block_sparse_attention as gbsa_extension  # noqa: E402
 
 _builder = gbsa_extension.generic_block_sparse_attention_op_builder
 _builder.category = None
-_builder.sources = lambda: [str(REPO_ROOT / "attention/generic_block_sparse_attention/torch_extension/csrc/generic_block_sparse_attention.cpp")]
+_builder.sources = lambda: [
+    str(REPO_ROOT / "attention/generic_block_sparse_attention/torch_extension/csrc/generic_block_sparse_attention.cpp")
+]
 
 
 def make_sparse(qs, kvs, block_y, topk, residual_mode):
@@ -50,8 +51,9 @@ def main():
     parser.add_argument("--group", type=int, default=16)
     parser.add_argument("--qs", type=int, help="override prefill length for D/resource sweeps")
     parser.add_argument("--precision", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--bench-repeats", type=int, default=0,
-                        help="synchronized wall-clock samples; 0 keeps one call for msprof op")
+    parser.add_argument(
+        "--bench-repeats", type=int, default=0, help="synchronized wall-clock samples; 0 keeps one call for msprof op"
+    )
     args = parser.parse_args()
     torch.set_num_threads(2)
 
@@ -74,25 +76,55 @@ def main():
 
     def make_metadata():
         return gbsa_extension.generic_block_sparse_attention_metadata(
-            idx, count, q_heads, kv_heads, dim, [1, block_y],
-            cu_seqlens_q=cu_q, cu_seqlens_kv=cu_kv, seqused_kv=used_kv,
-            max_seqlen_q=qs, max_seqlen_kv=kvs,
-            layout_q="TND", layout_kv="TND", layout_sparse_pattern=4,
-            mask_mode=1, quant_mode=0, softmax_precision=args.precision,
-            win_left=-1, win_right=-1, residual_block_mode=args.residual_mode,
+            idx,
+            count,
+            q_heads,
+            kv_heads,
+            dim,
+            [1, block_y],
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            seqused_kv=used_kv,
+            max_seqlen_q=qs,
+            max_seqlen_kv=kvs,
+            layout_q="TND",
+            layout_kv="TND",
+            layout_sparse_pattern=4,
+            mask_mode=1,
+            quant_mode=0,
+            softmax_precision=args.precision,
+            win_left=-1,
+            win_right=-1,
+            residual_block_mode=args.residual_mode,
             is_consistent_topk=False,
         )
 
     def invoke(metadata):
         return gbsa_extension.generic_block_sparse_attention(
-            q, k, v, idx, count, [1, block_y], metadata=metadata,
-            cu_seqlens_q=cu_q, cu_seqlens_kv=cu_kv, seqused_kv=used_kv,
-            layout_q="TND", layout_kv="TND", layout_sparse_pattern=4,
-            softmax_scale=1.0 / math.sqrt(dim), mask_mode=1, quant_mode=0,
-            softmax_precision=args.precision, win_left=-1, win_right=-1,
-            return_softmax_lse=False, residual_block_mode=args.residual_mode,
+            q,
+            k,
+            v,
+            idx,
+            count,
+            [1, block_y],
+            metadata=metadata,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            seqused_kv=used_kv,
+            layout_q="TND",
+            layout_kv="TND",
+            layout_sparse_pattern=4,
+            softmax_scale=1.0 / math.sqrt(dim),
+            mask_mode=1,
+            quant_mode=0,
+            softmax_precision=args.precision,
+            win_left=-1,
+            win_right=-1,
+            return_softmax_lse=False,
+            residual_block_mode=args.residual_mode,
             is_consistent_topk=False,
         )
+
     with torch.inference_mode():
         metadata = make_metadata()
         out, _ = invoke(metadata)
@@ -110,8 +142,11 @@ def main():
                     torch_npu.npu.synchronize()
                     samples.append((time.perf_counter_ns() - start) / 1000)
                 label = "metadata+attention+sync" if include_metadata else "attention+sync"
-                print(f"WALL_US scope={label} median={statistics.median(samples):.3f} "
-                      f"min={min(samples):.3f} max={max(samples):.3f} n={len(samples)}", flush=True)
+                print(
+                    f"WALL_US scope={label} median={statistics.median(samples):.3f} "
+                    f"min={min(samples):.3f} max={max(samples):.3f} n={len(samples)}",
+                    flush=True,
+                )
     print(
         f"DONE scenario={args.scenario} B=1 QS={qs} KVS={kvs} D={dim} "
         f"Nq:Nkv={q_heads}:{kv_heads} blockY={block_y} topK={topk} "

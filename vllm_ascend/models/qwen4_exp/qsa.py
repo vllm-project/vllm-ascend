@@ -431,11 +431,7 @@ class AscendQSAImpl:
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        packed_width = (
-            layer.indexer.token_topk // layer.indexer.compress_ratio
-            + layer.indexer.compress_ratio
-            - 1
-        )
+        packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
         logger.info_once("QSA attention is using the CANN GBSA backend.")
         return qsa_gbsa_attention(

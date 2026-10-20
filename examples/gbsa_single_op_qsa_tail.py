@@ -2,14 +2,13 @@ import argparse
 import math
 
 import torch
-
 import vllm_ascend.vllm_ascend_C  # noqa: F401
+
 import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.ops.gbsa import (
     generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
 )
-
 
 PAGE_SIZE = 128
 SPARSE_BLOCK_SIZE = 4
@@ -55,9 +54,7 @@ def run_case(dtype: torch.dtype, tail_tokens: int) -> None:
     seqused_kv = torch.tensor([sequence_length], dtype=torch.int32, device="npu")
     sparse_block_idx = torch.arange(explicit_blocks, dtype=torch.int32, device="npu")
     sparse_block_idx = sparse_block_idx.view(1, 1, -1).expand(NUM_KV_HEADS, 1, -1).contiguous()
-    sparse_block_count = torch.full(
-        (NUM_KV_HEADS, 1), explicit_blocks, dtype=torch.int32, device="npu"
-    )
+    sparse_block_count = torch.full((NUM_KV_HEADS, 1), explicit_blocks, dtype=torch.int32, device="npu")
 
     common = dict(
         cu_seqlens_q=cu_seqlens_q,

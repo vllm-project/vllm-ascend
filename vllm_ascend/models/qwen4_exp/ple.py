@@ -71,15 +71,11 @@ def _accumulate_compact_prefill_output(
     """
     F.silu(conv_output, inplace=True)
     local_req_indices = req_indices - request_start
-    in_chunk = (local_req_indices >= 0) & (
-        local_req_indices < conv_output.shape[0]
-    )
+    in_chunk = (local_req_indices >= 0) & (local_req_indices < conv_output.shape[0])
     safe_req_indices = local_req_indices.clamp(0, conv_output.shape[0] - 1)
     compact_output = conv_output[safe_req_indices, :, col_indices]
     valid_tokens = in_chunk & valid_state.to(device=output.device)[req_indices]
-    output.add_(
-        compact_output * valid_tokens.view(-1, 1).to(output.dtype)
-    )
+    output.add_(compact_output * valid_tokens.view(-1, 1).to(output.dtype))
 
 
 def _short_conv_dilated_prefill_batched(
@@ -101,14 +97,9 @@ def _short_conv_dilated_prefill_batched(
     """
     query_start_loc_p = getattr(metadata, "query_start_loc_p", None)
     if query_start_loc_p is None:
-        non_spec_query_start_loc = getattr(
-            metadata, "non_spec_query_start_loc", None
-        )
+        non_spec_query_start_loc = getattr(metadata, "non_spec_query_start_loc", None)
         if non_spec_query_start_loc is not None:
-            query_start_loc_p = (
-                non_spec_query_start_loc[-num_prefills - 1 :]
-                - num_decode_tokens
-            )
+            query_start_loc_p = non_spec_query_start_loc[-num_prefills - 1 :] - num_decode_tokens
     if query_start_loc_p is None:
         raise ValueError("query_start_loc is required for prefill short-conv")
     has_initial_states_p = metadata.has_initial_states_p
@@ -119,13 +110,11 @@ def _short_conv_dilated_prefill_batched(
     q_starts = query_start_loc_p.to(torch.int64)
     if state_indices_tensor_p.numel() < num_prefills:
         raise ValueError(
-            "state_indices_tensor_p size mismatch: "
-            f"got {state_indices_tensor_p.numel()}, need >= {num_prefills}."
+            f"state_indices_tensor_p size mismatch: got {state_indices_tensor_p.numel()}, need >= {num_prefills}."
         )
     if has_initial_states_p.numel() < num_prefills:
         raise ValueError(
-            "has_initial_states_p size mismatch: "
-            f"got {has_initial_states_p.numel()}, need >= {num_prefills}."
+            f"has_initial_states_p size mismatch: got {has_initial_states_p.numel()}, need >= {num_prefills}."
         )
     if num_prefills == 0 or x_p.numel() == 0:
         return output
@@ -135,9 +124,7 @@ def _short_conv_dilated_prefill_batched(
         return output
 
     hidden_size = x_p.shape[1]
-    positions = torch.arange(
-        num_prefill_tokens, device=x_p.device, dtype=torch.int64
-    )
+    positions = torch.arange(num_prefill_tokens, device=x_p.device, dtype=torch.int64)
     req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
     col_indices = positions - q_starts[req_indices]
 
@@ -145,16 +132,10 @@ def _short_conv_dilated_prefill_batched(
     packed_tokens[req_indices, col_indices] = x_p
     packed_tokens = packed_tokens.transpose(1, 2).contiguous()
 
-    state_indices = state_indices_tensor_p[:num_prefills].to(
-        device=conv_state.device, dtype=torch.int64
-    )
+    state_indices = state_indices_tensor_p[:num_prefills].to(device=conv_state.device, dtype=torch.int64)
     valid_state = state_indices != NULL_BLOCK_ID
-    state_indices = torch.where(
-        valid_state, state_indices, torch.zeros_like(state_indices)
-    )
-    has_initial = has_initial_states_p[:num_prefills].to(
-        device=conv_state.device, dtype=torch.bool
-    )
+    state_indices = torch.where(valid_state, state_indices, torch.zeros_like(state_indices))
+    has_initial = has_initial_states_p[:num_prefills].to(device=conv_state.device, dtype=torch.bool)
     if self.conv_state_len > 0:
         if conv_state.shape[0] == 0:
             state = conv_state.new_zeros(
@@ -162,9 +143,7 @@ def _short_conv_dilated_prefill_batched(
                 dtype=x_p.dtype,
             )
         else:
-            state = conv_state.index_select(0, state_indices)[
-                ..., : self.conv_state_len
-            ].to(x_p.dtype)
+            state = conv_state.index_select(0, state_indices)[..., : self.conv_state_len].to(x_p.dtype)
         use_initial_mask = (valid_state & has_initial).view(num_prefills, 1, 1)
         initial_state = torch.where(
             use_initial_mask,
@@ -198,12 +177,10 @@ def _short_conv_dilated_prefill_batched(
         )
 
     if self.conv_state_len > 0 and conv_state.shape[0] > 0:
-        state_starts = lengths.to(device=history.device, dtype=torch.int64).view(
-            num_prefills, 1, 1
+        state_starts = lengths.to(device=history.device, dtype=torch.int64).view(num_prefills, 1, 1)
+        state_offsets = torch.arange(self.conv_state_len, device=history.device, dtype=torch.int64).view(
+            1, 1, self.conv_state_len
         )
-        state_offsets = torch.arange(
-            self.conv_state_len, device=history.device, dtype=torch.int64
-        ).view(1, 1, self.conv_state_len)
         next_state = history.gather(
             dim=2,
             index=(state_starts + state_offsets).expand(-1, history.size(1), -1),
@@ -301,9 +278,7 @@ def patch_upstream_ple_short_conv() -> None:
                 embedding_dtype,
             )
 
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(
-            from_quant_config
-        )
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(from_quant_config)
 
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 

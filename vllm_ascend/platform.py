@@ -432,20 +432,21 @@ class NPUPlatform(Platform):
             if hasattr(model_cls, "get_mamba_specs_from_config"):
                 specs = model_cls.get_mamba_specs_from_config(vllm_config)
                 ssm_bytes = max(
-                    prod(spec.shapes[1]) * get_dtype_size(spec.dtypes[1])
-                    for spec in specs if len(spec.shapes) == 2
+                    prod(spec.shapes[1]) * get_dtype_size(spec.dtypes[1]) for spec in specs if len(spec.shapes) == 2
                 )
             else:
                 shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
                 dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
                 ssm_bytes = prod(shapes[1]) * get_dtype_size(dtypes[1])
             kv_dtype = (
-                model_config.dtype if cache_config.cache_dtype == "auto"
+                model_config.dtype
+                if cache_config.cache_dtype == "auto"
                 else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
             )
             k_token_bytes = (
                 model_config.get_num_kv_heads(vllm_config.parallel_config)
-                * model_config.get_head_size() * get_dtype_size(kv_dtype)
+                * model_config.get_head_size()
+                * get_dtype_size(kv_dtype)
             )
             alignment = cls._get_indexer_block_alignment(vllm_config)
             min_tokens = (ssm_bytes + k_token_bytes - 1) // k_token_bytes
