@@ -155,6 +155,10 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_layout import (
+    allocate_shared_attention_kv_cache,
+    can_share_full_and_sliding_kv_cache,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -5339,6 +5343,16 @@ class NPUModelRunner(GPUModelRunner):
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
+        if (
+            not self.use_sparse
+            and not self.use_compress
+            and can_share_full_and_sliding_kv_cache(self.vllm_config, layer_kv_cache_spec.values())
+        ):
+            self.hybrid_with_attn_and_mamba = False
+            return allocate_shared_attention_kv_cache(
+                kv_cache_config,
+                lambda size: self._allocate_int8_cache_tensor(size, alignment),
+            )
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = any(
             getattr(spec, "model_version", None) == "deepseek_v4"

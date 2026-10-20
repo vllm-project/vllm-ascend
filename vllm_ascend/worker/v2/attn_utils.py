@@ -84,6 +84,10 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.core.kv_cache_layout import (
+    allocate_shared_attention_kv_cache,
+    can_share_full_and_sliding_kv_cache,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
@@ -1010,6 +1014,11 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
+    if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
+        return allocate_shared_attention_kv_cache(
+            kv_cache_config,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+        )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
