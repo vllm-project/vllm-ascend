@@ -1,0 +1,4 @@
+pr: 19252
+entries:
+  - category: bugfix
+    text: Fixed incorrect expert-count reduction in swiglu_group_quant for partial four-vector groups, which could cause device errors during MoE offload on Ascend 950PR.
