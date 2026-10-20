@@ -193,6 +193,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.input_adapter import (
+    ModelInputContext,
+    build_model_input_adapter,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -326,43 +330,6 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
-
-
-def _pad_qwen4_exp_ple_graph_inputs(
-    context_buffer: torch.Tensor,
-    query_start_loc_buffer: torch.Tensor,
-    runtime_context: torch.Tensor,
-    runtime_query_start_loc: torch.Tensor,
-    num_reqs: int,
-    eos_token_id: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build fixed-row Qwen4Exp PLE inputs for ACL graph replay."""
-    max_num_reqs = context_buffer.shape[0]
-    if not 0 < num_reqs <= max_num_reqs:
-        raise ValueError(
-            f"PLE num_reqs must be in [1, {max_num_reqs}], got {num_reqs}"
-        )
-    if runtime_context.shape != context_buffer[:num_reqs].shape:
-        raise ValueError(
-            "PLE runtime context shape does not match the active graph rows: "
-            f"expected={tuple(context_buffer[:num_reqs].shape)}, "
-            f"actual={tuple(runtime_context.shape)}"
-        )
-    if runtime_query_start_loc.shape != (num_reqs + 1,):
-        raise ValueError(
-            "PLE runtime query_start_loc must have one boundary per active "
-            f"request: expected={(num_reqs + 1,)}, "
-            f"actual={tuple(runtime_query_start_loc.shape)}"
-        )
-
-    context_buffer.fill_(eos_token_id)
-    context_buffer[:num_reqs].copy_(runtime_context, non_blocking=False)
-    query_start_loc_buffer[: num_reqs + 1].copy_(
-        runtime_query_start_loc, non_blocking=False
-    )
-    query_start_loc_buffer[num_reqs + 1 :].fill_(runtime_query_start_loc[-1])
-    return context_buffer, query_start_loc_buffer
-
 
 
 @dataclass
@@ -730,11 +697,11 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
-        # Qwen4Exp PLE consumes request-history input alongside the regular
-        # token stream. Keep stable backing allocations for FULL ACL graph
-        # capture; each step only refreshes their contents.
-        self._qwen4_exp_ngram_context_buffer: torch.Tensor | None = None
-        self._qwen4_exp_query_start_loc_buffer: torch.Tensor | None = None
+        self.model_input_adapter = build_model_input_adapter(
+            self.model_config,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+        )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2724,7 +2691,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
-            self._maybe_add_qwen4_exp_ple_inputs(
+            self._maybe_add_model_inputs(
                 model_kwargs,
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -3675,7 +3642,7 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("Full-graph device metadata requires external events")
         return executor
 
-    def _maybe_add_qwen4_exp_ple_inputs(
+    def _maybe_add_model_inputs(
         self,
         model_kwargs: dict[str, Any],
         *,
@@ -3683,111 +3650,21 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded: int,
         is_dummy: bool = False,
     ) -> None:
-        """Add PLE inputs to the legacy Model Runner V1 forward contract."""
-        text_config = getattr(self.model_config, "hf_text_config", None)
-        if text_config is None:
+        """Let the active model family add graph-stable auxiliary inputs."""
+        adapter = getattr(self, "model_input_adapter", None)
+        if adapter is None:
             return
-        if not getattr(text_config, "ple_layer_ids", None):
-            return
-
-        context_len = int(text_config.ngram_size) - 1
-        if context_len <= 0:
-            raise ValueError("Qwen4Exp PLE requires ngram_size >= 2")
-        if not 0 < num_reqs_padded <= self.max_num_reqs:
-            raise ValueError(
-                "Qwen4Exp PLE num_reqs_padded must be in "
-                f"[1, {self.max_num_reqs}], got {num_reqs_padded}"
-            )
-
-        runtime_query_start_loc = model_kwargs.get("query_start_loc")
-        if runtime_query_start_loc is None:
-            runtime_query_start_loc = self.query_start_loc.gpu[
-                : num_reqs_padded + 1
-            ]
-        runtime_query_start_loc = runtime_query_start_loc[: num_reqs_padded + 1]
-
-        runtime_context = model_kwargs.get("ngram_context")
-        if runtime_context is None:
-            eos_token_id = int(text_config.eos_token_id)
-            context_cpu = np.full(
-                (num_reqs_padded, context_len),
-                eos_token_id,
-                dtype=np.int32,
-            )
-            if not is_dummy:
-                for req_idx in range(num_reqs):
-                    context_end = int(
-                        self.input_batch.num_computed_tokens_cpu[req_idx]
-                    )
-                    context_start = max(0, context_end - context_len)
-                    tokens = self.input_batch.token_ids_cpu[
-                        req_idx, context_start:context_end
-                    ]
-                    if len(tokens) > 0:
-                        context_cpu[req_idx, -len(tokens) :] = tokens
-            runtime_context = torch.from_numpy(context_cpu)
-        elif (
-            runtime_context.shape != (num_reqs_padded, context_len)
-            or runtime_context.dtype != torch.int32
-        ):
-            raise ValueError(
-                "Qwen4Exp PLE ngram_context must have shape "
-                f"({num_reqs_padded}, {context_len}) and dtype torch.int32, "
-                f"got shape={tuple(runtime_context.shape)}, "
-                f"dtype={runtime_context.dtype}"
-            )
-
-        buffer = self._qwen4_exp_ngram_context_buffer
-        expected_buffer_shape = (self.max_num_reqs, context_len)
-        if buffer is None:
-            buffer = torch.empty(
-                expected_buffer_shape,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self._qwen4_exp_ngram_context_buffer = buffer
-        elif (
-            buffer.shape != expected_buffer_shape
-            or buffer.dtype != torch.int32
-            or buffer.device != self.device
-        ):
-            raise RuntimeError(
-                "Qwen4Exp PLE persistent ngram_context buffer changed "
-                f"unexpectedly: shape={tuple(buffer.shape)}, "
-                f"dtype={buffer.dtype}, device={buffer.device}"
-            )
-
-        query_start_loc_buffer = self._qwen4_exp_query_start_loc_buffer
-        expected_query_start_loc_shape = (self.max_num_reqs + 1,)
-        if query_start_loc_buffer is None:
-            query_start_loc_buffer = torch.empty(
-                expected_query_start_loc_shape,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self._qwen4_exp_query_start_loc_buffer = query_start_loc_buffer
-        elif (
-            query_start_loc_buffer.shape != expected_query_start_loc_shape
-            or query_start_loc_buffer.dtype != torch.int32
-            or query_start_loc_buffer.device != self.device
-        ):
-            raise RuntimeError(
-                "Qwen4Exp PLE persistent query_start_loc buffer changed "
-                f"unexpectedly: shape={tuple(query_start_loc_buffer.shape)}, "
-                f"dtype={query_start_loc_buffer.dtype}, "
-                f"device={query_start_loc_buffer.device}"
-            )
-
-        static_context, static_query_start_loc = _pad_qwen4_exp_ple_graph_inputs(
-            buffer,
-            query_start_loc_buffer,
-            runtime_context.to(device=self.device, dtype=torch.int32),
-            runtime_query_start_loc.to(device=self.device, dtype=torch.int32),
-            num_reqs_padded,
-            int(text_config.eos_token_id),
+        adapter.prepare(
+            model_kwargs,
+            ModelInputContext(
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                is_dummy=is_dummy,
+                query_start_loc=self.query_start_loc.gpu,
+                num_computed_tokens=self.input_batch.num_computed_tokens_cpu,
+                token_ids=self.input_batch.token_ids_cpu,
+            ),
         )
-        model_kwargs["ngram_context"] = static_context
-        model_kwargs["query_start_loc"] = static_query_start_loc
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -4808,7 +4685,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 model_kwargs: dict[str, Any] = {}
-                self._maybe_add_qwen4_exp_ple_inputs(
+                self._maybe_add_model_inputs(
                     model_kwargs,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
