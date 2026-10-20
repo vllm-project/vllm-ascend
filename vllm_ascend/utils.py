@@ -1313,7 +1313,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
     uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
-    Returns False when hierarchy comm is enabled because hierarchy requires
+    O-proj TP across ranks requires DP synchronization to agree on each step's
+    exchange shape. Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
 
     Recomputed per call (no memoization): potential_max_tokens is a set/get global
@@ -1321,6 +1322,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
+    # O-proj exchanges only the current graph bucket, so every participating
+    # rank must select the same bucket. Reuse the runner's existing DP sync.
+    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 1:
+        return False
+
     # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
     # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.

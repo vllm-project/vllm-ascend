@@ -2778,58 +2778,112 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
 
 @pytest.mark.parametrize("tp_size", [2, 8])
 @pytest.mark.parametrize("decode_capacity,scheduler_capacity", [(4, 6), (6, 4), (6, 6)])
-def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, scheduler_capacity):
+@pytest.mark.parametrize("use_fp8", [False, True])
+def test_o_proj_exchange_uses_current_batch(tp_size, decode_capacity, scheduler_capacity, use_fp8):
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
-    impl.n_local_groups = tp_size
-    impl.support_fp8_attention = False
-    impl.wo_a = SimpleNamespace(weight=torch.ones(1, 2, 2))
+    impl.turboquant = None
+    impl.n_local_groups = impl.n_local_heads = tp_size
+    impl.head_dim = 2
+    impl.support_fp8_attention = use_fp8
+    impl.wo_a = SimpleNamespace(
+        weight=torch.ones(1, 2, 2),
+        weight_scale=torch.zeros(1, dtype=torch.uint8) if use_fp8 else None,
+    )
     impl.wo_b = lambda x: x
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_capacity, max_num_seqs=4)
     )
-    group = SimpleNamespace(world_size=tp_size, device_group=object())
     capacity = max(decode_capacity, scheduler_capacity)
+    group = SimpleNamespace(world_size=tp_size, device_group=object())
+    context = SimpleNamespace(num_tokens=scheduler_capacity)
+    expected_tokens = scheduler_capacity
+    pointers = None
 
     def exchange(recv, send, *, group):
+        assert send.numel() == recv.numel() == tp_size * max(expected_tokens, 1) * 2
+        assert send.is_contiguous() and recv.is_contiguous()
+        assert send.data_ptr() == impl._oproj_send_buf.data_ptr()
+        assert recv.data_ptr() == impl._oproj_recv_buf.data_ptr()
         recv.copy_(send)
 
     def matmul(x, weight, **kwargs):
+        assert x.shape == (tp_size * max(expected_tokens, 1), 1, 2)
         return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
     def reduce_scatter(out, partial, *, group):
-        out.copy_(partial.reshape(tp_size, capacity, 2).sum(0))
+        assert out.shape == (max(expected_tokens, 1), 2)
+        assert out.data_ptr() == impl._oproj_rs_out_buf.data_ptr()
+        out.copy_(partial.reshape(tp_size, max(expected_tokens, 1), 2).sum(0))
 
     with (
+        patch("vllm_ascend.attention.dsa_v1._EXTRA_CTX", context),
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity) as get_capacity,
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=matmul),
+        patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant",
+            side_effect=lambda x, **kwargs: (x, torch.zeros(1, dtype=torch.uint8)),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_quant_batchmatmul", side_effect=matmul, create=True
+        ),
+        patch.object(impl, "_forward_o_proj", wraps=impl._forward_o_proj) as project,
     ):
-        buffers = None
-        # A full profiling batch, a smaller decode batch, and an idle rank
-        # must all use the same collective shapes and buffer addresses.
-        for num_tokens in (capacity, 1, 0):
+        # Profiling keeps its full shape and executes the projection once.
+        output = torch.full((scheduler_capacity, 2), float("nan"))
+        impl.forward("layer", torch.zeros_like(output), None, None, output)
+        project.assert_called_once()
+        assert project.call_args.args[0].shape == (scheduler_capacity, tp_size, 2)
+        torch.testing.assert_close(output, torch.zeros_like(output))
+        pointers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
+        assert pointers[0].shape == pointers[1].shape == (tp_size, capacity, 1, 2)
+        assert pointers[2].shape == (capacity, 2)
+
+        # Smaller, larger, then smaller batches expose stale data and incorrect
+        # peer strides when reusing the same backing storage across buckets.
+        for num_tokens in (1, decode_capacity, 2, 1, 0, decode_capacity):
+            expected_tokens = num_tokens
             x = torch.arange(num_tokens * tp_size * 2, dtype=torch.float32).reshape(num_tokens, tp_size, 2)
             output = torch.empty(num_tokens, 2)
             impl._forward_o_proj(x, output)
             expected = x.sum((1, 2)).unsqueeze(1).expand(-1, 2)
             torch.testing.assert_close(output, expected)
-            current_buffers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
-            assert impl._oproj_send_buf.shape[1] == capacity
-            assert torch.count_nonzero(impl._oproj_send_buf[:, num_tokens:]) == 0
-            if buffers is None:
-                buffers = current_buffers
-                get_capacity.return_value = capacity + 2
-            else:
-                assert all(current is original for current, original in zip(current_buffers, buffers))
+            assert all(
+                current is original
+                for current, original in zip(
+                    (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf), pointers
+                )
+            )
 
-        with pytest.raises(ValueError, match=r"capacity \(\d+\) must cover local tokens \(\d+\)"):
-            impl._forward_o_proj(torch.zeros(capacity + 1, tp_size, 2), torch.empty(capacity + 1, 2))
+        with pytest.raises(ValueError, match="must cover local tokens"):
+            impl._forward_o_proj(torch.ones(capacity + 1, tp_size, 2), torch.empty(capacity + 1, 2))
 
-    assert a2a.call_count == rs.call_count == 3
-    get_capacity.assert_called_once()
+    assert a2a.call_count == rs.call_count == 7
+
+
+@pytest.mark.parametrize("pcp_sharded", [False, True])
+def test_non_otp_dummy_projection_keeps_full_batch(pcp_sharded):
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.turboquant = None
+    impl.n_local_heads = 1
+    impl.head_dim = 2
+    impl.enable_pcp_o_proj_weight_sharding = pcp_sharded
+    output = torch.full((7, 2), float("nan"))
+    with (
+        patch("vllm_ascend.attention.dsa_v1._EXTRA_CTX", SimpleNamespace(num_tokens=7)),
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch.object(impl, "_forward_o_proj", side_effect=lambda x, out: out.fill_(3)) as project,
+    ):
+        impl.forward("layer", torch.zeros_like(output), None, None, output)
+    if pcp_sharded:
+        project.assert_called_once()
+        assert project.call_args.args[0].shape == (7, 1, 2)
+    else:
+        project.assert_not_called()
+    torch.testing.assert_close(output, torch.full_like(output, 3 if pcp_sharded else 0))
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
@@ -2856,17 +2910,17 @@ def test_a5_fp8_o_proj_keeps_otp_collectives(tp_size, num_tokens):
         return x, torch.zeros((1,), dtype=torch.uint8)
 
     def matmul(x, weight, **kwargs):
-        assert x.shape == (tp_size * capacity, 1, 2)
+        assert x.shape == (tp_size * max(num_tokens, 1), 1, 2)
         assert weight.shape == (1, 2, 2)
         return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
     def reduce_scatter(out, partial, *, group):
-        out.copy_(partial.reshape(tp_size, capacity, 2).sum(0))
+        out.copy_(partial.reshape(tp_size, max(num_tokens, 1), 2).sum(0))
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=4),
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant", side_effect=quantize),

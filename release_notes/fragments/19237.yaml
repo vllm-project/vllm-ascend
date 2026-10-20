@@ -1,0 +1,8 @@
+pr: 19237
+entries:
+  - category: performance
+    text: >-
+      DSA O-projection tensor parallelism exchanges and projects only the current
+      batch's graph bucket while reusing address-stable communication buffers.
+      Cross-rank O-projection retains DP shape coordination.
+    model: deepseek-v4
