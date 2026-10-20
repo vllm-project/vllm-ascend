@@ -2172,8 +2172,8 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     }
 
 
-@pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
-def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
+@pytest.mark.parametrize("packed,sfa_enabled", [(False, False), (True, True), (True, False)])
+def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed, sfa_enabled):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
@@ -2186,7 +2186,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(kv_cache_placement, "get_layers_from_vllm_config", lambda *_args: layers)
     for module in (attn_utils, kv_cache_placement):
-        monkeypatch.setattr(module, "enable_sfa", lambda _: packed)
+        monkeypatch.setattr(module, "enable_sfa", lambda _: sfa_enabled)
         monkeypatch.setattr(module, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
@@ -2233,6 +2233,59 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         tokens_per_state=1,
     )
     return layer
+
+
+def test_glm_nope_packed_cache_uses_loaded_implementation(monkeypatch):
+    name = "model.layers.0.self_attn.attn"
+    layer = _make_mla_layer(sparse_c8=True)
+    layer.kv_lora_rank = layer.head_size = 512
+    layer.qk_rope_head_dim = 0
+    layer.get_kv_cache_spec = lambda _config: AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=0),
+        ),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="fp8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+    static_quantization = MagicMock(side_effect=AssertionError("Packed SFA must not enter static MLA quantization"))
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", static_quantization)
+    spec = attn_utils.get_kv_cache_spec(vllm_config)[name]
+    assert spec.head_size == 528 and spec.cache_sparse_sfa_c8
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[_make_kv_cache_tensor(2 * spec.page_size_bytes, [name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
+    (k_cache,) = attn_utils._reshape_kv_cache_v2(
+        [AttentionGroup(backend=AscendMLABackend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=0)],
+        raw,
+        "fp8",
+        [128],
+        {},
+        config,
+    )[name]
+    static_quantization.assert_not_called()
+    assert k_cache.shape == (2, 128, 1, 528)
+    assert k_cache.dtype == torch.float8_e4m3fn
+    assert k_cache.untyped_storage().data_ptr() == raw[name].data_ptr()
 
 
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
