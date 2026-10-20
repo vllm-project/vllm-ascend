@@ -66,7 +66,9 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadataBuilder, AscendIndexerKPoolTailMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -97,6 +99,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_step,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
@@ -123,6 +126,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
@@ -242,6 +246,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
+        self._needs_seq_lens_cpu_sync = True
         self.num_computed_tokens_event = torch.npu.Event()
         self.num_computed_tokens_stream = torch.npu.Stream()
         self.num_computed_tokens_cpu = torch.empty(
@@ -528,6 +533,53 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        self._needs_seq_lens_cpu_sync = not self._can_skip_cpu_seq_lens_sync()
+
+    def _can_skip_cpu_seq_lens_sync(self) -> bool:
+        if type(self.speculator) is not AscendMTPSpeculator:
+            return False
+        config = self.vllm_config
+        if (
+            not config.scheduler_config.async_scheduling
+            or config.kv_transfer_config is not None
+            or self.ascend_config.sparse_kv_offload_config.enabled
+            or self.adaptive_verification is not None
+        ):
+            return False
+        if any(
+            getattr(config.parallel_config, name) != 1
+            for name in (
+                "tensor_parallel_size",
+                "pipeline_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            )
+        ):
+            return False
+
+        # These GLM NoPE builders consume exact device lengths and only CPU
+        # upper bounds; other builders retain post-rejection CPU counts.
+        for is_draft, attn_groups in ((False, self.attn_groups), (True, self.speculator.attn_groups)):
+            has_nope = False
+            for groups in attn_groups:
+                for group in groups:
+                    if not group.metadata_builders:
+                        return False
+                    for builder in group.metadata_builders:
+                        if type(builder) is AscendSFAMetadataBuilder:
+                            if not builder.nope or getattr(group.kv_cache_spec, "model_version", None) != "glm5_next":
+                                return False
+                            has_nope = True
+                        elif type(builder) in (
+                            AscendIndexerKPoolMetadataBuilder,
+                            AscendIndexerKPoolTailMetadataBuilder,
+                        ) or (not is_draft and type(builder) is AscendGDNHostMetadataBuilder):
+                            continue
+                        else:
+                            return False
+            if not has_nope:
+                return False
+        return True
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -1250,10 +1302,7 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
+        """Update device state and stage counts needed by CPU-length consumers."""
         if (
             self.use_pp
             and not self.is_last_pp_rank
@@ -1272,12 +1321,11 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # TODO: Gate CPU length synchronization by backend requirements, not
-        # speculative decoding alone. V4.1 uses device lengths; extend this
-        # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
         if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+            self.speculator is not None
+            and not is_deepseek_v41(self.model_config.hf_config)
+            and self._needs_seq_lens_cpu_sync
         ) or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
@@ -1313,7 +1361,9 @@ class NPUModelRunner(GPUModelRunner):
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
         if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+            self.speculator is not None
+            and not is_deepseek_v41(self.model_config.hf_config)
+            and self._needs_seq_lens_cpu_sync
         ) or self.sync_spec_pp_cpu_counts:
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()

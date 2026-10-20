@@ -23,11 +23,15 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
 )
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadataBuilder, AscendIndexerKPoolTailMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
@@ -59,6 +63,7 @@ def _make_runner(need_timing: bool = True):
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
+    runner._needs_seq_lens_cpu_sync = True
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -814,6 +819,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     monkeypatch.setattr(vllm_model_runner, "get_offloader", NoopOffloader)
     monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_offloader", NoopOffloader)
     monkeypatch.setattr("vllm_ascend.attention.mla_v1.maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", lambda tensor, _format: tensor)
     monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", lambda _config: ())
 
     runner.load_model()
@@ -1924,10 +1930,12 @@ def test_cpu_length_sync_preserves_original_condition_except_v41(model_type, spe
         torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu[:2], runner.num_computed_tokens_cpu[:2])
 
 
-def test_device_only_postprocess_keeps_device_update_without_d2h():
+@pytest.mark.parametrize("model_type,needs_sync", [("deepseek_v41", True), ("glm5_next", False)])
+def test_device_only_postprocess_keeps_device_update_without_d2h(model_type, needs_sync):
     runner = _make_runner()
     runner.speculator = object()
-    runner.model_config.hf_config.model_type = "deepseek_v41"
+    runner.model_config.hf_config.model_type = model_type
+    runner._needs_seq_lens_cpu_sync = needs_sync
     runner._copy_num_computed_tokens_to_cpu = MagicMock()
     with patch.object(GPUModelRunner, "postprocess_sampled") as parent:
         runner.postprocess_sampled("idx", "tok", 3, 2, query_start_loc="q")
@@ -1935,9 +1943,11 @@ def test_device_only_postprocess_keeps_device_update_without_d2h():
     runner._copy_num_computed_tokens_to_cpu.assert_not_called()
 
 
-def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
+@pytest.mark.parametrize("model_type,needs_sync", [("deepseek_v41", True), ("glm5_next", False)])
+def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait(model_type, needs_sync):
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
-    runner.model_config.hf_config.model_type = "deepseek_v41"
+    runner.model_config.hf_config.model_type = model_type
+    runner._needs_seq_lens_cpu_sync = needs_sync
     before = runner.req_states.num_computed_tokens_cpu.clone()
     runner._update_seq_lens_cpu(output, batch.req_ids)
     runner.num_computed_tokens_event.synchronize.assert_not_called()
@@ -1945,3 +1955,45 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
     for i, req_id in enumerate(batch.req_ids):
         index = runner.req_states.req_id_to_index[req_id]
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+@pytest.mark.parametrize("unsupported", [None, "rotary", "dcp", "offload", "other_model", "unknown", "recurrent_draft"])
+def test_cpu_length_sync_guard_checks_loaded_target_and_draft(unsupported):
+    runner = _make_runner()
+    runner.speculator = AscendMTPSpeculator.__new__(AscendMTPSpeculator)
+    runner.vllm_config.scheduler_config = SimpleNamespace(async_scheduling=True)
+    runner.vllm_config.parallel_config = SimpleNamespace(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+    )
+
+    def group(builder_type):
+        builder = builder_type.__new__(builder_type)
+        if builder_type is AscendSFAMetadataBuilder:
+            builder.nope = True
+        return SimpleNamespace(
+            metadata_builders=[builder],
+            kv_cache_spec=SimpleNamespace(model_version="glm5_next"),
+        )
+
+    target = group(AscendSFAMetadataBuilder)
+    cache_groups = [group(AscendIndexerKPoolMetadataBuilder), group(AscendIndexerKPoolTailMetadataBuilder)]
+    recurrent = group(AscendGDNHostMetadataBuilder)
+    runner.attn_groups = [[target, recurrent, *cache_groups]]
+    runner.speculator.attn_groups = [[group(AscendSFAMetadataBuilder), *cache_groups]]
+    if unsupported == "rotary":
+        target.metadata_builders[0].nope = False
+    elif unsupported == "dcp":
+        runner.vllm_config.parallel_config.decode_context_parallel_size = 2
+    elif unsupported == "offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "other_model":
+        target.kv_cache_spec.model_version = None
+    elif unsupported == "unknown":
+        target.metadata_builders.append(object())
+    elif unsupported == "recurrent_draft":
+        runner.speculator.attn_groups[0].append(recurrent)
+
+    assert runner._can_skip_cpu_seq_lens_sync() is (unsupported is None)
